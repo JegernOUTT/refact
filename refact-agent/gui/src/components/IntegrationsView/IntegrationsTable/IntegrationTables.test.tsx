@@ -32,6 +32,61 @@ describe("integration table editors", () => {
     });
   });
 
+  it("uses fresh key/value row identity after add delete add", async () => {
+    const onChange = vi.fn();
+    const { container, user } = render(
+      <KeyValueTable initialData={{ EXISTING: "value" }} onChange={onChange} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /add row/i }));
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith({ EXISTING: "value", "1": "" });
+    });
+
+    const firstAddedRowId = inputs(container, "key")[1].dataset.rowId;
+    await user.click(screen.getAllByRole("button", { name: "Remove" })[0]);
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith({ "1": "" });
+    });
+
+    await user.click(screen.getByRole("button", { name: /add row/i }));
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith({ "1": "", "2": "" });
+    });
+
+    const keyInputs = inputs(container, "key");
+    expect(keyInputs.map((input) => input.value)).toEqual(["1", "2"]);
+    expect(keyInputs[0].dataset.rowId).toBe(firstAddedRowId);
+    expect(keyInputs[1].dataset.rowId).not.toBe(firstAddedRowId);
+  });
+
+  it("validates duplicate key/value rows without overwriting data", async () => {
+    const onChange = vi.fn();
+    const { container, user } = render(
+      <KeyValueTable
+        initialData={{ FIRST: "one", SECOND: "two" }}
+        onChange={onChange}
+      />,
+    );
+
+    const keyInputs = inputs(container, "key");
+    await user.clear(keyInputs[1]);
+    await user.type(keyInputs[1], "FIRST");
+
+    expect(
+      await screen.findAllByText('Duplicate key "FIRST" is already used.'),
+    ).toHaveLength(2);
+    expect(onChange).not.toHaveBeenCalledWith({ FIRST: "two" });
+    expect(onChange).not.toHaveBeenCalledWith({ FIRST: "one" });
+
+    await user.clear(keyInputs[1]);
+    await user.type(keyInputs[1], "THIRD");
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith({ FIRST: "one", THIRD: "two" });
+    });
+  });
+
   it("advances to the next parameter cell on Enter", () => {
     const onToolParameters = vi.fn();
     const { container } = render(

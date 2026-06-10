@@ -33,6 +33,7 @@ export interface EditableTableProps<T extends EditableTableRow>
   value: T[];
   onChange: (value: T[]) => void;
   createRow: () => T;
+  getRowId?: (row: T) => string;
   validate?: EditableTableValidate<T>;
   addLabel?: string;
   removeLabel?: string;
@@ -54,6 +55,7 @@ export function EditableTable<T extends EditableTableRow>({
   columns,
   createRow,
   emptyMessage = "No rows yet",
+  getRowId,
   onChange,
   removeLabel = "Remove row",
   validate,
@@ -61,7 +63,7 @@ export function EditableTable<T extends EditableTableRow>({
   ...props
 }: EditableTableProps<T>) {
   const [rows, setRows] = useState<InternalRow<T>[]>(() =>
-    value.map((row) => ({ id: nextId(), value: row })),
+    value.map((row) => ({ id: getRowId?.(row) ?? nextId(), value: row })),
   );
   const pendingFocusRef = useRef<{ rowIndex: number; columnId: string } | null>(
     null,
@@ -70,12 +72,16 @@ export function EditableTable<T extends EditableTableRow>({
 
   useEffect(() => {
     setRows((currentRows) =>
-      value.map((row, index) => ({
-        id: currentRows[index]?.id ?? nextId(),
-        value: row,
-      })),
+      value.map((row, index) => {
+        const currentRow = currentRows[index] as InternalRow<T> | undefined;
+
+        return {
+          id: getRowId?.(row) ?? currentRow?.id ?? nextId(),
+          value: row,
+        };
+      }),
     );
-  }, [value]);
+  }, [getRowId, value]);
 
   useEffect(() => {
     const pendingFocus = pendingFocusRef.current;
@@ -128,8 +134,14 @@ export function EditableTable<T extends EditableTableRow>({
     );
   };
 
+  const createInternalRow = (): InternalRow<T> => {
+    const nextValue = createRow();
+
+    return { id: getRowId?.(nextValue) ?? nextId(), value: nextValue };
+  };
+
   const addRow = () => {
-    emitChange([...rows, { id: nextId(), value: createRow() }]);
+    emitChange([...rows, createInternalRow()]);
   };
 
   const removeRow = (rowIndex: number) => {
@@ -145,7 +157,7 @@ export function EditableTable<T extends EditableTableRow>({
     }
 
     pendingFocusRef.current = { rowIndex: nextRowIndex, columnId };
-    emitChange([...rows, { id: nextId(), value: createRow() }]);
+    emitChange([...rows, createInternalRow()]);
   };
 
   const tableStyle = {
