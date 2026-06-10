@@ -82,6 +82,12 @@
   max-width: min(360px, calc(100vw - var(--rf-space-4)));
 }
 
+.content,
+.content > div {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
 .content > div {
   padding: var(--rf-space-2);
 }

@@ -128,6 +128,18 @@ describe("SegmentedControl", () => {
     expect(indicator).not.toBeNull();
   });
 
+  it("sizes to content while keeping equal segment tracks", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "SegmentedControl.module.css"),
+      "utf8",
+    );
+    const root = css.match(/\.root \{[^}]+\}/)?.[0] ?? "";
+
+    expect(root).toContain("display: inline-grid;");
+    expect(root).toContain("grid-auto-columns: minmax(0, 1fr);");
+    expect(root).toContain("max-width: 100%;");
+  });
+
   it("keeps text segments labelled by their visible text", () => {
     render(
       <SegmentedControl

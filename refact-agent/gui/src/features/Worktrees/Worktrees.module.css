@@ -351,12 +351,27 @@
   overflow: visible;
 }
 
+.createDialog > div {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+}
+
 .field {
   width: 100%;
 }
 
 .branchPicker {
   position: relative;
+}
+
+.branchPicker,
+.branchPicker input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .branchOptions {

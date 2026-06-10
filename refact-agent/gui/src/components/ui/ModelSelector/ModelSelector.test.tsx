@@ -45,15 +45,17 @@ describe("ModelSelector", () => {
     expect(selected).toHaveAttribute("data-selected", "true");
   });
 
-  it("keeps the scroll gutter outside the painted row width", async () => {
+  it("keeps rows and search on one content-width contract without gutter hacks", async () => {
     const css = await readFile(
       path.resolve(__dirname, "ModelSelector.module.css"),
       "utf8",
     );
+    const scrollArea = css.match(/\.scrollArea \{[^}]+\}/)?.[0] ?? "";
+    const row = css.match(/\.row \{[^}]+\}/)?.[0] ?? "";
 
-    expect(css).toContain("padding-right: var(--rf-space-2);");
-    expect(css).toContain("margin-right: calc(-1 * var(--rf-space-2));");
-    expect(css).toContain(".row {");
-    expect(css).toContain("width: 100%;");
+    expect(scrollArea).toContain("overflow-y: auto;");
+    expect(scrollArea).not.toContain("padding-right");
+    expect(scrollArea).not.toContain("margin-right");
+    expect(row).toContain("width: 100%;");
   });
 });

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { render, screen, within } from "../../utils/test-utils";
 import { TrajectoryButton } from "./TrajectoryButton";
 
@@ -26,6 +28,18 @@ describe("TrajectoryButton", () => {
     render(<TrajectoryButton />);
     const button = screen.getByLabelText("Compress or Handoff");
     expect(button).toBeInTheDocument();
+  });
+
+  it("sizes the handoff tab strip to its labels instead of stretching a blank tail", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "TrajectoryPopover.module.css"),
+      "utf8",
+    );
+    const tabStrip = css.match(/\.tabStrip \{[^}]+\}/)?.[0] ?? "";
+
+    expect(tabStrip).toContain("width: max-content;");
+    expect(tabStrip).toContain("max-width: 100%;");
+    expect(tabStrip).not.toMatch(/\n\s*width: 100%;/);
   });
 
   it("opens the full compress and handoff popover on click", async () => {

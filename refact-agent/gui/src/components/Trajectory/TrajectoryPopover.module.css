@@ -12,7 +12,8 @@
 .tabStrip {
   --rf-control-h: var(--rf-control-h-sm);
 
-  width: 100%;
+  width: max-content;
+  max-width: 100%;
 }
 
 .tabStrip [role="tab"] {
