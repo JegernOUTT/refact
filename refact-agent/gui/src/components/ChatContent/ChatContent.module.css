@@ -476,16 +476,17 @@
   color: var(--rf-color-fg);
 }
 
-.plainTextTrigger {
-  cursor: pointer;
+.plainTextCollapsible {
   color: var(--rf-color-muted);
 }
 
-.plainTextTrigger:hover {
-  color: var(--rf-color-fg);
+.plainTextHeader {
+  min-width: 0;
+  flex: 1;
 }
 
 .plainTextLabel {
+  flex-shrink: 0;
   color: var(--rf-color-muted);
 }
 

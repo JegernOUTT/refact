@@ -3,6 +3,10 @@ import classNames from "classnames";
 import { Pin, Trash2 } from "lucide-react";
 import { Markdown } from "../../../components/Markdown";
 import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../../components/shared/useDelayedUnmount";
+import {
   Badge,
   Button,
   Flex,
@@ -96,6 +100,11 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
 }) => {
   const [localExpanded, setLocalExpanded] = useState(false);
   const isExpanded = expanded ?? localExpanded;
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    isExpanded,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const shouldRenderExpanded = isExpanded || shouldRender;
   const title = useMemo(() => buildTitle(memory), [memory]);
   const content = memory.content.trim();
   const preview = useMemo(() => buildPreview(memory.content), [memory.content]);
@@ -253,11 +262,10 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
           </Flex>
         </Flex>
 
-        {isExpanded && (
+        {shouldRenderExpanded && (
           <div
-            className="rf-expand-grid"
-            data-open={isExpanded}
-            data-state="open"
+            className={classNames("rf-expand-grid", styles.expandedGrid)}
+            data-open={isAnimatingOpen}
           >
             <div
               className={styles.expandedContent}

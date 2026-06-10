@@ -270,6 +270,14 @@
   width: min(220px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
+.expandedGrid {
+  pointer-events: none;
+}
+
+.expandedGrid[data-open="true"] {
+  pointer-events: auto;
+}
+
 .expandedContent {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
@@ -279,6 +287,13 @@
   gap: var(--rf-space-3);
   padding: var(--rf-space-3) 0 0;
   overflow: auto;
+  opacity: 0;
+  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+}
+
+.expandedGrid[data-open="true"] .expandedContent {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
 }
 
 .expandedMarkdown {
@@ -362,7 +377,25 @@
 
 @media (prefers-reduced-motion: reduce) {
   .card,
-  .tagChip {
+  .tagChip,
+  .expandedContent {
     transition: none;
+  }
+
+  .expandedContent {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .expandedContent {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+    will-change: opacity, transform;
+  }
+
+  .expandedGrid:not([data-open="true"]) .expandedContent {
+    will-change: auto;
   }
 }

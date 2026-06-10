@@ -5,13 +5,16 @@ import { Provider } from "react-redux";
 import { describe, expect, it, vi } from "vitest";
 
 import { ContextFiles } from "./ContextFiles";
+import { PlainText } from "./PlainText";
 import { SystemPrompt } from "./SystemPrompt";
 import { ContextFileList } from "./ToolCard/ContextFileList";
 import type { ChatContextFile } from "../../services/refact/types";
 import { setUpStore } from "../../app/store";
 
 vi.mock("../Markdown", () => ({
-  Markdown: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Markdown: ({ children }: { children: React.ReactNode }) => (
+    <div>{children}</div>
+  ),
 }));
 
 vi.mock("../Markdown/ShikiCodeBlock", () => ({
@@ -61,6 +64,21 @@ describe("non-tool chat collapsibles", () => {
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("System content")).toBeInTheDocument();
+  });
+
+  it("renders PlainText header as an aria-expanded button", () => {
+    renderWithTheme(
+      <PlainText>{`${"x".repeat(110)}\nHidden tail marker`}</PlainText>,
+    );
+
+    const trigger = screen.getByRole("button", { name: /plain text/i });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/Hidden tail marker/i)).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/Hidden tail marker/i)).toBeInTheDocument();
   });
 
   it("renders ContextFiles header as an aria-expanded button", () => {
