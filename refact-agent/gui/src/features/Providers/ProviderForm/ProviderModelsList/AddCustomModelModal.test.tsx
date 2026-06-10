@@ -42,7 +42,10 @@ describe("AddCustomModelModal", () => {
       { preloadedState },
     );
 
-    await user.type(screen.getByPlaceholderText("e.g., my-custom-model"), "my-model");
+    await user.type(
+      screen.getByPlaceholderText("e.g., my-custom-model"),
+      "my-model",
+    );
     await user.click(screen.getByRole("button", { name: "Add Model" }));
 
     expect(
@@ -66,10 +69,13 @@ describe("AddCustomModelModal", () => {
     let requestBody: unknown;
 
     server.use(
-      http.post("*/v1/providers/openai_work/custom-models", async ({ request }) => {
-        requestBody = await request.json();
-        return HttpResponse.json({ success: true, model_id: "my-model" });
-      }),
+      http.post(
+        "*/v1/providers/openai_work/custom-models",
+        async ({ request }) => {
+          requestBody = await request.json();
+          return HttpResponse.json({ success: true, model_id: "my-model" });
+        },
+      ),
     );
 
     const onClose = vi.fn();
@@ -82,8 +88,14 @@ describe("AddCustomModelModal", () => {
       { preloadedState },
     );
 
-    await user.type(screen.getByPlaceholderText("e.g., my-custom-model"), "my-model");
-    await user.type(screen.getByPlaceholderText("low, medium, high"), "low, high");
+    await user.type(
+      screen.getByPlaceholderText("e.g., my-custom-model"),
+      "my-model",
+    );
+    await user.type(
+      screen.getByPlaceholderText("low, medium, high"),
+      "low, high",
+    );
     await user.type(screen.getByPlaceholderText("e.g., 8192"), "2048");
     await user.click(screen.getByRole("button", { name: "Add Model" }));
 

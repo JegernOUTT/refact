@@ -31,7 +31,9 @@ function renderReasoning(
 
   return render(
     store ? (
-      <CollapsibleStoreProvider value={store}>{element}</CollapsibleStoreProvider>
+      <CollapsibleStoreProvider value={store}>
+        {element}
+      </CollapsibleStoreProvider>
     ) : (
       element
     ),
@@ -63,7 +65,9 @@ describe("ReasoningContent", () => {
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
-    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reasoning details are visible"),
+    ).toBeInTheDocument();
   });
 
   it("opens collapsed reasoning and reveals the body", () => {
@@ -86,7 +90,9 @@ describe("ReasoningContent", () => {
     fireEvent.click(trigger);
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reasoning details are visible"),
+    ).toBeInTheDocument();
   });
 
   it("shows a header for historical reasoning blocks", () => {
@@ -105,7 +111,9 @@ describe("ReasoningContent", () => {
       hasMessageContent: false,
     });
 
-    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reasoning details are visible"),
+    ).toBeInTheDocument();
 
     rerender(
       <ReasoningContent
@@ -124,7 +132,9 @@ describe("ReasoningContent", () => {
 
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText(/Thought for/u)).toBeInTheDocument();
-    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reasoning details are visible"),
+    ).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(250);
@@ -137,6 +147,8 @@ describe("ReasoningContent", () => {
     fireEvent.click(trigger);
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reasoning details are visible"),
+    ).toBeInTheDocument();
   });
 });

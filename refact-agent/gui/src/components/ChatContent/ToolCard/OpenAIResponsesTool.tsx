@@ -180,7 +180,8 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
       <Box className={styles.content}>
         {content ? <Markdown>{content}</Markdown> : null}
 
-        {parsedArgs != null && typeof parsedArgs === "object" &&
+        {parsedArgs != null &&
+          typeof parsedArgs === "object" &&
           renderOpenAiResponsesPayload(toolName, parsedArgs)}
 
         <Box className={styles.sectionLabel}>Raw JSON</Box>

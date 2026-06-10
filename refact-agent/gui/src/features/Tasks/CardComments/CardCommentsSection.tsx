@@ -73,9 +73,7 @@ const CommentItem: React.FC<CommentItemProps> = ({
         <Icon icon={User} size="sm" tone="success" />
       </Badge>
     ) : (
-      <Badge tone="muted">
-        sys
-      </Badge>
+      <Badge tone="muted">sys</Badge>
     );
 
   return (
@@ -88,9 +86,7 @@ const CommentItem: React.FC<CommentItemProps> = ({
     >
       <Flex align="center" gap="1" mb="1" wrap="wrap">
         {roleIcon}
-        <Badge tone="muted">
-          {comment.author_role}
-        </Badge>
+        <Badge tone="muted">{comment.author_role}</Badge>
         <Text size="1" color="gray">
           {authorDisplay}
         </Text>
@@ -192,9 +188,7 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
       <Box className={classNames(styles.composer, "rf-enter-rise")}>
         {replyTo && (
           <Flex align="center" gap="2" mb="1">
-            <Badge tone="muted">
-              Replying to {replyTo.slice(0, 8)}
-            </Badge>
+            <Badge tone="muted">Replying to {replyTo.slice(0, 8)}</Badge>
             <Button size="sm" variant="ghost" onClick={() => setReplyTo(null)}>
               Cancel reply
             </Button>

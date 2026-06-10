@@ -70,9 +70,7 @@ describe("EditableTable", () => {
     render(<ControlledEditableTable />);
 
     const table = screen.getByRole("table");
-    const bodyRow = screen
-      .getByDisplayValue("city")
-      .closest(`.${styles.row}`);
+    const bodyRow = screen.getByDisplayValue("city").closest(`.${styles.row}`);
 
     expect(table).toHaveClass(styles.table);
     expect(table.getAttribute("style")).toContain(
@@ -138,7 +136,9 @@ describe("EditableTable", () => {
       { description: "", name: "" },
     ]);
 
-    await user.click(screen.getAllByRole("button", { name: "Remove parameter" })[0]);
+    await user.click(
+      screen.getAllByRole("button", { name: "Remove parameter" })[0],
+    );
 
     expect(screen.getAllByLabelText("Name")).toHaveLength(1);
     expect(onRowsChange).toHaveBeenLastCalledWith([

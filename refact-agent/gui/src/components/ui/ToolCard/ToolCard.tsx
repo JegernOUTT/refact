@@ -69,7 +69,8 @@ function useCollapsedFocusGuard(
       root.setAttribute("inert", "");
       for (const element of elements) {
         if (element.dataset.rfPreviousTabIndex !== undefined) continue;
-        element.dataset.rfPreviousTabIndex = element.getAttribute("tabindex") ?? "";
+        element.dataset.rfPreviousTabIndex =
+          element.getAttribute("tabindex") ?? "";
         element.tabIndex = -1;
       }
       return;

@@ -60,7 +60,10 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
               const filename = r.filename ?? r.file_name ?? "(file)";
               const text = r.text ?? r.content ?? "";
               return (
-                <Box key={idx} className={`${styles.resultItem} rf-enter-rise rf-pressable`}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Text size="2" weight="medium" className={styles.inlineCode}>
                     {filename}
                   </Text>

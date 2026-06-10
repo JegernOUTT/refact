@@ -379,9 +379,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
           <AgentStatusDot status={status} size="medium" />
         </div>
         <Flex align="center" gap="1" className={styles.panelItemContent}>
-          <Badge tone="muted">
-            {card.id}
-          </Badge>
+          <Badge tone="muted">{card.id}</Badge>
           <Text size="1" className={styles.panelItemTitle}>
             {card.title}
           </Text>
@@ -1784,7 +1782,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           }
         }}
       >
-        <Dialog.Content className={styles.deleteWorktreeDialog} maxWidth="420px">
+        <Dialog.Content
+          className={styles.deleteWorktreeDialog}
+          maxWidth="420px"
+        >
           <div className={styles.deleteWorktreeRoot}>
             <Dialog.Title>Delete worktree</Dialog.Title>
             <Dialog.Description>

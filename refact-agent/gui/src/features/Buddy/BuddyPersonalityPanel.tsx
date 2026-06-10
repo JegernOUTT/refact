@@ -244,9 +244,7 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           variant={settings?.personality_prompt ? "primary" : "ghost"}
           onClick={() =>
             onPromptChange(
-              settings?.personality_prompt
-                ? null
-                : (personality?.prompt ?? null),
+              settings?.personality_prompt ? null : personality?.prompt ?? null,
             )
           }
           disabled={isSavingSettings}

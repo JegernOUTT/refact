@@ -214,7 +214,10 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
           </CollapsibleSection>
         )}
 
-        <CollapsibleSection icon={<Icon icon={ScrollText} size="sm" />} title="Logs">
+        <CollapsibleSection
+          icon={<Icon icon={ScrollText} size="sm" />}
+          title="Logs"
+        >
           <MCPLogs
             integrationPath={configPath}
             integrationName={toPascalCase(integrName)}

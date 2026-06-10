@@ -92,7 +92,11 @@ export const IntegrationForm: FC<IntegrationFormProps> = ({
   const isMcpIntegration = integration.data.integr_name.includes("mcp");
 
   return (
-    <Flex className={classNames(styles.root, "rf-enter")} direction="column" gap="3">
+    <Flex
+      className={classNames(styles.root, "rf-enter")}
+      direction="column"
+      gap="3"
+    >
       {integration.data.integr_schema.description && (
         <Text as="p" className={styles.description} size="2" color="gray">
           {integration.data.integr_schema.description}

@@ -30,10 +30,7 @@
 .row {
   display: grid;
   min-width: 0;
-  grid-template-columns: var(
-    --editable-table-columns,
-    minmax(0, 1fr) auto
-  );
+  grid-template-columns: var(--editable-table-columns, minmax(0, 1fr) auto);
 }
 
 .headerCell,

@@ -62,7 +62,6 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
     [report, newFile],
   );
 
-
   const showSaveButton = isIdeHost();
   const shouldRenderMarkdown =
     report.length <= MAX_MD_RENDER_CHARS && looksLikeMarkdown(report);

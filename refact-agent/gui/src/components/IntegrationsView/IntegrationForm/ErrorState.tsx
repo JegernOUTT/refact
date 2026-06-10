@@ -24,7 +24,8 @@ export const ErrorState: FC<ErrorStateProps> = ({
   const { openFile } = useEventsBusForIDE();
 
   const { integr_name } = integration;
-  const { error_msg, integr_config_path, error_line } = integration.error_log[0];
+  const { error_msg, integr_config_path, error_line } =
+    integration.error_log[0];
 
   return (
     <Surface
@@ -35,13 +36,18 @@ export const ErrorState: FC<ErrorStateProps> = ({
     >
       <Flex direction="column" align="start" gap="4">
         <Text as="p" size="2" color="gray">
-          Whoops, this integration has a syntax error in the config file. You can
-          fix this by editing the config file.
+          Whoops, this integration has a syntax error in the config file. You
+          can fix this by editing the config file.
         </Text>
         <Badge tone="danger">
           <TriangleAlert size={14} /> {error_msg}
         </Badge>
-        <Flex align="center" className={styles.errorActions} gap="2" wrap="wrap">
+        <Flex
+          align="center"
+          className={styles.errorActions}
+          gap="2"
+          wrap="wrap"
+        >
           {config.host !== "web" && (
             <Button
               variant="soft"

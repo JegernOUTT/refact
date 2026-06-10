@@ -453,9 +453,7 @@ export const ModeForm: React.FC<ModeFormProps> = ({
             <FieldText
               type="number"
               value={typeof ui.order === "number" ? ui.order.toString() : ""}
-              onChange={(value) =>
-                patch(["ui", "order"], parseIntSafe(value))
-              }
+              onChange={(value) => patch(["ui", "order"], parseIntSafe(value))}
               placeholder="Order"
             />
           </Field>

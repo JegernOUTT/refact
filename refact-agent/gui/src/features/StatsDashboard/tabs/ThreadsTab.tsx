@@ -113,7 +113,8 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
             setPaging({
               items: rows.slice(firstPage.items.length),
               isLoading: false,
-              error: err instanceof Error ? err.message : "Failed to load threads",
+              error:
+                err instanceof Error ? err.message : "Failed to load threads",
             });
           }
           return;

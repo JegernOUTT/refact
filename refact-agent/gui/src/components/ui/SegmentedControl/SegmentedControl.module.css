@@ -22,7 +22,9 @@
   top: var(--rf-segment-padding);
   bottom: var(--rf-segment-padding);
   left: var(--rf-segment-padding);
-  width: calc((100% - 2 * var(--rf-segment-padding)) / var(--rf-segment-count, 1));
+  width: calc(
+    (100% - 2 * var(--rf-segment-padding)) / var(--rf-segment-count, 1)
+  );
   background: var(--rf-surface-glass);
   border: 0;
   border-radius: var(--rf-radius-ctl);

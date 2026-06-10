@@ -410,10 +410,14 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                       <span>Action</span>
                     </div>
                     <div
-                      className={classNames(styles.providerRow, "rf-enter-rise", {
-                        [styles.providerRowSelected]:
-                          optimisticSelectedProvider === "",
-                      })}
+                      className={classNames(
+                        styles.providerRow,
+                        "rf-enter-rise",
+                        {
+                          [styles.providerRowSelected]:
+                            optimisticSelectedProvider === "",
+                        },
+                      )}
                     >
                       <span className={styles.providerCellPrimary}>Auto</span>
                       <span>–</span>

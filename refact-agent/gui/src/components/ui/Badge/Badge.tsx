@@ -52,7 +52,9 @@ function normalizeSize(size: BadgeComponentProps["size"]): BadgeSize {
   return "sm";
 }
 
-function normalizeVariant(variant: BadgeComponentProps["variant"]): BadgeVariant {
+function normalizeVariant(
+  variant: BadgeComponentProps["variant"],
+): BadgeVariant {
   if (variant === "outline") return "outline";
   if (variant === "glass") return "glass";
   return "soft";

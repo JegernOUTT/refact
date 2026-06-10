@@ -44,9 +44,7 @@ function readGuiSource(path: string): Promise<string> {
 
 function readCssBlock(source: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(
-    source,
-  );
+  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
   if (match?.index === undefined) {
     throw new Error(`Missing CSS block for ${selector}`);
   }

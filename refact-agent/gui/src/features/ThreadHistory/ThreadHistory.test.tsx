@@ -57,7 +57,9 @@ describe("ThreadHistory", () => {
       expect(
         screen
           .getAllByText((_, element) =>
-            Boolean(element?.textContent?.includes("Failed to copy chat history")),
+            Boolean(
+              element?.textContent?.includes("Failed to copy chat history"),
+            ),
           )
           .at(0),
       ).toBeInTheDocument();
@@ -75,7 +77,9 @@ describe("ThreadHistory", () => {
         screen
           .getAllByText((_, element) =>
             Boolean(
-              element?.textContent?.includes("Chat history copied to clipboard"),
+              element?.textContent?.includes(
+                "Chat history copied to clipboard",
+              ),
             ),
           )
           .at(0),

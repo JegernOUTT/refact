@@ -993,8 +993,14 @@ mod tests {
         assert_eq!(message.role, "assistant");
         let metadata = &message.extra["compression"];
         assert_eq!(metadata["schema_version"], serde_json::json!(3));
-        assert_eq!(metadata["kind"], serde_json::json!(LLM_SEGMENT_SUMMARY_KIND));
-        assert_eq!(metadata["insert_mode"], serde_json::json!("source_preserving"));
+        assert_eq!(
+            metadata["kind"],
+            serde_json::json!(LLM_SEGMENT_SUMMARY_KIND)
+        );
+        assert_eq!(
+            metadata["insert_mode"],
+            serde_json::json!("source_preserving")
+        );
         assert_eq!(
             metadata["summarized_source_message_ids"],
             serde_json::json!(["assistant-source", "context-source"])
@@ -1003,7 +1009,10 @@ mod tests {
             metadata["preserved_source_message_ids"],
             serde_json::json!(["plan-source"])
         );
-        assert_eq!(metadata["created_at"], serde_json::json!("2026-06-04T00:00:00Z"));
+        assert_eq!(
+            metadata["created_at"],
+            serde_json::json!("2026-06-04T00:00:00Z")
+        );
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
     }
@@ -1013,7 +1022,10 @@ mod tests {
         let metadata = &message.extra[COMPRESSION_REPORT_EXTRA_KEY];
         assert_eq!(metadata["schema_version"], serde_json::json!(3));
         assert_eq!(metadata["kind"], serde_json::json!(COMPRESSION_REPORT_KIND));
-        assert_eq!(metadata["insert_mode"], serde_json::json!("source_preserving"));
+        assert_eq!(
+            metadata["insert_mode"],
+            serde_json::json!("source_preserving")
+        );
         assert_eq!(
             metadata["summarized_source_message_ids"],
             serde_json::json!(["assistant-source", "context-source"])
@@ -1022,7 +1034,10 @@ mod tests {
             metadata["preserved_source_message_ids"],
             serde_json::json!(["plan-source"])
         );
-        assert_eq!(metadata["created_at"], serde_json::json!("2026-06-04T00:00:00Z"));
+        assert_eq!(
+            metadata["created_at"],
+            serde_json::json!("2026-06-04T00:00:00Z")
+        );
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
     }

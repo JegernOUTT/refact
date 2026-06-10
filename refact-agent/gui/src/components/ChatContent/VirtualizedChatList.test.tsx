@@ -684,7 +684,9 @@ describe("VirtualizedChatList", () => {
       });
     });
 
-    const button = screen.getByRole("button", { name: /expiring anchor tool/i });
+    const button = screen.getByRole("button", {
+      name: /expiring anchor tool/i,
+    });
     fireEvent.pointerDown(button);
     vi.advanceTimersByTime(600);
     fireEvent.click(button);

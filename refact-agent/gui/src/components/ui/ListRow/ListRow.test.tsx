@@ -49,9 +49,7 @@ describe("ListRow", () => {
   });
 
   it("applies interactive and animated classes", () => {
-    render(
-      <ListRow interactive animated title="Animated interactive row" />,
-    );
+    render(<ListRow interactive animated title="Animated interactive row" />);
 
     const row = screen.getByText("Animated interactive row").closest("div");
     expect(row).toHaveClass(styles.interactive);

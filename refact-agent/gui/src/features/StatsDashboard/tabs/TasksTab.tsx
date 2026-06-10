@@ -26,11 +26,7 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
 
   return (
     <div className={styles.root}>
-      <Surface
-        animated="rise"
-        className={styles.tableWrapper}
-        variant="glass"
-      >
+      <Surface animated="rise" className={styles.tableWrapper} variant="glass">
         <table className={styles.table}>
           <thead>
             <tr>

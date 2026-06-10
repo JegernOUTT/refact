@@ -71,7 +71,12 @@ export const MCPConnectionStatus: React.FC<MCPConnectionStatusProps> = ({
   const nextRetryInfo = getNextRetryInfo(status);
 
   return (
-    <Flex align="center" className={styles.connectionStatus} gap="3" wrap="wrap">
+    <Flex
+      align="center"
+      className={styles.connectionStatus}
+      gap="3"
+      wrap="wrap"
+    >
       <Flex align="center" gap="2">
         <Badge aria-label={`MCP connection status: ${label}`} tone={tone}>
           {label}

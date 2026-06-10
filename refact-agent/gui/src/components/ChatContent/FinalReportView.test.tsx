@@ -184,7 +184,9 @@ describe("FinalReportView", () => {
   });
 
   it("keeps verification output tails expandable", () => {
-    const { container } = render(<FinalReportView content={structuredPayload} />);
+    const { container } = render(
+      <FinalReportView content={structuredPayload} />,
+    );
     const toggle = screen.getByRole("button", {
       name: /npm run test -- FinalReportView --run/u,
     });

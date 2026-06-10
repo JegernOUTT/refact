@@ -53,7 +53,9 @@ describe("StatusBadge", () => {
 
     rerender(<StatusBadge pulse status="success" />);
 
-    expect(screen.getByLabelText("Agent success")).not.toHaveClass(styles.pulse);
+    expect(screen.getByLabelText("Agent success")).not.toHaveClass(
+      styles.pulse,
+    );
     expect(getAgentStatusBadgeProps("running")).toMatchObject({
       pulse: true,
       tone: "accent",

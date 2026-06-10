@@ -87,8 +87,8 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
         <span className={styles.kanbanCardTitle}>{card.title}</span>
 
         <div className={styles.kanbanCardBadges}>
-          {hasAgent && (
-            card.agent_chat_id ? (
+          {hasAgent &&
+            (card.agent_chat_id ? (
               <button
                 type="button"
                 className={styles.agentBadgeAction}
@@ -101,8 +101,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
               <Badge tone="accent" title={`Agent: ${card.assignee}`}>
                 <Icon icon={User} size="sm" tone="accent" /> Agent
               </Badge>
-            )
-          )}
+            ))}
           {worktree && (
             <Badge tone="success" title={`Worktree: ${worktree}`}>
               <BranchIcon /> {worktree}

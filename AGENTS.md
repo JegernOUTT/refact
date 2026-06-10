@@ -14,6 +14,8 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | IDE metadata | `.idea/` | IntelliJ project config | keep local/editor files out of commits; `.idea/workspace.xml` is ignored by `.gitignore` |
 | Agent notes | `.agents/` | onboarding notes | checked for repo-specific guidance when present |
 | Codex workspace | `.codex/` | Codex config/data | checked for repo-specific guidance when present |
+| Playwright MCP cache | `.playwright-mcp/` | Playwright MCP server runtime/browser cache | local-only cache for the Playwright MCP server; do not commit |
+| Local refact state | `.refact/` | per-project refact state | gitignored (`.refact/`, `.refact-*/`); holds `trajectories/`, `knowledge/`, `tasks/`, `integrations.d/`, and personal slash commands in `.refact/commands/` |
 | Root `.gitignore` | `.gitignore` | repository ignore rules | includes local editor and build output exclusions; check before adding new generated files |
 | JetBrains local release helper | `build-jb-plugin-local.sh` | shell script | local JetBrains packaging helper; root `.gitignore` excludes copied `/refact-*.zip` archives |
 

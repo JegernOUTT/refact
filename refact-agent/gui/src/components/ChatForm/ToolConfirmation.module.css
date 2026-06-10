@@ -129,7 +129,8 @@
   }
 }
 
-:global(.radix-themes[data-host="jetbrains"]) .ToolConfirmationCard.ToolConfirmationCard,
+:global(.radix-themes[data-host="jetbrains"])
+  .ToolConfirmationCard.ToolConfirmationCard,
 :global(.radix-themes[data-host="jetbrains"]) .CacheGuardScroll {
   backdrop-filter: none;
 }

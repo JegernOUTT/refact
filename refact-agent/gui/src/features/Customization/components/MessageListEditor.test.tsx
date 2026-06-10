@@ -11,7 +11,6 @@ function ControlledMessageList() {
   return <MessageListEditor value={messages} onChange={setMessages} />;
 }
 
-
 describe("MessageListEditor", () => {
   it("keeps the focused textarea mounted across controlled edits", async () => {
     const { user } = render(<ControlledMessageList />);

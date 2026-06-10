@@ -9,7 +9,10 @@ import {
 } from "./statusBadgeRecipe";
 import styles from "./StatusBadge.module.css";
 
-const iconSize: Record<StatusBadgeSize, React.ComponentProps<typeof Icon>["size"]> = {
+const iconSize: Record<
+  StatusBadgeSize,
+  React.ComponentProps<typeof Icon>["size"]
+> = {
   xs: "sm",
   sm: "sm",
   md: "md",

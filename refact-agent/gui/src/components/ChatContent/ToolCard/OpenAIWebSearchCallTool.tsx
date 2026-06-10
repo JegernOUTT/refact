@@ -71,7 +71,10 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
               const safeUrl = url && isSafeHttpUrl(url) ? url : "";
               const snippet = r.snippet ?? r.description ?? "";
               return (
-                <Box key={idx} className={`${styles.resultItem} rf-enter-rise rf-pressable`}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Flex direction="column" gap="1">
                     {safeUrl ? (
                       <Link

@@ -313,7 +313,6 @@ export function MemoryDetailsEditor({
           </Dialog.Content>
         </Dialog>
       ) : null}
-
     </Surface>
   );
 }

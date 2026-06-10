@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, waitFor } from "../../../utils/test-utils";
-import type { IntegrationFieldValue, ToolConfirmation } from "../../../services/refact";
+import type {
+  IntegrationFieldValue,
+  ToolConfirmation,
+} from "../../../services/refact";
 import { Confirmation } from "./Confirmation";
 
 function getInput(container: HTMLElement, field: keyof ToolConfirmation) {
