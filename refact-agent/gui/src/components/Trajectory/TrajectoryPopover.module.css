@@ -4,7 +4,6 @@
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
-  scrollbar-gutter: auto;
 
   transform: translateZ(0);
   will-change: transform;
@@ -13,14 +12,7 @@
 .tabStrip {
   --rf-control-h: var(--rf-control-h-sm);
 
-  width: max-content;
   max-width: 100%;
-  grid-auto-columns: max-content;
-  scrollbar-gutter: auto;
-}
-
-.tabStrip [aria-hidden="true"] {
-  display: none;
 }
 
 .tabStrip [role="tab"] {

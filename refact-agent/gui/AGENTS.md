@@ -250,6 +250,7 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 - `.scrollX` is the only sanctioned horizontal-overflow escape hatch for code, diff, table, and kanban islands.
 - Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
 - Do not relayout feature surfaces while adding responsive infrastructure; feature migrations need their own characterization/parity tests.
+- Scrollbar styling (width/color) may be global, but `scrollbar-gutter: stable` must never use universal or broad selectors; it is a per-scroll-container opt-in because `stable` reserves a phantom inline-end gutter on every `overflow: hidden` element, including truncating labels.
 
 ## Design System (Refact UI)
 

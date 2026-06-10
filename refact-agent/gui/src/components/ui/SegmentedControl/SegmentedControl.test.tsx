@@ -140,9 +140,8 @@ describe("SegmentedControl", () => {
     expect(root).toContain("display: inline-grid;");
     expect(root).toContain("grid-auto-columns: minmax(0, 1fr);");
     expect(root).toContain("max-width: 100%;");
-    expect(root).toContain("scrollbar-gutter: auto;");
-    expect(segment).toContain("scrollbar-gutter: auto;");
-    expect(label).toContain("scrollbar-gutter: auto;");
+    expect(segment).toContain("display: flex;");
+    expect(label).toContain("overflow: hidden;");
   });
 
   it("keeps text segments labelled by their visible text", () => {

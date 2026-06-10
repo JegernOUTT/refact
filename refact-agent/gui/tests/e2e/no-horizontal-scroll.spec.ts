@@ -24,6 +24,11 @@ type EdgeMeasurement = {
   details: string;
 };
 
+type GutterMeasurement = {
+  name: string;
+  value: string;
+};
+
 const widths = [240, 360, 768, 1280] as const;
 
 const routes = [
@@ -274,7 +279,7 @@ test.describe("overlay right-edge regressions", () => {
     });
   });
 
-  test("aligns popover row paint and avoids control gutter tails", async ({
+  test("aligns overlay controls without broad scrollbar gutters", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -283,6 +288,28 @@ test.describe("overlay right-edge regressions", () => {
 
     await page.getByLabel("Compress or Handoff").click();
     await page.getByRole("dialog").waitFor();
+
+    const trajectoryGutters = await page.evaluate<GutterMeasurement[]>(() => {
+      const dialog = document.querySelector("[role='dialog']");
+      const tab = document.querySelector("[role='tab']");
+      const preview = [...document.querySelectorAll("button")].find(
+        (el) => el.textContent?.trim() === "Preview",
+      );
+      const label = preview?.querySelector("span");
+      const targets = [
+        ["popover content", dialog],
+        ["tabs trigger", tab],
+        ["button label", label],
+      ] as const;
+      return targets.map(([name, el]) => ({
+        name,
+        value: el ? getComputedStyle(el).scrollbarGutter : "missing",
+      }));
+    });
+
+    for (const gutter of trajectoryGutters) {
+      expect(gutter.value, gutter.name).toBe("auto");
+    }
 
     const trajectoryEdges = await page.evaluate<EdgeMeasurement[]>(() => {
       const rect = (el: Element) => el.getBoundingClientRect();
@@ -320,7 +347,8 @@ test.describe("overlay right-edge regressions", () => {
     });
 
     for (const edge of trajectoryEdges) {
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(2);
+      const maxDelta = edge.name.includes("button") ? 1 : 2;
+      expect(edge.delta, edge.details).toBeLessThanOrEqual(maxDelta);
     }
 
     await page.getByRole("tab", { name: "Handoff" }).click();
@@ -352,70 +380,55 @@ test.describe("overlay right-edge regressions", () => {
     });
 
     for (const edge of handoffEdges) {
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(2);
+      expect(edge.delta, edge.details).toBeLessThanOrEqual(1);
     }
 
     await page.keyboard.press("Escape");
     await page.getByLabel("Select model").click();
     await page.getByRole("listbox", { name: "Models" }).waitFor();
 
-    const modelEdges = await page.evaluate<EdgeMeasurement[]>(() => {
-      const rect = (el: Element) => el.getBoundingClientRect();
-      const px = (value: string) => Number.parseFloat(value) || 0;
-      const search = document
-        .querySelector("[role='dialog'] input[type='search']")
-        ?.closest("label");
+    const modelGutters = await page.evaluate<GutterMeasurement[]>(() => {
+      const dialog = document.querySelector("[role='dialog']");
       const row = document.querySelector(
         "[role='option'][data-selected='true']",
       );
-      if (!search || !row) {
-        return [
-          { name: "model selector", delta: 999, details: "missing target" },
-        ];
-      }
-      const rowPaintRight =
-        rect(row).right - px(getComputedStyle(row, "::before").insetInlineEnd);
       return [
         {
-          name: "model selector selected paint",
-          delta: Math.abs(rect(search).right - rowPaintRight),
-          details: `searchRight=${
-            rect(search).right
-          } rowPaintRight=${rowPaintRight}`,
+          name: "model selector popover content",
+          value: dialog ? getComputedStyle(dialog).scrollbarGutter : "missing",
+        },
+        {
+          name: "model selector selected row",
+          value: row ? getComputedStyle(row).scrollbarGutter : "missing",
         },
       ];
     });
 
-    for (const edge of modelEdges) {
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(2);
+    for (const gutter of modelGutters) {
+      expect(gutter.value, gutter.name).toBe("auto");
     }
 
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: /Agent/ }).click();
     await page.getByRole("dialog").waitFor();
 
-    const modeEdges = await page.evaluate<EdgeMeasurement[]>(() => {
-      const rect = (el: Element) => el.getBoundingClientRect();
-      const px = (value: string) => Number.parseFloat(value) || 0;
+    const modeGutters = await page.evaluate<GutterMeasurement[]>(() => {
       const list = document.querySelector("[class*='modeList']");
       const selected = document.querySelector("[class*='itemSelected']");
-      if (!list || !selected) {
-        return [{ name: "mode select", delta: 999, details: "missing target" }];
-      }
-      const paintRight =
-        rect(selected).right +
-        px(getComputedStyle(list).getPropertyValue("--rf-scrollbar-size"));
       return [
         {
-          name: "mode select selected paint",
-          delta: Math.abs(rect(list).right - paintRight),
-          details: `listRight=${rect(list).right} paintRight=${paintRight}`,
+          name: "mode select list",
+          value: list ? getComputedStyle(list).scrollbarGutter : "missing",
+        },
+        {
+          name: "mode select selected item",
+          value: selected ? getComputedStyle(selected).scrollbarGutter : "missing",
         },
       ];
     });
 
-    for (const edge of modeEdges) {
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(2);
+    for (const gutter of modeGutters) {
+      expect(gutter.value, gutter.name).toBe("auto");
     }
   });
 });

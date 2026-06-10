@@ -3,7 +3,6 @@
   position: relative;
   display: inline-flex;
   min-width: 0;
-  scrollbar-gutter: auto;
   align-items: center;
   justify-content: center;
   border: var(--rf-hairline) solid var(--rf-border);
@@ -124,7 +123,6 @@
 .label {
   display: inline-flex;
   min-width: 0;
-  scrollbar-gutter: auto;
   align-items: center;
   gap: var(--rf-space-1);
   overflow: hidden;

@@ -119,9 +119,7 @@ describe("ModeSelect", () => {
     expect(item).toContain("border-radius: 0;");
 
     const selected = css.match(/\.itemSelected \{[^}]+\}/)?.[0] ?? "";
-    expect(selected).toContain(
-      "box-shadow: var(--rf-scrollbar-size, 8px) 0 0 var(--rf-surface-2);",
-    );
+    expect(selected).toContain("background: var(--rf-surface-2);");
   });
 
   test("selecting a mode before chat starts applies mode and thread defaults directly", async () => {

@@ -11,10 +11,6 @@
 }
 
 .listRoot {
-  --rf-model-selector-row-paint-outset-inline-end: calc(
-    var(--rf-scrollbar-size, 8px) + 2 * var(--rf-hairline)
-  );
-
   display: flex;
   gap: var(--rf-space-2);
   min-height: 0;
@@ -103,20 +99,9 @@
   border-radius: 0;
   cursor: pointer;
   transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
     color var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.row::before {
-  position: absolute;
-  inset-block: 0;
-  inset-inline: 0
-    calc(-1 * var(--rf-model-selector-row-paint-outset-inline-end));
-  z-index: 0;
-  background: transparent;
-  content: "";
-  pointer-events: none;
-  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .row:focus-visible {
@@ -130,21 +115,16 @@
   opacity: 0.58;
 }
 
-.row:hover:not(:disabled)::before {
+.row:hover:not(:disabled) {
   background: var(--rf-surface-1);
 }
 
 .row[data-selected="true"] {
+  background: var(--rf-color-accent-soft);
   color: var(--rf-color-accent);
 }
 
-.row[data-selected="true"]::before {
-  background: var(--rf-color-accent-soft);
-}
-
 .rowContent {
-  position: relative;
-  z-index: 1;
   display: grid;
   flex: 1 1 auto;
   gap: var(--rf-space-1);
@@ -213,8 +193,6 @@
 }
 
 .rowCheck {
-  position: relative;
-  z-index: 1;
   flex: 0 0 auto;
 }
 

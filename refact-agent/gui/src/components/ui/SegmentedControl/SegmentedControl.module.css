@@ -10,7 +10,6 @@
   grid-auto-flow: column;
   max-width: 100%;
   min-width: 0;
-  scrollbar-gutter: auto;
   padding: var(--rf-segment-padding);
   background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-border);
@@ -38,7 +37,6 @@
   z-index: 1;
   display: flex;
   min-width: 0;
-  scrollbar-gutter: auto;
 }
 
 .input {
@@ -55,7 +53,6 @@
   box-sizing: border-box;
   min-width: 0;
   width: 100%;
-  scrollbar-gutter: auto;
   align-items: center;
   justify-content: center;
   overflow: hidden;

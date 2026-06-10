@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { ChevronRight, ExternalLink, Plus } from "lucide-react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "../../../utils/test-utils";
@@ -31,25 +28,6 @@ describe("Button", () => {
     expect(button.children).toHaveLength(1);
     expect(label).toHaveTextContent("Create");
     expect(label?.children).toHaveLength(0);
-  });
-
-  it("does not reserve a global scrollbar gutter inside label-sized controls", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "Button.module.css"),
-      "utf8",
-    );
-    const sharedControl =
-      css.match(/\.button,\n\.iconButton \{[^}]+\}/)?.[0] ?? "";
-    const label = css.match(/\.label \{[^}]+\}/)?.[0] ?? "";
-
-    render(<Button>Preview</Button>);
-
-    expect(screen.getByRole("button", { name: "Preview" })).toHaveClass(
-      styles.button,
-    );
-    expect(sharedControl).toContain("display: inline-flex;");
-    expect(sharedControl).toContain("scrollbar-gutter: auto;");
-    expect(label).toContain("scrollbar-gutter: auto;");
   });
 
   it("renders rightIcon after the label without extra placeholders", () => {

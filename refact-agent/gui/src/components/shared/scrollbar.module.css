@@ -1,5 +1,4 @@
 .scrollbarThin {
-  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
 }

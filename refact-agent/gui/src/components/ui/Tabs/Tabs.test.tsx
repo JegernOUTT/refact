@@ -34,9 +34,8 @@ describe("Tabs", () => {
     const trigger = css.match(/\.trigger \{[^}]+\}/)?.[0] ?? "";
 
     expect(list).toContain("display: grid;");
-    expect(list).toContain("scrollbar-gutter: auto;");
     expect(list).toContain("overflow: auto hidden;");
-    expect(trigger).toContain("scrollbar-gutter: auto;");
+    expect(trigger).toContain("overflow: hidden;");
   });
 
   it("renders an empty tab list without an indicator", () => {
