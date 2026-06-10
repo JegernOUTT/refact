@@ -40,6 +40,11 @@ export interface ButtonGroupProps extends React.ComponentProps<"div"> {
   children?: React.ReactNode;
 }
 
+type ButtonChildProps = React.HTMLAttributes<HTMLElement> & {
+  disabled?: boolean;
+  type?: string;
+};
+
 function normalizeVariant(
   variant: ButtonVariant,
 ): Exclude<ButtonVariant, "solid" | "outline"> {
@@ -85,15 +90,48 @@ function getIconSize(
   return "md";
 }
 
+function setRef<T>(ref: React.Ref<T> | undefined, value: T | null) {
+  if (!ref) return;
+
+  if (typeof ref === "function") {
+    ref(value);
+    return;
+  }
+
+  (ref as React.MutableRefObject<T | null>).current = value;
+}
+
+function composeRefs<T>(...refs: (React.Ref<T> | undefined)[]) {
+  return (value: T | null) => {
+    for (const ref of refs) {
+      setRef(ref, value);
+    }
+  };
+}
+
+function canReceiveDisabledAttribute(type: unknown) {
+  return (
+    typeof type === "string" &&
+    (type === "button" ||
+      type === "fieldset" ||
+      type === "input" ||
+      type === "optgroup" ||
+      type === "option" ||
+      type === "select" ||
+      type === "textarea")
+  );
+}
+
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
       children,
-      asChild: _asChild,
+      asChild = false,
       className,
       disabled,
       leftIcon,
       loading = false,
+      onClick,
       rightIcon,
       size = "md",
       type = "button",
@@ -107,22 +145,15 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     const normalizedSize = normalizeSize(size);
     const iconTone = getIconTone(normalizedVariant);
     const iconSize = getIconSize(normalizedSize);
-
-    return (
-      <button
-        {...props}
-        ref={ref}
-        aria-busy={loading ? true : props["aria-busy"]}
-        className={classNames(
-          styles.button,
-          styles[`variant-${normalizedVariant}`],
-          styles[`size-${normalizedSize}`],
-          "rf-pressable",
-          className,
-        )}
-        disabled={isDisabled}
-        type={type}
-      >
+    const buttonClassName = classNames(
+      styles.button,
+      styles[`variant-${normalizedVariant}`],
+      styles[`size-${normalizedSize}`],
+      "rf-pressable",
+      className,
+    );
+    const renderContent = (label: React.ReactNode) => (
+      <>
         {loading ? (
           <span
             aria-hidden="true"
@@ -135,12 +166,78 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
           </span>
         ) : null}
-        <span className={styles.label}>{children}</span>
+        <span className={styles.label}>{label}</span>
         {rightIcon && !loading ? (
           <span aria-hidden="true" className={styles.icon}>
             <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
           </span>
         ) : null}
+      </>
+    );
+
+    if (asChild) {
+      const child = React.Children.only(children);
+
+      if (!React.isValidElement<ButtonChildProps>(child)) {
+        throw new Error(
+          "Button with asChild requires a single React element child",
+        );
+      }
+
+      const childRef = (
+        child as React.ReactElement & { ref?: React.Ref<HTMLElement> }
+      ).ref;
+      const childOnClick = child.props.onClick;
+      const childCanReceiveDisabled = canReceiveDisabledAttribute(child.type);
+
+      const handleClick: React.MouseEventHandler<HTMLElement> = (event) => {
+        if (isDisabled) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+
+        childOnClick?.(event);
+
+        if (!event.defaultPrevented) {
+          onClick?.(event as React.MouseEvent<HTMLButtonElement>);
+        }
+      };
+
+      const childProps: ButtonChildProps & React.RefAttributes<HTMLElement> = {
+        ...props,
+        "aria-busy": loading ? true : props["aria-busy"],
+        children: renderContent(child.props.children),
+        className: classNames(buttonClassName, child.props.className),
+        onClick: handleClick,
+        ref: composeRefs(childRef, ref as React.Ref<HTMLElement>),
+      };
+
+      if (childCanReceiveDisabled && isDisabled) {
+        childProps.disabled = true;
+      } else if (isDisabled) {
+        childProps["aria-disabled"] = true;
+        childProps.tabIndex = -1;
+      }
+
+      if (child.type === "button") {
+        childProps.type = type;
+      }
+
+      return React.cloneElement(child, childProps);
+    }
+
+    return (
+      <button
+        {...props}
+        ref={ref}
+        aria-busy={loading ? true : props["aria-busy"]}
+        className={buttonClassName}
+        disabled={isDisabled}
+        onClick={onClick}
+        type={type}
+      >
+        {renderContent(children)}
       </button>
     );
   },
