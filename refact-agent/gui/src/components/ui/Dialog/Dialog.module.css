@@ -1,7 +1,7 @@
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: var(--rf-z-overlay);
+  z-index: var(--rf-z-overlay, 600);
   background: var(--rf-surface-3);
 }
 
@@ -15,7 +15,7 @@
   position: fixed;
   top: 50%;
   left: 50%;
-  z-index: var(--rf-z-modal);
+  z-index: var(--rf-z-modal, 700);
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-3);
