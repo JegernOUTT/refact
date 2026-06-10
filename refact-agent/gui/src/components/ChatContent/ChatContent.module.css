@@ -287,13 +287,24 @@
 }
 
 .diffHeader {
+  all: unset;
+  box-sizing: border-box;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
   color: var(--rf-color-muted);
+  border-radius: var(--rf-radius-ctl);
   transition: color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .diffHeader:hover {
   color: var(--rf-color-fg);
+}
+
+.diffHeader:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .diffChevron {

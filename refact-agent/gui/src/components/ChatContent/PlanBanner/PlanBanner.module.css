@@ -24,13 +24,29 @@
 }
 
 .header {
-  cursor: pointer;
   padding: var(--rf-space-1) 0;
-  transition: filter 0.15s ease;
 }
 
 .header:hover {
   filter: brightness(1.3);
+}
+
+.toggleButton {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: var(--rf-radius-ctl);
+  transition: filter 0.15s ease;
+}
+
+.toggleButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .icon {

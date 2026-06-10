@@ -1,5 +1,5 @@
 import { describe, test, vi, expect } from "vitest";
-import { render } from "../../utils/test-utils";
+import { render, screen } from "../../utils/test-utils";
 import { DiffContent } from "./DiffContent";
 import groupBy from "lodash.groupby";
 
@@ -76,6 +76,47 @@ const STUB_DIFFS_1 = groupBy(
   ],
   (diff) => diff.file_name,
 );
+
+describe("diff content disclosure", () => {
+  test("renders a semantic trigger with aria state and controls", () => {
+    render(<DiffContent diffs={STUB_DIFFS_1} />);
+
+    const trigger = screen.getByRole("button", {
+      name: /frog\.py \+7 -7 , holiday\.py \+5 -5 , jump_to_conclusions\.py \+6 -6/i,
+    });
+    const content = document.getElementById(
+      trigger.getAttribute("aria-controls") ?? "",
+    );
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(content).toBeTruthy();
+    expect(content).toHaveAttribute("data-open", "false");
+  });
+
+  test("toggles with mouse and keyboard", async () => {
+    const { user } = render(<DiffContent diffs={STUB_DIFFS_1} />);
+    const trigger = screen.getByRole("button", { name: /frog\.py/i });
+    const content = document.getElementById(
+      trigger.getAttribute("aria-controls") ?? "",
+    );
+
+    await user.click(trigger);
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(content).toHaveAttribute("data-open", "true");
+
+    trigger.focus();
+    await user.keyboard("{Enter}");
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(content).toHaveAttribute("data-open", "false");
+
+    await user.keyboard(" ");
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(content).toHaveAttribute("data-open", "true");
+  });
+});
 
 // TODO: mock requests with msw when chat has been migrated.
 describe.skip("diff content", () => {

@@ -183,7 +183,8 @@ export const DiffContent: React.FC<{
   onOpenChange?: (open: boolean) => void;
 }> = ({ diffs, open: controlledOpen, onOpenChange }) => {
   const [internalOpen, setInternalOpen] = React.useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const contentId = React.useId();
+  const ref = useRef<HTMLButtonElement>(null);
   const handleScroll = useHideScroll(ref);
 
   const isControlled = controlledOpen !== undefined;
@@ -208,15 +209,21 @@ export const DiffContent: React.FC<{
   return (
     <Collapsible.Root open={open} onOpenChange={(v) => setOpen(v)}>
       <Collapsible.Trigger asChild>
-        <Flex gap="2" align="center" ref={ref} className={styles.diffHeader}>
+        <button
+          type="button"
+          ref={ref}
+          className={styles.diffHeader}
+          aria-controls={contentId}
+        >
           <Text weight="light" size="1">
             <DiffTitle diffs={diffs} />
           </Text>
           <Chevron open={open} className={styles.diffChevron} />
-        </Flex>
+        </button>
       </Collapsible.Trigger>
       <Collapsible.Content forceMount asChild>
         <div
+          id={contentId}
           className={classNames("rf-expand-grid", styles.diffContentGrid)}
           data-open={open}
           hidden={false}

@@ -210,9 +210,17 @@ describe("PlanBanner", () => {
 
   it("toggle collapse hides body, persists in localStorage, and restores on remount", () => {
     const { unmount } = renderPlanBanner([makePlan(1)]);
+    const trigger = screen.getByRole("button", {
+      name: "Plan — agent · v1 · 2m ago",
+    });
+    const bodyId = screen.getByTestId("plan-banner-body").id;
 
-    fireEvent.click(screen.getByTestId("plan-banner-header"));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", bodyId);
 
+    fireEvent.click(trigger);
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("plan-banner-body")).toBeNull();
     expect(localStorage.getItem(`plan-banner-collapsed-${threadId}`)).toBe(
       "true",
@@ -222,7 +230,28 @@ describe("PlanBanner", () => {
     renderPlanBanner([makePlan(1)]);
 
     expect(screen.queryByTestId("plan-banner-body")).toBeNull();
-    expect(screen.getByTestId("plan-banner-header")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Plan — agent · v1 · 2m ago" }),
+    ).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("toggles collapse from the keyboard without activating action buttons", async () => {
+    const { user } = renderPlanBanner([makePlan(1)]);
+    const trigger = screen.getByRole("button", {
+      name: "Plan — agent · v1 · 2m ago",
+    });
+
+    trigger.focus();
+    await user.keyboard("{Enter}");
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("plan-banner-body")).toBeNull();
+    expect(writeTextMock).not.toHaveBeenCalled();
+
+    await user.keyboard(" ");
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("plan-banner-body")).toBeTruthy();
   });
 
   it("compact plan classes are applied", () => {
