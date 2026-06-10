@@ -141,23 +141,70 @@ type HooksEditorProps = {
   scope?: "global" | "local";
 };
 
+function hooksEqual(left: HookEntry[], right: HookEntry[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
-  const { data, isLoading, error } = useGetHooksQuery({ scope });
+  const [hooksScope, setHooksScope] = useState<"global" | "local">(
+    scope ?? "global",
+  );
+  const {
+    currentData: data,
+    isLoading,
+    isFetching,
+    error,
+  } = useGetHooksQuery({ scope: hooksScope });
   const [saveHooks, { isLoading: isSaving }] = useSaveHooksMutation();
   const [view, setView] = useState<EditorView>("form");
   const [hooks, setHooks] = useState<HookEntry[]>([]);
   const [rawYaml, setRawYaml] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [hooksScope, setHooksScope] = useState<"global" | "local">(
-    scope ?? "global",
+  const [loadedScope, setLoadedScope] = useState<"global" | "local" | null>(
+    null,
   );
+  const [loadedHooks, setLoadedHooks] = useState<HookEntry[]>([]);
+  const [loadedRawYaml, setLoadedRawYaml] = useState("");
 
   useEffect(() => {
     if (data) {
       setHooks(data.hooks);
       setRawYaml(data.raw_yaml);
+      setLoadedHooks(data.hooks);
+      setLoadedRawYaml(data.raw_yaml);
+      setLoadedScope(hooksScope);
+      setSaveError(null);
     }
-  }, [data]);
+  }, [data, hooksScope]);
+
+  const hasUnsavedEdits =
+    loadedScope === hooksScope &&
+    (!hooksEqual(hooks, loadedHooks) || rawYaml !== loadedRawYaml);
+
+  const resetLoadedState = useCallback(() => {
+    setHooks([]);
+    setRawYaml("");
+    setLoadedHooks([]);
+    setLoadedRawYaml("");
+    setLoadedScope(null);
+    setSaveError(null);
+  }, []);
+
+  const handleScopeChange = useCallback(
+    (value: string) => {
+      const nextScope = value as "global" | "local";
+      if (nextScope === hooksScope) return;
+      if (
+        hasUnsavedEdits &&
+        !window.confirm("Discard unsaved hook changes before switching scope?")
+      ) {
+        return;
+      }
+      resetLoadedState();
+      setHooksScope(nextScope);
+    },
+    [hasUnsavedEdits, hooksScope, resetLoadedState],
+  );
 
   const handleUpdate = useCallback((index: number, updated: HookEntry) => {
     setHooks((prev) => prev.map((h, i) => (i === index ? updated : h)));
@@ -181,6 +228,7 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
 
   const handleSave = useCallback(async () => {
     setSaveError(null);
+    if (loadedScope !== hooksScope) return;
     try {
       if (view === "raw") {
         await saveHooks({
@@ -190,12 +238,16 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
       } else {
         await saveHooks({ scope: hooksScope, body: { hooks } }).unwrap();
       }
+      setLoadedHooks(hooks);
+      setLoadedRawYaml(rawYaml);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     }
-  }, [view, hooksScope, rawYaml, hooks, saveHooks]);
+  }, [view, hooksScope, loadedScope, rawYaml, hooks, saveHooks]);
 
-  if (isLoading) return <Spinner spinning />;
+  if (isLoading || (isFetching && loadedScope !== hooksScope)) {
+    return <Spinner spinning />;
+  }
   if (error) {
     return (
       <div
@@ -215,9 +267,7 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
           <SegmentedControl
             size="sm"
             value={hooksScope}
-            onValueChange={(value) =>
-              setHooksScope(value as "global" | "local")
-            }
+            onValueChange={handleScopeChange}
             options={[
               { value: "global", label: "Global" },
               { value: "local", label: "Project" },
@@ -241,7 +291,7 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
             variant="primary"
             size="sm"
             onClick={() => void handleSave()}
-            disabled={isSaving}
+            disabled={isSaving || loadedScope !== hooksScope}
             loading={isSaving}
           >
             Save
