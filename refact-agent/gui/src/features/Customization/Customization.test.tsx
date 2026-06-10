@@ -1,7 +1,7 @@
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
-import { render, screen } from "../../utils/test-utils";
+import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import {
   chatSessionCommand,
   goodCaps,
@@ -87,6 +87,31 @@ function setupHandlers() {
   );
 }
 
+function setupSaveHandler(onSave: (body: unknown) => void) {
+  setupHandlers();
+  server.use(
+    http.put("*/v1/customization/modes/:id", async ({ request }) => {
+      onSave(await request.json());
+      return HttpResponse.json({
+        ok: true,
+        file_path: "/tmp/saved.yaml",
+        scope: "global",
+        errors: [],
+      });
+    }),
+  );
+}
+
+function setupDeleteHandler(onDelete: () => void) {
+  setupHandlers();
+  server.use(
+    http.delete("*/v1/customization/modes/:id", () => {
+      onDelete();
+      return HttpResponse.json({ ok: true, scope: "global", errors: [] });
+    }),
+  );
+}
+
 describe("Customization", () => {
   it("renders the canonical tabs with preserved count badges", async () => {
     setupHandlers();
@@ -147,5 +172,78 @@ describe("Customization", () => {
     expect(
       screen.getByRole("radio", { name: "Project scope" }),
     ).toBeInTheDocument();
+  });
+
+  it("saves the latest YAML edit when Save is clicked immediately", async () => {
+    let savedBody: unknown;
+    setupSaveHandler((body) => {
+      savedBody = body;
+    });
+
+    const { container, user } = render(
+      <Customization
+        embedded
+        host="web"
+        tabbed={false}
+        initialKind="modes"
+        initialConfigId="agent_mode_with_a_long_identifier"
+        backFromCustomization={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(
+      await screen.findByText("agent_mode_with_a_long_identifier"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "YAML editor" }));
+    const textarea = container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) throw new Error("expected YAML textarea");
+
+    fireEvent.change(textarea, {
+      target: {
+        value:
+          "id: agent_mode_with_a_long_identifier\ntitle: Agent Mode\nprompt: Updated Prompt\n",
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(savedBody).toMatchObject({
+        config: { prompt: "Updated Prompt" },
+      });
+    });
+  });
+
+  it("uses an in-app confirmation before deleting a config", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onDelete = vi.fn();
+    setupDeleteHandler(onDelete);
+
+    const { user } = render(
+      <Customization
+        embedded
+        host="web"
+        tabbed={false}
+        backFromCustomization={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    await screen.findByRole("heading", { name: "Customization" });
+    await user.click(
+      screen.getByLabelText("Delete agent_mode_with_a_long_identifier"),
+    );
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("heading", { name: "Delete configuration?" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(onDelete).toHaveBeenCalledOnce());
+    confirmSpy.mockRestore();
   });
 });

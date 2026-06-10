@@ -13,6 +13,7 @@ import {
   safeBoolean,
   safeMessageArray,
   safeSelectionRange,
+  parseIntSafe,
 } from "./configUtils";
 import styles from "./editors.module.css";
 
@@ -74,7 +75,7 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
               type="number"
               value={selectionMin.toString()}
               onChange={(value) => {
-                const val = value === "" ? undefined : parseInt(value, 10);
+                const val = value === "" ? undefined : parseIntSafe(value);
                 if (val !== undefined) {
                   patch(["selection_needed"], [val, selectionMax]);
                 }
@@ -86,7 +87,7 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
               type="number"
               value={selectionMax.toString()}
               onChange={(value) => {
-                const val = value === "" ? undefined : parseInt(value, 10);
+                const val = value === "" ? undefined : parseIntSafe(value);
                 if (val !== undefined) {
                   patch(["selection_needed"], [selectionMin, val]);
                 }

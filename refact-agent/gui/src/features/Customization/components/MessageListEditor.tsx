@@ -33,8 +33,22 @@ const generateId = () => `msg_${++idCounter}_${Date.now()}`;
 const toInternal = (msgs: MessageTemplate[]): InternalMessage[] =>
   msgs.map((m) => ({ ...m, _id: generateId() }));
 
+const toInternalWithPrevious = (
+  msgs: MessageTemplate[],
+  previous: InternalMessage[],
+): InternalMessage[] =>
+  msgs.map((m, index) => ({ ...m, _id: previous[index]?._id ?? generateId() }));
+
 const toExternal = (msgs: InternalMessage[]): MessageTemplate[] =>
   msgs.map(({ _id, ...rest }) => rest);
+
+function messagesEqual(a: MessageTemplate[], b: MessageTemplate[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((msg, index) => {
+    const other = b[index];
+    return msg.role === other.role && msg.content === other.content;
+  });
+}
 
 export const MessageListEditor: React.FC<MessageListEditorProps> = ({
   value,
@@ -44,16 +58,18 @@ export const MessageListEditor: React.FC<MessageListEditorProps> = ({
   const [internal, setInternal] = useState<InternalMessage[]>(() =>
     toInternal(value),
   );
-  const valueKey = JSON.stringify(value);
+  const lastEmittedRef = React.useRef<MessageTemplate[]>(value);
 
   useEffect(() => {
-    setInternal(toInternal(value));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- valueKey is derived from value, used for deep comparison
-  }, [valueKey]);
+    if (messagesEqual(value, lastEmittedRef.current)) return;
+    setInternal((prev) => toInternalWithPrevious(value, prev));
+    lastEmittedRef.current = value;
+  }, [value]);
 
   const emit = useCallback(
     (msgs: InternalMessage[]) => {
       setInternal(msgs);
+      lastEmittedRef.current = toExternal(msgs);
       onChange(toExternal(msgs));
     },
     [onChange],

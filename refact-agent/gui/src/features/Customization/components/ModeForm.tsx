@@ -10,6 +10,7 @@ import {
   safeObject,
   isString,
   safeToolConfirmRules,
+  parseIntSafe,
 } from "./configUtils";
 import { useGetCapsQuery } from "../../../services/refact/caps";
 import { useCapsForToolUse } from "../../../hooks";
@@ -453,7 +454,7 @@ export const ModeForm: React.FC<ModeFormProps> = ({
               type="number"
               value={typeof ui.order === "number" ? ui.order.toString() : ""}
               onChange={(value) =>
-                patch(["ui", "order"], value ? parseInt(value, 10) : undefined)
+                patch(["ui", "order"], parseIntSafe(value))
               }
               placeholder="Order"
             />

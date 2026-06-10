@@ -141,6 +141,17 @@ type EditorView = "form" | "yaml";
 
 const jsYamlPromise = import("js-yaml");
 
+async function parseYamlConfig(
+  yamlStr: string,
+): Promise<Record<string, unknown>> {
+  const jsYaml = await jsYamlPromise;
+  const parsed = jsYaml.load(yamlStr);
+  if (!isPlainObject(parsed)) {
+    throw new Error("Config must be an object");
+  }
+  return sanitizeObject(parsed) as Record<string, unknown>;
+}
+
 export const ConfigEditor: React.FC<{
   kind: ConfigKind;
   configId: string;
@@ -180,15 +191,11 @@ export const ConfigEditor: React.FC<{
       const version = ++syncVersionRef.current;
       void (async () => {
         try {
-          const jsYaml = await jsYamlPromise;
+          const parsed = await parseYamlConfig(draft.yaml_or_json);
           if (version !== syncVersionRef.current) return;
-          const parsed = jsYaml.load(draft.yaml_or_json);
-          if (isPlainObject(parsed)) {
-            const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
-            setConfigJson(sanitized);
-            setYaml(draft.yaml_or_json);
-            setYamlParseError(null);
-          }
+          setConfigJson(parsed);
+          setYaml(draft.yaml_or_json);
+          setYamlParseError(null);
         } catch {
           // ignore parse error; fall back to server data
         }
@@ -226,15 +233,9 @@ export const ConfigEditor: React.FC<{
   const syncYamlToJson = useCallback(
     async (yamlStr: string, version: number) => {
       try {
-        const jsYaml = await jsYamlPromise;
+        const parsed = await parseYamlConfig(yamlStr);
         if (version !== syncVersionRef.current) return;
-        const parsed = jsYaml.load(yamlStr);
-        if (!isPlainObject(parsed)) {
-          setYamlParseError("Config must be an object");
-          return;
-        }
-        const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
-        setConfigJson(sanitized);
+        setConfigJson(parsed);
         setYamlParseError(null);
       } catch (e) {
         if (version !== syncVersionRef.current) return;
@@ -295,7 +296,27 @@ export const ConfigEditor: React.FC<{
 
   const handleSave = useCallback(async () => {
     setSaveError(null);
-    if (!configJson) {
+    if (yamlSyncTimeoutRef.current) {
+      clearTimeout(yamlSyncTimeoutRef.current);
+      yamlSyncTimeoutRef.current = null;
+    }
+
+    let configToSave = configJson;
+    if (view === "yaml") {
+      const version = ++syncVersionRef.current;
+      try {
+        configToSave = await parseYamlConfig(yaml);
+        if (version !== syncVersionRef.current) return;
+        setConfigJson(configToSave);
+        setYamlParseError(null);
+      } catch (e) {
+        if (version !== syncVersionRef.current) return;
+        setYamlParseError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+
+    if (!configToSave) {
       setSaveError("No config to save");
       return;
     }
@@ -303,7 +324,7 @@ export const ConfigEditor: React.FC<{
       const result = await saveConfig({
         kind,
         id: configId,
-        config: configJson,
+        config: configToSave,
         scope: targetScope,
         draft_id: draftId,
       }).unwrap();
@@ -315,7 +336,17 @@ export const ConfigEditor: React.FC<{
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     }
-  }, [configJson, kind, configId, saveConfig, onSaved, targetScope, draftId]);
+  }, [
+    configJson,
+    view,
+    kind,
+    configId,
+    saveConfig,
+    onSaved,
+    targetScope,
+    draftId,
+    yaml,
+  ]);
 
   if (isLoading || draftLoading) return <Spinner />;
   if (error)
@@ -361,7 +392,7 @@ export const ConfigEditor: React.FC<{
           <Button
             size="sm"
             onClick={() => void handleSave()}
-            disabled={isSaving || !!yamlParseError}
+            disabled={isSaving}
           >
             {isSaving ? "..." : "Save"}
           </Button>
@@ -607,6 +638,10 @@ export const Customization: React.FC<CustomizationProps> = ({
     initialConfigId ?? null,
   );
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    scope: "global" | "local";
+  } | null>(null);
 
   const { data: registry, isLoading, refetch } = useGetRegistryQuery(undefined);
   const [deleteConfig] = useDeleteConfigMutation();
@@ -637,7 +672,6 @@ export const Customization: React.FC<CustomizationProps> = ({
 
   const handleDelete = useCallback(
     async (id: string, scope: "global" | "local") => {
-      if (!confirm(`Delete ${id} from ${scope}?`)) return;
       await deleteConfig({ kind: activeKind, id, scope });
       if (selectedConfigId === id) {
         setSelectedConfigId(null);
@@ -773,7 +807,7 @@ export const Customization: React.FC<CustomizationProps> = ({
                 items={activeItems}
                 selectedId={selectedConfigId}
                 onSelect={setSelectedConfigId}
-                onDelete={(id, scope) => void handleDelete(id, scope)}
+                onDelete={(id, scope) => setDeleteTarget({ id, scope })}
               />
             </div>
           )}
@@ -790,6 +824,37 @@ export const Customization: React.FC<CustomizationProps> = ({
           getAllItems().some((i) => i.local_path !== "")
         }
       />
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
+          <Dialog.Title>Delete configuration?</Dialog.Title>
+          <Dialog.Description>
+            {deleteTarget
+              ? `Delete ${deleteTarget.id} from ${deleteTarget.scope}?`
+              : "Delete this configuration?"}
+          </Dialog.Description>
+          <div className={styles.dialogFooter}>
+            <Button variant="soft" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (!deleteTarget) return;
+                const { id, scope } = deleteTarget;
+                setDeleteTarget(null);
+                void handleDelete(id, scope);
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog>
     </div>
   );
 
