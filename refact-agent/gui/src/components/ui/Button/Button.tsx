@@ -122,6 +122,28 @@ function canReceiveDisabledAttribute(type: unknown) {
   );
 }
 
+function hasRenderableContent(children: React.ReactNode) {
+  return React.Children.toArray(children).some(
+    (child) => typeof child !== "string" || child.trim().length > 0,
+  );
+}
+
+function isSingleIconContent(children: React.ReactNode) {
+  const renderableChildren = React.Children.toArray(children);
+
+  if (renderableChildren.length !== 1) {
+    return false;
+  }
+
+  const child = renderableChildren[0];
+
+  if (!React.isValidElement<{ children?: React.ReactNode }>(child)) {
+    return false;
+  }
+
+  return !hasRenderableContent(child.props.children);
+}
+
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
@@ -145,35 +167,59 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     const normalizedSize = normalizeSize(size);
     const iconTone = getIconTone(normalizedVariant);
     const iconSize = getIconSize(normalizedSize);
-    const buttonClassName = classNames(
-      styles.button,
-      styles[`variant-${normalizedVariant}`],
-      styles[`size-${normalizedSize}`],
-      "rf-pressable",
-      className,
-    );
-    const renderContent = (label: React.ReactNode) => (
-      <>
-        {loading ? (
-          <span
-            aria-hidden="true"
-            className={classNames(styles.icon, styles.spinner)}
-          >
-            <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
-          </span>
-        ) : leftIcon ? (
-          <span aria-hidden="true" className={styles.icon}>
-            <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
-          </span>
-        ) : null}
-        <span className={styles.label}>{label}</span>
-        {rightIcon && !loading ? (
-          <span aria-hidden="true" className={styles.icon}>
-            <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
-          </span>
-        ) : null}
-      </>
-    );
+    const getButtonClassName = (iconOnly: boolean) =>
+      classNames(
+        styles.button,
+        styles[`variant-${normalizedVariant}`],
+        styles[`size-${normalizedSize}`],
+        iconOnly && styles.iconOnly,
+        "rf-pressable",
+        className,
+      );
+    const isIconOnly = (label: React.ReactNode) => {
+      const showLabel = hasRenderableContent(label);
+
+      if (!showLabel) {
+        return leftIcon !== undefined || rightIcon !== undefined || loading;
+      }
+
+      return !leftIcon && !rightIcon && !loading && isSingleIconContent(label);
+    };
+    const renderContent = (label: React.ReactNode) => {
+      const showLabel = hasRenderableContent(label);
+      const labelIsIconOnly = showLabel && isSingleIconContent(label);
+
+      return (
+        <>
+          {loading ? (
+            <span
+              aria-hidden="true"
+              className={classNames(styles.icon, styles.spinner)}
+            >
+              <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
+            </span>
+          ) : leftIcon ? (
+            <span aria-hidden="true" className={styles.icon}>
+              <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
+            </span>
+          ) : null}
+          {showLabel ? (
+            labelIsIconOnly ? (
+              <span aria-hidden="true" className={styles.icon}>
+                {label}
+              </span>
+            ) : (
+              <span className={styles.label}>{label}</span>
+            )
+          ) : null}
+          {rightIcon && !loading ? (
+            <span aria-hidden="true" className={styles.icon}>
+              <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
+            </span>
+          ) : null}
+        </>
+      );
+    };
 
     if (asChild) {
       const child = React.Children.only(children);
@@ -189,6 +235,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       ).ref;
       const childOnClick = child.props.onClick;
       const childCanReceiveDisabled = canReceiveDisabledAttribute(child.type);
+      const iconOnly = isIconOnly(child.props.children);
 
       const handleClick: React.MouseEventHandler<HTMLElement> = (event) => {
         if (isDisabled) {
@@ -208,7 +255,10 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         ...props,
         "aria-busy": loading ? true : props["aria-busy"],
         children: renderContent(child.props.children),
-        className: classNames(buttonClassName, child.props.className),
+        className: classNames(
+          getButtonClassName(iconOnly),
+          child.props.className,
+        ),
         onClick: handleClick,
         ref: composeRefs(childRef, ref as React.Ref<HTMLElement>),
       };
@@ -227,12 +277,14 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       return React.cloneElement(child, childProps);
     }
 
+    const iconOnly = isIconOnly(children);
+
     return (
       <button
         {...props}
         ref={ref}
         aria-busy={loading ? true : props["aria-busy"]}
-        className={buttonClassName}
+        className={getButtonClassName(iconOnly)}
         disabled={isDisabled}
         onClick={onClick}
         type={type}

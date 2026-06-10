@@ -73,21 +73,18 @@
   border-color: var(--rf-border-strong);
 }
 
-.button:has(.label:empty),
-.button:has(.label > svg:only-child) {
+.button.iconOnly {
   width: max(var(--rf-control-h), 28px);
   min-width: max(var(--rf-control-h), 28px);
   padding: 0;
 }
 
-.button.size-sm:has(.label:empty),
-.button.size-sm:has(.label > svg:only-child) {
+.button.size-sm.iconOnly {
   width: 28px;
   min-width: 28px;
 }
 
-.button.size-lg:has(.label:empty),
-.button.size-lg:has(.label > svg:only-child) {
+.button.size-lg.iconOnly {
   width: var(--rf-control-h-lg);
   min-width: var(--rf-control-h-lg);
 }
