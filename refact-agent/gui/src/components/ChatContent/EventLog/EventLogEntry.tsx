@@ -96,10 +96,14 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
   };
 
   return (
-    <Box className={styles.entry} data-testid="event-log-entry">
+    <Box
+      className={styles.entry}
+      data-expanded={expanded}
+      data-testid="event-log-entry"
+    >
       <button
         type="button"
-        className={styles.entryButton}
+        className={`${styles.entryButton} rf-pressable`}
         aria-expanded={expanded}
         aria-controls={jsonId}
         onClick={handleClick}
