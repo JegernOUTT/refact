@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen, fireEvent } from "../utils/test-utils";
+import { render, screen, fireEvent, waitFor } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
@@ -469,6 +469,65 @@ describe("MCPMarketplace", () => {
     expect(
       screen.getByText(/Smithery source requires an API key/),
     ).toBeDefined();
+  });
+
+  it("shows install failures, clears installing state, and allows retry", async () => {
+    let installAttempts = 0;
+    const unhandledRejections: PromiseRejectionEvent[] = [];
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      unhandledRejections.push(event);
+    };
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+
+    server.use(
+      http.get("*/v1/mcp/marketplace", () => {
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+      http.get("*/v1/mcp/marketplace/installed", () => {
+        return HttpResponse.json({ installed: [] });
+      }),
+      http.post("*/v1/mcp/marketplace/install", async ({ request }) => {
+        installAttempts += 1;
+        const body = (await request.json()) as Record<string, unknown>;
+        expect(body.server_id).toBe("test-server");
+        expect(body.source_id).toBe("refact-bundled");
+        if (installAttempts === 1) {
+          return HttpResponse.json(
+            { detail: "Install exploded" },
+            { status: 500 },
+          );
+        }
+        return HttpResponse.json({
+          installed: true,
+          config_path: "/tmp/test.yaml",
+        });
+      }),
+    );
+
+    try {
+      render(
+        <MCPMarketplace
+          host="vscode"
+          tabbed={false}
+          backFromMarketplace={() => undefined}
+        />,
+        { preloadedState: PRELOADED_STATE },
+      );
+
+      await screen.findByText("Test Server");
+      fireEvent.click(screen.getByRole("button", { name: /^install$/i }));
+
+      expect(await screen.findByText("Install exploded")).toBeDefined();
+      const retryButton = screen.getByRole("button", { name: /^install$/i });
+      expect(retryButton).not.toBeDisabled();
+      expect(unhandledRejections).toHaveLength(0);
+
+      fireEvent.click(retryButton);
+
+      await waitFor(() => expect(installAttempts).toBe(2));
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    }
   });
 
   it("source settings dialog opens and closes", async () => {

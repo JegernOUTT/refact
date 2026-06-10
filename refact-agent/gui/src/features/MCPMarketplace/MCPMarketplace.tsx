@@ -32,6 +32,28 @@ import { change } from "../Pages/pagesSlice";
 
 const PAGE_SIZE = 20;
 
+const fallbackInstallError = "Failed to install MCP server";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringifyErrorData(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && typeof value.detail === "string") return value.detail;
+  return null;
+}
+
+function installErrorMessage(error: unknown): string {
+  if (!isRecord(error)) return fallbackInstallError;
+  if ("data" in error) {
+    return stringifyErrorData(error.data) ?? fallbackInstallError;
+  }
+  if (typeof error.error === "string") return error.error;
+  if (typeof error.message === "string") return error.message;
+  return fallbackInstallError;
+}
+
 type MCPMarketplaceProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
@@ -50,6 +72,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [page, setPage] = useState(1);
 
@@ -125,6 +148,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 
   const handleInstall = async (server: MCPServer) => {
     setInstallingId(server.id);
+    setInstallError(null);
     try {
       const result = await installServer({
         server_id: server.id,
@@ -137,6 +161,8 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           integrationPath: result.config_path,
         }),
       );
+    } catch (err) {
+      setInstallError(installErrorMessage(err));
     } finally {
       setInstallingId(null);
     }
@@ -144,6 +170,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 
   const handleSelectSource = (sourceId: string | null) => {
     setSelectedSource(sourceId);
+    setInstallError(null);
     setPage(1);
   };
 
@@ -256,6 +283,13 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           >
             Configure
           </Button>
+        </div>
+      )}
+
+      {installError && (
+        <div className={`${styles.notice} ${styles.noticeDanger}`}>
+          <Icon icon={Info} tone="danger" />
+          <p className={styles.smallText}>{installError}</p>
         </div>
       )}
 
