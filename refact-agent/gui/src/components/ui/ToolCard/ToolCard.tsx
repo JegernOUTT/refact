@@ -36,6 +36,59 @@ const statusTone: Record<
   streaming: "accent",
 };
 
+const focusableSelector = [
+  "a[href]",
+  "area[href]",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "summary",
+  "iframe",
+  "object",
+  "embed",
+  "audio[controls]",
+  "video[controls]",
+  "[contenteditable='true']",
+  "[tabindex]",
+].join(",");
+
+function useCollapsedFocusGuard(
+  ref: React.RefObject<HTMLElement>,
+  active: boolean,
+): void {
+  React.useLayoutEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+
+    const elements = Array.from(
+      root.querySelectorAll<HTMLElement>(focusableSelector),
+    );
+
+    if (active) {
+      root.setAttribute("inert", "");
+      for (const element of elements) {
+        if (element.dataset.rfPreviousTabIndex !== undefined) continue;
+        element.dataset.rfPreviousTabIndex = element.getAttribute("tabindex") ?? "";
+        element.tabIndex = -1;
+      }
+      return;
+    }
+
+    root.removeAttribute("inert");
+    for (const element of elements) {
+      const previousTabIndex = element.dataset.rfPreviousTabIndex;
+      if (previousTabIndex === undefined) continue;
+      if (previousTabIndex) {
+        element.setAttribute("tabindex", previousTabIndex);
+      } else {
+        element.removeAttribute("tabindex");
+      }
+      delete element.dataset.rfPreviousTabIndex;
+    }
+  });
+}
+
 export function ToolCard({
   title,
   icon,
@@ -52,7 +105,10 @@ export function ToolCard({
   const isControlled = open !== undefined;
   const isOpen = isControlled ? open : uncontrolledOpen;
   const bodyId = React.useId();
+  const bodyRef = React.useRef<HTMLDivElement>(null);
   const tone = statusTone[status];
+
+  useCollapsedFocusGuard(bodyRef, !isOpen);
 
   const toggleOpen = () => {
     const nextOpen = !isOpen;
@@ -94,6 +150,7 @@ export function ToolCard({
         {actions ? <div className={styles.actions}>{actions}</div> : null}
       </div>
       <div
+        ref={bodyRef}
         className={classNames("rf-expand-grid", styles.bodyGrid)}
         data-open={isOpen}
         id={bodyId}

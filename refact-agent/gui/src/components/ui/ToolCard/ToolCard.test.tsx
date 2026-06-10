@@ -15,6 +15,7 @@ function renderToolCard() {
     <Theme>
       <ToolCard defaultOpen={false} icon={Terminal} title="Run command">
         <div>Command output</div>
+        <button type="button">Copy command output</button>
       </ToolCard>
     </Theme>,
   );
@@ -67,6 +68,20 @@ describe("ToolCard", () => {
     expect(chevron).toHaveClass(styles.chevron);
   });
 
+  it("toggles from the keyboard", async () => {
+    const { user } = renderToolCard();
+    const toggle = screen.getByRole("button", { name: /run command/i });
+
+    toggle.focus();
+    await user.keyboard("{Enter}");
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    await user.keyboard(" ");
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("updates collapsed body state when opened", async () => {
     const { user } = renderToolCard();
     const toggle = screen.getByRole("button", { name: /run command/i });
@@ -81,6 +96,31 @@ describe("ToolCard", () => {
     expect(body).toHaveAttribute("data-open", "true");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Command output")).toBeInTheDocument();
+  });
+
+  it("keeps collapsed body controls out of sequential keyboard focus", async () => {
+    const { user } = renderToolCard();
+    const toggle = screen.getByRole("button", { name: /run command/i });
+    const bodyId = toggle.getAttribute("aria-controls");
+    const body = bodyId ? document.getElementById(bodyId) : null;
+
+    expect(body).toHaveAttribute("inert");
+
+    await user.tab();
+    expect(toggle).toHaveFocus();
+
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: /copy command output/i }),
+    ).not.toHaveFocus();
+
+    await user.click(toggle);
+    expect(body).not.toHaveAttribute("inert");
+
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: /copy command output/i }),
+    ).toHaveFocus();
   });
 
   it("keeps reduced-motion open feedback instant", async () => {
