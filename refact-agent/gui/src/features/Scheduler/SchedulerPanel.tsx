@@ -37,6 +37,7 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   const [createCron, createState] = useCreateCronMutation();
   const [deleteCron, deleteState] = useDeleteCronMutation();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
   const lastCronFireAt = useAppSelector(selectLastCronFireAt);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const currentMode = useAppSelector(selectThreadMode);
@@ -53,6 +54,7 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       ),
     [tasks],
   );
+  const renderedDeleteError = deleteState.error ?? deleteError;
 
   const handleCreate = async (
     request: Omit<CreateCronRequest, "chat_id" | "mode">,
@@ -66,15 +68,18 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
 
   const handleDelete = async (id: string) => {
     setDeletingId(id);
+    setDeleteError(null);
     try {
       await deleteCron({ id }).unwrap();
+    } catch (err) {
+      setDeleteError(err);
     } finally {
       setDeletingId(null);
     }
   };
 
   const deleteTask = (id: string) => {
-    void handleDelete(id);
+    handleDelete(id).catch(setDeleteError);
   };
 
   const actions = (
@@ -133,8 +138,10 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
           {error ? (
             <FieldError>{schedulerErrorMessage(error)}</FieldError>
           ) : null}
-          {deleteState.error ? (
-            <FieldError>{schedulerErrorMessage(deleteState.error)}</FieldError>
+          {renderedDeleteError ? (
+            <FieldError>
+              {schedulerErrorMessage(renderedDeleteError)}
+            </FieldError>
           ) : null}
           <CronList
             tasks={sortedTasks}
