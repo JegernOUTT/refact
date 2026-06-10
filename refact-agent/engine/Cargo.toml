@@ -95,6 +95,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "refact"
+path = "src/bin/refact.rs"
+test = false
+bench = false
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]

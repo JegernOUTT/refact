@@ -672,12 +672,8 @@ fn build_shared_http_client_builder() -> reqwest::ClientBuilder {
 pub async fn create_global_context(
     cache_dir: PathBuf,
     config_dir: PathBuf,
-) -> (
-    Arc<GlobalContext>,
-    std::sync::mpsc::Receiver<String>,
-    CommandLine,
-) {
-    let cmdline = CommandLine::from_args();
+    cmdline: CommandLine,
+) -> (Arc<GlobalContext>, std::sync::mpsc::Receiver<String>) {
     let (ask_shutdown_sender, ask_shutdown_receiver) = std::sync::mpsc::channel::<String>();
     let mut http_client_builder = build_shared_http_client_builder();
     if cmdline.insecure {
@@ -767,7 +763,7 @@ pub async fn create_global_context(
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     crate::chat::start_session_cleanup_task(app_state);
     crate::chat::start_trajectory_watcher(gcx.clone());
-    (gcx, ask_shutdown_receiver, cmdline)
+    (gcx, ask_shutdown_receiver)
 }
 
 #[cfg(test)]
