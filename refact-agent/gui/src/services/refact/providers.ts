@@ -139,15 +139,27 @@ export type ClaudeCodeUsageWindow = {
 
 export type ClaudeCodeExtraUsage = {
   is_enabled: boolean;
-  used_credits: number;
+  used_credits?: number | null;
   monthly_limit?: number | null;
   utilization?: number | null;
+  currency?: string | null;
+  disabled_reason?: string | null;
 };
 
 export type ClaudeCodeUsageData = {
   five_hour?: ClaudeCodeUsageWindow | null;
   seven_day?: ClaudeCodeUsageWindow | null;
+  seven_day_sonnet?: ClaudeCodeUsageWindow | null;
+  seven_day_oauth_apps?: ClaudeCodeUsageWindow | null;
+  seven_day_opus?: ClaudeCodeUsageWindow | null;
+  seven_day_cowork?: ClaudeCodeUsageWindow | null;
+  seven_day_omelette?: ClaudeCodeUsageWindow | null;
   extra_usage?: ClaudeCodeExtraUsage | null;
+  cinder_cove?: unknown;
+  iguana_necktie?: unknown;
+  omelette_promotional?: unknown;
+  tangelo?: unknown;
+  raw_extra?: Record<string, unknown>;
 };
 
 export type ClaudeCodeUsageResponse = {
@@ -158,25 +170,59 @@ export type ClaudeCodeUsageResponse = {
 export type OpenAICodexUsageWindow = {
   used_percent: number;
   reset_at?: string | null;
+  reset_after_seconds?: number | null;
+  limit_window_seconds?: number | null;
 };
 
 export type OpenAICodexRateLimit = {
+  allowed?: boolean | null;
   limit_reached: boolean;
   primary_window?: OpenAICodexUsageWindow | null;
   secondary_window?: OpenAICodexUsageWindow | null;
+};
+
+export type OpenAICodexAdditionalRateLimit = {
+  limit_name?: string | null;
+  metered_feature?: string | null;
+  rate_limit?: OpenAICodexRateLimit | null;
+};
+
+export type OpenAICodexResetCredits = {
+  available_count?: number | null;
 };
 
 export type OpenAICodexCredits = {
   balance: number;
   unlimited: boolean;
   has_credits: boolean;
+  granted?: number | null;
+  used?: number | null;
+  reset_at?: string | null;
+  overage_limit_reached?: boolean | null;
+  approx_cloud_messages?: number[] | null;
+  approx_local_messages?: number[] | null;
+};
+
+export type OpenAICodexSpendControl = {
+  individual_limit?: number | null;
+  reached?: boolean | null;
 };
 
 export type OpenAICodexUsageData = {
+  account_id?: string | null;
+  user_id?: string | null;
+  email?: string | null;
   plan_type?: string | null;
   rate_limit?: OpenAICodexRateLimit | null;
+  additional_rate_limits?: OpenAICodexAdditionalRateLimit[] | null;
   code_review_rate_limit?: OpenAICodexRateLimit | null;
+  rate_limit_reached_type?: string | null;
+  rate_limit_reset_credits?: OpenAICodexResetCredits | null;
   credits?: OpenAICodexCredits | null;
+  spend_control?: OpenAICodexSpendControl | null;
+  promo?: unknown;
+  referral_beacon?: unknown;
+  raw_extra?: Record<string, unknown>;
 };
 
 export type OpenAICodexUsageResponse = {

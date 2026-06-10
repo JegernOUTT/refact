@@ -11,6 +11,10 @@ import { useGetConfiguredProvidersQuery } from "../../../../hooks";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  type ClaudeCodeUsageData,
+  type ClaudeCodeUsageWindow,
+  type OpenAICodexAdditionalRateLimit,
+  type OpenAICodexRateLimit,
 } from "../../../../services/refact/providers";
 import { integrationsApi } from "../../../../services/refact/integrations";
 import { useGetKnowledgeGraphQuery } from "../../../../services/refact/knowledgeGraphApi";
@@ -22,6 +26,19 @@ import { TokenDonut } from "./TokenDonut";
 import { ModelBars } from "./ModelBars";
 import { MiniDonut } from "./MiniDonut";
 import { formatTokenCount } from "../../../StatsDashboard/utils/formatters";
+import {
+  clampPercent,
+  formatClaudeExtraUsage,
+  formatCodexCreditsDetails,
+  formatCodexCreditsSummary,
+  formatCodexSpendControl,
+  formatLimitWindowSeconds,
+  formatQuotaMeta,
+  formatResetAfterSeconds,
+  formatResetAt,
+  formatUsagePercent,
+  formatWindowLabel,
+} from "../../../../utils/providerQuota";
 import type { DashboardBreakpoint } from "../../types";
 import type { ConversationStats } from "../../../StatsDashboard/types";
 import styles from "./StatsStrip.module.css";
@@ -75,20 +92,8 @@ function HoverStat({
   );
 }
 
-function formatResetAt(resetAt: string | null | undefined): string | null {
-  if (!resetAt) return null;
-  const d = new Date(resetAt);
-  if (isNaN(d.getTime())) return null;
-  return `Resets ${d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })}`;
-}
-
 function UsageBar({ pct }: { pct: number }) {
-  const clamped = Math.max(0, Math.min(pct, 100));
+  const clamped = clampPercent(pct);
   const color =
     clamped >= 90
       ? "var(--rf-color-danger)"
@@ -123,15 +128,25 @@ function WindowRow({
   label,
   pct,
   resetAt,
+  resetAfterSeconds,
   limitReached,
+  windowSeconds,
 }: {
   label: string;
   pct: number;
   resetAt?: string | null;
+  resetAfterSeconds?: number | null;
   limitReached?: boolean;
+  windowSeconds?: number | null;
 }) {
-  const clamped = Math.max(0, Math.min(pct, 100));
-  const reset = formatResetAt(resetAt);
+  const clamped = clampPercent(pct);
+  const windowText = formatLimitWindowSeconds(windowSeconds);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(clamped),
+    windowText ? `Window ${windowText}` : null,
+    formatResetAfterSeconds(resetAfterSeconds),
+    formatResetAt(resetAt),
+  ]);
   return (
     <div style={{ marginBottom: "6px" }}>
       <Flex justify="between" align="center">
@@ -146,10 +161,98 @@ function WindowRow({
           )}
         </Flex>
         <Text size="1" tone="muted">
-          {Math.round(clamped)}%{reset ? ` · ${reset}` : ""}
+          {meta}
         </Text>
       </Flex>
       <UsageBar pct={clamped} />
+    </div>
+  );
+}
+
+type ClaudeUsageWindowKey = keyof Pick<
+  ClaudeCodeUsageData,
+  | "five_hour"
+  | "seven_day"
+  | "seven_day_sonnet"
+  | "seven_day_oauth_apps"
+  | "seven_day_opus"
+  | "seven_day_cowork"
+  | "seven_day_omelette"
+>;
+
+const CLAUDE_USAGE_WINDOWS: {
+  key: ClaudeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "five_hour", label: "Current session" },
+  { key: "seven_day", label: "Current week" },
+  { key: "seven_day_sonnet", label: "Sonnet week" },
+  { key: "seven_day_opus", label: "Opus week" },
+  { key: "seven_day_oauth_apps", label: "OAuth apps week" },
+  { key: "seven_day_cowork", label: "Cowork week" },
+  { key: "seven_day_omelette", label: "Omelette week" },
+];
+
+function CodexRateLimitRows({
+  rateLimit,
+  primaryLabel,
+  secondaryLabel,
+}: {
+  rateLimit: OpenAICodexRateLimit;
+  primaryLabel: string;
+  secondaryLabel: string;
+}) {
+  return (
+    <>
+      {rateLimit.primary_window && (
+        <WindowRow
+          label={formatWindowLabel(
+            primaryLabel,
+            rateLimit.primary_window.limit_window_seconds,
+          )}
+          pct={rateLimit.primary_window.used_percent}
+          resetAt={rateLimit.primary_window.reset_at}
+          resetAfterSeconds={rateLimit.primary_window.reset_after_seconds}
+          limitReached={rateLimit.limit_reached}
+          windowSeconds={rateLimit.primary_window.limit_window_seconds}
+        />
+      )}
+      {rateLimit.secondary_window && (
+        <WindowRow
+          label={formatWindowLabel(
+            secondaryLabel,
+            rateLimit.secondary_window.limit_window_seconds,
+          )}
+          pct={rateLimit.secondary_window.used_percent}
+          resetAt={rateLimit.secondary_window.reset_at}
+          resetAfterSeconds={rateLimit.secondary_window.reset_after_seconds}
+          windowSeconds={rateLimit.secondary_window.limit_window_seconds}
+        />
+      )}
+    </>
+  );
+}
+
+function AdditionalRateLimitLine({
+  limit,
+}: {
+  limit: OpenAICodexAdditionalRateLimit;
+}) {
+  return (
+    <div>
+      <Text size="1" tone="muted">
+        {formatQuotaMeta([
+          limit.limit_name ?? "Additional quota",
+          limit.metered_feature ?? null,
+        ])}
+      </Text>
+      {limit.rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={limit.rate_limit}
+          primaryLabel="Primary"
+          secondaryLabel="Secondary"
+        />
+      )}
     </div>
   );
 }
@@ -306,7 +409,20 @@ function ClaudeCodeInstanceRow({
   );
   const data = claudeUsage?.data;
   if (!data) return null;
-  if (!data.five_hour && !data.seven_day) return null;
+  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: ClaudeUsageWindowKey;
+      label: string;
+      window: ClaudeCodeUsageWindow;
+    } => Boolean(row.window),
+  );
+  if (windowRows.length === 0 && !data.extra_usage) return null;
 
   return (
     <div className={styles.cardSection}>
@@ -318,27 +434,17 @@ function ClaudeCodeInstanceRow({
           ({providerName})
         </Text>
       </Flex>
-      {data.five_hour && (
+      {windowRows.map(({ key, label, window }) => (
         <WindowRow
-          label="Session (5h)"
-          pct={data.five_hour.percent_used}
-          resetAt={data.five_hour.resets_at}
+          key={key}
+          label={label}
+          pct={window.percent_used}
+          resetAt={window.resets_at}
         />
-      )}
-      {data.seven_day && (
-        <WindowRow
-          label="Weekly"
-          pct={data.seven_day.percent_used}
-          resetAt={data.seven_day.resets_at}
-        />
-      )}
+      ))}
       {data.extra_usage && (
         <Text size="1" tone="muted">
-          Extra: {data.extra_usage.is_enabled ? "on" : "off"} · $
-          {data.extra_usage.used_credits.toFixed(2)} spent
-          {typeof data.extra_usage.monthly_limit === "number"
-            ? ` / $${data.extra_usage.monthly_limit.toFixed(0)}`
-            : ""}
+          Extra: {formatClaudeExtraUsage(data.extra_usage)}
         </Text>
       )}
     </div>
@@ -357,7 +463,9 @@ function OpenAICodexInstanceRow({
     { pollingInterval: 5 * 60_000 },
   );
   const data = codexUsage?.data;
-  if (!data?.rate_limit) return null;
+  if (!data) return null;
+  if (!data.rate_limit && !data.additional_rate_limits?.length && !data.credits)
+    return null;
 
   return (
     <div className={styles.cardSection}>
@@ -374,36 +482,39 @@ function OpenAICodexInstanceRow({
           </Badge>
         )}
       </Flex>
-      {data.rate_limit.primary_window && (
-        <WindowRow
-          label="Session (5h)"
-          pct={data.rate_limit.primary_window.used_percent}
-          resetAt={data.rate_limit.primary_window.reset_at}
-          limitReached={data.rate_limit.limit_reached}
+      {data.rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={data.rate_limit}
+          primaryLabel="Main"
+          secondaryLabel="Secondary"
         />
       )}
-      {data.rate_limit.secondary_window && (
-        <WindowRow
-          label="Weekly"
-          pct={data.rate_limit.secondary_window.used_percent}
-          resetAt={data.rate_limit.secondary_window.reset_at}
+      {data.code_review_rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={data.code_review_rate_limit}
+          primaryLabel="Code review"
+          secondaryLabel="Code review secondary"
         />
       )}
-      {data.code_review_rate_limit?.primary_window && (
-        <WindowRow
-          label="Code review"
-          pct={data.code_review_rate_limit.primary_window.used_percent}
-          limitReached={data.code_review_rate_limit.limit_reached}
-        />
-      )}
+      {data.additional_rate_limits
+        ?.slice(0, 2)
+        .map((limit, index) => (
+          <AdditionalRateLimitLine
+            key={`${limit.limit_name ?? "quota"}-${index}`}
+            limit={limit}
+          />
+        ))}
       {data.credits && (
         <Text size="1" tone="muted">
-          Credits:{" "}
-          {data.credits.unlimited
-            ? "unlimited"
-            : data.credits.has_credits
-              ? `${data.credits.balance} remaining`
-              : "none"}
+          Credits: {formatCodexCreditsSummary(data.credits)}
+          {formatCodexCreditsDetails(data.credits)
+            ? ` · ${formatCodexCreditsDetails(data.credits)}`
+            : ""}
+        </Text>
+      )}
+      {data.spend_control && (
+        <Text size="1" tone="muted">
+          Spend: {formatCodexSpendControl(data.spend_control)}
         </Text>
       )}
     </div>

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
@@ -114,16 +114,28 @@ pub struct ClaudeCodeUsageWindow {
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaudeCodeExtraUsage {
     pub is_enabled: bool,
-    pub used_credits: f64,
+    pub used_credits: Option<f64>,
     pub monthly_limit: Option<f64>,
     pub utilization: Option<f64>,
+    pub currency: Option<String>,
+    pub disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaudeCodeUsage {
     pub five_hour: Option<ClaudeCodeUsageWindow>,
     pub seven_day: Option<ClaudeCodeUsageWindow>,
+    pub seven_day_sonnet: Option<ClaudeCodeUsageWindow>,
+    pub seven_day_oauth_apps: Option<ClaudeCodeUsageWindow>,
+    pub seven_day_opus: Option<ClaudeCodeUsageWindow>,
+    pub seven_day_cowork: Option<ClaudeCodeUsageWindow>,
+    pub seven_day_omelette: Option<ClaudeCodeUsageWindow>,
     pub extra_usage: Option<ClaudeCodeExtraUsage>,
+    pub cinder_cove: Option<Value>,
+    pub iguana_necktie: Option<Value>,
+    pub omelette_promotional: Option<Value>,
+    pub tangelo: Option<Value>,
+    pub raw_extra: Map<String, Value>,
 }
 
 impl ClaudeCodeProvider {
@@ -153,51 +165,100 @@ impl ClaudeCodeProvider {
             .await
             .map_err(|e| format!("Failed to parse usage response: {}", e))?;
 
-        let data = root.get("data").unwrap_or(&root);
-
-        fn as_f64_loose(v: &serde_json::Value) -> Option<f64> {
-            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-        }
-
-        let parse_window = |key: &str| -> Option<ClaudeCodeUsageWindow> {
-            let w = data.get(key)?;
-            let percent_used = w
-                .get("utilization")
-                .and_then(as_f64_loose)
-                .or_else(|| w.get("percent_used").and_then(as_f64_loose))?;
-            let resets_at = w
-                .get("resets_at")
-                .or_else(|| w.get("reset_at"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            Some(ClaudeCodeUsageWindow {
-                percent_used,
-                resets_at,
-            })
-        };
-
-        let extra_usage = data.get("extra_usage").and_then(|e| {
-            let used_credits = e.get("used_credits").and_then(as_f64_loose).unwrap_or(0.0);
-            let is_enabled = e
-                .get("is_enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let monthly_limit = e.get("monthly_limit").and_then(as_f64_loose);
-            let utilization = e.get("utilization").and_then(as_f64_loose);
-            Some(ClaudeCodeExtraUsage {
-                is_enabled,
-                used_credits,
-                monthly_limit,
-                utilization,
-            })
-        });
-
-        Ok(ClaudeCodeUsage {
-            five_hour: parse_window("five_hour"),
-            seven_day: parse_window("seven_day"),
-            extra_usage,
-        })
+        Ok(Self::parse_usage_payload(&root))
     }
+
+    fn parse_usage_payload(root: &Value) -> ClaudeCodeUsage {
+        let data = root.get("data").unwrap_or(root);
+        let raw_extra = collect_raw_extra(
+            data,
+            &[
+                "five_hour",
+                "seven_day",
+                "seven_day_sonnet",
+                "seven_day_oauth_apps",
+                "seven_day_opus",
+                "seven_day_cowork",
+                "seven_day_omelette",
+                "extra_usage",
+                "cinder_cove",
+                "iguana_necktie",
+                "omelette_promotional",
+                "tangelo",
+            ],
+        );
+
+        ClaudeCodeUsage {
+            five_hour: parse_claude_usage_window(data, "five_hour"),
+            seven_day: parse_claude_usage_window(data, "seven_day"),
+            seven_day_sonnet: parse_claude_usage_window(data, "seven_day_sonnet"),
+            seven_day_oauth_apps: parse_claude_usage_window(data, "seven_day_oauth_apps"),
+            seven_day_opus: parse_claude_usage_window(data, "seven_day_opus"),
+            seven_day_cowork: parse_claude_usage_window(data, "seven_day_cowork"),
+            seven_day_omelette: parse_claude_usage_window(data, "seven_day_omelette"),
+            extra_usage: data.get("extra_usage").and_then(parse_claude_extra_usage),
+            cinder_cove: data.get("cinder_cove").cloned(),
+            iguana_necktie: data.get("iguana_necktie").cloned(),
+            omelette_promotional: data.get("omelette_promotional").cloned(),
+            tangelo: data.get("tangelo").cloned(),
+            raw_extra,
+        }
+    }
+}
+
+fn collect_raw_extra(data: &Value, known_keys: &[&str]) -> Map<String, Value> {
+    let Some(obj) = data.as_object() else {
+        return Map::new();
+    };
+    obj.iter()
+        .filter(|(key, _)| !known_keys.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn as_f64_loose(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
+fn parse_claude_usage_window(data: &Value, key: &str) -> Option<ClaudeCodeUsageWindow> {
+    let w = data.get(key)?.as_object()?;
+    let percent_used = w
+        .get("utilization")
+        .and_then(as_f64_loose)
+        .or_else(|| w.get("percent_used").and_then(as_f64_loose))?;
+    let resets_at = w
+        .get("resets_at")
+        .or_else(|| w.get("reset_at"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(ClaudeCodeUsageWindow {
+        percent_used,
+        resets_at,
+    })
+}
+
+fn parse_optional_string_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_claude_extra_usage(e: &Value) -> Option<ClaudeCodeExtraUsage> {
+    let obj = e.as_object()?;
+    Some(ClaudeCodeExtraUsage {
+        is_enabled: obj
+            .get("is_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        used_credits: obj.get("used_credits").and_then(as_f64_loose),
+        monthly_limit: obj.get("monthly_limit").and_then(as_f64_loose),
+        utilization: obj.get("utilization").and_then(as_f64_loose),
+        currency: parse_optional_string_field(obj, "currency"),
+        disabled_reason: parse_optional_string_field(obj, "disabled_reason"),
+    })
 }
 
 #[async_trait]
@@ -584,6 +645,7 @@ pub async fn fetch_claude_code_model_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn claude_code_resolves_real_api_ids_from_models_dev_snapshot() {
@@ -645,6 +707,54 @@ mod tests {
         model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
 
         assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn claude_code_usage_parser_preserves_raw_quota_fields() {
+        let usage = ClaudeCodeProvider::parse_usage_payload(&json!({
+            "five_hour": { "utilization": 12.5, "resets_at": "2026-06-10T12:00:00Z" },
+            "seven_day": { "percent_used": "33.7", "reset_at": "2026-06-11T00:00:00Z" },
+            "seven_day_sonnet": { "utilization": 44.0, "resets_at": null },
+            "seven_day_oauth_apps": null,
+            "seven_day_opus": { "utilization": 55 },
+            "seven_day_cowork": { "utilization": 0 },
+            "seven_day_omelette": { "utilization": 1 },
+            "extra_usage": {
+                "is_enabled": false,
+                "used_credits": null,
+                "monthly_limit": "25.5",
+                "utilization": "4.5",
+                "currency": "USD",
+                "disabled_reason": "admin_disabled"
+            },
+            "cinder_cove": null,
+            "iguana_necktie": { "future": true },
+            "omelette_promotional": null,
+            "tangelo": { "value": 1 },
+            "future_window": { "utilization": 99.0 }
+        }));
+
+        assert_eq!(usage.five_hour.unwrap().percent_used, 12.5);
+        assert_eq!(usage.seven_day.unwrap().percent_used, 33.7);
+        assert_eq!(usage.seven_day_sonnet.unwrap().percent_used, 44.0);
+        assert!(usage.seven_day_oauth_apps.is_none());
+        assert_eq!(usage.seven_day_opus.unwrap().percent_used, 55.0);
+        assert_eq!(usage.seven_day_cowork.unwrap().percent_used, 0.0);
+        assert_eq!(usage.seven_day_omelette.unwrap().percent_used, 1.0);
+
+        let extra = usage.extra_usage.unwrap();
+        assert!(!extra.is_enabled);
+        assert_eq!(extra.used_credits, None);
+        assert_eq!(extra.monthly_limit, Some(25.5));
+        assert_eq!(extra.utilization, Some(4.5));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.disabled_reason.as_deref(), Some("admin_disabled"));
+
+        assert!(usage.cinder_cove.unwrap().is_null());
+        assert_eq!(usage.iguana_necktie.unwrap()["future"], json!(true));
+        assert!(usage.omelette_promotional.unwrap().is_null());
+        assert_eq!(usage.tangelo.unwrap()["value"], json!(1));
+        assert_eq!(usage.raw_extra["future_window"]["utilization"], json!(99.0));
     }
 
     #[test]

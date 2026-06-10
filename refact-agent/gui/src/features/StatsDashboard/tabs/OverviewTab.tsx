@@ -30,20 +30,18 @@ import {
   formatDuration,
 } from "../utils/formatters";
 import { dateRangeToApiArgs } from "../utils/dateRange";
+import {
+  clampPercent,
+  formatClaudeExtraUsage,
+  formatCodexCreditsDetails,
+  formatCodexCreditsSummary,
+  formatLimitWindowSeconds,
+  formatQuotaMeta,
+  formatResetAt,
+  formatUsagePercent,
+} from "../../../utils/providerQuota";
 import type { DateRange } from "../types";
 import styles from "./OverviewTab.module.css";
-
-const formatResetAt = (resetAt: string | null | undefined): string | null => {
-  if (!resetAt) return null;
-  const d = new Date(resetAt);
-  if (isNaN(d.getTime())) return null;
-  return `Resets ${d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })}`;
-};
 
 type UsageTone = "danger" | "warning" | "success";
 
@@ -60,7 +58,7 @@ const usageStatus: Record<UsageTone, "error" | "warning" | "success"> = {
 };
 
 const UsageBar: React.FC<{ pct: number }> = ({ pct }) => {
-  const clamped = Math.max(0, Math.min(pct, 100));
+  const clamped = clampPercent(pct);
   const tone = usageTone(clamped);
   const color =
     tone === "danger"
@@ -96,9 +94,15 @@ const QuotaLine: React.FC<{
   pct: number;
   resetAt?: string | null;
   limitReached?: boolean;
-}> = ({ label, pct, resetAt, limitReached = false }) => {
-  const clamped = Math.max(0, Math.min(pct, 100));
-  const reset = formatResetAt(resetAt);
+  windowSeconds?: number | null;
+}> = ({ label, pct, resetAt, limitReached = false, windowSeconds }) => {
+  const clamped = clampPercent(pct);
+  const windowText = formatLimitWindowSeconds(windowSeconds);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(clamped),
+    windowText ? `Window ${windowText}` : null,
+    formatResetAt(resetAt),
+  ]);
 
   return (
     <div className={styles.quotaLine}>
@@ -110,9 +114,7 @@ const QuotaLine: React.FC<{
         <span className={styles.quotaMeta}>{label}</span>
         {limitReached && <Badge tone="danger">Limit reached</Badge>}
       </div>
-      <span className={styles.quotaMeta}>
-        {Math.round(clamped)}%{reset ? ` · ${reset}` : ""}
-      </span>
+      <span className={styles.quotaMeta}>{meta}</span>
     </div>
   );
 };
@@ -160,11 +162,7 @@ const ClaudeCodeInstanceCard: React.FC<{
       )}
       {data.extra_usage && (
         <span className={styles.quotaExtra}>
-          Extra: {data.extra_usage.is_enabled ? "on" : "off"} · $
-          {data.extra_usage.used_credits.toFixed(2)} spent
-          {typeof data.extra_usage.monthly_limit === "number"
-            ? ` / $${data.extra_usage.monthly_limit.toFixed(0)}`
-            : ""}
+          Extra: {formatClaudeExtraUsage(data.extra_usage)}
         </span>
       )}
     </Card>
@@ -182,6 +180,10 @@ const OpenAICodexInstanceCard: React.FC<{
   const data = codexUsage?.data;
   if (!data?.rate_limit) return null;
 
+  const creditsDetails = data.credits
+    ? formatCodexCreditsDetails(data.credits)
+    : null;
+
   return (
     <Card animated="rise" className={styles.quotaCard}>
       <div className={styles.quotaHeader}>
@@ -195,10 +197,11 @@ const OpenAICodexInstanceCard: React.FC<{
       {data.rate_limit.primary_window && (
         <div>
           <QuotaLine
-            label="Session (5h)"
+            label="Session"
             pct={data.rate_limit.primary_window.used_percent}
             resetAt={data.rate_limit.primary_window.reset_at}
             limitReached={data.rate_limit.limit_reached}
+            windowSeconds={data.rate_limit.primary_window.limit_window_seconds}
           />
           <UsageBar pct={data.rate_limit.primary_window.used_percent} />
         </div>
@@ -206,9 +209,12 @@ const OpenAICodexInstanceCard: React.FC<{
       {data.rate_limit.secondary_window && (
         <div>
           <QuotaLine
-            label="Weekly"
+            label="Secondary"
             pct={data.rate_limit.secondary_window.used_percent}
             resetAt={data.rate_limit.secondary_window.reset_at}
+            windowSeconds={
+              data.rate_limit.secondary_window.limit_window_seconds
+            }
           />
           <UsageBar pct={data.rate_limit.secondary_window.used_percent} />
         </div>
@@ -218,21 +224,36 @@ const OpenAICodexInstanceCard: React.FC<{
           <QuotaLine
             label="Code review"
             pct={data.code_review_rate_limit.primary_window.used_percent}
+            resetAt={data.code_review_rate_limit.primary_window.reset_at}
             limitReached={data.code_review_rate_limit.limit_reached}
+            windowSeconds={
+              data.code_review_rate_limit.primary_window.limit_window_seconds
+            }
           />
           <UsageBar
             pct={data.code_review_rate_limit.primary_window.used_percent}
           />
         </div>
       )}
+      {data.code_review_rate_limit?.secondary_window && (
+        <div>
+          <QuotaLine
+            label="Code review secondary"
+            pct={data.code_review_rate_limit.secondary_window.used_percent}
+            resetAt={data.code_review_rate_limit.secondary_window.reset_at}
+            windowSeconds={
+              data.code_review_rate_limit.secondary_window.limit_window_seconds
+            }
+          />
+          <UsageBar
+            pct={data.code_review_rate_limit.secondary_window.used_percent}
+          />
+        </div>
+      )}
       {data.credits && (
         <span className={styles.quotaExtra}>
-          Credits:{" "}
-          {data.credits.unlimited
-            ? "unlimited"
-            : data.credits.has_credits
-              ? `${data.credits.balance} remaining`
-              : "none"}
+          Credits: {formatCodexCreditsSummary(data.credits)}
+          {creditsDetails ? ` · ${creditsDetails}` : ""}
         </span>
       )}
     </Card>

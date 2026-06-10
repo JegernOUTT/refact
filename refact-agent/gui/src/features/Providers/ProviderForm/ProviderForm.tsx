@@ -6,9 +6,13 @@ import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
 import type {
+  ClaudeCodeUsageData,
   ProviderListItem,
   ProviderStatus,
   ClaudeCodeUsageWindow,
+  OpenAICodexAdditionalRateLimit,
+  OpenAICodexRateLimit,
+  OpenAICodexUsageData,
   OpenAICodexUsageWindow,
   ModelTypeDefaults,
   ProviderDefaults,
@@ -26,6 +30,20 @@ import {
   useGetCapsQuery,
   useUpdateDefaultsMutation,
 } from "../../../services/refact";
+import {
+  clampPercent,
+  formatClaudeExtraUsage,
+  formatCodexCreditsDetails,
+  formatCodexCreditsSummary,
+  formatCodexSpendControl,
+  formatLimitWindowSeconds,
+  formatNullableBool,
+  formatQuotaMeta,
+  formatResetAfterSeconds,
+  formatResetAt,
+  formatUsagePercent,
+  formatWindowLabel,
+} from "../../../utils/providerQuota";
 
 export type ProviderFormProps = {
   currentProvider: ProviderListItem;
@@ -59,24 +77,16 @@ const ClaudeWindowRow: React.FC<{
   label: string;
   w: ClaudeCodeUsageWindow;
 }> = ({ label, w }) => {
-  const pct = Math.max(0, Math.min(w.percent_used, 100));
-  const d = w.resets_at ? new Date(w.resets_at) : null;
-  const resetText =
-    d && !isNaN(d.getTime())
-      ? `Resets ${d.toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`
-      : null;
+  const pct = clampPercent(w.percent_used);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(pct),
+    formatResetAt(w.resets_at),
+  ]);
   return (
     <div className={styles.usageRow}>
       <div className={styles.usageRowHeader}>
         <span>{label}</span>
-        <span>
-          {Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}
-        </span>
+        <span>{meta}</span>
       </div>
       <UsageBar pct={pct} />
     </div>
@@ -88,17 +98,14 @@ const CodexWindowRow: React.FC<{
   w: OpenAICodexUsageWindow;
   limitReached?: boolean;
 }> = ({ label, w, limitReached }) => {
-  const pct = Math.max(0, Math.min(w.used_percent, 100));
-  const d = w.reset_at ? new Date(w.reset_at) : null;
-  const resetText =
-    d && !isNaN(d.getTime())
-      ? `Resets ${d.toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`
-      : null;
+  const pct = clampPercent(w.used_percent);
+  const windowText = formatLimitWindowSeconds(w.limit_window_seconds);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(pct),
+    windowText ? `Window ${windowText}` : null,
+    formatResetAfterSeconds(w.reset_after_seconds),
+    formatResetAt(w.reset_at),
+  ]);
   return (
     <div className={styles.usageRow}>
       <div className={styles.usageRowHeader}>
@@ -106,14 +113,220 @@ const CodexWindowRow: React.FC<{
           {label}
           {limitReached ? <Badge tone="danger">Limit reached</Badge> : null}
         </span>
-        <span>
-          {Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}
-        </span>
+        <span>{meta}</span>
       </div>
       <UsageBar pct={pct} />
     </div>
   );
 };
+
+type ClaudeUsageWindowKey = keyof Pick<
+  ClaudeCodeUsageData,
+  | "five_hour"
+  | "seven_day"
+  | "seven_day_sonnet"
+  | "seven_day_oauth_apps"
+  | "seven_day_opus"
+  | "seven_day_cowork"
+  | "seven_day_omelette"
+>;
+
+const CLAUDE_USAGE_WINDOWS: {
+  key: ClaudeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "five_hour", label: "Current session" },
+  { key: "seven_day", label: "Current week — all models" },
+  { key: "seven_day_sonnet", label: "Current week — Sonnet" },
+  { key: "seven_day_opus", label: "Current week — Opus" },
+  { key: "seven_day_oauth_apps", label: "Current week — OAuth apps" },
+  { key: "seven_day_cowork", label: "Current week — cowork" },
+  { key: "seven_day_omelette", label: "Current week — Omelette" },
+];
+
+const InfoRow: React.FC<{ label: string; value: string }> = ({
+  label,
+  value,
+}) => (
+  <div className={styles.usageRowHeader}>
+    <span>{label}</span>
+    <span>{value}</span>
+  </div>
+);
+
+const ClaudeUsagePanel: React.FC<{ data: ClaudeCodeUsageData }> = ({
+  data,
+}) => {
+  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: ClaudeUsageWindowKey;
+      label: string;
+      window: ClaudeCodeUsageWindow;
+    } => Boolean(row.window),
+  );
+
+  return (
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageTitle}>Usage</div>
+      <div className={styles.usageRows}>
+        {windowRows.length > 0 ? (
+          windowRows.map(({ key, label, window }) => (
+            <ClaudeWindowRow key={key} label={label} w={window} />
+          ))
+        ) : (
+          <div className={styles.usageMeta}>Quota windows not reported.</div>
+        )}
+        {data.extra_usage ? (
+          <div className={styles.usageRow}>
+            <div className={styles.usageRowHeader}>
+              <span>Extra usage</span>
+              <span>{formatClaudeExtraUsage(data.extra_usage)}</span>
+            </div>
+            {typeof data.extra_usage.utilization === "number" ? (
+              <UsageBar pct={clampPercent(data.extra_usage.utilization)} />
+            ) : null}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>Extra usage not reported.</div>
+        )}
+      </div>
+    </Surface>
+  );
+};
+
+const RateLimitSection: React.FC<{
+  title: string;
+  rl: OpenAICodexRateLimit | null | undefined;
+}> = ({ title, rl }) => {
+  if (!rl) {
+    return <div className={styles.usageMeta}>{title}: not reported.</div>;
+  }
+
+  const hasWindows = Boolean(rl.primary_window ?? rl.secondary_window);
+
+  return (
+    <div className={styles.usageRow}>
+      <div className={styles.usageRowHeader}>
+        <span className={styles.usageLabelGroup}>
+          {title}
+          {rl.limit_reached ? <Badge tone="danger">Limit reached</Badge> : null}
+        </span>
+        <span>
+          {formatQuotaMeta([
+            `allowed ${formatNullableBool(rl.allowed)}`,
+            `limit reached ${formatNullableBool(rl.limit_reached)}`,
+          ])}
+        </span>
+      </div>
+      {rl.primary_window ? (
+        <CodexWindowRow
+          label={formatWindowLabel(
+            "Primary",
+            rl.primary_window.limit_window_seconds,
+          )}
+          w={rl.primary_window}
+          limitReached={rl.limit_reached}
+        />
+      ) : null}
+      {rl.secondary_window ? (
+        <CodexWindowRow
+          label={formatWindowLabel(
+            "Secondary",
+            rl.secondary_window.limit_window_seconds,
+          )}
+          w={rl.secondary_window}
+        />
+      ) : null}
+      {!hasWindows ? (
+        <div className={styles.usageMeta}>No active windows reported.</div>
+      ) : null}
+    </div>
+  );
+};
+
+const AdditionalRateLimitRow: React.FC<{
+  limit: OpenAICodexAdditionalRateLimit;
+}> = ({ limit }) => (
+  <div className={styles.usageRow}>
+    <div className={styles.usageRowHeader}>
+      <span>{limit.limit_name ?? "Additional quota"}</span>
+      {limit.metered_feature ? <span>{limit.metered_feature}</span> : null}
+    </div>
+    <RateLimitSection title="Quota" rl={limit.rate_limit} />
+  </div>
+);
+
+const CodexUsagePanel: React.FC<{ data: OpenAICodexUsageData }> = ({
+  data,
+}) => (
+  <Surface className={styles.usagePanel} variant="glass" animated="rise">
+    <div className={styles.usageHeader}>
+      <div>
+        <div className={styles.usageTitle}>Usage</div>
+        {data.email ? (
+          <div className={styles.usageMeta}>{data.email}</div>
+        ) : null}
+      </div>
+      {data.plan_type ? <Badge tone="accent">{data.plan_type}</Badge> : null}
+    </div>
+    <div className={styles.usageRows}>
+      <RateLimitSection title="Main quota" rl={data.rate_limit} />
+      {data.rate_limit_reached_type ? (
+        <InfoRow label="Reached type" value={data.rate_limit_reached_type} />
+      ) : null}
+      {data.additional_rate_limits?.length ? (
+        <div className={styles.usageRow}>
+          <div className={styles.usageTitle}>Additional quotas</div>
+          {data.additional_rate_limits.map((limit, index) => (
+            <AdditionalRateLimitRow
+              key={`${limit.limit_name ?? "quota"}-${index}`}
+              limit={limit}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className={styles.usageMeta}>Additional quotas not reported.</div>
+      )}
+      <RateLimitSection
+        title="Code review quota"
+        rl={data.code_review_rate_limit}
+      />
+      {data.credits ? (
+        <div className={styles.usageRow}>
+          <InfoRow
+            label="Credits"
+            value={formatCodexCreditsSummary(data.credits)}
+          />
+          {formatCodexCreditsDetails(data.credits) ? (
+            <div className={styles.usageMeta}>
+              {formatCodexCreditsDetails(data.credits)}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className={styles.usageMeta}>Credits not reported.</div>
+      )}
+      {typeof data.rate_limit_reset_credits?.available_count === "number" ? (
+        <InfoRow
+          label="Reset credits"
+          value={`${data.rate_limit_reset_credits.available_count} available`}
+        />
+      ) : null}
+      {data.spend_control ? (
+        <InfoRow
+          label="Spend control"
+          value={formatCodexSpendControl(data.spend_control)}
+        />
+      ) : null}
+    </div>
+  </Surface>
+);
 
 type DefaultModelKey =
   | "chat"
@@ -341,59 +554,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         </div>
 
         {claudeUsage?.data && !claudeUsage.error ? (
-          <Surface
-            className={styles.usagePanel}
-            variant="glass"
-            animated="rise"
-          >
-            <div className={styles.usageTitle}>Usage</div>
-            <div className={styles.usageRows}>
-              {claudeUsage.data.five_hour ? (
-                <ClaudeWindowRow
-                  label="Session (5 hour)"
-                  w={claudeUsage.data.five_hour}
-                />
-              ) : null}
-              {claudeUsage.data.seven_day ? (
-                <ClaudeWindowRow
-                  label="Weekly"
-                  w={claudeUsage.data.seven_day}
-                />
-              ) : null}
-              {claudeUsage.data.extra_usage ? (
-                <div className={styles.usageRow}>
-                  <div className={styles.usageRowHeader}>
-                    <span>Extra usage</span>
-                    <span>
-                      {claudeUsage.data.extra_usage.is_enabled
-                        ? "enabled"
-                        : "disabled"}
-                      {" · $"}
-                      {claudeUsage.data.extra_usage.used_credits.toFixed(
-                        2,
-                      )}{" "}
-                      spent
-                      {typeof claudeUsage.data.extra_usage.monthly_limit ===
-                      "number"
-                        ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(
-                            0,
-                          )} limit`
-                        : " / unlimited"}
-                    </span>
-                  </div>
-                  {typeof claudeUsage.data.extra_usage.utilization ===
-                  "number" ? (
-                    <UsageBar
-                      pct={Math.max(
-                        0,
-                        Math.min(claudeUsage.data.extra_usage.utilization, 100),
-                      )}
-                    />
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          </Surface>
+          <ClaudeUsagePanel data={claudeUsage.data} />
         ) : null}
         {claudeUsage?.error != null || claudeUsageError ? (
           <div className={styles.defaultDescription}>
@@ -402,52 +563,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         ) : null}
 
         {codexUsage?.data && !codexUsage.error ? (
-          <Surface
-            className={styles.usagePanel}
-            variant="glass"
-            animated="rise"
-          >
-            <div className={styles.usageHeader}>
-              <div className={styles.usageTitle}>Usage</div>
-              {codexUsage.data.plan_type ? (
-                <Badge tone="accent">{codexUsage.data.plan_type}</Badge>
-              ) : null}
-            </div>
-            <div className={styles.usageRows}>
-              {codexUsage.data.rate_limit?.primary_window ? (
-                <CodexWindowRow
-                  label="Session (5 hour)"
-                  w={codexUsage.data.rate_limit.primary_window}
-                  limitReached={codexUsage.data.rate_limit.limit_reached}
-                />
-              ) : null}
-              {codexUsage.data.rate_limit?.secondary_window ? (
-                <CodexWindowRow
-                  label="Weekly"
-                  w={codexUsage.data.rate_limit.secondary_window}
-                />
-              ) : null}
-              {codexUsage.data.code_review_rate_limit?.primary_window ? (
-                <CodexWindowRow
-                  label="Code review (weekly)"
-                  w={codexUsage.data.code_review_rate_limit.primary_window}
-                  limitReached={
-                    codexUsage.data.code_review_rate_limit.limit_reached
-                  }
-                />
-              ) : null}
-              {codexUsage.data.credits ? (
-                <div className={styles.defaultDescription}>
-                  Credits:{" "}
-                  {codexUsage.data.credits.unlimited
-                    ? "unlimited"
-                    : codexUsage.data.credits.has_credits
-                      ? `${codexUsage.data.credits.balance} remaining`
-                      : "none"}
-                </div>
-              ) : null}
-            </div>
-          </Surface>
+          <CodexUsagePanel data={codexUsage.data} />
         ) : null}
         {codexUsage?.error != null || codexUsageError ? (
           <div className={styles.defaultDescription}>
