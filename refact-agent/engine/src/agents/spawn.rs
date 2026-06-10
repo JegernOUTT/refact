@@ -160,6 +160,7 @@ pub async fn spawn_background_agent(
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: parent_tool_call_id.clone(),
             parent_subchat_tx: parent_subchat_tx.clone(),
             abort_flag: None,

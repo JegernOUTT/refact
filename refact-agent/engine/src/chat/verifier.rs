@@ -547,6 +547,7 @@ async fn run_verifier_review(
         max_new_tokens: 1024,
         temperature: Some(0.0),
         reasoning_effort: None,
+        cache_control: crate::llm::params::CacheControl::Ephemeral,
         parent_tool_call_id: None,
         parent_subchat_tx: None,
         abort_flag: None,

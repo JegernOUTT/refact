@@ -19,6 +19,7 @@ subchat:
   max_new_tokens: 128000
   tokens_for_rag: 200000
   reasoning_effort: high
+  cache_control: off
 
 gather_files:
   subagent: strategic_planning_gather_files

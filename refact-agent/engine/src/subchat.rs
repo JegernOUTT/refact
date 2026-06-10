@@ -310,6 +310,7 @@ pub struct SubchatConfig {
     pub max_new_tokens: usize,
     pub temperature: Option<f32>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub cache_control: CacheControl,
     pub parent_tool_call_id: Option<String>,
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
@@ -488,6 +489,21 @@ fn scale_subchat_budget(value: usize, new_n_ctx: usize, old_n_ctx: usize) -> usi
     (((value as u128) * (new_n_ctx as u128)) / (old_n_ctx as u128)) as usize
 }
 
+fn parse_subchat_cache_control(
+    tool_name: &str,
+    value: Option<&str>,
+) -> Result<CacheControl, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(CacheControl::Ephemeral),
+        Some(value) if value.eq_ignore_ascii_case("off") => Ok(CacheControl::Off),
+        Some(value) if value.eq_ignore_ascii_case("ephemeral") => Ok(CacheControl::Ephemeral),
+        Some(value) => Err(format!(
+            "invalid cache_control '{}' for '{}', expected: off, ephemeral",
+            value, tool_name
+        )),
+    }
+}
+
 fn normalize_subchat_params_for_model(
     tool_name: &str,
     params: &mut SubchatParameters,
@@ -585,6 +601,7 @@ pub async fn resolve_subchat_params(
         },
         None => None,
     };
+    let cache_control = parse_subchat_cache_control(tool_name, subchat.cache_control.as_deref())?;
 
     let mut params = SubchatParameters {
         subchat_model_type: model_type,
@@ -594,6 +611,7 @@ pub async fn resolve_subchat_params(
         subchat_temperature: subchat.temperature,
         subchat_tokens_for_rag: subchat.tokens_for_rag.unwrap_or(0),
         subchat_reasoning_effort: reasoning_effort,
+        subchat_cache_control: cache_control,
     };
 
     if params.subchat_n_ctx == 0 {
@@ -913,6 +931,7 @@ pub async fn resolve_subchat_config_with_parent(
 
     let params = resolve_subchat_params(gcx.clone(), tool_name).await?;
     let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
+    let cache_control = params.subchat_cache_control;
     let autonomous_no_confirm =
         resolve_subagent_autonomous_no_confirm(gcx.clone(), tool_name).await;
 
@@ -951,6 +970,7 @@ pub async fn resolve_subchat_config_with_parent(
         max_new_tokens: params.subchat_max_new_tokens,
         temperature: params.subchat_temperature,
         reasoning_effort: params.subchat_reasoning_effort,
+        cache_control,
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
@@ -1243,6 +1263,7 @@ async fn run_subchat_loop(
                 config.temperature,
                 config.max_new_tokens,
                 config.reasoning_effort.clone(),
+                config.cache_control,
                 config.prepend_system_prompt && step == 0,
                 if should_stream_thinking_progress(&config.tool_name) {
                     config.parent_tool_call_id.as_deref()
@@ -1361,6 +1382,7 @@ async fn run_subchat_with_wrap_up(
                 config.temperature,
                 config.max_new_tokens,
                 config.reasoning_effort.clone(),
+                config.cache_control,
                 config.prepend_system_prompt && step_n == 0,
                 if should_stream_thinking_progress(&config.tool_name) {
                     config.parent_tool_call_id.as_deref()
@@ -1454,6 +1476,7 @@ async fn run_subchat_with_wrap_up(
             config.temperature,
             config.max_new_tokens,
             config.reasoning_effort.clone(),
+            config.cache_control,
             false,
             if should_stream_thinking_progress(&config.tool_name) {
                 config.parent_tool_call_id.as_deref()
@@ -1653,6 +1676,7 @@ async fn subchat_stream(
     temperature: Option<f32>,
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
+    cache_control: CacheControl,
     only_deterministic_messages: bool,
     progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
@@ -1715,7 +1739,7 @@ async fn subchat_stream(
         allow_at_commands: false,
         allow_tool_prerun: false,
         supports_tools: model_rec.supports_tools,
-        cache_control: CacheControl::Ephemeral,
+        cache_control,
         ..Default::default()
     };
 
@@ -2039,6 +2063,7 @@ async fn subchat_single_internal(
     temperature: Option<f32>,
     max_new_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
+    cache_control: CacheControl,
     prepend_system_prompt: bool,
     progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
@@ -2078,6 +2103,7 @@ async fn subchat_single_internal(
         temperature,
         max_new_tokens,
         reasoning_effort,
+        cache_control,
         only_deterministic_messages,
         progress_tool_call_id,
     )
@@ -2087,12 +2113,12 @@ async fn subchat_single_internal(
 mod subchat_tests {
     use super::{
         apply_subchat_reactive_compaction, emit_parent_compaction_diagnostics,
-        parent_compaction_diagnostic_status, parent_thread_worktree,
+        parent_compaction_diagnostic_status, parent_thread_worktree, parse_subchat_cache_control,
         partial_output_stream_error_message, register_stateful_subchat_worktree,
-        resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
-        safe_context_limit_error_for_log, should_compact_context_limit_error,
-        stateful_thread_from_config, SubchatConfig, ToolsPolicy,
-        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        resolve_subchat_config_with_parent, resolve_subchat_model, resolve_subchat_params,
+        resolve_subchat_worktree, safe_context_limit_error_for_log,
+        should_compact_context_limit_error, stateful_thread_from_config, SubchatConfig,
+        ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -2108,6 +2134,7 @@ mod subchat_tests {
     use crate::chat::types::{TaskMeta, ThreadParams};
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
+    use crate::llm::params::CacheControl;
     use crate::worktrees::types::WorktreeMeta;
     use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
     use std::fs;
@@ -2177,6 +2204,7 @@ mod subchat_tests {
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
@@ -2490,6 +2518,7 @@ mod subchat_tests {
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: Some(ReasoningEffort::Low),
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
@@ -2537,6 +2566,7 @@ mod subchat_tests {
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
@@ -2590,6 +2620,7 @@ mod subchat_tests {
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
@@ -2802,6 +2833,7 @@ mod subchat_tests {
             max_new_tokens: 512,
             temperature: None,
             reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
@@ -2850,15 +2882,107 @@ mod subchat_tests {
 
         install_caps(gcx.clone(), caps).await;
 
-        let params = resolve_subchat_params(gcx, "code_review").await.unwrap();
+        let params = resolve_subchat_params(gcx.clone(), "code_review")
+            .await
+            .unwrap();
         let extra_budget = (params.subchat_n_ctx as f32 * 0.06) as usize;
 
         assert_eq!(params.subchat_n_ctx, 200_000);
+        assert_eq!(params.subchat_cache_control, CacheControl::Off);
+        let planning_params = resolve_subchat_params(gcx.clone(), "strategic_planning")
+            .await
+            .unwrap();
+        assert_eq!(planning_params.subchat_cache_control, CacheControl::Off);
         assert!(
             params.subchat_max_new_tokens + params.subchat_tokens_for_rag + extra_budget
                 < params.subchat_n_ctx,
             "normalized code_review budget must fit the clamped model context window"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_subchat_config_carries_cache_control() {
+        let gcx = make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        global_configs_try_create_all(&config_dir).await.unwrap();
+
+        let thinking_model_id = "claude_code/claude-opus-4-6".to_string();
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            thinking_model_id.clone(),
+            chat_model_record(
+                &thinking_model_id,
+                200_000,
+                "https://api.anthropic.com/v1/messages",
+            ),
+        );
+        caps.defaults.chat_default_model = thinking_model_id.clone();
+        caps.defaults.chat_light_model = thinking_model_id.clone();
+        caps.defaults.chat_thinking_model = thinking_model_id;
+
+        install_caps(gcx.clone(), caps).await;
+
+        let config = resolve_subchat_config_with_parent(
+            gcx,
+            "code_review",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            true,
+            None,
+            "agent".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(config.cache_control, CacheControl::Off);
+    }
+
+    #[test]
+    fn test_parse_subchat_cache_control_rejects_invalid_values() {
+        let err = parse_subchat_cache_control("bad_cache_agent", Some("forever")).unwrap_err();
+
+        assert!(err.contains("invalid cache_control 'forever'"));
+        assert!(err.contains("bad_cache_agent"));
+        assert!(err.contains("expected: off, ephemeral"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_subchat_params_defaults_cache_control_to_ephemeral() {
+        let gcx = make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        global_configs_try_create_all(&config_dir).await.unwrap();
+
+        let light_model_id = "openai/gpt-4o-mini".to_string();
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            light_model_id.clone(),
+            chat_model_record(
+                &light_model_id,
+                200_000,
+                "https://api.openai.com/v1/chat/completions",
+            ),
+        );
+        caps.defaults.chat_default_model = light_model_id.clone();
+        caps.defaults.chat_light_model = light_model_id.clone();
+        caps.defaults.chat_thinking_model = light_model_id;
+
+        install_caps(gcx.clone(), caps).await;
+
+        let params = resolve_subchat_params(gcx, "subagent").await.unwrap();
+
+        assert_eq!(params.subchat_cache_control, CacheControl::Ephemeral);
     }
 
     #[tokio::test]
@@ -2887,6 +3011,7 @@ mod subchat_tests {
             subchat_temperature: None,
             subchat_tokens_for_rag: 0,
             subchat_reasoning_effort: None,
+            subchat_cache_control: crate::llm::params::CacheControl::Ephemeral,
         };
 
         let err = resolve_subchat_model(gcx, &params).await.unwrap_err();
@@ -2927,6 +3052,7 @@ mod subchat_tests {
             subchat_temperature: None,
             subchat_tokens_for_rag: 0,
             subchat_reasoning_effort: None,
+            subchat_cache_control: crate::llm::params::CacheControl::Ephemeral,
         };
 
         let err = resolve_subchat_model(gcx, &params).await.unwrap_err();
@@ -2967,6 +3093,7 @@ mod subchat_tests {
             subchat_temperature: None,
             subchat_tokens_for_rag: 0,
             subchat_reasoning_effort: None,
+            subchat_cache_control: crate::llm::params::CacheControl::Ephemeral,
         };
 
         let err = resolve_subchat_model(gcx, &params).await.unwrap_err();

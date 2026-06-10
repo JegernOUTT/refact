@@ -1988,6 +1988,7 @@ async fn run_task_briefing_subchat(
                     max_new_tokens: 1536,
                     temperature: Some(0.0),
                     reasoning_effort: None,
+                    cache_control: crate::llm::params::CacheControl::Ephemeral,
                     parent_tool_call_id: None,
                     parent_subchat_tx: None,
                     abort_flag: None,

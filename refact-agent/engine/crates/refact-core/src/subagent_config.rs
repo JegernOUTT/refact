@@ -80,6 +80,9 @@ impl SubagentConfig {
         if ovr.subchat.reasoning_effort.is_some() {
             result.subchat.reasoning_effort = ovr.subchat.reasoning_effort.clone();
         }
+        if ovr.subchat.cache_control.is_some() {
+            result.subchat.cache_control = ovr.subchat.cache_control.clone();
+        }
         if ovr.subchat.tokens_for_rag.is_some() {
             result.subchat.tokens_for_rag = ovr.subchat.tokens_for_rag;
         }
@@ -177,6 +180,8 @@ pub struct SubchatConfig {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub cache_control: Option<String>,
     #[serde(default)]
     pub tokens_for_rag: Option<usize>,
     #[serde(default)]

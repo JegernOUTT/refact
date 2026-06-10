@@ -896,6 +896,7 @@ mod tests {
                 embedding_size: 0,
                 rejection_threshold: 0.0,
                 embedding_batch: 0,
+                ..Default::default()
             },
             ..Default::default()
         };

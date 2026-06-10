@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use ropey::Rope;
 
 use crate::custom_error::ScratchError;
+use crate::llm::params::CacheControl;
 use crate::worktrees::types::WorktreeMeta;
 
 pub use refact_core::chat_types::{
@@ -62,6 +63,10 @@ impl Default for ChatModelType {
     }
 }
 
+fn default_subchat_cache_control() -> CacheControl {
+    CacheControl::Ephemeral
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubchatParameters {
     #[serde(default)]
@@ -73,6 +78,8 @@ pub struct SubchatParameters {
     pub subchat_temperature: Option<f32>,
     pub subchat_tokens_for_rag: usize,
     pub subchat_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default = "default_subchat_cache_control")]
+    pub subchat_cache_control: CacheControl,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
