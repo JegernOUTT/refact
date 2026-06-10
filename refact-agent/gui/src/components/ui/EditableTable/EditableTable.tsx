@@ -148,14 +148,16 @@ export function EditableTable<T extends EditableTableRow>({
     emitChange([...rows, { id: nextId(), value: createRow() }]);
   };
 
-  const gridTemplateColumns = `${columns
-    .map((column) => column.width ?? "minmax(0, 1fr)")
-    .join(" ")} auto`;
+  const tableStyle = {
+    "--editable-table-columns": `${columns
+      .map((column) => column.width ?? "minmax(0, 1fr)")
+      .join(" ")} auto`,
+  } as React.CSSProperties;
 
   return (
     <div {...props} className={classNames(styles.root, className)}>
       <div className={styles.tableWrap}>
-        <table className={styles.table} style={{ gridTemplateColumns }}>
+        <table className={styles.table} style={tableStyle}>
           <thead>
             <tr className={styles.row}>
               {columns.map((column) => (

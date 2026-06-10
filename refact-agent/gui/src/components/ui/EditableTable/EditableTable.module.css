@@ -10,6 +10,7 @@
 .tableWrap {
   width: 100%;
   min-width: 0;
+  container-type: inline-size;
 }
 
 .table {
@@ -21,9 +22,18 @@
 }
 
 .table thead,
-.table tbody,
+.table tbody {
+  display: grid;
+  min-width: 0;
+}
+
 .row {
-  display: contents;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: var(
+    --editable-table-columns,
+    minmax(0, 1fr) auto
+  );
 }
 
 .headerCell,
@@ -55,6 +65,7 @@
 }
 
 .emptyCell {
+  grid-column: 1 / -1;
   color: var(--rf-color-muted);
 }
 
@@ -80,9 +91,8 @@
   border: 0;
 }
 
-@media (width <= 640px) {
+@container (max-width: 480px) {
   .table {
-    display: grid;
     gap: var(--rf-space-3);
   }
 
@@ -91,14 +101,11 @@
   }
 
   .table tbody {
-    display: grid;
-    min-width: 0;
     gap: var(--rf-space-3);
   }
 
   .row {
-    display: grid;
-    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--rf-space-2);
     padding: var(--rf-space-3);
     border: var(--rf-hairline) solid var(--rf-border);
