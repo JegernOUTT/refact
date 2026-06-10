@@ -50,6 +50,7 @@ pub mod background_tasks;
 pub mod buddy;
 pub mod caps;
 pub mod cli_dispatch;
+pub mod daemon;
 pub mod global_context;
 pub mod indexing_utils;
 pub mod json_utils;

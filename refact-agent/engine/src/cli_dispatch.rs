@@ -24,6 +24,7 @@ pub struct CliDispatchError {
 #[derive(Debug, Clone)]
 pub enum DispatchResult {
     Worker(CommandLine),
+    Daemon { foreground: bool },
     Exit(i32),
 }
 
@@ -64,10 +65,7 @@ where
 pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
     match command {
         RefactCliCommand::Worker(cmdline) => DispatchResult::Worker(cmdline),
-        RefactCliCommand::Daemon { .. } => {
-            eprintln!("not implemented");
-            DispatchResult::Exit(2)
-        }
+        RefactCliCommand::Daemon { foreground } => DispatchResult::Daemon { foreground },
         RefactCliCommand::Version => {
             println!("{}", version_text());
             DispatchResult::Exit(0)
@@ -162,6 +160,22 @@ mod tests {
         assert!(matches!(
             parse_from(["refact", "version"]).unwrap(),
             RefactCliCommand::Version
+        ));
+    }
+
+    #[test]
+    fn parse_daemon_foreground() {
+        assert!(matches!(
+            parse_from(["refact", "daemon", "--foreground"]).unwrap(),
+            RefactCliCommand::Daemon { foreground: true }
+        ));
+    }
+
+    #[test]
+    fn dispatch_daemon_command() {
+        assert!(matches!(
+            dispatch(RefactCliCommand::Daemon { foreground: false }),
+            DispatchResult::Daemon { foreground: false }
         ));
     }
 
