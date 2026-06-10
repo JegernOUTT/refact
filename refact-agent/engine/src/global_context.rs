@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -243,6 +243,7 @@ impl AtCommandsPreviewCache {
 
 pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
+    pub lsp_tcp_client_count: Arc<AtomicUsize>,
     pub exec_registry: Arc<ExecRegistry>,
     pub cmdline: CommandLine,
     pub http_client: reqwest::Client,
@@ -702,6 +703,7 @@ pub async fn create_global_context(
         .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
+        lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
         exec_registry: Arc::new(ExecRegistry::new()),
         cmdline: cmdline.clone(),
         http_client: http_client.clone(),
@@ -883,6 +885,7 @@ pub mod tests {
 
         let cx = GlobalContext {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
             cmdline,
             http_client,

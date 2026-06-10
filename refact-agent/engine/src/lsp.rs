@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::atomic::Ordering;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::io::Write;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{ClientSocket, LanguageServer, LspService};
@@ -23,9 +25,33 @@ use crate::http::routers::v1::code_completion::handle_v1_code_completion;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LspTransport {
+    Tcp,
+    Stdio,
+}
+
 pub struct LspBackend {
     pub gcx: Arc<GlobalContext>,
     pub client: tower_lsp::Client,
+    transport: LspTransport,
+}
+
+struct LspTcpClientGuard {
+    gcx: Arc<GlobalContext>,
+}
+
+impl LspTcpClientGuard {
+    fn new(gcx: Arc<GlobalContext>) -> Self {
+        gcx.lsp_tcp_client_count.fetch_add(1, Ordering::SeqCst);
+        Self { gcx }
+    }
+}
+
+impl Drop for LspTcpClientGuard {
+    fn drop(&mut self) {
+        self.gcx.lsp_tcp_client_count.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -432,6 +458,9 @@ impl LanguageServer for LspBackend {
 
     async fn shutdown(&self) -> Result<()> {
         info!("shutdown");
+        if self.transport == LspTransport::Tcp {
+            return Ok(());
+        }
         self.gcx
             .ask_shutdown_sender
             .lock()
@@ -515,6 +544,324 @@ impl LanguageServer for LspBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::service::{make_service_fn, service_fn};
+    use hyper::{Body, Request, Response as HyperResponse, Server};
+    use serde_json::{Value, json};
+    use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    async fn start_ping_server() -> (u16, JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = Server::from_tcp(listener)
+            .unwrap()
+            .serve(make_service_fn(|_| async {
+                Ok::<_, hyper::Error>(service_fn(|_req: Request<Body>| async {
+                    Ok::<_, hyper::Error>(HyperResponse::new(Body::from("pong")))
+                }))
+            }));
+        let handle = tokio::spawn(async move {
+            if let Err(err) = server.await {
+                error!("test ping server failed: {}", err);
+            }
+        });
+        (port, handle)
+    }
+
+    async fn make_lsp_test_gcx(http_port: u16) -> Arc<GlobalContext> {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().cmdline.http_port = http_port;
+        gcx
+    }
+
+    async fn start_lsp_test_server(gcx: Arc<GlobalContext>) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(serve_lsp_tcp(listener, gcx));
+        (addr, handle)
+    }
+
+    async fn wait_for_client_count(gcx: &Arc<GlobalContext>, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if gcx.lsp_tcp_client_count.load(Ordering::SeqCst) == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected {} LSP TCP clients, got {}",
+                expected,
+                gcx.lsp_tcp_client_count.load(Ordering::SeqCst)
+            )
+        });
+    }
+
+    async fn write_lsp_message(stream: &mut TcpStream, value: Value) {
+        let body = value.to_string();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        stream.write_all(frame.as_bytes()).await.unwrap();
+    }
+
+    async fn read_lsp_message(stream: &mut TcpStream) -> Value {
+        timeout(Duration::from_secs(2), async {
+            let mut header = Vec::new();
+            let mut byte = [0_u8; 1];
+            loop {
+                stream.read_exact(&mut byte).await.unwrap();
+                header.push(byte[0]);
+                if header.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let header = String::from_utf8(header).unwrap();
+            let content_length = header
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let mut body = vec![0_u8; content_length];
+            stream.read_exact(&mut body).await.unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn read_lsp_response(stream: &mut TcpStream, id: u64) -> Value {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let message = read_lsp_message(stream).await;
+                if message.get("id").and_then(Value::as_u64) == Some(id) {
+                    return message;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn send_initialize(stream: &mut TcpStream, id: u64) -> Value {
+        write_lsp_message(
+            stream,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": null,
+                    "capabilities": {},
+                    "workspaceFolders": null
+                }
+            }),
+        )
+        .await;
+        read_lsp_response(stream, id).await
+    }
+
+    async fn send_initialized(stream: &mut TcpStream) {
+        write_lsp_message(
+            stream,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            }),
+        )
+        .await;
+    }
+
+    async fn send_did_open_and_change(stream: &mut TcpStream, path: &PathBuf, text: &str) {
+        let uri = Url::from_file_path(path).unwrap().to_string();
+        write_lsp_message(
+            stream,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "rust",
+                        "version": 1,
+                        "text": "fn before() {}\n"
+                    }
+                }
+            }),
+        )
+        .await;
+        write_lsp_message(
+            stream,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": 2
+                    },
+                    "contentChanges": [{ "text": text }]
+                }
+            }),
+        )
+        .await;
+    }
+
+    async fn wait_for_document_text(gcx: &Arc<GlobalContext>, path: &PathBuf, expected: &str) {
+        let canonical = crate::files_correction::canonical_path(path.to_string_lossy());
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let maybe_doc = gcx
+                    .documents_state
+                    .memory_document_map
+                    .lock()
+                    .await
+                    .get(&canonical)
+                    .cloned();
+                if let Some(doc) = maybe_doc {
+                    let doc = doc.read().await;
+                    if doc
+                        .doc_text
+                        .as_ref()
+                        .map(|text| text.to_string())
+                        .as_deref()
+                        == Some(expected)
+                    {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn shutdown_server(gcx: Arc<GlobalContext>, handle: JoinHandle<()>) {
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("LSP test server did not stop after shutdown flag")
+            .expect("LSP test server task panicked");
+    }
+
+    #[tokio::test]
+    async fn lsp_tcp_serves_two_clients_concurrently() {
+        let (http_port, ping_handle) = start_ping_server().await;
+        let gcx = make_lsp_test_gcx(http_port).await;
+        let (addr, lsp_handle) = start_lsp_test_server(gcx.clone()).await;
+        let temp = tempfile::tempdir().unwrap();
+        let file_a = temp.path().join("a.rs");
+        let file_b = temp.path().join("b.rs");
+
+        let mut client_a = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 1).await;
+        let mut client_b = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 2).await;
+
+        let response_b = send_initialize(&mut client_b, 2).await;
+        assert_eq!(response_b.get("id").and_then(Value::as_u64), Some(2));
+        assert!(response_b.get("result").is_some());
+        send_initialized(&mut client_b).await;
+        send_did_open_and_change(&mut client_b, &file_b, "fn from_b() {}\n").await;
+        wait_for_document_text(&gcx, &file_b, "fn from_b() {}\n").await;
+
+        let response_a = send_initialize(&mut client_a, 1).await;
+        assert_eq!(response_a.get("id").and_then(Value::as_u64), Some(1));
+        assert!(response_a.get("result").is_some());
+        send_initialized(&mut client_a).await;
+        send_did_open_and_change(&mut client_a, &file_a, "fn from_a() {}\n").await;
+        wait_for_document_text(&gcx, &file_a, "fn from_a() {}\n").await;
+
+        drop(client_b);
+        wait_for_client_count(&gcx, 1).await;
+        drop(client_a);
+        wait_for_client_count(&gcx, 0).await;
+        shutdown_server(gcx, lsp_handle).await;
+        ping_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn lsp_tcp_client_count_tracks_disconnect_churn() {
+        let (http_port, ping_handle) = start_ping_server().await;
+        let gcx = make_lsp_test_gcx(http_port).await;
+        let (addr, lsp_handle) = start_lsp_test_server(gcx.clone()).await;
+
+        assert_eq!(gcx.lsp_tcp_client_count.load(Ordering::SeqCst), 0);
+        let client_a = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 1).await;
+        let client_b = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 2).await;
+
+        drop(client_a);
+        wait_for_client_count(&gcx, 1).await;
+        drop(client_b);
+        wait_for_client_count(&gcx, 0).await;
+
+        shutdown_server(gcx, lsp_handle).await;
+        ping_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn lsp_tcp_shutdown_request_does_not_stop_worker_or_listener() {
+        let (http_port, ping_handle) = start_ping_server().await;
+        let gcx = make_lsp_test_gcx(http_port).await;
+        let (addr, lsp_handle) = start_lsp_test_server(gcx.clone()).await;
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 1).await;
+        let response = send_initialize(&mut client, 1).await;
+        assert!(response.get("result").is_some());
+        send_initialized(&mut client).await;
+        write_lsp_message(
+            &mut client,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "shutdown",
+            }),
+        )
+        .await;
+        let shutdown_response = read_lsp_response(&mut client, 2).await;
+        assert!(
+            shutdown_response.get("error").is_none(),
+            "shutdown response should not be an error: {shutdown_response}"
+        );
+        write_lsp_message(
+            &mut client,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            }),
+        )
+        .await;
+        drop(client);
+        wait_for_client_count(&gcx, 0).await;
+
+        assert!(!gcx.shutdown_flag.load(Ordering::Relaxed));
+        let mut next_client = TcpStream::connect(addr).await.unwrap();
+        wait_for_client_count(&gcx, 1).await;
+        let next_response = send_initialize(&mut next_client, 3).await;
+        assert_eq!(next_response.get("id").and_then(Value::as_u64), Some(3));
+        assert!(next_response.get("result").is_some());
+        drop(next_client);
+        wait_for_client_count(&gcx, 0).await;
+
+        shutdown_server(gcx, lsp_handle).await;
+        ping_handle.abort();
+    }
 
     #[test]
     fn sidebar_workspace_roots_changed_ignores_order_and_duplicates() {
@@ -667,12 +1014,65 @@ mod tests {
     }
 }
 
-async fn build_lsp_service(gcx: Arc<GlobalContext>) -> (LspService<LspBackend>, ClientSocket) {
-    let (lsp_service, socket) = LspService::build(|client| LspBackend { gcx, client })
-        .custom_method("refact/getCompletions", LspBackend::get_completions)
-        .custom_method("refact/setActiveDocument", LspBackend::set_active_document)
-        .finish();
+async fn build_lsp_service(
+    gcx: Arc<GlobalContext>,
+    transport: LspTransport,
+) -> (LspService<LspBackend>, ClientSocket) {
+    let (lsp_service, socket) = LspService::build(move |client| LspBackend {
+        gcx: gcx.clone(),
+        client,
+        transport,
+    })
+    .custom_method("refact/getCompletions", LspBackend::get_completions)
+    .custom_method("refact/setActiveDocument", LspBackend::set_active_document)
+    .finish();
     (lsp_service, socket)
+}
+
+async fn serve_lsp_tcp(listener: TcpListener, gcx: Arc<GlobalContext>) {
+    let mut shutdown_poll = tokio::time::interval(Duration::from_millis(200));
+    let mut connection_tasks = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = shutdown_poll.tick() => {
+                if gcx.shutdown_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, addr)) => {
+                        info!("LSP new client connection from {}", addr);
+                        let guard = LspTcpClientGuard::new(gcx.clone());
+                        let gcx_for_client = gcx.clone();
+                        connection_tasks.spawn(async move {
+                            let _guard = guard;
+                            let (read, write) = tokio::io::split(stream);
+                            let (lsp_service, socket) = build_lsp_service(gcx_for_client, LspTransport::Tcp).await;
+                            tower_lsp::Server::new(read, write, socket)
+                                .serve(lsp_service)
+                                .await;
+                            info!("LSP client connection from {} ended", addr);
+                        });
+                    }
+                    Err(e) => {
+                        error!("Error accepting client connection: {}", e);
+                    }
+                }
+            }
+        }
+        drain_finished_lsp_tasks(&mut connection_tasks);
+    }
+    connection_tasks.abort_all();
+    while connection_tasks.join_next().await.is_some() {}
+}
+
+fn drain_finished_lsp_tasks(connection_tasks: &mut JoinSet<()>) {
+    while let Some(result) = connection_tasks.try_join_next() {
+        if let Err(err) = result {
+            error!("LSP client task failed: {}", err);
+        }
+    }
 }
 
 pub async fn spawn_lsp_task(
@@ -701,23 +1101,7 @@ pub async fn spawn_lsp_task(
             }
             let listener = listener_maybe.unwrap();
             info!("LSP listening on {}", listener.local_addr().unwrap());
-            loop {
-                // possibly wrong code, look at
-                // tower-lsp-0.20.0/examples/tcp.rs
-                match listener.accept().await {
-                    Ok((s, addr)) => {
-                        info!("LSP new client connection from {}", addr);
-                        let (read, write) = tokio::io::split(s);
-                        let (lsp_service, socket) = build_lsp_service(gcx_t.clone()).await;
-                        tower_lsp::Server::new(read, write, socket)
-                            .serve(lsp_service)
-                            .await;
-                    }
-                    Err(e) => {
-                        error!("Error accepting client connection: {}", e);
-                    }
-                }
-            }
+            serve_lsp_tcp(listener, gcx_t.clone()).await;
         }));
     }
 
@@ -726,7 +1110,7 @@ pub async fn spawn_lsp_task(
         return Some(tokio::spawn(async move {
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            let (lsp_service, socket) = build_lsp_service(gcx_t.clone()).await;
+            let (lsp_service, socket) = build_lsp_service(gcx_t.clone(), LspTransport::Stdio).await;
             tower_lsp::Server::new(stdin, stdout, socket)
                 .serve(lsp_service)
                 .await;
