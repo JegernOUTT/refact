@@ -18,6 +18,7 @@ export type SheetCloseProps = DialogPrimitive.DialogCloseProps;
 export interface SheetContentProps extends ModalOverlayContentProps {
   side?: SheetSide;
   scrollable?: boolean;
+  style?: React.CSSProperties;
 }
 export type SheetTitleProps = DialogPrimitive.DialogTitleProps;
 export type SheetDescriptionProps = DialogPrimitive.DialogDescriptionProps;
@@ -37,6 +38,7 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
       maxHeight,
       scrollable = true,
       side = "bottom",
+      style,
       children,
     },
     ref,
@@ -56,7 +58,7 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
               "rf-popover-motion",
               className,
             )}
-            style={overlayStyle(maxWidth, maxHeight)}
+            style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
           >
             <div
               className={classNames(

@@ -31,6 +31,7 @@ export interface PopoverProps extends OverlayRootProps {
 export type PopoverTriggerProps = PopoverPrimitive.PopoverTriggerProps;
 export interface PopoverContentProps extends AnchoredOverlayContentProps {
   scrollable?: boolean;
+  style?: React.CSSProperties;
 }
 export type PopoverCloseProps = PopoverPrimitive.PopoverCloseProps;
 
@@ -104,6 +105,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       sideOffset = 8,
       collisionPadding = 12,
       scrollable = true,
+      style,
       children,
     },
     ref,
@@ -118,9 +120,12 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       return (
         <Sheet open={context.open} onOpenChange={context.onOpenChange}>
           <Sheet.Content
+            ref={ref}
+            className={className}
             maxWidth={maxWidth}
             maxHeight={maxHeight}
             scrollable={scrollable}
+            style={style}
           >
             {children}
           </Sheet.Content>
@@ -143,7 +148,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
               "rf-popover-motion",
               className,
             )}
-            style={overlayStyle(maxWidth, maxHeight)}
+            style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
           >
             <div
               className={classNames(
