@@ -24,6 +24,53 @@ export function drawEarOverlay(
   }
 }
 
+const BROWLESS_EYE_STYLES = new Set([
+  "angry",
+  "X",
+  "star",
+  "heart",
+  "spiral",
+  "uwu",
+  "squint",
+]);
+
+export function drawBrows(
+  ctx: CanvasRenderingContext2D,
+  leftX: number,
+  leftY: number,
+  rightX: number,
+  rightY: number,
+  size: number,
+  m: ColorMap,
+  anim: BuddyAnimState,
+): void {
+  if (BROWLESS_EYE_STYLES.has(anim.eyeStyle)) return;
+  if (anim.idleAction === "doze") return;
+  const mood = anim.moodType;
+  const lift = anim.eyeStyle === "wide" ? 1 : 0;
+
+  if (mood === "alert" || anim.eyeStyle === "wide") {
+    fillPixel(ctx, leftX, leftY - 3 - lift, size, 1, m.eyeDark);
+    fillPixel(ctx, rightX, rightY - 3 - lift, size, 1, m.eyeDark);
+    return;
+  }
+  if (mood === "concerned" || anim.eyeStyle === "teary") {
+    fillPixel(ctx, leftX, leftY - 2, 2, 1, m.eyeDark);
+    fillPixel(ctx, leftX + 2, leftY - 3, 1, 1, m.eyeDark);
+    fillPixel(ctx, rightX + size - 2, rightY - 2, 2, 1, m.eyeDark);
+    fillPixel(ctx, rightX, rightY - 3, 1, 1, m.eyeDark);
+    return;
+  }
+  if (mood === "working" || mood === "focused" || mood === "thinking") {
+    fillPixel(ctx, leftX, leftY - 2, size, 1, m.eyeDark);
+    fillPixel(ctx, rightX, rightY - 2, size, 1, m.eyeDark);
+    return;
+  }
+  if (mood === "curious" || mood === "learning") {
+    fillPixel(ctx, rightX, rightY - 3, size, 1, m.eyeDark);
+  }
+}
+
 export function drawEyes(
   ctx: CanvasRenderingContext2D,
   leftX: number,

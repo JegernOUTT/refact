@@ -45,18 +45,23 @@ function objectAlpha(
 }
 
 export function drawBuddyHomeDoor(args: DrawBuddyWorldBaseArgs): void {
-  const { ctx, palette } = args;
+  const { ctx, palette, world } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
   const x = pctX(width, BUDDY_WORLD_HOME_HOTSPOT.x);
   const y = pctY(height, BUDDY_WORLD_HOME_HOTSPOT.y);
-  const glow = 0.28 + wave(frame, 32, 0, 0.08, args.reducedMotion);
   const scale = args.compact ? 0.86 : 1;
+  const night = world.phase === "night" || world.phase === "evening";
+  const winter = world.season === "winter";
+  const glow = night
+    ? 0.3 + wave(frame, 32, 0, 0.08, args.reducedMotion)
+    : 0.14;
 
-  fillEllipse(ctx, x, y + 14 * scale, 35 * scale, 15 * scale, "#FBBF24", glow);
+  fillEllipse(ctx, x, y + 16 * scale, 36 * scale, 14 * scale, "#FBBF24", glow);
+  fillEllipse(ctx, x, y + 28 * scale, 40 * scale, 7 * scale, "#1A2E20", 0.3);
 
-  const pathGlow = 0.36 + wave(frame, 40, 0, 0.04, args.reducedMotion);
+  const pathGlow = 0.4 + wave(frame, 40, 0, 0.04, args.reducedMotion);
   for (let index = 0; index < 6; index += 1) {
     const stepX = x + index * 9 * scale + Math.sin(index * 1.7) * 4;
     const stepY = y + 32 * scale + index * 5 * scale;
@@ -66,91 +71,323 @@ export function drawBuddyHomeDoor(args: DrawBuddyWorldBaseArgs): void {
       stepY,
       8 - index * 0.45,
       3.4,
-      "#B45309",
-      pathGlow - index * 0.035,
+      "#9A8A78",
+      pathGlow - index * 0.04,
+    );
+    fillEllipse(
+      ctx,
+      stepX - 1,
+      stepY - 1,
+      5 - index * 0.3,
+      1.6,
+      "#C3B5A2",
+      (pathGlow - index * 0.04) * 0.7,
     );
   }
 
   fillPixelRect(
     ctx,
-    x - 23 * scale,
+    x - 24 * scale,
     y - 1 * scale,
-    46 * scale,
-    30 * scale,
-    "#92400E",
+    48 * scale,
+    28 * scale,
+    "#F2E8D5",
+  );
+  fillPixelRect(
+    ctx,
+    x - 24 * scale,
+    y + 21 * scale,
+    48 * scale,
+    6 * scale,
+    "#D9CBB4",
+  );
+  fillPixelRect(
+    ctx,
+    x - 25 * scale,
+    y + 27 * scale,
+    50 * scale,
+    4 * scale,
+    "#8C8378",
+  );
+  fillPixelRect(
+    ctx,
+    x - 24 * scale,
+    y - 1 * scale,
+    2 * scale,
+    28 * scale,
+    "#8B5E3C",
+    0.85,
+  );
+  fillPixelRect(
+    ctx,
+    x + 22 * scale,
+    y - 1 * scale,
+    2 * scale,
+    28 * scale,
+    "#8B5E3C",
+    0.85,
+  );
+  fillPixelRect(
+    ctx,
+    x - 9 * scale,
+    y - 1 * scale,
+    2 * scale,
+    27 * scale,
+    "#8B5E3C",
+    0.6,
+  );
+  fillPixelRect(
+    ctx,
+    x + 8 * scale,
+    y - 1 * scale,
+    2 * scale,
+    27 * scale,
+    "#8B5E3C",
+    0.6,
+  );
+  fillPixelRect(
+    ctx,
+    x - 24 * scale,
+    y + 9 * scale,
+    48 * scale,
+    2 * scale,
+    "#8B5E3C",
+    0.5,
+  );
+
+  fillPixelRect(
+    ctx,
+    x - 28 * scale,
+    y - 9 * scale,
+    56 * scale,
+    8 * scale,
+    "#C2563C",
+  );
+  fillPixelRect(
+    ctx,
+    x - 24 * scale,
+    y - 16 * scale,
+    48 * scale,
+    8 * scale,
+    "#C2563C",
+  );
+  fillPixelRect(
+    ctx,
+    x - 18 * scale,
+    y - 23 * scale,
+    36 * scale,
+    8 * scale,
+    "#B14B34",
+  );
+  fillPixelRect(
+    ctx,
+    x - 12 * scale,
+    y - 29 * scale,
+    24 * scale,
+    7 * scale,
+    "#A8432E",
   );
   fillPixelRect(
     ctx,
     x - 28 * scale,
-    y + 25 * scale,
+    y - 2 * scale,
     56 * scale,
-    5 * scale,
-    "#0F172A",
-    0.36,
+    2 * scale,
+    "#9E4530",
   );
   fillPixelRect(
     ctx,
-    x - 17 * scale,
-    y - 15 * scale,
-    34 * scale,
-    8 * scale,
-    palette.dark,
+    x - 24 * scale,
+    y - 10 * scale,
+    48 * scale,
+    2 * scale,
+    "#9E4530",
+    0.8,
   );
   fillPixelRect(
     ctx,
-    x - 22 * scale,
-    y - 7 * scale,
-    44 * scale,
-    8 * scale,
-    palette.dark,
+    x - 18 * scale,
+    y - 17 * scale,
+    36 * scale,
+    2 * scale,
+    "#9E4530",
+    0.8,
   );
   fillPixelRect(
     ctx,
-    x - 14 * scale,
-    y - 29 * scale,
+    x - 13 * scale,
+    y - 30 * scale,
+    26 * scale,
+    2 * scale,
+    palette.body,
+    0.9,
+  );
+  if (winter) {
+    fillPixelRect(
+      ctx,
+      x - 27 * scale,
+      y - 11 * scale,
+      54 * scale,
+      3 * scale,
+      "#F4F8FB",
+      0.92,
+    );
+    fillPixelRect(
+      ctx,
+      x - 17 * scale,
+      y - 24 * scale,
+      34 * scale,
+      3 * scale,
+      "#F4F8FB",
+      0.9,
+    );
+  }
+
+  fillPixelRect(
+    ctx,
+    x + 9 * scale,
+    y - 42 * scale,
+    9 * scale,
+    16 * scale,
+    "#A8968A",
+  );
+  fillPixelRect(
+    ctx,
+    x + 9 * scale,
+    y - 42 * scale,
+    3 * scale,
+    16 * scale,
+    "#8C7A6E",
+  );
+  fillPixelRect(
+    ctx,
+    x + 7 * scale,
+    y - 44 * scale,
+    13 * scale,
+    3 * scale,
+    "#6E6157",
+  );
+  if (!args.reducedMotion) {
+    for (let puff = 0; puff < 3; puff += 1) {
+      const rise = ((frame * 0.5 + puff * 34) % 100) / 100;
+      const px =
+        x + 13 * scale + rise * 14 + wave(frame, 26, puff * 2, 2, false);
+      const py = y - 46 * scale - rise * 26;
+      fillCircle(ctx, px, py, 3 + rise * 5, "#D8D3CA", (1 - rise) * 0.32);
+    }
+  }
+
+  const windowLit = night;
+  fillPixelRect(
+    ctx,
+    x - 3 * scale,
+    y - 24 * scale,
     7 * scale,
+    7 * scale,
+    "#6E6157",
+  );
+  fillCircle(
+    ctx,
+    x + 0.5 * scale,
+    y - 20.5 * scale,
+    3 * scale,
+    windowLit ? "#FFE9A8" : "#B9D4E4",
+    0.95,
+  );
+  fillPixelRect(ctx, x - 0.5, y - 23 * scale, 1.4, 6 * scale, "#6E6157", 0.9);
+
+  fillPixelRect(
+    ctx,
+    x + 11 * scale,
+    y + 3 * scale,
+    10 * scale,
+    10 * scale,
+    "#7A6A56",
+  );
+  fillPixelRect(
+    ctx,
+    x + 12 * scale,
+    y + 4 * scale,
+    8 * scale,
+    8 * scale,
+    windowLit ? "#FFE9A8" : "#BFD9E8",
+  );
+  fillPixelRect(
+    ctx,
+    x + 15.4 * scale,
+    y + 4 * scale,
+    1.4,
+    8 * scale,
+    "#7A6A56",
+  );
+  fillPixelRect(
+    ctx,
+    x + 12 * scale,
+    y + 7.4 * scale,
+    8 * scale,
+    1.4,
+    "#7A6A56",
+  );
+  if (windowLit) {
+    fillCircle(ctx, x + 16 * scale, y + 8 * scale, 9 * scale, "#FFE9A8", 0.14);
+  }
+  fillPixelRect(
+    ctx,
+    x + 10 * scale,
+    y + 13 * scale,
     12 * scale,
-    "#475569",
+    2.4 * scale,
+    "#6E5A44",
+  );
+  fillPixelRect(ctx, x + 11 * scale, y + 12 * scale, 2.4, 2, "#3E7C4F");
+  fillPixelRect(ctx, x + 14 * scale, y + 11.4 * scale, 2.4, 2, "#4A8C58");
+  fillPixelRect(ctx, x + 17 * scale, y + 12 * scale, 2.4, 2, "#3E7C4F");
+  fillPixelRect(ctx, x + 12.4 * scale, y + 10.6 * scale, 1.6, 1.6, "#E981A0");
+  fillPixelRect(ctx, x + 15.6 * scale, y + 10 * scale, 1.6, 1.6, "#F4B8C4");
+  fillPixelRect(ctx, x + 18 * scale, y + 10.8 * scale, 1.6, 1.6, "#E981A0");
+
+  fillPixelRect(
+    ctx,
+    x - 8 * scale,
+    y + 5 * scale,
+    14 * scale,
+    24 * scale,
+    "#92400E",
   );
   fillPixelRect(
     ctx,
     x - 7 * scale,
     y + 6 * scale,
-    14 * scale,
-    23 * scale,
-    "#1E293B",
+    12 * scale,
+    22 * scale,
+    "#7C3A12",
+  );
+  fillPixelRect(ctx, x - 6 * scale, y + 7 * scale, 10 * scale, 1.6, "#A0522D");
+  fillPixelRect(ctx, x - 6 * scale, y + 11 * scale, 10 * scale, 1.6, "#A0522D");
+  fillCircle(
+    ctx,
+    x - 3.4 * scale,
+    y + 17 * scale,
+    1.3 * scale,
+    "#FDE68A",
+    0.95,
   );
   fillPixelRect(
     ctx,
     x - 4 * scale,
-    y + 10 * scale,
+    y - 4 * scale,
     8 * scale,
-    19 * scale,
-    "#0F172A",
-  );
-  fillPixelRect(
-    ctx,
-    x + 7 * scale,
-    y + 7 * scale,
-    8 * scale,
-    8 * scale,
-    "#FDE68A",
-  );
-  fillPixelRect(
-    ctx,
-    x + 9 * scale,
-    y + 9 * scale,
-    4 * scale,
-    4 * scale,
-    palette.light,
-  );
-  fillPixelRect(
-    ctx,
-    x - 12 * scale,
-    y + 31 * scale,
-    24 * scale,
     3 * scale,
-    "#FBBF24",
+    "#8B5E3C",
+  );
+  fillEllipse(
+    ctx,
+    x - 1 * scale,
+    y + 30 * scale,
+    9 * scale,
+    2.4 * scale,
+    "#B7AA96",
+    0.9,
   );
 
   fillPixelRect(
@@ -159,8 +396,8 @@ export function drawBuddyHomeDoor(args: DrawBuddyWorldBaseArgs): void {
     y - 43 * scale,
     52 * scale,
     12 * scale,
-    "#0F172A",
-    0.86,
+    "#5C4A3A",
+    0.92,
   );
   fillPixelRect(
     ctx,
@@ -170,8 +407,7 @@ export function drawBuddyHomeDoor(args: DrawBuddyWorldBaseArgs): void {
     2 * scale,
     palette.body,
   );
-  if (!args.compact)
-    drawPixelText(ctx, "HOME", x, y - 36 * scale, palette.light);
+  if (!args.compact) drawPixelText(ctx, "HOME", x, y - 36 * scale, "#F6EBDB");
   fillPixelRect(
     ctx,
     x - 2 * scale,

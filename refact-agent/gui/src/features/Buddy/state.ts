@@ -150,6 +150,15 @@ export function createInitialAnimState(): BuddyAnimState {
     petSessionCount: 0,
     lastPetFrame: -9999,
     temperamentSeed: 0,
+    facing: 1,
+    facingLerp: 1,
+    tailPhase: 0,
+    tailEnergy: 0.4,
+    tailDroop: 0,
+    armPose: "rest",
+    armAnimPhase: 0,
+    wingFlap: 0,
+    dancePhase: 0,
   };
 }
 

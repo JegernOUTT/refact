@@ -1,5 +1,4 @@
 import type { BuddyWorldState } from "./buddyWorldModel";
-import type { BuddyWorldTokenName } from "./buddyWorldDrawHelpers";
 import {
   BUDDY_WORLD_HOME_HOTSPOT,
   alphaForMotion,
@@ -32,43 +31,46 @@ import {
   worldPaletteHint,
   worldPhase,
   worldWeather,
-  worldTokenPalette,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
-const SKY_STOP_ROLES: Record<
+const GHIBLI_SKY_STOPS: Record<
   BuddyWorldState["atmosphere"]["paletteHint"],
-  Array<{ offset: number; role: BuddyWorldTokenName }>
+  Array<{ offset: number; color: string }>
 > = {
   dawn: [
-    { offset: 0, role: "accent" },
-    { offset: 0.5, role: "warning" },
-    { offset: 1, role: "success" },
+    { offset: 0, color: "#7FA8D4" },
+    { offset: 0.42, color: "#C3CFE0" },
+    { offset: 0.68, color: "#F4D9AC" },
+    { offset: 1, color: "#F3B27E" },
   ],
   day: [
-    { offset: 0, role: "accent" },
-    { offset: 0.58, role: "accentSoft" },
-    { offset: 1, role: "success" },
+    { offset: 0, color: "#3D7EC2" },
+    { offset: 0.45, color: "#7DB8E8" },
+    { offset: 0.78, color: "#B9E0F2" },
+    { offset: 1, color: "#E3F4F8" },
   ],
   dusk: [
-    { offset: 0, role: "warning" },
-    { offset: 0.54, role: "accent" },
-    { offset: 1, role: "success" },
+    { offset: 0, color: "#54498A" },
+    { offset: 0.4, color: "#9A6486" },
+    { offset: 0.7, color: "#D67E6A" },
+    { offset: 1, color: "#F2B05E" },
   ],
   night: [
-    { offset: 0, role: "overlay" },
-    { offset: 0.55, role: "surface3" },
-    { offset: 1, role: "success" },
+    { offset: 0, color: "#0E1733" },
+    { offset: 0.5, color: "#1C2C55" },
+    { offset: 0.82, color: "#2E4374" },
+    { offset: 1, color: "#3D5587" },
   ],
   dream: [
-    { offset: 0, role: "overlay" },
-    { offset: 0.58, role: "accent" },
-    { offset: 1, role: "success" },
+    { offset: 0, color: "#2C2553" },
+    { offset: 0.5, color: "#6E5FA8" },
+    { offset: 1, color: "#BCA9E0" },
   ],
   storm: [
-    { offset: 0, role: "overlay" },
-    { offset: 0.5, role: "surface3" },
-    { offset: 1, role: "danger" },
+    { offset: 0, color: "#39465A" },
+    { offset: 0.55, color: "#5C6B7E" },
+    { offset: 1, color: "#93A2B2" },
   ],
 };
 
@@ -77,11 +79,10 @@ export function drawSkyGradient(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  const stops = SKY_STOP_ROLES[worldPaletteHint(args.world)];
-  const tokens = worldTokenPalette(args);
+  const stops = GHIBLI_SKY_STOPS[worldPaletteHint(args.world)];
 
   for (const stop of stops) {
-    gradient.addColorStop(clamp(stop.offset, 0, 1), tokens[stop.role]);
+    gradient.addColorStop(clamp(stop.offset, 0, 1), stop.color);
   }
 
   fillRect(ctx, 0, 0, width, height, gradient);

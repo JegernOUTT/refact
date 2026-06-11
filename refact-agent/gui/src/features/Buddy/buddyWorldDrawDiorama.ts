@@ -27,11 +27,21 @@ export function drawDistantHills(args: DrawBuddyWorldBaseArgs): void {
   const farY = height * 0.62;
   const nearY = height * 0.69;
   const phase = worldPhase(world);
-  const farColor = phase === "night" ? "#1E3A5F" : "#2F855A";
-  const nearColor = phase === "night" ? "#155E49" : "#166534";
+  const farColor = phase === "night" ? "#27425C" : "#76A88C";
+  const nearColor = phase === "night" ? "#1E3850" : "#4E8C5F";
+
+  fillEllipse(
+    ctx,
+    width * 0.5,
+    farY + 4,
+    width * 0.55,
+    14,
+    phase === "night" ? "#3D5587" : "#D8ECE2",
+    alphaForMotion(0.16, args.reducedMotion),
+  );
 
   ctx.save();
-  ctx.fillStyle = `${farColor}66`;
+  ctx.fillStyle = `${farColor}88`;
   ctx.beginPath();
   ctx.moveTo(0, farY + 18);
   for (let x = 0; x <= width; x += 20) {
@@ -43,7 +53,7 @@ export function drawDistantHills(args: DrawBuddyWorldBaseArgs): void {
   ctx.closePath();
   ctx.fill();
 
-  ctx.fillStyle = `${nearColor}88`;
+  ctx.fillStyle = `${nearColor}AA`;
   ctx.beginPath();
   ctx.moveTo(0, nearY + 16);
   for (let x = 0; x <= width; x += 16) {
@@ -112,18 +122,30 @@ export function drawMidgroundGarden(args: DrawBuddyWorldBaseArgs): void {
   for (let index = 0; index < count; index += 1) {
     const x = (index / count) * width + ((index * 17) % 23);
     const stem = 8 + ((index * 7) % 12);
-    const sway = wave(frame, 40, index, 2.5, args.reducedMotion);
-    fillPixelRect(args.ctx, x + sway, gardenY + 7, 3, stem, "#166534", 0.54);
-    fillPixelRect(args.ctx, x - 5 + sway, gardenY + 8, 11, 3, "#4ADE80", 0.34);
+    const sway = args.reducedMotion
+      ? 0
+      : Math.sin(frame / 26 - x / 55) * 2.6 +
+        Math.sin(frame / 11 + index) * 0.8;
+    fillPixelRect(args.ctx, x + sway, gardenY + 7, 3, stem, "#2E7D45", 0.6);
+    fillPixelRect(args.ctx, x - 5 + sway, gardenY + 8, 11, 3, "#5FAE6B", 0.4);
     if (index % 4 === 0) {
       fillPixelRect(
         args.ctx,
-        x + 1 + sway,
+        x + 1 + sway * 1.3,
         gardenY + 3,
         4,
         4,
         flowerColor,
-        0.46,
+        0.52,
+      );
+      fillPixelRect(
+        args.ctx,
+        x + 2 + sway * 1.3,
+        gardenY + 4,
+        2,
+        2,
+        "#FFF7E0",
+        0.4,
       );
     }
   }
@@ -263,9 +285,10 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
   const baseY = height * 0.745;
+  const night = worldPhase(args.world) === "night";
 
   ctx.save();
-  ctx.fillStyle = "rgba(22, 101, 52, 0.46)";
+  ctx.fillStyle = night ? "rgba(26, 58, 56, 0.5)" : "rgba(58, 132, 70, 0.5)";
   ctx.beginPath();
   ctx.moveTo(0, baseY + 10);
   for (let x = 0; x <= width; x += 18) {
@@ -290,7 +313,7 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
       baseY + ridge,
       8,
       height - baseY - ridge,
-      "rgba(20,83,45,0.88)",
+      night ? "rgba(22,52,52,0.9)" : "rgba(38,107,58,0.9)",
     );
     if ((x / 8) % 11 === 0) {
       fillPixelRect(
@@ -299,33 +322,76 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
         baseY + ridge + 11,
         7,
         2,
-        "rgba(74,222,128,0.2)",
+        night ? "rgba(98,166,150,0.18)" : "rgba(126,199,110,0.26)",
+      );
+    }
+    if ((x / 8) % 7 === 3) {
+      fillPixelRect(
+        ctx,
+        x + 4,
+        baseY + ridge + 17,
+        2,
+        2,
+        night ? "rgba(72,128,116,0.3)" : "rgba(31,94,56,0.4)",
       );
     }
   }
 
-  const grassStep = args.compact || args.reducedMotion ? 82 : 52;
+  const grassStep = args.compact || args.reducedMotion ? 64 : 38;
   for (let x = 0; x < width; ) {
     const offset = (x * 17) % 43;
     const clumpX = x + offset;
     const clumpY = baseY + 12 + ((x * 11) % 22);
-    const grassHeight = 8 + wave(frame, 64, x + offset, 4, args.reducedMotion);
+    const gust = args.reducedMotion
+      ? 0
+      : Math.sin(frame / 26 - clumpX / 55) * 3 +
+        Math.sin(frame / 9 - clumpX / 23) * 1.1;
+    const grassHeight = 9 + gust;
+    const lean = args.reducedMotion ? 0 : Math.round(gust * 0.7);
     fillPixelRect(
       ctx,
-      clumpX,
+      clumpX + lean,
       clumpY - grassHeight,
       3,
       grassHeight,
-      "rgba(187,247,208,0.28)",
+      night ? "rgba(150,205,186,0.26)" : "rgba(196,235,178,0.34)",
     );
     fillPixelRect(
       ctx,
-      clumpX + 4,
+      clumpX + 4 + lean,
       clumpY - grassHeight + 2,
       2,
       Math.max(2, grassHeight - 1),
-      "rgba(74,222,128,0.24)",
+      night ? "rgba(106,166,148,0.22)" : "rgba(132,196,118,0.3)",
     );
+    fillPixelRect(
+      ctx,
+      clumpX - 3 + Math.round(lean * 0.6),
+      clumpY - grassHeight + 4,
+      2,
+      Math.max(2, grassHeight - 4),
+      night ? "rgba(88,142,128,0.18)" : "rgba(108,176,96,0.24)",
+    );
+    if (!night && (clumpX | 0) % 5 === 0) {
+      fillPixelRect(
+        ctx,
+        clumpX + 6 + lean,
+        clumpY - grassHeight - 2,
+        2,
+        2,
+        "#F6F8F4",
+        0.8,
+      );
+      fillPixelRect(
+        ctx,
+        clumpX + 6.6 + lean,
+        clumpY - grassHeight - 1.4,
+        0.8,
+        0.8,
+        "#F2CD5C",
+        0.9,
+      );
+    }
     x += grassStep + offset;
   }
 }

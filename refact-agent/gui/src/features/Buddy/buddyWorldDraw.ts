@@ -24,6 +24,21 @@ import {
   drawWinterGroundDust,
   drawWorkshopZones,
 } from "./buddyWorldDrawDiorama";
+import {
+  drawAirship,
+  drawAlpineRidge,
+  drawGhibliClouds,
+  drawGreatTree,
+  drawKodama,
+  drawKomorebi,
+  drawMeadowCritters,
+  drawNightSkyDust,
+  drawRainPuddles,
+  drawSkyIsland,
+  drawSootSprites,
+  drawStream,
+  drawWindStreaks,
+} from "./buddyWorldDrawScenery";
 import { drawBuddyHomeDoor, drawWorldObjects } from "./buddyWorldDrawObjects";
 import {
   safeDimension,
@@ -64,23 +79,36 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
 
   drawSkyGradient(drawArgs);
   if (shouldDrawStarField(args.world)) drawStarField(drawArgs);
+  drawNightSkyDust(drawArgs);
+  drawSkyIsland(drawArgs);
   drawObservatoryStructures(drawArgs);
   drawCelestial(drawArgs);
+  drawGhibliClouds(drawArgs);
+  drawAirship(drawArgs);
   drawAmbientLayers(drawArgs);
+  drawAlpineRidge(drawArgs);
   drawDistantHills(drawArgs);
+  drawGreatTree(drawArgs);
   drawMidgroundGarden(drawArgs);
   drawWorkshopZones(drawArgs);
+  drawKomorebi(drawArgs);
   drawWeatherAtmosphere(drawArgs);
   drawWorldObjects(drawArgs);
   drawGround(drawArgs);
   drawWinterGroundDust(drawArgs);
+  drawStream(drawArgs);
   drawPond(drawArgs);
+  drawRainPuddles(drawArgs);
   drawHomePath(drawArgs);
   drawLanterns(drawArgs);
   drawBuddyHomeDoor(drawArgs);
   drawMailbox(drawArgs);
   drawVitality(drawArgs);
+  drawKodama(drawArgs);
+  drawMeadowCritters(drawArgs);
+  drawSootSprites(drawArgs);
   drawBuddyLandingPad(drawArgs);
   drawCampfire(drawArgs);
   drawForegroundCozyDetails(drawArgs);
+  drawWindStreaks(drawArgs);
 }

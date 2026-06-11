@@ -1,40 +1,13 @@
 import { spawnSparks } from "./particles";
 import type { BuddyAnimState, ColorMap } from "../types";
 
-export function renderWalkingFeet(
-  ctx: CanvasRenderingContext2D,
-  ox: number,
-  oy: number,
-  spriteWidth: number,
-  spriteHeight: number,
-  m: ColorMap,
-  anim: BuddyAnimState,
-): void {
-  if (!anim.walking || Math.abs(anim.walkVel) < 0.08) return;
-  const leftUp = Math.sin(anim.walkPhase) > 0;
-  const stepHeight = Math.abs(Math.sin(anim.walkPhase)) * 2.5;
-  ctx.fillStyle = m.dark;
-  ctx.fillRect(
-    (ox + 4) | 0,
-    (oy + spriteHeight + (leftUp ? -stepHeight : 0)) | 0,
-    3,
-    2,
-  );
-  ctx.fillRect(
-    (ox + spriteWidth - 7) | 0,
-    (oy + spriteHeight + (!leftUp ? -stepHeight : 0)) | 0,
-    3,
-    2,
-  );
-}
-
 export function renderToy(
   ctx: CanvasRenderingContext2D,
   ox: number,
   oy: number,
   spriteWidth: number,
   spriteHeight: number,
-  m: ColorMap,
+  _m: ColorMap,
   anim: BuddyAnimState,
 ): void {
   if (!anim.toyActive || !anim.toyType) return;
@@ -154,12 +127,4 @@ export function renderToy(
       ctx.globalAlpha = 1;
     }
   }
-
-  const armX = ox + spriteWidth;
-  const armY = (oy + spriteHeight / 2) | 0;
-  const armLength = Math.round(
-    3 + Math.abs(Math.sin(anim.toyAnimPhase * 0.6)) * 2,
-  );
-  ctx.fillStyle = m.body;
-  ctx.fillRect(armX, armY, armLength, 2);
 }

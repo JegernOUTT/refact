@@ -20,6 +20,7 @@ import {
 import type {
   AnimBeat,
   BuddyAnimState,
+  BuddyArmPose,
   BuddySemanticState,
   BuddyEvent,
   IdleActionType,
@@ -142,6 +143,7 @@ const IDLE_CHAIN_BIAS: Partial<
   sniff: { walk: 1.8, lookAround: 1.5 },
   groom: { stretch: 1.5 },
   wiggle: { walk: 2.5, playDuck: 2 },
+  dance: { shakeOff: 2.5, sigh: 1.8, drinkCoffee: 1.6 },
   sigh: { scratch: 1.6, daydream: 1.5 },
   shakeOff: { lookAround: 1.6 },
   daydream: { yawn: 1.6, lookAround: 1.4 },
@@ -194,6 +196,13 @@ function selectIdleAction(
     {
       action: "spin",
       weight: p.playfulness > 35 && m.energy > 45 ? 4 : 0,
+    },
+    {
+      action: "dance",
+      weight:
+        anim.rareActionCooldown === 0 && p.playfulness > 40 && m.energy > 50
+          ? 3 + p.playfulness * 0.05 + m.happiness * 0.03
+          : 0,
     },
     { action: "type_code", weight: 7 },
     {
@@ -276,6 +285,7 @@ function getIdleActionDuration(action: IdleActionType): number {
     confidentPose: 90,
     wave: 80,
     spin: 55,
+    dance: 130 + Math.random() * 60,
     type_code: 120 + Math.random() * 80,
     scratch: 65,
     peekAround: 90,
@@ -690,6 +700,84 @@ function updateBreath(
   const s = Math.sin(anim.breathPhase);
   const shaped = s >= 0 ? Math.pow(s, 0.7) : -Math.pow(-s, 1.4);
   anim.breathScale = shaped * depth;
+}
+
+function resolveArmPose(anim: BuddyAnimState): BuddyArmPose {
+  if (anim.toyActive) return "hold";
+  if (anim.idleAction === "dance" || anim.celebrationTimer > 60) return "raise";
+  if (anim.idleAction === "wave") return "wave";
+  if (anim.idleAction === "groom" || anim.idleAction === "scratch")
+    return "face";
+  if (anim.idleAction === "type_code") return "drum";
+  if (anim.idleAction === "daydream") return "hug";
+  if (anim.activeScene === "working" && anim.activeSceneVariant === "typing")
+    return "drum";
+  if (anim.walking && Math.abs(anim.walkVel) > 0.12) return "swing";
+  return "rest";
+}
+
+function updateBodyLanguage(
+  anim: BuddyAnimState,
+  semantic: BuddySemanticState,
+): void {
+  const m = semantic.mood;
+  if (anim.walking && Math.abs(anim.walkVel) > 0.05) {
+    anim.facing = anim.walkDirection >= 0 ? 1 : -1;
+  } else if (anim.mouseProximity > 0.3 && Math.abs(anim.cursorTargetX) > 0.3) {
+    anim.facing = anim.cursorTargetX >= 0 ? 1 : -1;
+  } else if (
+    anim.idleAction === "lookAround" ||
+    anim.idleAction === "peekAround"
+  ) {
+    anim.facing = anim.cursorTargetX >= 0 ? 1 : -1;
+  }
+  anim.facingLerp += (anim.facing - anim.facingLerp) * 0.16;
+
+  const excitement =
+    anim.celebrationTimer > 0 ||
+    anim.mouseOnBuddy ||
+    anim.idleAction === "dance"
+      ? 1
+      : m.happiness > 60
+        ? 0.55 + (m.energy / 100) * 0.25
+        : m.happiness > 35
+          ? 0.32
+          : 0.12;
+  anim.tailEnergy += (excitement - anim.tailEnergy) * 0.06;
+  const droopTarget =
+    anim.idleAction === "doze" || m.energy < 22
+      ? 0.85
+      : m.happiness < 35 || anim.errorStreak >= 2
+        ? 0.6
+        : m.anxiety > 60
+          ? 0.45
+          : 0;
+  anim.tailDroop += (droopTarget - anim.tailDroop) * 0.05;
+  anim.tailPhase +=
+    0.05 +
+    anim.tailEnergy * 0.22 +
+    Math.abs(anim.walkVel) * 0.08 +
+    (anim.idleAction === "dance" ? 0.18 : 0);
+
+  const flapTarget =
+    anim.celebrationTimer > 0 ||
+    anim.zoomiesDashesLeft > 0 ||
+    anim.idleAction === "dance" ||
+    anim.idleAction === "wiggle"
+      ? 1
+      : semantic.progress.stage >= 5
+        ? 0.3
+        : anim.walking
+          ? 0.2
+          : 0.05;
+  anim.wingFlap += (flapTarget - anim.wingFlap) * 0.09;
+
+  if (anim.idleAction === "dance") {
+    anim.dancePhase += 0.16 + (semantic.personality.playfulness / 100) * 0.06;
+  } else {
+    anim.dancePhase = 0;
+  }
+  anim.armPose = resolveArmPose(anim);
 }
 
 const FRIENDLY_REACTION_SIGNALS = new Set([
@@ -1229,6 +1317,15 @@ function startIdleAction(
       anim.squashTargetY = 0.92;
       say(anim, pickFrom(STATUS_POOLS.spin), -40);
       break;
+    case "dance":
+      anim.rareActionCooldown = 1300;
+      anim.dancePhase = 0;
+      anim.earState = 1;
+      anim.eyeStyle = Math.random() < 0.5 ? "squint" : "uwu";
+      anim.eyeStyleTimer = 130;
+      say(anim, pickFrom(STATUS_POOLS.dance), 20);
+      spawnRainbowSparks(anim, 6);
+      break;
     case "type_code":
       say(anim, pickFrom(STATUS_POOLS.type_code), 50);
       break;
@@ -1330,6 +1427,27 @@ function updateIdleActionFrame(
         );
       }
       break;
+    case "dance": {
+      const groove = Math.sin(anim.dancePhase);
+      anim.squashTargetX = 1 + groove * 0.09;
+      anim.squashTargetY = 1 - Math.abs(groove) * 0.1;
+      anim.nuzzleOffsetX += (groove * 3 - anim.nuzzleOffsetX) * 0.2;
+      anim.headTilt += (groove * 0.4 - anim.headTilt) * 0.18;
+      if (elapsed % 26 === 0) {
+        spawnSparks(anim, 2, "#F472B6");
+        spawnGroundEffect(
+          anim,
+          "dust",
+          cx + (groove > 0 ? 6 : -6),
+          CANVAS_CENTER_Y + 12,
+        );
+      }
+      if (elapsed % 52 === 13)
+        spawnFloatingEmoji(anim, "♪", cx + 12, CANVAS_CENTER_Y - 22);
+      if (elapsed % 52 === 39)
+        spawnFloatingEmoji(anim, "♫", cx - 12, CANVAS_CENTER_Y - 24);
+      break;
+    }
     case "type_code": {
       const tp = Math.abs(Math.sin(anim.frame * 0.38));
       anim.squashTargetX = 1.02 + tp * 0.05;
@@ -1542,6 +1660,7 @@ export function stepAnimFrame(
   updateBlink(anim, semantic);
   updateGaze(anim, semantic);
   updateBreath(anim, semantic);
+  updateBodyLanguage(anim, semantic);
 
   if (anim.celebrationTimer > 0) anim.celebrationTimer--;
   if (anim.eyeStyleTimer > 0) {

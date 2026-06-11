@@ -1,7 +1,7 @@
 import { fillRect, fillPixel, strokeArc, strokeEllipse } from "./helpers";
 import { buildColorMap } from "./colorMap";
 import { drawStageCharacter } from "./sprites";
-import { renderWalkingFeet, renderToy } from "./toys";
+import { renderToy } from "./toys";
 import {
   updateAndRenderSparks,
   updateAndRenderFloatingEmojis,
@@ -163,7 +163,6 @@ export function renderFrame(
   ctx.restore();
   ctx.restore();
 
-  renderWalkingFeet(ctx, ox, oy, spriteW, spriteH, m, anim);
   renderToy(ctx, ox, oy, spriteW, spriteH, m, anim);
 
   if (anim.quirkType === "shell_fall" && anim.quirkActive) {
@@ -208,18 +207,6 @@ export function renderFrame(
       spriteH / 2 + 2,
       pal.accent,
     );
-    ctx.globalAlpha = 1;
-  }
-
-  if (anim.idleAction === "wave" && !isSleeping) {
-    const wavePhase = Math.sin(anim.frame * 0.28);
-    const armBaseX = ox + spriteW + 1;
-    const armBaseY = Math.round(oy + spriteH / 3);
-    const handX = armBaseX + Math.round(wavePhase * 3);
-    const handY = armBaseY - Math.round(Math.abs(wavePhase) * 4);
-    ctx.globalAlpha = 0.85;
-    fillRect(ctx, armBaseX, armBaseY, 1, 4, pal.body);
-    fillRect(ctx, handX, handY, 2, 2, pal.light);
     ctx.globalAlpha = 1;
   }
 

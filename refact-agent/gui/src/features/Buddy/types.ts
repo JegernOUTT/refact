@@ -120,9 +120,20 @@ export type IdleActionType =
   | "daydream"
   | "shakeOff"
   | "peekCamera"
-  | "stumble";
+  | "stumble"
+  | "dance";
 
 export type ToyType = "duck" | "dice" | "coffee" | "bug" | "scroll";
+
+export type BuddyArmPose =
+  | "rest"
+  | "swing"
+  | "wave"
+  | "raise"
+  | "face"
+  | "drum"
+  | "hold"
+  | "hug";
 
 export type GroundFXType = "impact" | "crack" | "dust";
 
@@ -443,6 +454,15 @@ export interface BuddyAnimState {
   petSessionCount: number;
   lastPetFrame: number;
   temperamentSeed: number;
+  facing: number;
+  facingLerp: number;
+  tailPhase: number;
+  tailEnergy: number;
+  tailDroop: number;
+  armPose: BuddyArmPose;
+  armAnimPhase: number;
+  wingFlap: number;
+  dancePhase: number;
 }
 
 export interface ColorMap {

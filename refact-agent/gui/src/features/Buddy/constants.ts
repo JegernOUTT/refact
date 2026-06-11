@@ -759,6 +759,7 @@ export const STATUS_POOLS = {
   groom: ["*preen*", "*brush brush*", "self care~", "gotta look sharp ✨"],
   daydream: ["...", "huh? oh, nothing", "☁️ ...", "what if bugs... flew?"],
   wiggle: ["*wiggle*", "ready...", "hehe~"],
+  dance: ["♪ ♫ ♪", "dancing~!", "(ﾉ´ヮ`)ﾉ*: ･ﾟ", "got the groove!", "♪~ ᕕ(ᐛ)ᕗ"],
   zoomies_start: ["ZOOMIES!!", "can't catch me!!", "NYOOOM", "gotta go fast!!"],
   zoomies_end: ["*pant pant*", "okay... done", "whew!! 😮‍💨", "worth it"],
   stumble: ["oof!", "meant to do that", "whoopsie", "gravity wins again"],
