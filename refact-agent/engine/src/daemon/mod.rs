@@ -19,6 +19,7 @@ pub mod proxy;
 pub mod server;
 pub mod state;
 pub mod supervisor;
+pub mod web;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePaths {

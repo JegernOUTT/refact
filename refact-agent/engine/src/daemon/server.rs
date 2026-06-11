@@ -56,6 +56,15 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
 pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
     let auth_token = state.auth_token.clone();
     Router::new()
+        .route("/", get(crate::daemon::web::handle_project_picker))
+        .route(
+            "/p/:project_id/",
+            get(crate::daemon::web::handle_project_gui_index),
+        )
+        .route(
+            "/dist/chat/*path",
+            get(crate::daemon::web::handle_daemon_gui_asset),
+        )
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
