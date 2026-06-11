@@ -68,6 +68,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
+        .route("/daemon/v1/workers", get(workers))
         .route("/daemon/v1/worker-status", post(worker_status))
         .route(
             "/daemon/v1/projects/open",
@@ -188,6 +189,20 @@ async fn events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn workers(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+) -> Json<Vec<crate::daemon::supervisor::WorkerInfo>> {
+    let entries = state.projects.read().await.list();
+    let mut workers = Vec::new();
+    for entry in entries {
+        if let Some(worker) = state.supervisor.worker_info(&entry.id).await {
+            workers.push(worker);
+        }
+    }
+    workers.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+    Json(workers)
 }
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {

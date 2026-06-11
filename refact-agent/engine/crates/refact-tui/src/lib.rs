@@ -1,7 +1,11 @@
 pub mod app;
+pub mod approvals;
 pub mod client;
+pub mod events_pane;
+pub mod pickers;
 pub mod render;
 pub mod terminal;
+pub mod tools;
 pub mod ui;
 pub mod vendored;
 

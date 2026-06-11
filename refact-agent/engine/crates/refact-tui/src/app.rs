@@ -3,12 +3,31 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
-use crate::client::{ChatEvent, DaemonClient, OpenProjectResponse, ProjectEntry, WorkerInfo};
+use crate::approvals::{ApprovalKeyAction, ApprovalModalState};
+use crate::client::{
+    ChatEvent, DaemonClient, OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
+};
+use crate::events_pane::{DaemonEventRecord, EventsPaneState};
+use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
 use crate::terminal::TerminalSession;
+use crate::tools::{now_ms, ToolCard, ToolStatus};
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
+
+const PATCH_LIKE_FUNCTIONS: &[&str] = &[
+    "patch",
+    "text_edit",
+    "create_textdoc",
+    "update_textdoc",
+    "replace_textdoc",
+    "update_textdoc_regex",
+    "update_textdoc_by_lines",
+    "update_textdoc_anchored",
+    "apply_patch",
+    "undo_textdoc",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -31,7 +50,7 @@ pub enum TranscriptItem {
     User(String),
     Assistant(String),
     Reasoning(String, bool),
-    Tool(String),
+    Tool(ToolCard),
     Notice(String),
 }
 
@@ -117,12 +136,20 @@ pub struct App {
     composer: String,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
+    modal_picker: Option<PickerState>,
+    approval_modal: Option<ApprovalModalState>,
+    events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
     model: Option<String>,
+    mode: Option<String>,
+    pending_model: Option<String>,
+    pending_mode: Option<String>,
     session_state: SessionState,
     daemon_online: bool,
     scroll_offset: usize,
+    selected_tool_index: Option<usize>,
+    help_open: bool,
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
     stream_collector: MarkdownStreamCollector,
@@ -139,12 +166,20 @@ impl App {
             composer: String::new(),
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
+            modal_picker: None,
+            approval_modal: None,
+            events_pane: EventsPaneState::new(),
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
             model: None,
+            mode: None,
+            pending_model: None,
+            pending_mode: None,
             session_state: SessionState::Idle,
             daemon_online: true,
             scroll_offset: 0,
+            selected_tool_index: None,
+            help_open: false,
             should_quit: false,
             last_ctrl_c: None,
             stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
@@ -183,6 +218,10 @@ impl App {
         self.model.as_deref()
     }
 
+    pub fn mode(&self) -> Option<&str> {
+        self.mode.as_deref()
+    }
+
     pub fn session_state(&self) -> SessionState {
         self.session_state
     }
@@ -203,6 +242,26 @@ impl App {
         &self.picker
     }
 
+    pub fn modal_picker(&self) -> Option<&PickerState> {
+        self.modal_picker.as_ref()
+    }
+
+    pub fn approval_modal(&self) -> Option<&ApprovalModalState> {
+        self.approval_modal.as_ref()
+    }
+
+    pub fn events_pane(&self) -> &EventsPaneState {
+        &self.events_pane
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub fn selected_tool_index(&self) -> Option<usize> {
+        self.selected_tool_index
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -219,9 +278,30 @@ impl App {
         lines as u16 + 2
     }
 
-    fn open_picker(&mut self, projects: Vec<ProjectEntry>) {
+    fn open_project_picker(&mut self, projects: Vec<ProjectEntry>) {
         self.picker = ProjectPickerState::new(projects);
         self.composer_mode = ComposerMode::ProjectPicker;
+        self.modal_picker = None;
+    }
+
+    fn open_model_picker(&mut self, caps: Value) {
+        let items = model_items_from_caps(&caps);
+        if items.is_empty() {
+            self.add_notice("No models returned by caps");
+        } else {
+            self.modal_picker = Some(PickerState::new(PickerKind::Model, items));
+            self.composer_mode = ComposerMode::Chat;
+        }
+    }
+
+    fn open_mode_picker(&mut self, modes: Value) {
+        let items = mode_items_from_response(&modes);
+        if items.is_empty() {
+            self.add_notice("No modes returned by worker");
+        } else {
+            self.modal_picker = Some(PickerState::new(PickerKind::Mode, items));
+            self.composer_mode = ComposerMode::Chat;
+        }
     }
 
     fn set_project(&mut self, project: OpenProjectResponse) {
@@ -236,6 +316,9 @@ impl App {
         )));
         self.stream_collector.clear();
         self.composer_mode = ComposerMode::Chat;
+        self.modal_picker = None;
+        self.approval_modal = None;
+        self.selected_tool_index = None;
     }
 
     fn new_chat(&mut self) {
@@ -245,9 +328,11 @@ impl App {
             .push(TranscriptItem::Notice("New chat started".to_string()));
         self.session_state = SessionState::Idle;
         self.stream_collector.clear();
+        self.approval_modal = None;
+        self.selected_tool_index = None;
     }
 
-    fn submit_composer(&mut self) -> Option<String> {
+    fn submit_composer(&mut self) -> Option<(String, Value)> {
         let prompt = self.composer.trim().to_string();
         if prompt.is_empty() || self.current_project.is_none() {
             return None;
@@ -258,7 +343,27 @@ impl App {
             .push(TranscriptItem::Assistant(String::new()));
         self.session_state = SessionState::Generating;
         self.stream_collector.clear();
-        Some(prompt)
+        let params = self.take_pending_params();
+        Some((prompt, params))
+    }
+
+    fn take_pending_params(&mut self) -> Value {
+        let mut patch = Map::new();
+        if let Some(model) = self.pending_model.take() {
+            patch.insert("model".to_string(), Value::String(model.clone()));
+            self.model = Some(model);
+        }
+        if let Some(mode) = self.pending_mode.take() {
+            patch.insert("mode".to_string(), Value::String(mode.clone()));
+            patch.insert("tool_use".to_string(), Value::String(mode.clone()));
+            self.mode = Some(mode);
+        }
+        if self.mode.is_none() {
+            patch.insert("mode".to_string(), Value::String("agent".to_string()));
+            patch.insert("tool_use".to_string(), Value::String("agent".to_string()));
+            self.mode = Some("agent".to_string());
+        }
+        Value::Object(patch)
     }
 
     fn append_assistant(&mut self, text: &str) {
@@ -313,12 +418,9 @@ impl App {
                 }
             }
             "runtime_updated" => self.handle_runtime_updated(&event.raw),
-            "pause_required" => {
-                self.session_state = SessionState::Paused;
-                self.add_notice(
-                    "Approval required; use the web UI for rich approvals in this version.",
-                );
-            }
+            "pause_required" => self.handle_pause_required(&event.raw),
+            "pause_cleared" => self.approval_modal = None,
+            "message_added" => self.handle_message_added(&event.raw),
             _ => {}
         }
     }
@@ -330,9 +432,52 @@ impl App {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
+            self.mode = thread
+                .get("mode")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
+            self.rebuild_transcript(messages);
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
+            if let Some(modal) = ApprovalModalState::from_event(runtime) {
+                self.approval_modal = Some(modal);
+            }
+        }
+    }
+
+    fn rebuild_transcript(&mut self, messages: &[Value]) {
+        self.transcript.clear();
+        self.selected_tool_index = None;
+        for message in messages {
+            match message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "user" => {
+                    if let Some(text) = content_text(message) {
+                        self.transcript.push(TranscriptItem::User(text));
+                    }
+                }
+                "assistant" => {
+                    if let Some(text) = content_text(message) {
+                        if !text.is_empty() {
+                            self.transcript.push(TranscriptItem::Assistant(text));
+                        }
+                    }
+                    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                        for call in calls {
+                            self.push_tool_call(call);
+                        }
+                    }
+                }
+                "tool" => self.handle_tool_message(message),
+                _ => {}
+            }
         }
     }
 
@@ -358,6 +503,14 @@ impl App {
         };
     }
 
+    fn handle_pause_required(&mut self, raw: &Value) {
+        self.session_state = SessionState::Paused;
+        self.approval_modal = ApprovalModalState::from_event(raw);
+        if self.approval_modal.is_none() {
+            self.add_notice("Approval required but no tool metadata was provided");
+        }
+    }
+
     fn handle_stream_delta(&mut self, raw: &Value) {
         let Some(ops) = raw.get("ops").and_then(Value::as_array) else {
             return;
@@ -381,8 +534,7 @@ impl App {
                         .into_iter()
                         .flatten()
                     {
-                        self.transcript
-                            .push(TranscriptItem::Tool(tool_summary(tool)));
+                        self.push_tool_call(tool);
                     }
                 }
                 _ => {}
@@ -390,14 +542,160 @@ impl App {
         }
     }
 
+    fn handle_message_added(&mut self, raw: &Value) {
+        let Some(message) = raw.get("message").or_else(|| raw.get("msg")) else {
+            return;
+        };
+        match message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "tool" => self.handle_tool_message(message),
+            "assistant" => {
+                if let Some(text) = content_text(message) {
+                    self.transcript.push(TranscriptItem::Assistant(text));
+                }
+            }
+            "user" => {
+                if let Some(text) = content_text(message) {
+                    self.transcript.push(TranscriptItem::User(text));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_tool_message(&mut self, message: &Value) {
+        let id = message
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let result = content_text(message).unwrap_or_default();
+        let failed = message
+            .get("tool_failed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let completed_at_ms = now_ms();
+        self.complete_tool(
+            &id,
+            result,
+            if failed {
+                ToolStatus::Error
+            } else {
+                ToolStatus::Success
+            },
+            completed_at_ms,
+        );
+    }
+
+    fn push_tool_call(&mut self, tool: &Value) {
+        let card = ToolCard::from_tool_call(tool);
+        self.transcript.push(TranscriptItem::Tool(card));
+        self.selected_tool_index = Some(self.transcript.len() - 1);
+    }
+
+    fn complete_tool(
+        &mut self,
+        id: &str,
+        result: String,
+        status: ToolStatus,
+        completed_at_ms: u64,
+    ) {
+        for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
+            if let TranscriptItem::Tool(card) = item {
+                if card.id == id || id.is_empty() {
+                    card.result = result;
+                    card.status = status;
+                    card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    self.selected_tool_index = Some(idx);
+                    return;
+                }
+            }
+        }
+        let mut card = ToolCard::from_tool_call(&json!({"id": id, "name": "tool"}));
+        card.result = result;
+        card.status = status;
+        card.duration_ms = Some(0);
+        self.transcript.push(TranscriptItem::Tool(card));
+        self.selected_tool_index = Some(self.transcript.len() - 1);
+    }
+
+    fn toggle_selected_tool(&mut self) -> bool {
+        let Some(index) = self.selected_tool_index else {
+            return false;
+        };
+        if let Some(TranscriptItem::Tool(card)) = self.transcript.get_mut(index) {
+            card.toggle();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cycle_tool_selection(&mut self) {
+        let indices = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| matches!(item, TranscriptItem::Tool(_)).then_some(idx))
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            self.selected_tool_index = None;
+            return;
+        }
+        let next = match self.selected_tool_index {
+            Some(current) => indices
+                .iter()
+                .position(|idx| *idx == current)
+                .map(|pos| indices[(pos + 1) % indices.len()])
+                .unwrap_or(indices[0]),
+            None => indices[0],
+        };
+        self.selected_tool_index = Some(next);
+    }
+
+    fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
+        self.events_pane.set_workers(workers);
+    }
+
+    fn push_daemon_event(&mut self, event: DaemonEventRecord) {
+        self.events_pane.push_event(event);
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.kind != KeyEventKind::Press {
             return AppAction::None;
         }
+        if self.help_open {
+            self.help_open = false;
+            return AppAction::None;
+        }
+        if let Some(action) = self.handle_approval_key(key) {
+            return action;
+        }
+        if self.modal_picker.is_some() {
+            return self.handle_modal_picker_key(key);
+        }
         if self.composer_mode == ComposerMode::ProjectPicker {
-            return self.handle_picker_key(key);
+            return self.handle_project_picker_key(key);
         }
         match key {
+            KeyEvent {
+                code: KeyCode::Char('?'),
+                ..
+            } => {
+                self.help_open = true;
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::F(2),
+                ..
+            } => {
+                self.events_pane.toggle();
+                AppAction::RefreshWorkers
+            }
             KeyEvent {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::CONTROL,
@@ -420,6 +718,16 @@ impl App {
                 ..
             } => AppAction::LoadProjects,
             KeyEvent {
+                code: KeyCode::Char('m'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => AppAction::LoadModels,
+            KeyEvent {
+                code: KeyCode::Char('o'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => AppAction::LoadModes,
+            KeyEvent {
                 code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -439,7 +747,10 @@ impl App {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if matches!(
+                if self.events_pane.open {
+                    self.events_pane.open = false;
+                    AppAction::None
+                } else if matches!(
                     self.session_state,
                     SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
                 ) {
@@ -449,6 +760,22 @@ impl App {
                 } else {
                     AppAction::None
                 }
+            }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
+                self.cycle_tool_selection();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers,
+                ..
+            } if self.composer.is_empty()
+                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+            {
+                self.toggle_selected_tool();
+                AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Enter,
@@ -461,9 +788,13 @@ impl App {
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
+            } if self.composer.is_empty() && self.toggle_selected_tool() => AppAction::None,
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
             } => self
                 .submit_composer()
-                .map(AppAction::SendMessage)
+                .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
                 .unwrap_or(AppAction::None),
             KeyEvent {
                 code: KeyCode::Backspace,
@@ -498,12 +829,45 @@ impl App {
         }
     }
 
+    fn handle_approval_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        let modal = self.approval_modal.as_mut()?;
+        match modal.handle_key(key) {
+            ApprovalKeyAction::None | ApprovalKeyAction::ToggleFullArgs => Some(AppAction::None),
+            ApprovalKeyAction::ApproveOnce => {
+                let decisions = modal.decisions(true);
+                self.approval_modal = None;
+                Some(AppAction::SendToolDecisions {
+                    decisions,
+                    patch: None,
+                })
+            }
+            ApprovalKeyAction::ApproveForChat => {
+                let patch = approval_patch(modal);
+                let decisions = modal.decisions(true);
+                self.approval_modal = None;
+                Some(AppAction::SendToolDecisions {
+                    decisions,
+                    patch: Some(patch),
+                })
+            }
+            ApprovalKeyAction::Deny => {
+                let decisions = modal.decisions(false);
+                self.approval_modal = None;
+                Some(AppAction::SendToolDecisions {
+                    decisions,
+                    patch: None,
+                })
+            }
+        }
+    }
+
     fn ctrl_c_action(&mut self) -> AppAction {
         if matches!(
             self.session_state,
             SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
         ) {
             self.session_state = SessionState::Idle;
+            self.approval_modal = None;
             self.add_notice("Cancel requested");
             self.last_ctrl_c = Some(Instant::now());
             return AppAction::Abort;
@@ -521,7 +885,7 @@ impl App {
         AppAction::None
     }
 
-    fn handle_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    fn handle_project_picker_key(&mut self, key: KeyEvent) -> AppAction {
         match key {
             KeyEvent {
                 code: KeyCode::Esc, ..
@@ -572,15 +936,107 @@ impl App {
             _ => AppAction::None,
         }
     }
+
+    fn handle_modal_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        let Some(picker) = self.modal_picker.as_mut() else {
+            return AppAction::None;
+        };
+        match key {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                self.modal_picker = None;
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
+                if let Some(item) = picker.selected_item() {
+                    match picker.kind {
+                        PickerKind::Model => {
+                            self.pending_model = Some(item.id.clone());
+                            self.model = Some(item.id.clone());
+                            self.add_notice(format!(
+                                "Model selected for next message: {}",
+                                item.title
+                            ));
+                        }
+                        PickerKind::Mode => {
+                            self.pending_mode = Some(item.id.clone());
+                            self.mode = Some(item.id.clone());
+                            self.add_notice(format!(
+                                "Mode selected for next message: {}",
+                                item.title
+                            ));
+                        }
+                    }
+                }
+                self.modal_picker = None;
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            } => {
+                picker.select_prev();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            } => {
+                picker.select_next();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
+                picker.pop_filter();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers,
+                ..
+            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                picker.push_filter(ch);
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_set_approval(&mut self, modal: ApprovalModalState) {
+        self.approval_modal = Some(modal);
+        self.session_state = SessionState::Paused;
+    }
+
+    #[cfg(test)]
+    pub fn test_push_tool(&mut self, card: ToolCard) {
+        self.transcript.push(TranscriptItem::Tool(card));
+        self.selected_tool_index = Some(self.transcript.len() - 1);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
     None,
     LoadProjects,
+    LoadModels,
+    LoadModes,
+    RefreshWorkers,
     OpenProject(PathBuf),
     SubscribeCurrent,
-    SendMessage(String),
+    SendMessage {
+        prompt: String,
+        params: Value,
+    },
+    SendToolDecisions {
+        decisions: Vec<ToolDecision>,
+        patch: Option<Value>,
+    },
     Abort,
 }
 
@@ -590,8 +1046,13 @@ enum RuntimeEvent {
     Tick,
     Chat(ChatEvent),
     ChatDisconnected(String),
+    DaemonEvent(DaemonEventRecord),
+    DaemonEventsDisconnected(String),
     ProjectsLoaded(Result<Vec<ProjectEntry>, String>),
     ProjectOpened(Result<OpenProjectResponse, String>),
+    ModelsLoaded(Result<Value, String>),
+    ModesLoaded(Result<Value, String>),
+    WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
 }
 
@@ -611,6 +1072,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     spawn_input_task(tx.clone());
     spawn_tick_task(tx.clone());
+    spawn_daemon_events_task(client.clone(), tx.clone());
+    spawn_worker_refresh_task(client.clone(), tx.clone());
     if let Some(project_id) = app.current_project_id() {
         spawn_subscription_task(
             client.clone(),
@@ -642,7 +1105,13 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 app.daemon_online = false;
                 app.add_notice(format!("SSE disconnected: {message}; reconnecting…"));
             }
-            RuntimeEvent::ProjectsLoaded(Ok(projects)) => app.open_picker(projects),
+            RuntimeEvent::DaemonEvent(event) => app.push_daemon_event(event),
+            RuntimeEvent::DaemonEventsDisconnected(message) => {
+                app.add_notice(format!(
+                    "Daemon events disconnected: {message}; reconnecting…"
+                ));
+            }
+            RuntimeEvent::ProjectsLoaded(Ok(projects)) => app.open_project_picker(projects),
             RuntimeEvent::ProjectsLoaded(Err(error)) => {
                 app.add_notice(format!("Failed to list projects: {error}"))
             }
@@ -659,6 +1128,20 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             }
             RuntimeEvent::ProjectOpened(Err(error)) => {
                 app.add_notice(format!("Failed to open project: {error}"))
+            }
+            RuntimeEvent::ModelsLoaded(Ok(caps)) => app.open_model_picker(caps),
+            RuntimeEvent::ModelsLoaded(Err(error)) => {
+                app.add_notice(format!("Failed to load models: {error}"))
+            }
+            RuntimeEvent::ModesLoaded(Ok(modes)) => app.open_mode_picker(modes),
+            RuntimeEvent::ModesLoaded(Err(error)) => {
+                app.add_notice(format!("Failed to load modes: {error}"))
+            }
+            RuntimeEvent::WorkersLoaded(Ok(workers)) => app.set_workers(workers),
+            RuntimeEvent::WorkersLoaded(Err(error)) => {
+                if app.events_pane.open {
+                    app.add_notice(format!("Failed to refresh workers: {error}"));
+                }
             }
             RuntimeEvent::CommandFinished(Ok(())) => {}
             RuntimeEvent::CommandFinished(Err(error)) => {
@@ -688,6 +1171,33 @@ fn run_action(
                 let _ = tx.send(RuntimeEvent::ProjectsLoaded(result)).await;
             });
         }
+        AppAction::LoadModels => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .get_caps(&project_id)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::ModelsLoaded(result)).await;
+                });
+            }
+        }
+        AppAction::LoadModes => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .get_chat_modes(&project_id)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::ModesLoaded(result)).await;
+                });
+            }
+        }
+        AppAction::RefreshWorkers => refresh_workers(client.clone(), tx.clone()),
         AppAction::OpenProject(root) => {
             let client = client.clone();
             let tx = tx.clone();
@@ -709,22 +1219,40 @@ fn run_action(
                 );
             }
         }
-        AppAction::SendMessage(prompt) => {
+        AppAction::SendMessage { prompt, params } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
                 let client = client.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let result = async {
-                        client
-                            .send_set_params(
-                                &project_id,
-                                &chat_id,
-                                json!({"mode": "agent", "tool_use": "agent"}),
-                            )
-                            .await?;
+                        if params.as_object().is_some_and(|object| !object.is_empty()) {
+                            client
+                                .send_set_params(&project_id, &chat_id, params)
+                                .await?;
+                        }
                         client
                             .send_user_message(&project_id, &chat_id, &prompt)
+                            .await
+                    }
+                    .await
+                    .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                });
+            }
+        }
+        AppAction::SendToolDecisions { decisions, patch } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        if let Some(patch) = patch {
+                            client.send_set_params(&project_id, &chat_id, patch).await?;
+                        }
+                        client
+                            .send_tool_decisions(&project_id, &chat_id, decisions)
                             .await
                     }
                     .await
@@ -788,6 +1316,69 @@ fn spawn_tick_task(tx: mpsc::Sender<RuntimeEvent>) {
     });
 }
 
+fn spawn_worker_refresh_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            refresh_workers(client.clone(), tx.clone());
+            if tx.is_closed() {
+                break;
+            }
+        }
+    });
+}
+
+fn refresh_workers(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+    tokio::spawn(async move {
+        let result = client
+            .list_workers()
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx.send(RuntimeEvent::WorkersLoaded(result)).await;
+    });
+}
+
+fn spawn_daemon_events_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+    tokio::spawn(async move {
+        loop {
+            match client.subscribe_daemon_events().await {
+                Ok(mut stream) => {
+                    while let Some(event) = stream.next().await {
+                        match event {
+                            Ok(event) => {
+                                if tx.send(RuntimeEvent::DaemonEvent(event)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                if tx
+                                    .send(RuntimeEvent::DaemonEventsDisconnected(error.to_string()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if tx
+                        .send(RuntimeEvent::DaemonEventsDisconnected(error.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
 fn spawn_subscription_task(
     client: DaemonClient,
     project_id: String,
@@ -833,43 +1424,41 @@ fn spawn_subscription_task(
     });
 }
 
-fn tool_summary(tool: &Value) -> String {
-    let name = tool
-        .get("function")
-        .and_then(|function| function.get("name"))
-        .or_else(|| tool.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("tool");
-    let args = tool
-        .get("function")
-        .and_then(|function| function.get("arguments"))
-        .or_else(|| tool.get("arguments"))
-        .or_else(|| tool.get("args"))
-        .or_else(|| tool.get("input"))
-        .map(|value| match value {
-            Value::String(value) => value.clone(),
-            value => value.to_string(),
-        })
-        .unwrap_or_default();
-    let args = args.replace('\n', " ");
-    let mut preview = String::new();
-    for (idx, ch) in args.chars().enumerate() {
-        if idx >= 96 {
-            preview.push('…');
-            break;
-        }
-        preview.push(ch);
+fn content_text(message: &Value) -> Option<String> {
+    match message.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => Some(
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        value => Some(value_to_compact_string(value)),
     }
-    if preview.is_empty() {
-        name.to_string()
+}
+
+fn value_to_compact_string(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn approval_patch(modal: &ApprovalModalState) -> Value {
+    let all_patch_like = modal.reasons().iter().all(|reason| {
+        PATCH_LIKE_FUNCTIONS
+            .iter()
+            .any(|name| *name == reason.tool_name)
+    });
+    if all_patch_like {
+        json!({"auto_approve_editing_tools": true})
     } else {
-        format!("{name}({preview})")
+        json!({"auto_approve_dangerous_commands": true})
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approvals::PauseReason;
 
     fn project() -> OpenProjectResponse {
         OpenProjectResponse {
@@ -891,7 +1480,10 @@ mod tests {
         let mut app = App::new(project());
         app.composer = "hello".to_string();
         let action = app.handle_key(key(KeyCode::Enter));
-        assert_eq!(action, AppAction::SendMessage("hello".to_string()));
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "hello"
+        ));
         assert_eq!(app.session_state(), SessionState::Generating);
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -952,5 +1544,68 @@ mod tests {
         ]);
         picker.filter = "bet".to_string();
         assert_eq!(picker.filtered_projects()[0].slug, "beta");
+    }
+
+    #[test]
+    fn synthetic_pause_approval_yields_decision_and_clears_modal() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            kind: "pause_required".to_string(),
+            raw: json!({"reasons": [{"type": "confirmation", "tool_name": "shell", "command": "echo hi", "rule": "*", "tool_call_id": "call-1"}]}),
+        });
+        assert!(app.approval_modal().is_some());
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert!(app.approval_modal().is_none());
+        assert_eq!(
+            action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-1".to_string(),
+                    accepted: true,
+                }],
+                patch: None,
+            }
+        );
+    }
+
+    #[test]
+    fn approve_for_chat_sets_patch_scope() {
+        let mut app = App::new(project());
+        app.test_set_approval(ApprovalModalState::new(vec![PauseReason {
+            reason_type: "confirmation".to_string(),
+            tool_name: "update_textdoc".to_string(),
+            command: "{}".to_string(),
+            rule: "default".to_string(),
+            tool_call_id: "call-1".to_string(),
+            integr_config_path: None,
+        }]));
+        let action = app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-1".to_string(),
+                    accepted: true,
+                }],
+                patch: Some(json!({"auto_approve_editing_tools": true})),
+            }
+        );
+    }
+
+    #[test]
+    fn picker_selection_applies_params_to_next_message() {
+        let mut app = App::new(project());
+        app.open_model_picker(json!({"chat_models": {"m1": {"name": "Model One"}}}));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        app.composer = "hello".to_string();
+        let action = app.handle_key(key(KeyCode::Enter));
+        match action {
+            AppAction::SendMessage { params, .. } => {
+                assert_eq!(params["model"], "m1");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 }

@@ -7,6 +7,8 @@ use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::events_pane::{parse_daemon_event, DaemonEventRecord};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP error: {0}")]
@@ -77,6 +79,7 @@ pub struct ChatEvent {
 }
 
 pub type ChatEventStream = BoxStream<'static, Result<ChatEvent, ClientError>>;
+pub type DaemonEventStream = BoxStream<'static, Result<DaemonEventRecord, ClientError>>;
 
 impl DaemonClient {
     pub fn new(
@@ -114,6 +117,48 @@ impl DaemonClient {
             .await
             .map_err(|error| ClientError::Http(format!("failed to open project: {error}")))?;
         decode_response(response).await
+    }
+
+    pub async fn list_workers(&self) -> Result<Vec<WorkerInfo>, ClientError> {
+        self.get_json("/daemon/v1/workers").await
+    }
+
+    pub async fn get_caps(&self, project_id: &str) -> Result<Value, ClientError> {
+        let path = format!("/p/{}/v1/caps", encode_path_segment(project_id));
+        self.get_json(&path).await
+    }
+
+    pub async fn get_chat_modes(&self, project_id: &str) -> Result<Value, ClientError> {
+        let path = format!("/p/{}/v1/chat-modes", encode_path_segment(project_id));
+        self.get_json(&path).await
+    }
+
+    pub async fn subscribe_daemon_events(&self) -> Result<DaemonEventStream, ClientError> {
+        let response = self
+            .with_auth(self.client.get(self.url("/daemon/v1/events?follow=true")))
+            .send()
+            .await
+            .map_err(|error| {
+                ClientError::Http(format!("failed to subscribe to daemon events: {error}"))
+            })?;
+        if !response.status().is_success() {
+            return Err(status_error(response).await);
+        }
+        Ok(response
+            .bytes_stream()
+            .map_err(|error| ClientError::Sse(error.to_string()))
+            .eventsource()
+            .filter_map(|event| async move {
+                match event {
+                    Ok(event) if event.data.trim().is_empty() => None,
+                    Ok(event) => Some(
+                        parse_daemon_event(&event.data)
+                            .map_err(|error| ClientError::Json(error.to_string())),
+                    ),
+                    Err(error) => Some(Err(ClientError::Sse(error.to_string()))),
+                }
+            })
+            .boxed())
     }
 
     pub async fn subscribe_chat(
@@ -191,6 +236,24 @@ impl DaemonClient {
             json!({
                 "client_request_id": request_id("abort"),
                 "type": "abort",
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_tool_decisions(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        decisions: Vec<ToolDecision>,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": request_id("tool-decisions"),
+                "type": "tool_decisions",
+                "decisions": decisions,
             }),
         )
         .await
