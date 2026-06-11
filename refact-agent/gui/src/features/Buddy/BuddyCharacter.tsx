@@ -2,6 +2,7 @@ import React, { type CSSProperties } from "react";
 import { BuddyCanvas } from "./BuddyCanvas";
 import type {
   BuddyControl,
+  BuddyCursorBridge,
   BuddyEnvContext,
   BuddyEvent,
   BuddyScenePose,
@@ -29,6 +30,8 @@ interface BuddyCharacterProps {
   arrived?: boolean;
   travelDirection?: "left" | "right";
   envContext?: BuddyEnvContext | null;
+  spritePointer?: boolean;
+  cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   speechText?: string | null;
   speechControls?: BuddyControl[];
   speechIntent?: string;
@@ -77,6 +80,8 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   arrived = false,
   travelDirection = "right",
   envContext,
+  spritePointer = false,
+  cursorBridgeRef,
   speechText,
   speechControls,
   speechIntent,
@@ -111,6 +116,8 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
         onEvent={onCanvasEvent}
         displaySize={displaySize}
         envContext={envContext}
+        spritePointer={spritePointer}
+        cursorBridgeRef={cursorBridgeRef}
         speechOverride={speechText}
         speechControls={speechControls}
         speechIntent={speechIntent}

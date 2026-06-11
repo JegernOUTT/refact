@@ -1,4 +1,10 @@
-import { fillRect, fillPixel, strokeArc, strokeEllipse } from "./helpers";
+import {
+  fillEllipse,
+  fillPixel,
+  fillRect,
+  strokeArc,
+  strokeEllipse,
+} from "./helpers";
 import { buildColorMap } from "./colorMap";
 import { drawStageCharacter } from "./sprites";
 import { renderToy } from "./toys";
@@ -95,6 +101,7 @@ export function renderFrame(
   ctx: CanvasRenderingContext2D,
   anim: BuddyAnimState,
   semantic: BuddySemanticState,
+  rawPixelScale = 1,
 ): void {
   ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
   ctx.imageSmoothingEnabled = false;
@@ -168,13 +175,13 @@ export function renderFrame(
   updateAndRenderGroundEffects(ctx, anim, pal.accent);
 
   ctx.globalAlpha = 0.12;
-  const shadowWidth = Math.round((spriteW - 6) * anim.squashX);
-  fillRect(
+  const shadowWidth = (spriteW - 6) * anim.squashX;
+  fillEllipse(
     ctx,
-    ox + spriteW / 2 - shadowWidth / 2,
-    oy + spriteH + 1,
-    shadowWidth,
-    2,
+    ox + spriteW / 2,
+    oy + spriteH + 2,
+    shadowWidth / 2 + 1,
+    1.4,
     "#000",
   );
   ctx.globalAlpha = 1;
@@ -219,14 +226,14 @@ export function renderFrame(
   drawStageCharacter(ctx, stage, ox, oy, m, anim, semantic.paletteIndex);
   if (anim.blushTimer > 0 || semantic.mood.affection > 70) {
     ctx.globalAlpha = 0.3 + Math.sin(anim.frame * 0.15) * 0.1;
-    const cheekY = oy + Math.round(spriteH * 0.62);
-    fillRect(ctx, ox + Math.round(spriteW * 0.14), cheekY, 3, 1, "#FB7185");
-    fillRect(
+    const cheekY = oy + spriteH * 0.62 + 0.5;
+    fillEllipse(ctx, ox + spriteW * 0.14 + 1.5, cheekY, 1.8, 0.8, "#FB7185");
+    fillEllipse(
       ctx,
-      ox + spriteW - Math.round(spriteW * 0.14) - 3,
+      ox + spriteW - spriteW * 0.14 - 1.5,
       cheekY,
-      3,
-      1,
+      1.8,
+      0.8,
       "#FB7185",
     );
     ctx.globalAlpha = 1;
@@ -337,12 +344,18 @@ export function renderFrame(
     for (let y = 0; y < CANVAS_SIZE; y += 3)
       fillRect(ctx, 0, y, CANVAS_SIZE, 1, "#000");
     if (Math.random() < anim.screenGlitch) {
+      const raw = Math.max(1, rawPixelScale);
       const gy = (Math.random() * CANVAS_SIZE) | 0;
       const gh = (2 + Math.random() * 4) | 0;
       const shift = ((Math.random() - 0.5) * 8) | 0;
       try {
-        const d = ctx.getImageData(0, gy, CANVAS_SIZE, gh);
-        ctx.putImageData(d, shift, gy);
+        const d = ctx.getImageData(
+          0,
+          Math.round(gy * raw),
+          Math.max(1, Math.round(CANVAS_SIZE * raw)),
+          Math.max(1, Math.round(gh * raw)),
+        );
+        ctx.putImageData(d, Math.round(shift * raw), Math.round(gy * raw));
       } catch (_) {
         void 0;
       }

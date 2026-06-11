@@ -259,7 +259,7 @@ export const BuddyHome: React.FC = () => {
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
   const executeOpportunityAction = useExecuteBuddyAction();
   const buddy = useBuddyState();
-  const { state } = buddy;
+  const { state, signal: buddySignal } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [speechIndex, setSpeechIndex] = useState(0);
@@ -353,6 +353,7 @@ export const BuddyHome: React.FC = () => {
 
   const handleCare = useCallback(
     async (action: BuddyCareAction, toy?: string) => {
+      buddySignal(`care_${action}`);
       await executeBuddyAction(
         {
           id: `care-${action}`,
@@ -364,7 +365,7 @@ export const BuddyHome: React.FC = () => {
         dispatch,
       );
     },
-    [dispatch],
+    [buddySignal, dispatch],
   );
 
   const handlePromptChange = useCallback(

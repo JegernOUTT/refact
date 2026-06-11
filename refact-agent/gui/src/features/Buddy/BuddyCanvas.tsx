@@ -105,6 +105,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   className,
   style,
   envContext,
+  spritePointer = false,
+  cursorBridgeRef,
   speechOverride,
   speechControls,
   speechIntent,
@@ -195,11 +197,25 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         return;
       }
 
-      const ctx = canvasRef.current?.getContext("2d");
-      if (ctx) {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (canvas && ctx) {
+        const pixelRatio = Math.min(
+          2,
+          Math.max(1, window.devicePixelRatio || 1),
+        );
+        const targetSize = Math.max(1, Math.round(displaySize * pixelRatio));
+        if (canvas.width !== targetSize || canvas.height !== targetSize) {
+          canvas.width = targetSize;
+          canvas.height = targetSize;
+        }
+        const backingScale = targetSize / CANVAS_SIZE;
         const sem = semanticRef.current;
         stepAnimFrame(animRef.current, sem, emit, envRef.current);
-        renderFrame(ctx, animRef.current, sem);
+        ctx.save();
+        ctx.scale(backingScale, backingScale);
+        renderFrame(ctx, animRef.current, sem, backingScale);
+        ctx.restore();
 
         const anim = animRef.current;
         const previous = bubbleViewRef.current;
@@ -310,23 +326,24 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     speechControlCount,
   ]);
 
-  const toCanvasCoords = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const clientToCanvasCoords = useCallback(
+    (clientX: number, clientY: number) => {
       const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return null;
+      if (!rect || rect.width === 0 || rect.height === 0) return null;
+      const clampNorm = (value: number) => Math.max(-1.6, Math.min(1.6, value));
       return {
-        x: ((e.clientX - rect.left) / rect.width) * CANVAS_SIZE,
-        y: ((e.clientY - rect.top) / rect.height) * CANVAS_SIZE,
-        normX: ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        normY: ((e.clientY - rect.top) / rect.height) * 2 - 1,
+        x: ((clientX - rect.left) / rect.width) * CANVAS_SIZE,
+        y: ((clientY - rect.top) / rect.height) * CANVAS_SIZE,
+        normX: clampNorm(((clientX - rect.left) / rect.width) * 2 - 1),
+        normY: clampNorm(((clientY - rect.top) / rect.height) * 2 - 1),
       };
     },
     [],
   );
 
-  const onMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+  const applyPointerMove = useCallback(
+    (clientX: number, clientY: number) => {
+      const coords = clientToCanvasCoords(clientX, clientY);
       if (!coords) return;
       const anim = animRef.current;
       anim.mouseSpeed = Math.sqrt(
@@ -347,7 +364,14 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       anim.mouseProximity = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / 80);
       anim.mouseAngle = Math.atan2(coords.normY, coords.normX);
     },
-    [toCanvasCoords],
+    [clientToCanvasCoords],
+  );
+
+  const onMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      applyPointerMove(e.clientX, e.clientY);
+    },
+    [applyPointerMove],
   );
 
   const onMouseLeave = useCallback(() => {
@@ -358,9 +382,20 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     anim.dragging = false;
   }, []);
 
+  useEffect(() => {
+    if (!cursorBridgeRef) return;
+    cursorBridgeRef.current = {
+      move: applyPointerMove,
+      leave: onMouseLeave,
+    };
+    return () => {
+      cursorBridgeRef.current = null;
+    };
+  }, [applyPointerMove, cursorBridgeRef, onMouseLeave]);
+
   const onMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+    (e: React.MouseEvent<HTMLElement>) => {
+      const coords = clientToCanvasCoords(e.clientX, e.clientY);
       if (!coords) return;
       const stage = semanticRef.current.progress.stage;
       const [spriteW] = STAGE_SIZES[stage] ?? [28, 18];
@@ -374,7 +409,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         animRef.current.dragging = true;
       }
     },
-    [toCanvasCoords],
+    [clientToCanvasCoords],
   );
 
   const onMouseUp = useCallback(() => {
@@ -387,8 +422,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   }, []);
 
   const onClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+    (e: React.MouseEvent<HTMLElement>) => {
+      const coords = clientToCanvasCoords(e.clientX, e.clientY);
       if (!coords) return;
       const stage = semanticRef.current.progress.stage;
       handlePet(
@@ -400,7 +435,16 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         semanticRef.current,
       );
     },
-    [toCanvasCoords, emit],
+    [clientToCanvasCoords, emit],
+  );
+
+  const scaleK = displaySize / CANVAS_SIZE;
+  const [spriteHitW, spriteHitH] = STAGE_SIZES[state.progress.stage] ?? [
+    28, 18,
+  ];
+  const hitDiameter = Math.round((spriteHitW + 12) * 1.8 * scaleK);
+  const hitHeight = Math.round(
+    Math.max(hitDiameter * 0.84, (spriteHitH + 14) * 1.8 * scaleK),
   );
 
   return (
@@ -412,26 +456,48 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         width: displaySize,
         height: displaySize,
         flexShrink: 0,
+        pointerEvents: spritePointer ? "none" : undefined,
         ...style,
       }}
     >
       <canvas
         ref={canvasRef}
-        width={CANVAS_SIZE}
-        height={CANVAS_SIZE}
+        width={displaySize}
+        height={displaySize}
         style={{
           width: displaySize,
           height: displaySize,
-          imageRendering: "pixelated",
           display: "block",
-          cursor: "pointer",
+          cursor: spritePointer ? "default" : "pointer",
+          pointerEvents: spritePointer ? "none" : undefined,
         }}
-        onMouseMove={onMouseMove}
-        onMouseLeave={onMouseLeave}
-        onMouseDown={onMouseDown}
-        onMouseUp={onMouseUp}
-        onClick={onClick}
+        onMouseMove={spritePointer ? undefined : onMouseMove}
+        onMouseLeave={spritePointer ? undefined : onMouseLeave}
+        onMouseDown={spritePointer ? undefined : onMouseDown}
+        onMouseUp={spritePointer ? undefined : onMouseUp}
+        onClick={spritePointer ? undefined : onClick}
       />
+      {spritePointer && (
+        <div
+          data-testid="buddy-sprite-hit"
+          style={{
+            position: "absolute",
+            left: `calc(50% + ${bubbleView.walkOffsetPx}px)`,
+            top: Math.round(CANVAS_CENTER_Y * scaleK),
+            width: hitDiameter,
+            height: hitHeight,
+            transform: "translate(-50%, -50%)",
+            borderRadius: 9999,
+            pointerEvents: "auto",
+            cursor: "pointer",
+          }}
+          onMouseMove={onMouseMove}
+          onMouseLeave={onMouseLeave}
+          onMouseDown={onMouseDown}
+          onMouseUp={onMouseUp}
+          onClick={onClick}
+        />
+      )}
       {displaySize >= 100 && (
         <BuddySpeechBubble
           text={bubbleView.text}

@@ -27,6 +27,7 @@ import {
 import {
   drawAirship,
   drawAlpineRidge,
+  drawCloudShadows,
   drawGhibliClouds,
   drawGreatTree,
   drawKodama,
@@ -145,6 +146,7 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
   drawWeatherAtmosphere(drawArgs);
   drawWorldObjects(drawArgs);
   drawGround(drawArgs);
+  drawCloudShadows(drawArgs);
   drawWinterGroundDust(drawArgs);
   drawStream(drawArgs);
   drawPond(drawArgs);

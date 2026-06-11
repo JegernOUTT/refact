@@ -1,5 +1,48 @@
-import { fillPixel, fillRect } from "./helpers";
+import {
+  fillCircle,
+  fillEllipse,
+  fillPixel,
+  fillRect,
+  strokeArc,
+  strokeSeg,
+} from "./helpers";
 import type { BuddyAnimState, ColorMap } from "../types";
+
+function eyeBall(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  grow = 0.55,
+): void {
+  fillCircle(ctx, x + size / 2, y + size / 2, size / 2 + grow, color);
+}
+
+function eyeLidPair(
+  ctx: CanvasRenderingContext2D,
+  leftX: number,
+  leftY: number,
+  rightX: number,
+  rightY: number,
+  size: number,
+  lid: number,
+  m: ColorMap,
+): void {
+  if (lid <= 0.28) return;
+  const cover = Math.min(size - 0.4, lid * (size + 0.7));
+  const drawLid = (x: number, y: number): void => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, size / 2 + 0.45, 0, Math.PI * 2);
+    ctx.clip();
+    fillRect(ctx, x - 0.8, y - 0.8, size + 1.6, cover + 0.8, m.body);
+    strokeSeg(ctx, x - 0.3, y + cover, x + size + 0.3, y + cover, m.dark, 0.55);
+    ctx.restore();
+  };
+  drawLid(leftX, leftY);
+  drawLid(rightX, rightY);
+}
 
 const BROWLESS_EYE_STYLES = new Set([
   "angry",
@@ -58,34 +101,60 @@ export function drawEyes(
   size: number,
   anim: BuddyAnimState,
 ): void {
-  const lookOffsetX = Math.round(anim.eyeLookX * 0.8);
-  const lookOffsetY = Math.round(anim.eyeLookY * 0.5);
+  const lookOffsetX = anim.eyeLookX * 0.8;
+  const lookOffsetY = anim.eyeLookY * 0.5;
   const lid = Math.max(anim.lidClose, anim.lidBase);
+  const half = size / 2;
 
   if (lid > 0.78) {
-    fillRect(ctx, leftX, leftY + ((size / 2) | 0), size, 1, m.eyeDark);
-    fillRect(ctx, rightX, rightY + ((size / 2) | 0), size, 1, m.eyeDark);
+    strokeArc(
+      ctx,
+      leftX + half,
+      leftY + half - 0.4,
+      half + 0.2,
+      Math.PI * 0.15,
+      Math.PI * 0.85,
+      m.eyeDark,
+      0.7,
+    );
+    strokeArc(
+      ctx,
+      rightX + half,
+      rightY + half - 0.4,
+      half + 0.2,
+      Math.PI * 0.15,
+      Math.PI * 0.85,
+      m.eyeDark,
+      0.7,
+    );
     return;
   }
 
   const drawLids = (): void => {
-    if (lid <= 0.28) return;
-    const cover = Math.max(1, Math.min(size - 1, Math.round(lid * size)));
-    fillRect(ctx, leftX, leftY, size, cover, m.body);
-    fillRect(ctx, rightX, rightY, size, cover, m.body);
-    fillRect(ctx, leftX, leftY + cover - 1, size, 1, m.dark);
-    fillRect(ctx, rightX, rightY + cover - 1, size, 1, m.dark);
+    eyeLidPair(ctx, leftX, leftY, rightX, rightY, size, lid, m);
   };
 
   if (anim.idleAction === "doze" || anim.moodType === "sleepy") {
-    for (let i = 0; i < size; i++) {
-      fillPixel(ctx, leftX + i, leftY + 1, 1, 1, m.eyeDark);
-      fillPixel(ctx, rightX + i, rightY + 1, 1, 1, m.eyeDark);
-    }
-    fillPixel(ctx, leftX - 1, leftY, 1, 1, m.eyeDark);
-    fillPixel(ctx, leftX + size, leftY, 1, 1, m.eyeDark);
-    fillPixel(ctx, rightX - 1, rightY, 1, 1, m.eyeDark);
-    fillPixel(ctx, rightX + size, rightY, 1, 1, m.eyeDark);
+    strokeArc(
+      ctx,
+      leftX + half,
+      leftY + 0.6,
+      half + 0.3,
+      Math.PI * 0.18,
+      Math.PI * 0.82,
+      m.eyeDark,
+      0.7,
+    );
+    strokeArc(
+      ctx,
+      rightX + half,
+      rightY + 0.6,
+      half + 0.3,
+      Math.PI * 0.18,
+      Math.PI * 0.82,
+      m.eyeDark,
+      0.7,
+    );
     return;
   }
 
@@ -157,22 +226,26 @@ export function drawEyes(
   }
 
   if (style === "teary") {
-    fillRect(ctx, leftX, leftY, size, size, m.white);
-    fillRect(ctx, rightX, rightY, size, size, m.white);
-    fillPixel(
+    eyeBall(ctx, leftX, leftY, size, m.white);
+    eyeBall(ctx, rightX, rightY, size, m.white);
+    fillCircle(
       ctx,
-      Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
-      Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
-      1,
-      1,
+      Math.max(
+        leftX + 0.6,
+        Math.min(leftX + size - 0.6, leftX + half + lookOffsetX),
+      ),
+      Math.max(
+        leftY + 0.6,
+        Math.min(leftY + size - 0.6, leftY + half + lookOffsetY),
+      ),
+      0.66,
       m.black,
     );
-    fillPixel(
+    fillCircle(
       ctx,
-      rightX + 1 + lookOffsetX,
-      rightY + 1 + lookOffsetY,
-      1,
-      1,
+      rightX + half + lookOffsetX,
+      rightY + half + lookOffsetY,
+      0.66,
       m.black,
     );
     const td = (frame * 0.4 + leftX) % 10;
@@ -202,42 +275,54 @@ export function drawEyes(
   }
 
   if (style === "angry") {
-    fillRect(ctx, leftX, leftY + 1, size, size - 1, m.white);
-    fillRect(ctx, rightX, rightY + 1, size, size - 1, m.white);
-    fillPixel(
+    fillEllipse(
       ctx,
-      leftX + 1 + lookOffsetX,
-      leftY + 2 + lookOffsetY,
-      1,
-      1,
+      leftX + half,
+      leftY + half + 0.6,
+      half + 0.3,
+      half - 0.1,
+      m.white,
+    );
+    fillEllipse(
+      ctx,
+      rightX + half,
+      rightY + half + 0.6,
+      half + 0.3,
+      half - 0.1,
+      m.white,
+    );
+    fillCircle(
+      ctx,
+      leftX + half + lookOffsetX,
+      leftY + half + 0.7 + lookOffsetY,
+      0.66,
       m.black,
     );
-    fillPixel(
+    fillCircle(
       ctx,
-      rightX + 1 + lookOffsetX,
-      rightY + 2 + lookOffsetY,
-      1,
-      1,
+      rightX + half + lookOffsetX,
+      rightY + half + 0.7 + lookOffsetY,
+      0.66,
       m.black,
     );
-    for (let i = 0; i < size + 1; i++) {
-      fillPixel(
-        ctx,
-        leftX + i,
-        leftY - 1 + (i < size / 2 ? 1 : 0),
-        1,
-        1,
-        "#FF4444",
-      );
-      fillPixel(
-        ctx,
-        rightX + i,
-        rightY - 1 + (i >= size / 2 ? 1 : 0),
-        1,
-        1,
-        "#FF4444",
-      );
-    }
+    strokeSeg(
+      ctx,
+      leftX - 0.4,
+      leftY - 0.2,
+      leftX + size + 0.4,
+      leftY - 1.2,
+      "#FF4444",
+      0.8,
+    );
+    strokeSeg(
+      ctx,
+      rightX - 0.4,
+      rightY - 1.2,
+      rightX + size + 0.4,
+      rightY - 0.2,
+      "#FF4444",
+      0.8,
+    );
     return;
   }
 
@@ -307,117 +392,126 @@ export function drawEyes(
   }
 
   if (style === "wide") {
-    fillRect(ctx, leftX, leftY, size, size, m.white);
-    fillRect(ctx, rightX, rightY, size, size, m.white);
-    fillPixel(ctx, leftX, leftY - 1, size, 1, m.white);
-    fillPixel(ctx, rightX, rightY - 1, size, 1, m.white);
-    fillPixel(
-      ctx,
-      leftX + ((size / 2) | 0),
-      leftY + ((size / 2) | 0),
-      1,
-      1,
-      m.black,
-    );
-    fillPixel(
-      ctx,
-      rightX + ((size / 2) | 0),
-      rightY + ((size / 2) | 0),
-      1,
-      1,
-      m.black,
-    );
+    eyeBall(ctx, leftX, leftY, size, m.white, 0.85);
+    eyeBall(ctx, rightX, rightY, size, m.white, 0.85);
+    fillCircle(ctx, leftX + half, leftY + half, 0.7, m.black);
+    fillCircle(ctx, rightX + half, rightY + half, 0.7, m.black);
     return;
   }
 
   if (style === "wink") {
-    fillRect(ctx, leftX, leftY, size, size, m.white);
-    fillPixel(
+    eyeBall(ctx, leftX, leftY, size, m.white);
+    fillCircle(
       ctx,
-      Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
-      Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
-      1,
-      1,
+      Math.max(
+        leftX + 0.6,
+        Math.min(leftX + size - 0.6, leftX + half + lookOffsetX),
+      ),
+      Math.max(
+        leftY + 0.6,
+        Math.min(leftY + size - 0.6, leftY + half + lookOffsetY),
+      ),
+      0.66,
       m.black,
     );
-    for (let i = 0; i < size; i++) {
-      const off = Math.round(Math.abs(i - size / 2) * 0.8);
-      fillPixel(ctx, rightX + i, rightY + size - 1 - off, 1, 1, m.eyeDark);
-    }
+    strokeArc(
+      ctx,
+      rightX + half,
+      rightY + size - 0.8,
+      half + 0.2,
+      Math.PI * 1.15,
+      Math.PI * 1.85,
+      m.eyeDark,
+      0.7,
+    );
     ctx.globalAlpha = 0.4;
-    fillRect(ctx, rightX - 1, rightY + size, 3, 2, m.rosy);
+    fillEllipse(ctx, rightX + half, rightY + size + 0.8, 1.7, 0.8, m.rosy);
     ctx.globalAlpha = 1;
     return;
   }
 
   if (style === "shifty") {
-    fillRect(ctx, leftX, leftY + 1, size, size - 1, m.white);
-    fillRect(ctx, rightX, rightY + 1, size, size - 1, m.white);
-    fillRect(ctx, leftX, leftY, size, 1, m.eyeDark);
-    fillRect(ctx, rightX, rightY, size, 1, m.eyeDark);
-    const sideX = Math.floor(frame / 20) % 2 === 0 ? 0 : size - 1;
-    fillPixel(
+    fillEllipse(
       ctx,
-      leftX + sideX,
-      leftY + 1 + ((size / 2) | 0) - 1,
-      1,
-      1,
-      m.black,
+      leftX + half,
+      leftY + half + 0.5,
+      half + 0.3,
+      half - 0.05,
+      m.white,
     );
-    fillPixel(
+    fillEllipse(
       ctx,
-      rightX + sideX,
-      rightY + 1 + ((size / 2) | 0) - 1,
-      1,
-      1,
-      m.black,
+      rightX + half,
+      rightY + half + 0.5,
+      half + 0.3,
+      half - 0.05,
+      m.white,
     );
+    strokeSeg(
+      ctx,
+      leftX - 0.2,
+      leftY + 0.2,
+      leftX + size + 0.2,
+      leftY + 0.2,
+      m.eyeDark,
+      0.7,
+    );
+    strokeSeg(
+      ctx,
+      rightX - 0.2,
+      rightY + 0.2,
+      rightX + size + 0.2,
+      rightY + 0.2,
+      m.eyeDark,
+      0.7,
+    );
+    const sideX = Math.floor(frame / 20) % 2 === 0 ? 0.6 : size - 0.6;
+    fillCircle(ctx, leftX + sideX, leftY + half + 0.4, 0.62, m.black);
+    fillCircle(ctx, rightX + sideX, rightY + half + 0.4, 0.62, m.black);
     return;
   }
 
-  fillRect(ctx, leftX, leftY, size, size, m.white);
-  fillRect(ctx, rightX, rightY, size, size, m.white);
+  eyeBall(ctx, leftX, leftY, size, m.white);
+  eyeBall(ctx, rightX, rightY, size, m.white);
   const dilated = anim.pupilDilation > 0.75 && size >= 3;
+  const clampPupil = (x: number, y: number, ex: number, ey: number) => ({
+    px: Math.max(ex + 0.7, Math.min(ex + size - 0.7, x)),
+    py: Math.max(ey + 0.7, Math.min(ey + size - 0.7, y)),
+  });
   if (dilated) {
-    const lpx = Math.max(
+    const lp = clampPupil(
+      leftX + half + lookOffsetX,
+      leftY + half + lookOffsetY,
       leftX,
-      Math.min(leftX + size - 2, leftX + 1 + lookOffsetX),
-    );
-    const lpy = Math.max(
       leftY,
-      Math.min(leftY + size - 2, leftY + 1 + lookOffsetY),
     );
-    const rpx = Math.max(
+    const rp = clampPupil(
+      rightX + half + lookOffsetX,
+      rightY + half + lookOffsetY,
       rightX,
-      Math.min(rightX + size - 2, rightX + 1 + lookOffsetX),
-    );
-    const rpy = Math.max(
       rightY,
-      Math.min(rightY + size - 2, rightY + 1 + lookOffsetY),
     );
-    fillPixel(ctx, lpx, lpy, 2, 2, m.black);
-    fillPixel(ctx, rpx, rpy, 2, 2, m.black);
+    fillCircle(ctx, lp.px, lp.py, 1.05, m.black);
+    fillCircle(ctx, rp.px, rp.py, 1.05, m.black);
     ctx.globalAlpha = 0.85;
-    fillPixel(ctx, lpx, lpy, 1, 1, m.white);
-    fillPixel(ctx, rpx, rpy, 1, 1, m.white);
+    fillCircle(ctx, lp.px - 0.35, lp.py - 0.35, 0.36, m.white);
+    fillCircle(ctx, rp.px - 0.35, rp.py - 0.35, 0.36, m.white);
     ctx.globalAlpha = 1;
   } else {
-    fillPixel(
-      ctx,
-      Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
-      Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
-      1,
-      1,
-      m.black,
+    const lp = clampPupil(
+      leftX + half + lookOffsetX,
+      leftY + half + lookOffsetY,
+      leftX,
+      leftY,
     );
-    fillPixel(
-      ctx,
-      Math.max(rightX, Math.min(rightX + size - 1, rightX + 1 + lookOffsetX)),
-      Math.max(rightY, Math.min(rightY + size - 1, rightY + 1 + lookOffsetY)),
-      1,
-      1,
-      m.black,
+    const rp = clampPupil(
+      rightX + half + lookOffsetX,
+      rightY + half + lookOffsetY,
+      rightX,
+      rightY,
     );
+    fillCircle(ctx, lp.px, lp.py, 0.68, m.black);
+    fillCircle(ctx, rp.px, rp.py, 0.68, m.black);
   }
   drawLids();
 }
@@ -472,16 +566,28 @@ export function drawMouth(
 
   if (mood === "happy" || mood === "celebrate") {
     if (mood === "celebrate" && anim.successStreak >= 2) {
-      fillRect(ctx, mx, my, width, 3, m.eyeDark);
-      fillRect(ctx, mx + 1, my, width - 2, 1, m.white);
-      fillRect(ctx, mx + 1, my + 2, width - 2, 1, m.rosy);
-      fillPixel(ctx, mx - 1, my - 1, 1, 1, m.eyeDark);
-      fillPixel(ctx, mx + width, my - 1, 1, 1, m.eyeDark);
+      fillEllipse(
+        ctx,
+        mx + width / 2,
+        my + 1.4,
+        width / 2 + 0.6,
+        1.7,
+        m.eyeDark,
+      );
+      fillEllipse(ctx, mx + width / 2, my + 0.7, width / 2 - 0.4, 0.6, m.white);
+      fillEllipse(ctx, mx + width / 2, my + 2.2, width / 2 - 0.8, 0.7, m.rosy);
       return;
     }
-    fillPixel(ctx, mx - 1, my, 1, 1, m.eyeDark);
-    fillRect(ctx, mx, my + 1, width, 1, m.eyeDark);
-    fillPixel(ctx, mx + width, my, 1, 1, m.eyeDark);
+    strokeArc(
+      ctx,
+      mx + width / 2,
+      my - 0.4,
+      width / 2 + 0.6,
+      Math.PI * 0.14,
+      Math.PI * 0.86,
+      m.eyeDark,
+      0.75,
+    );
     return;
   }
 
@@ -515,6 +621,4 @@ export function drawMouth(
     fillPixel(ctx, mx + width - 1, my, 1, 1, m.eyeDark);
     return;
   }
-
-  fillRect(ctx, mx + 1, my, width - 2, 1, m.eyeDark);
 }

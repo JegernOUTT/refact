@@ -1090,4 +1090,248 @@ describe("drawBuddyWorld", () => {
 
     expectHealthyDraw(ctx);
   });
+
+  function drawActorWorld(args: {
+    intentKind: string;
+    heldMs: number;
+    xPercent?: number;
+    yPercent?: number;
+  }): RecordedCanvasContext {
+    const ctx = makeCanvasContext();
+    drawBuddyWorld({
+      ctx,
+      world: makeWorld(),
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: args.xPercent ?? 47,
+        yPercent: args.yPercent ?? 80,
+        intentKind: args.intentKind,
+        travel: null,
+        nowMs: 50_000,
+        intentStartedAtMs: 50_000 - args.heldMs,
+      },
+    });
+    return ctx;
+  }
+
+  it("draws progressive feed care props that finish with a heart", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "care_feed",
+      heldMs: 400,
+      xPercent: 38,
+      yPercent: 78,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "care_feed",
+      heldMs: 7_500,
+      xPercent: 38,
+      yPercent: 78,
+    });
+
+    const foodCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#FDBA74"))
+        .length;
+    const bowlCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#92400E"))
+        .length;
+
+    expect(foodCount(earlyCtx)).toBeGreaterThan(foodCount(lateCtx));
+    expect(bowlCount(earlyCtx)).toBeGreaterThan(0);
+    expect(bowlCount(lateCtx)).toBeGreaterThan(0);
+    expect(
+      earlyCtx.drawOps.some(
+        (operation) =>
+          operation.startsWith("fillText:♥") && operation.includes("#F472B6"),
+      ),
+    ).toBe(false);
+    expect(
+      lateCtx.drawOps.some(
+        (operation) =>
+          operation.startsWith("fillText:♥") && operation.includes("#F472B6"),
+      ),
+    ).toBe(true);
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("draws the fishing long action with a late catch payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "fish_at_pond",
+      heldMs: 2_000,
+      xPercent: 36,
+      yPercent: 82,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "fish_at_pond",
+      heldMs: 11_500,
+      xPercent: 36,
+      yPercent: 82,
+    });
+
+    const fishCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#FB923C"))
+        .length;
+
+    expect(
+      earlyCtx.drawOps.some((operation) =>
+        operation.startsWith("stroke:#6B4F3A"),
+      ),
+    ).toBe(true);
+    expect(
+      earlyCtx.drawOps.some((operation) =>
+        operation.startsWith("fill:#EF4444"),
+      ),
+    ).toBe(true);
+    expect(fishCount(lateCtx)).toBeGreaterThan(fishCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("builds the snow buddy in stages during play_in_snow", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "play_in_snow",
+      heldMs: 1_200,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "play_in_snow",
+      heldMs: 9_000,
+    });
+
+    const eyeCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter(
+        (operation) =>
+          operation.startsWith("fillRect:") && operation.includes("#1E293B"),
+      ).length;
+    const armCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("stroke:#6B4F3A"))
+        .length;
+
+    expect(eyeCount(lateCtx)).toBeGreaterThan(eyeCount(earlyCtx));
+    expect(armCount(lateCtx)).toBeGreaterThanOrEqual(armCount(earlyCtx) + 2);
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("renders staged accents deterministically for the same held duration", () => {
+    const firstCtx = drawActorWorld({
+      intentKind: "build_cairn",
+      heldMs: 6_500,
+    });
+    const secondCtx = drawActorWorld({
+      intentKind: "build_cairn",
+      heldMs: 6_500,
+    });
+
+    expect(secondCtx.drawOps).toEqual(firstCtx.drawOps);
+  });
+
+  it("grows the acorn pile during gather_acorns and lifts one as payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "gather_acorns",
+      heldMs: 1_000,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "gather_acorns",
+      heldMs: 12_000,
+    });
+
+    const acornCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#B45309"))
+        .length;
+
+    expect(acornCount(lateCtx)).toBeGreaterThan(acornCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("grows the ritual sprout during seed_ritual with a sparkle payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "seed_ritual",
+      heldMs: 1_500,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "seed_ritual",
+      heldMs: 13_200,
+    });
+
+    const crownCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#34D399"))
+        .length;
+    const sparkleCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#A7F3D0"))
+        .length;
+
+    expect(crownCount(earlyCtx)).toBe(0);
+    expect(crownCount(lateCtx)).toBeGreaterThan(0);
+    expect(sparkleCount(lateCtx)).toBeGreaterThan(sparkleCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("keeps the ocarina and umbrella accents finite and deterministic", () => {
+    const ocarinaCtx = drawActorWorld({
+      intentKind: "play_ocarina",
+      heldMs: 8_000,
+    });
+    const ocarinaCtxRepeat = drawActorWorld({
+      intentKind: "play_ocarina",
+      heldMs: 8_000,
+    });
+    const umbrellaCtx = drawActorWorld({
+      intentKind: "leaf_umbrella_rain",
+      heldMs: 4_000,
+    });
+    const topCtx = drawActorWorld({
+      intentKind: "spin_top",
+      heldMs: 6_000,
+    });
+
+    expect(ocarinaCtxRepeat.drawOps).toEqual(ocarinaCtx.drawOps);
+    expect(
+      ocarinaCtx.drawOps.some((operation) =>
+        operation.startsWith("fillText:♪"),
+      ),
+    ).toBe(true);
+    expect(
+      umbrellaCtx.drawOps.some((operation) =>
+        operation.startsWith("fill:#4A7D40"),
+      ),
+    ).toBe(true);
+    expect(
+      topCtx.drawOps.some((operation) => operation.startsWith("fill:#C98A5B")),
+    ).toBe(true);
+    expectHealthyDraw(ocarinaCtx);
+    expectHealthyDraw(umbrellaCtx);
+    expectHealthyDraw(topCtx);
+  });
+
+  it("keeps staged care accents finite with hostile actor inputs", () => {
+    const ctx = makeCanvasContext();
+
+    drawBuddyWorld({
+      ctx,
+      world: makeWorld(),
+      palette: PALETTES[0],
+      frame: Number.POSITIVE_INFINITY,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: Number.NaN,
+        yPercent: Number.NEGATIVE_INFINITY,
+        intentKind: "care_clean",
+        travel: null,
+        nowMs: Number.NaN,
+        intentStartedAtMs: Number.POSITIVE_INFINITY,
+      },
+    });
+
+    expectHealthyDraw(ctx);
+  });
 });

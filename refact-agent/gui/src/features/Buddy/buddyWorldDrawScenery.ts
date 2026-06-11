@@ -222,21 +222,79 @@ export function drawGhibliClouds(args: DrawBuddyWorldBaseArgs): void {
   const frame = safeFrame(args.frame);
   const hint = worldPaletteHint(args.world);
   if (hint === "storm") return;
-  const count = countForMotion(3, args.compact, args.reducedMotion);
+  const count = countForMotion(5, args.compact, args.reducedMotion);
   const baseAlpha = hint === "night" || hint === "dream" ? 0.5 : 0.85;
+  const tints = phaseTints(args);
+
+  const giantDrift = args.reducedMotion ? 96 : frame * 0.05;
+  const giantX =
+    ((seededUnit(347, 0) * width + giantDrift) % (width + 460)) - 230;
+  drawCumulus(
+    args,
+    giantX,
+    height * 0.025,
+    args.compact ? 1.05 : 1.45,
+    baseAlpha * 0.38,
+  );
 
   for (let index = 0; index < count; index += 1) {
-    const speed = 0.06 + seededUnit(311, index) * 0.05;
+    const speed = 0.11 + seededUnit(311, index) * 0.09;
     const drift = args.reducedMotion ? index * 130 : frame * speed;
     const x = ((seededUnit(313, index) * width + drift) % (width + 260)) - 130;
     const y = height * (0.06 + seededUnit(317, index) * 0.2);
-    const scale = (args.compact ? 0.6 : 0.85) + seededUnit(331, index) * 0.55;
+    const scale = (args.compact ? 0.55 : 0.78) + seededUnit(331, index) * 0.5;
     drawCumulus(
       args,
       x,
       y,
       scale,
       baseAlpha * (0.7 + seededUnit(337, index) * 0.3),
+    );
+  }
+
+  const wisps = countForMotion(3, args.compact, args.reducedMotion);
+  for (let index = 0; index < wisps; index += 1) {
+    const speed = 0.32 + seededUnit(353, index) * 0.24;
+    const drift = args.reducedMotion ? index * 210 : frame * speed;
+    const x = ((seededUnit(359, index) * width + drift) % (width + 180)) - 90;
+    const y = height * (0.045 + seededUnit(367, index) * 0.15);
+    fillEllipse(
+      args.ctx,
+      x,
+      y,
+      24 + seededUnit(373, index) * 20,
+      2 + seededUnit(379, index) * 1.2,
+      tints.cloudTop,
+      baseAlpha * 0.26,
+    );
+  }
+}
+
+export function drawCloudShadows(args: DrawBuddyWorldBaseArgs): void {
+  if (args.reducedMotion) return;
+  const hint = worldPaletteHint(args.world);
+  if (hint !== "day" && hint !== "dawn" && hint !== "dusk") return;
+  if (worldWeather(args.world) === "rain") return;
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(2, args.compact, false);
+
+  for (let index = 0; index < count; index += 1) {
+    const speed = 0.11 + seededUnit(311, index) * 0.09;
+    const x =
+      ((seededUnit(313, index) * width + frame * speed) % (width + 260)) -
+      130 +
+      28;
+    const y = height * (0.79 + seededUnit(383, index) * 0.09);
+    fillEllipse(
+      args.ctx,
+      x,
+      y,
+      44 + seededUnit(389, index) * 28,
+      6 + seededUnit(397, index) * 3,
+      "#1A2E20",
+      0.055,
     );
   }
 }
@@ -248,8 +306,11 @@ export function drawGreatTree(args: DrawBuddyWorldBaseArgs): void {
   const tints = phaseTints(args);
   const baseX = width * 0.3;
   const baseY = height * 0.72;
-  const sway = wave(frame, 90, 0, 3, args.reducedMotion);
-  const swayHigh = wave(frame, 90, 0.9, 5, args.reducedMotion);
+  const gustWithin = args.reducedMotion ? 999 : (frame * 1.4) % 520;
+  const gust =
+    gustWithin < 170 ? Math.sin((gustWithin / 170) * Math.PI) * 2.2 : 0;
+  const sway = wave(frame, 90, 0, 3, args.reducedMotion) + gust;
+  const swayHigh = wave(frame, 90, 0.9, 5, args.reducedMotion) + gust * 1.4;
   const scale = args.compact ? 0.72 : 1;
 
   fillEllipse(
@@ -803,6 +864,39 @@ export function drawMeadowCritters(args: DrawBuddyWorldBaseArgs): void {
       2.2,
       "#8FA56F",
       0.85,
+    );
+  }
+
+  if (
+    (season === "summer" || season === "spring") &&
+    (phase === "day" || phase === "morning") &&
+    calm
+  ) {
+    const dx =
+      width * 0.38 +
+      wave(frame, 36, 0, 16, args.reducedMotion) +
+      wave(frame, 9, 2, 2.4, args.reducedMotion);
+    const dy = height * 0.835 + wave(frame, 17, 1, 4, args.reducedMotion);
+    fillPixelRect(args.ctx, dx, dy, 5, 1.2, "#38BDF8", 0.92);
+    fillPixelRect(args.ctx, dx + 4.4, dy - 0.6, 1.6, 1.6, "#0EA5E9", 0.95);
+    const wingUp = args.reducedMotion || Math.floor(frame / 2) % 2 === 0;
+    fillPixelRect(
+      args.ctx,
+      dx + 1.6,
+      dy - (wingUp ? 2.2 : 1.2),
+      2.8,
+      1,
+      "#E0F2FE",
+      0.6,
+    );
+    fillPixelRect(
+      args.ctx,
+      dx + 1.6,
+      dy + (wingUp ? 1.6 : 1),
+      2.8,
+      1,
+      "#E0F2FE",
+      0.5,
     );
   }
 

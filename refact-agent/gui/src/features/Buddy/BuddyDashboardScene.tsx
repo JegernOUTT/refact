@@ -43,7 +43,7 @@ export const BuddyDashboardScene: React.FC = () => {
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
   const buddy = useBuddyState();
-  const { state } = buddy;
+  const { state, signal: buddySignal } = buddy;
   const { data: setupData } = useGetSetupStatusQuery(undefined, {
     refetchOnMountOrArgChange: true,
   });
@@ -89,6 +89,7 @@ export const BuddyDashboardScene: React.FC = () => {
 
   const handleCare = useCallback(
     async (action: BuddyCareAction, toy?: string) => {
+      buddySignal(`care_${action}`);
       await executeBuddyAction(
         {
           id: `scene-care-${action}`,
@@ -100,7 +101,7 @@ export const BuddyDashboardScene: React.FC = () => {
         dispatch,
       );
     },
-    [dispatch],
+    [buddySignal, dispatch],
   );
 
   const handleOpenPage = useCallback(

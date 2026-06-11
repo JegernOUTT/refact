@@ -30,7 +30,17 @@ export type BuddyWorldIntentKind =
   | "splash_puddles"
   | "nap_under_tree"
   | "greet_kodama"
-  | "chase_soot_sprites";
+  | "chase_soot_sprites"
+  | "fish_at_pond"
+  | "build_cairn"
+  | "catch_fireflies"
+  | "paint_meadow"
+  | "picnic_snack"
+  | "gather_acorns"
+  | "leaf_umbrella_rain"
+  | "play_ocarina"
+  | "seed_ritual"
+  | "spin_top";
 
 export interface BuddyWorldIntent {
   id: string;
@@ -746,6 +756,147 @@ export function chooseBuddyWorldIntent(
         speech: "Soot sprites!! Tiny, fast, suspicious.",
         durationMs: 8_600,
         priority: 13,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+
+  const calmDaylight =
+    args.world.weather === "clear" &&
+    (args.world.phase === "day" || args.world.phase === "morning") &&
+    args.world.season !== "winter";
+
+  if (hasLayer(args.world, "pond_life") && args.world.season !== "winter") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "fish_at_pond",
+        target: SAFE_TARGETS.pond,
+        pose: "look",
+        speech: "Fishing protocol engaged. The koi are negotiating terms.",
+        durationMs: 16_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (calmDaylight) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "build_cairn",
+        target: SAFE_TARGETS.pond,
+        pose: "dig",
+        speech: "Stacking zen stones. Nobody breathe near the tower.",
+        durationMs: 15_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+      makeIntent({
+        kind: "paint_meadow",
+        target: SAFE_TARGETS.meadow,
+        pose: "look",
+        speech: "Plein air session. The meadow demands more green.",
+        durationMs: 16_000,
+        priority: 11,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+      makeIntent({
+        kind: "picnic_snack",
+        target: SAFE_TARGETS.meadow,
+        pose: "bounce",
+        speech: "Tiny picnic deployed. Crumb security is, frankly, lax.",
+        durationMs: 12_000,
+        priority: 11,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "fireflies")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "catch_fireflies",
+        target: SAFE_TARGETS.meadow,
+        pose: "pounce",
+        speech: "Recruiting lantern volunteers. Gently. With a jar.",
+        durationMs: 14_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (
+    args.world.season === "autumn" &&
+    (args.world.phase === "day" || args.world.phase === "morning")
+  ) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "gather_acorns",
+        target: SAFE_TARGETS.greatTree,
+        pose: "dig",
+        speech: "Acorn harvest! Every pocket is an acorn pocket now.",
+        durationMs: 14_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (args.world.weather === "rain") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "leaf_umbrella_rain",
+        target: SAFE_TARGETS.meadow,
+        pose: "look",
+        speech: "Leaf umbrella deployed. Dry-ish and very dignified.",
+        durationMs: 13_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (args.world.phase === "night" && args.world.season !== "winter") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "play_ocarina",
+        target: SAFE_TARGETS.greatTree,
+        pose: "meditate",
+        speech: "Moon song time. The fireflies requested an encore.",
+        durationMs: 15_000,
+        priority: 12,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+    if (args.world.weather === "clear" || args.world.weather === "aurora") {
+      flavorCandidates.push(
+        makeIntent({
+          kind: "seed_ritual",
+          target: SAFE_TARGETS.garden,
+          pose: "bounce",
+          speech: "Grow, grow, grow… tiny forest ritual in progress.",
+          durationMs: 16_000,
+          priority: 11,
+          nowMs: args.nowMs,
+          reducedMotion: args.reducedMotion,
+        }),
+      );
+    }
+  }
+  if (calmDaylight) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "spin_top",
+        target: SAFE_TARGETS.meadow,
+        pose: "spin",
+        speech: "Spinning top tournament. Current champion: the top.",
+        durationMs: 13_000,
+        priority: 10,
         nowMs: args.nowMs,
         reducedMotion: args.reducedMotion,
       }),

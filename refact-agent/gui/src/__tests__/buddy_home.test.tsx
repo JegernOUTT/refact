@@ -1798,7 +1798,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
-  it("keeps showcase speech ahead of local hotspot reactions from travel onward", async () => {
+  it("lets a user care click preempt a running showcase with a visible world activity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-01T00:00:40Z"));
     const onCare = vi.fn();
@@ -1853,34 +1853,40 @@ describe("BuddyWorld_dynamic_environment", () => {
       expect(onCare).toHaveBeenCalledWith("play", "scroll");
 
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "none",
+      );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-care-activity",
+        "play",
+      );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-source",
-        "showcase",
+        "reaction",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-priority",
-        "backend-showcase-director-local",
+        "backend-care-showcase-director-local",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-text",
-        "Buddy gathers the memory fireflies into a soft night map.",
+        "Buddy catches a warm sunbeam and opens the focus scroll.",
       );
 
-      await vi.advanceTimersByTimeAsync(3817);
+      await vi.advanceTimersByTimeAsync(3_817);
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
         "data-pose",
-        "meditate",
+        "pounce",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-source",
-        "showcase",
+        "data-care-activity",
+        "play",
       );
+
+      await vi.advanceTimersByTimeAsync(7_700);
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-priority",
-        "backend-showcase-director-local",
-      );
-      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-text",
-        "Buddy gathers the memory fireflies into a soft night map.",
+        "data-care-activity",
+        "none",
       );
     } finally {
       vi.useRealTimers();
@@ -2046,7 +2052,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
-  it("uses top bubble for center director targets", async () => {
+  it("uses a side bubble for elevated center director targets so speech stays unclipped", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-01T08:00:00Z"));
     try {
@@ -2090,7 +2096,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       );
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
         "data-bubble-position",
-        "top",
+        "right",
       );
     } finally {
       vi.useRealTimers();

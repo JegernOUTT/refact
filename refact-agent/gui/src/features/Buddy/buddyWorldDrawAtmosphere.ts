@@ -178,6 +178,27 @@ function drawSkyStructures(args: DrawBuddyWorldBaseArgs): void {
       serious ? 2 : 1.5,
       alphaForMotion(serious ? 0.22 : 0.1, args.reducedMotion),
     );
+    if (warning) {
+      const flickA = Math.abs(wave(frame, 21, 0, 1.6, args.reducedMotion));
+      fillPixelRect(
+        args.ctx,
+        toriiX - 9,
+        hillY - 14 - flickA,
+        1.8,
+        1.8,
+        "#F59E0B",
+        alphaForMotion(0.72, args.reducedMotion),
+      );
+      fillPixelRect(
+        args.ctx,
+        toriiX + 8,
+        hillY - 10 + flickA * 0.6,
+        1.5,
+        1.5,
+        "#F59E0B",
+        alphaForMotion(0.6, args.reducedMotion),
+      );
+    }
   }
   if (active) {
     const count = countForMotion(4, args.compact, args.reducedMotion);
@@ -327,65 +348,60 @@ export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
         : "#FBBF24";
   const glowColor = isNight ? "#818CF8" : isEvening ? "#FB7185" : "#FBBF24";
 
-  fillCircle(ctx, x, y, isNight ? 30 : 42, glowColor, isNight ? 0.13 : 0.26);
-  fillPixelRect(ctx, x - 13, y - 13, 26, 26, color);
-  fillPixelRect(ctx, x - 18, y - 8, 36, 16, color);
-  fillPixelRect(ctx, x - 8, y - 18, 16, 36, color);
-
   if (isNight) {
     const moonPhase = clamp(
       Number.isFinite(world.moonPhase) ? world.moonPhase : 0.5,
       0,
       1,
     );
+    fillCircle(ctx, x, y, 30, glowColor, 0.13);
+    fillCircle(ctx, x, y, 19, glowColor, 0.16);
+    fillCircle(ctx, x, y, 16.6, "#CBD7F2", 0.66);
+    fillCircle(ctx, x, y, 15.6, color);
     const illumination = 1 - Math.abs(moonPhase - 0.5) * 2;
-    const shadowSpan = Math.round(36 * (1 - illumination));
-    if (shadowSpan > 1) {
+    const shadowShift = (1 - illumination) * 21;
+    if (shadowShift > 1.4) {
       const fromLeft = moonPhase < 0.5;
-      const barSpan = Math.min(shadowSpan, 36);
-      fillPixelRect(
+      fillCircle(
         ctx,
-        fromLeft ? x - 18 : x + 18 - barSpan,
-        y - 8,
-        barSpan,
-        16,
-        "#312E81",
-        0.88,
+        x + (fromLeft ? -shadowShift : shadowShift),
+        y - shadowShift * 0.1,
+        14.8,
+        "#2B3760",
+        0.9,
       );
-      const coreSpan = Math.min(Math.max(shadowSpan - 5, 0), 26);
-      if (coreSpan > 0) {
-        fillPixelRect(
-          ctx,
-          fromLeft ? x - 13 : x + 13 - coreSpan,
-          y - 13,
-          coreSpan,
-          26,
-          "#312E81",
-          0.88,
-        );
-      }
-      const tipSpan = Math.min(Math.max(shadowSpan - 10, 0), 16);
-      if (tipSpan > 0) {
-        fillPixelRect(
-          ctx,
-          fromLeft ? x - 8 : x + 8 - tipSpan,
-          y - 18,
-          tipSpan,
-          36,
-          "#312E81",
-          0.88,
-        );
-      }
     }
-    fillPixelRect(ctx, x - 6, y - 4, 4, 4, "#C7D2FE", 0.55);
-    fillPixelRect(ctx, x + 2, y + 5, 3, 3, "#C7D2FE", 0.45);
+    fillCircle(ctx, x - 5, y - 3.4, 2.7, "#C7D2FE", 0.6);
+    fillCircle(ctx, x + 4.4, y + 4.6, 2, "#C7D2FE", 0.5);
+    fillCircle(ctx, x + 6.2, y - 6.4, 1.3, "#C7D2FE", 0.44);
+    fillCircle(ctx, x - 4.6, y - 3, 1.1, "#EEF2FF", 0.5);
+    fillPixelRect(ctx, x - 24, y - 11, 2, 2, color, 0.78);
+    fillPixelRect(ctx, x + 22, y + 7, 1.6, 1.6, color, 0.62);
     return;
   }
 
-  fillPixelRect(ctx, x - 2, y - 32, 4, 8, "#F59E0B");
-  fillPixelRect(ctx, x - 2, y + 24, 4, 8, "#F59E0B");
-  fillPixelRect(ctx, x - 32, y - 2, 8, 4, "#F59E0B");
-  fillPixelRect(ctx, x + 24, y - 2, 8, 4, "#F59E0B");
+  fillCircle(ctx, x, y, 46, glowColor, 0.16);
+  fillCircle(ctx, x, y, 30, glowColor, 0.18);
+  fillCircle(ctx, x, y, 17.4, color, 0.4);
+  fillCircle(ctx, x, y, 14.6, color);
+  fillCircle(ctx, x - 4.6, y - 5, 4.6, "#FFF6D8", 0.55);
+  const raySpin = args.reducedMotion ? 0 : frame / 460;
+  const rayPulse = Math.abs(wave(frame, 44, 0, 2.2, args.reducedMotion));
+  for (let ray = 0; ray < 8; ray += 1) {
+    const angle = (ray / 8) * TAU + raySpin;
+    const inner = 20 + rayPulse;
+    const outer = inner + (ray % 2 === 0 ? 7 : 4.4);
+    strokeLine(
+      ctx,
+      { x: x + Math.cos(angle) * inner, y: y + Math.sin(angle) * inner },
+      { x: x + Math.cos(angle) * outer, y: y + Math.sin(angle) * outer },
+      color,
+      1.7,
+      alphaForMotion(0.5, args.reducedMotion),
+    );
+  }
+  fillPixelRect(ctx, x - 26, y + 9, 2, 2, color, 0.66);
+  fillPixelRect(ctx, x + 24, y - 12, 1.8, 1.8, color, 0.58);
   if (isMorning || isEvening) {
     fillEllipse(
       ctx,
@@ -590,6 +606,42 @@ function drawBirds(args: DrawBuddyWorldBaseArgs): void {
       alpha,
     );
     fillPixelRect(args.ctx, x, y + (flap > 0 ? 0 : -2), 4, 2, "#1E293B", alpha);
+  }
+
+  if (args.reducedMotion) return;
+  const vWithin = (frame * 1.2) % 2_100;
+  if (vWithin >= 640) return;
+  const t = vWithin / 640;
+  const vx = width * (-0.08 + t * 1.16);
+  const vy =
+    height * (0.14 + Math.sin(t * Math.PI) * 0.05) +
+    wave(frame, 26, 2, 2, args.reducedMotion);
+  const fade = Math.min(1, Math.min(t * 7, (1 - t) * 7));
+  const flockCount = countForMotion(5, args.compact, false);
+  for (let index = 0; index < flockCount; index += 1) {
+    const row = Math.ceil(index / 2);
+    const side = index % 2 === 0 ? 1 : -1;
+    const bx = vx - row * 10;
+    const by = vy + side * row * 5.4;
+    const flap = Math.sin(frame / 4.6 + index * 1.1);
+    fillPixelRect(
+      args.ctx,
+      bx - 3.4,
+      by + (flap > 0 ? -1.8 : 0),
+      3.4,
+      1.6,
+      "#1E293B",
+      alpha * fade,
+    );
+    fillPixelRect(
+      args.ctx,
+      bx,
+      by + (flap > 0 ? 0 : -1.8),
+      3.4,
+      1.6,
+      "#1E293B",
+      alpha * fade,
+    );
   }
 }
 

@@ -183,6 +183,7 @@ function makeNoopCanvasContext(): CanvasRenderingContext2D {
     scale: vi.fn(),
     translate: vi.fn(),
     beginPath: vi.fn(),
+    clip: vi.fn(),
     arc: vi.fn(),
     ellipse: vi.fn(),
     fill: vi.fn(),

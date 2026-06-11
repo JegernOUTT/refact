@@ -63,15 +63,49 @@
 }
 
 .hotspot {
-  width: 82px;
-  height: 82px;
+  width: 52px;
+  height: 52px;
   padding: 0;
 }
 
 .objectHotspot {
-  width: 58px;
-  height: 58px;
+  width: 44px;
+  height: 44px;
   padding: 0;
+}
+
+.hotspot::after,
+.objectHotspot::after {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.35);
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  pointer-events: none;
+}
+
+.scene:hover .hotspot::after,
+.scene:focus-within .hotspot::after,
+.scene:hover .objectHotspot::after,
+.scene:focus-within .objectHotspot::after {
+  opacity: 0.55;
+  transform: scale(1);
+  animation: buddyHotspotTwinkle 2.2s ease-in-out infinite;
+}
+
+.hotspot:hover::after,
+.hotspot:focus-visible::after,
+.objectHotspot:hover::after,
+.objectHotspot:focus-visible::after {
+  opacity: 0.95;
+  animation: none;
 }
 
 .hotspot:hover,
@@ -89,8 +123,8 @@
 }
 
 .homeHotspot {
-  width: 78px;
-  height: 64px;
+  width: 64px;
+  height: 56px;
 }
 
 .objectTooltip {
@@ -115,6 +149,8 @@
   backdrop-filter: blur(8px);
 }
 
+.hotspot:hover .objectTooltip,
+.hotspot:focus-visible .objectTooltip,
 .objectHotspot:hover .objectTooltip,
 .objectHotspot:focus-visible .objectTooltip {
   opacity: 1;
@@ -143,6 +179,7 @@
   z-index: 5;
   left: 50%;
   bottom: -32px;
+  pointer-events: none;
   transform: translateX(-50%) scale(var(--buddy-scene-scale, 1));
   transform-origin: 50% 100%;
   filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.18));
@@ -329,8 +366,8 @@
 }
 
 .compact .objectHotspot {
-  width: 50px;
-  height: 50px;
+  width: 40px;
+  height: 40px;
 }
 
 .compact .setupDock,
@@ -347,6 +384,19 @@
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(4.6);
+  }
+}
+
+@keyframes buddyHotspotTwinkle {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: scale(1.08);
   }
 }
 
@@ -476,6 +526,13 @@
   .careDock,
   .sceneButton,
   .sceneButtonGhost {
+    transition-duration: 0.01ms;
+  }
+
+  .hotspot::after,
+  .objectHotspot::after {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
     transition-duration: 0.01ms;
   }
 

@@ -567,3 +567,217 @@ describe("buddy world director seasonal flavor", () => {
     expectSafeIntent(intent);
   });
 });
+
+describe("buddy world director long activities", () => {
+  function buildSummerIntent(
+    recentIntentKinds: readonly BuddyWorldIntentKind[],
+  ): BuddyWorldIntent | null {
+    const now = new Date(2024, 6, 1, 14, 0, 0);
+    const world = buildBuddyWorldState({
+      now,
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    return chooseBuddyWorldIntent({
+      world,
+      previousIntent: null,
+      nowMs: now.getTime(),
+      activeSpeechVisible: false,
+      showcaseActive: false,
+      localReactionVisible: false,
+      reducedMotion: false,
+      recentIntentKinds,
+    });
+  }
+
+  const SUMMER_BASE_RECENTS: BuddyWorldIntentKind[] = [
+    "chase_butterfly",
+    "watch_birds",
+    "visit_pond",
+    "nap_under_tree",
+  ];
+
+  it("goes fishing at the pond once shorter pond visits rest", () => {
+    const intent = buildSummerIntent(SUMMER_BASE_RECENTS);
+
+    expect(intent?.kind).toBe("fish_at_pond");
+    expect(intent?.pose).toBe("look");
+    expect(intent?.durationMs).toBeGreaterThanOrEqual(14_000);
+    expectSafeIntent(intent);
+  });
+
+  it("stacks a stone cairn after fishing rests", () => {
+    const intent = buildSummerIntent([...SUMMER_BASE_RECENTS, "fish_at_pond"]);
+
+    expect(intent?.kind).toBe("build_cairn");
+    expect(intent?.pose).toBe("dig");
+    expectSafeIntent(intent);
+  });
+
+  it("paints the meadow and picnics as deeper rotation options", () => {
+    const paintIntent = buildSummerIntent([
+      ...SUMMER_BASE_RECENTS,
+      "fish_at_pond",
+      "build_cairn",
+    ]);
+    const picnicIntent = buildSummerIntent([
+      ...SUMMER_BASE_RECENTS,
+      "fish_at_pond",
+      "build_cairn",
+      "paint_meadow",
+    ]);
+
+    expect(paintIntent?.kind).toBe("paint_meadow");
+    expect(picnicIntent?.kind).toBe("picnic_snack");
+    expectSafeIntent(paintIntent);
+    expectSafeIntent(picnicIntent);
+  });
+
+  it("collects fireflies in a jar once cozy night routines rest", () => {
+    const intent = buildIntent({
+      hour: 23,
+      recentIntentKinds: [
+        "night_watch",
+        "warm_by_fire",
+        "watch_shooting_star",
+        "play_in_snow",
+        "greet_kodama",
+        "chase_soot_sprites",
+      ],
+    });
+
+    expect(intent?.kind).toBe("catch_fireflies");
+    expect(intent?.pose).toBe("pounce");
+    expect(intent?.durationMs).toBeGreaterThanOrEqual(12_000);
+    expectSafeIntent(intent);
+  });
+
+  it("keeps long activities out of winter days so idle exhaustion still rests", () => {
+    const intent = buildIntent({
+      recentIntentKinds: [
+        "play_in_snow",
+        "wander_curiously",
+        "watch_observatory",
+      ],
+    });
+
+    expect(intent).toBeNull();
+  });
+});
+
+describe("buddy world director totoro flavor", () => {
+  function buildSeasonIntent(
+    now: Date,
+    recentIntentKinds: readonly BuddyWorldIntentKind[],
+    weather?: "rain",
+  ): BuddyWorldIntent | null {
+    const world = buildBuddyWorldState({
+      now,
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    return chooseBuddyWorldIntent({
+      world: weather ? { ...world, weather } : world,
+      previousIntent: null,
+      nowMs: now.getTime(),
+      activeSpeechVisible: false,
+      showcaseActive: false,
+      localReactionVisible: false,
+      reducedMotion: false,
+      recentIntentKinds,
+    });
+  }
+
+  it("gathers acorns under the great tree on autumn days", () => {
+    const intent = buildSeasonIntent(new Date(2024, 9, 1, 14, 0, 0), [
+      "collect_leaves",
+      "chase_butterfly",
+      "watch_birds",
+      "visit_pond",
+      "nap_under_tree",
+      "fish_at_pond",
+      "build_cairn",
+      "paint_meadow",
+      "picnic_snack",
+    ]);
+
+    expect(intent?.kind).toBe("gather_acorns");
+    expect(intent?.pose).toBe("dig");
+    expect(intent?.durationMs).toBeGreaterThanOrEqual(12_000);
+    expectSafeIntent(intent);
+  });
+
+  it("holds a leaf umbrella once puddle splashing rests in the rain", () => {
+    const intent = buildSeasonIntent(
+      new Date(2024, 6, 1, 14, 0, 0),
+      [
+        "splash_puddles",
+        "visit_pond",
+        "fish_at_pond",
+        "warm_by_fire",
+        "watch_birds",
+        "chase_butterfly",
+      ],
+      "rain",
+    );
+
+    expect(intent?.kind).toBe("leaf_umbrella_rain");
+    expectSafeIntent(intent);
+  });
+
+  it("plays the ocarina on summer nights after cozy routines rest", () => {
+    const intent = buildSeasonIntent(new Date(2024, 6, 1, 23, 0, 0), [
+      "night_watch",
+      "warm_by_fire",
+      "watch_shooting_star",
+      "greet_kodama",
+      "chase_soot_sprites",
+      "catch_fireflies",
+      "visit_pond",
+      "fish_at_pond",
+    ]);
+
+    expect(intent?.kind).toBe("play_ocarina");
+    expect(intent?.pose).toBe("meditate");
+    expectSafeIntent(intent);
+  });
+
+  it("performs the seed ritual once the ocarina rests on clear summer nights", () => {
+    const intent = buildSeasonIntent(new Date(2024, 6, 1, 23, 0, 0), [
+      "night_watch",
+      "warm_by_fire",
+      "watch_shooting_star",
+      "greet_kodama",
+      "chase_soot_sprites",
+      "catch_fireflies",
+      "visit_pond",
+      "fish_at_pond",
+      "play_ocarina",
+    ]);
+
+    expect(intent?.kind).toBe("seed_ritual");
+    expect(intent?.durationMs).toBeGreaterThanOrEqual(14_000);
+    expectSafeIntent(intent);
+  });
+
+  it("spins the wooden top as the deepest calm daylight rotation", () => {
+    const intent = buildSeasonIntent(new Date(2024, 6, 1, 14, 0, 0), [
+      "chase_butterfly",
+      "watch_birds",
+      "visit_pond",
+      "nap_under_tree",
+      "fish_at_pond",
+      "build_cairn",
+      "paint_meadow",
+      "picnic_snack",
+    ]);
+
+    expect(intent?.kind).toBe("spin_top");
+    expect(intent?.pose).toBe("spin");
+    expectSafeIntent(intent);
+  });
+});

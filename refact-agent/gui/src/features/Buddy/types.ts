@@ -553,6 +553,11 @@ export interface BuddyEnvContext {
   season: "spring" | "summer" | "autumn" | "winter";
 }
 
+export interface BuddyCursorBridge {
+  move: (clientX: number, clientY: number) => void;
+  leave: () => void;
+}
+
 export interface BuddyCanvasProps {
   state: BuddySemanticState;
   onEvent?: (event: BuddyEvent) => void;
@@ -560,6 +565,10 @@ export interface BuddyCanvasProps {
   className?: string;
   style?: React.CSSProperties;
   envContext?: BuddyEnvContext | null;
+  /** Restrict pointer interactions to a circular hit area over the sprite */
+  spritePointer?: boolean;
+  /** Receives a cursor bridge so a parent surface can forward pointer moves */
+  cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   /** Override speech bubble text (from runtime/backend), takes priority over canvas statusText */
   speechOverride?: string | null;
   /** Buttons rendered inside the speech bubble */

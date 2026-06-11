@@ -57,6 +57,7 @@ export interface BuddyWorldActor {
   intentKind: string | null;
   travel: BuddyWorldActorTravel | null;
   nowMs: number;
+  intentStartedAtMs?: number | null;
 }
 
 const FALLBACK_TOKEN_PALETTE: BuddyWorldTokenPalette = {

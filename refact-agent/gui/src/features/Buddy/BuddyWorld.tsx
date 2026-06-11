@@ -10,6 +10,7 @@ import { BuddyCharacter } from "./BuddyCharacter";
 import type {
   BuddyCareAction,
   BuddyControl,
+  BuddyCursorBridge,
   BuddyEvent,
   BuddyPage,
   BuddyPetState,
@@ -46,6 +47,13 @@ import {
   type BuddyWorldIntent,
   type BuddyWorldIntentKind,
 } from "./buddyWorldDirector";
+import {
+  BUDDY_CARE_ACTIVITY_DEFS,
+  careActivityTotalMs,
+  careActorIntentKind,
+  pickCareLine,
+  type BuddyCareActivity,
+} from "./buddyWorldCareActivities";
 import { bubblePositionForSceneX } from "./buddyWorldUtils";
 import styles from "./BuddyWorld.module.css";
 
@@ -398,6 +406,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     RecentDirectorIntent[]
   >([]);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+  const [careActivity, setCareActivity] = useState<BuddyCareActivity | null>(
+    null,
+  );
   const [travelState, setTravelState] = useState<BuddyWorldActorTravel | null>(
     null,
   );
@@ -409,6 +420,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   );
   const sceneTargetRef = useRef<ScenePoint | null>(null);
   const travelStateRef = useRef<BuddyWorldActorTravel | null>(null);
+  const cursorBridgeRef = useRef<BuddyCursorBridge | null>(null);
   const tokenValues = useTokens([...WORLD_TOKEN_NAMES]);
   const tokenPalette = useMemo(
     () => buildWorldTokenPalette(tokenValues),
@@ -504,21 +516,32 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     [world],
   );
   const activeWaypoint = waypoints[activeWaypointIndex % waypoints.length];
+  const careDef = careActivity
+    ? BUDDY_CARE_ACTIVITY_DEFS[careActivity.action]
+    : null;
   const effectiveDirectorIntent =
-    activeSpeech !== null || showcaseRun !== null ? null : directorIntent;
+    activeSpeech !== null || showcaseRun !== null || careActivity !== null
+      ? null
+      : directorIntent;
   const characterSceneX = clampBuddySceneX(
-    showcaseRun
-      ? showcaseRun.target.x
-      : effectiveDirectorIntent
-        ? effectiveDirectorIntent.targetX
-        : activeWaypoint.x,
+    careDef
+      ? careDef.spot.x
+      : showcaseRun
+        ? showcaseRun.target.x
+        : effectiveDirectorIntent
+          ? effectiveDirectorIntent.targetX
+          : activeWaypoint.x,
   );
-  const characterSceneY = showcaseRun
-    ? showcaseRun.target.y
-    : effectiveDirectorIntent?.targetY;
-  const characterDepthScale = showcaseRun
-    ? 1
-    : effectiveDirectorIntent?.depthScale;
+  const characterSceneY = careDef
+    ? careDef.spot.y
+    : showcaseRun
+      ? showcaseRun.target.y
+      : effectiveDirectorIntent?.targetY;
+  const characterDepthScale = careDef
+    ? careDef.depthScale
+    : showcaseRun
+      ? 1
+      : effectiveDirectorIntent?.depthScale;
   const characterSceneYEffective = characterSceneY ?? DEFAULT_SCENE_Y;
   const directorSpeech = effectiveDirectorIntent?.speech ?? null;
   const speechOverride = resolveBuddyWorldSpeechOverride({
@@ -541,12 +564,21 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     characterSceneX,
     compact,
     speechOverride,
+    characterSceneYEffective,
   );
-  const actorIntentKind = showcaseRun
-    ? null
-    : effectiveDirectorIntent?.kind ?? null;
+  const actorIntentKind = careActivity
+    ? careActorIntentKind(careActivity.action)
+    : showcaseRun
+      ? null
+      : effectiveDirectorIntent?.kind ?? null;
+  const actorIntentStartedAtMs = careActivity
+    ? careActivity.startedAtMs + careActivity.travelMs
+    : effectiveDirectorIntent
+      ? directorIntentStartedAtMs
+      : null;
   const renderStateRef = useRef({
     actorIntentKind,
+    actorIntentStartedAtMs,
     actorX: characterSceneX,
     actorY: characterSceneYEffective,
     compact,
@@ -561,6 +593,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   useEffect(() => {
     renderStateRef.current = {
       actorIntentKind,
+      actorIntentStartedAtMs,
       actorX: characterSceneX,
       actorY: characterSceneYEffective,
       compact,
@@ -573,6 +606,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     };
   }, [
     actorIntentKind,
+    actorIntentStartedAtMs,
     characterSceneX,
     characterSceneYEffective,
     compact,
@@ -645,9 +679,46 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     }
   }, [showcaseRun]);
 
+  const runCareActivity = useCallback(
+    (action: BuddyCareActivity["action"], toy?: string, line?: string) => {
+      const def = BUDDY_CARE_ACTIVITY_DEFS[action];
+      const nowMs = Date.now();
+      setShowcaseRun(null);
+      setDirectorIntent(null);
+      setLastWaypoint(null);
+      setCareActivity({
+        action,
+        toy,
+        startedAtMs: nowMs,
+        travelMs: reducedMotion ? 0 : TRAVEL_DURATION_MS,
+        performMs: def.performMs,
+      });
+      setReaction(line ?? pickCareLine(def.startLines, state.name));
+      onCare(action, toy);
+    },
+    [onCare, reducedMotion, state.name],
+  );
+
+  useEffect(() => {
+    if (!careActivity) return;
+    const def = BUDDY_CARE_ACTIVITY_DEFS[careActivity.action];
+    const endAtMs =
+      careActivity.startedAtMs + careActivityTotalMs(careActivity);
+    const timer = window.setTimeout(
+      () => {
+        setCareActivity(null);
+        setReaction(pickCareLine(def.finishLines, state.name));
+        setNextDirectorSpeechAtMs(Date.now() + 6_000);
+      },
+      Math.max(0, endAtMs - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [careActivity, state.name]);
+
   const startShowcase = useCallback(
     (strongRuntimeTrigger: boolean) => {
       if (showcaseRun) return false;
+      if (careActivity) return false;
       const nowMs = Date.now();
       const run = createBuddyShowcaseRun({
         targets: showcaseTargets,
@@ -691,6 +762,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     },
     [
       activeSpeech,
+      careActivity,
       idleGraceUntilMs,
       lastShowcaseKind,
       runtimeShowcaseEventIds,
@@ -710,6 +782,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
+    if (careActivity) return;
     const delay = 4200 + Math.random() * 7200;
     const timer = window.setTimeout(() => {
       const roll = Math.random();
@@ -733,6 +806,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     return () => window.clearTimeout(timer);
   }, [
     activeSpeech,
+    careActivity,
     directorIntent,
     idleTick,
     reaction,
@@ -744,6 +818,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
+    if (careActivity) return;
     if (lastWaypoint?.id === activeWaypoint.id) return;
     const timer = window.setTimeout(() => {
       setLastWaypoint(activeWaypoint);
@@ -755,6 +830,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   }, [
     activeSpeech,
     activeWaypoint,
+    careActivity,
     directorIntent,
     lastWaypoint,
     reaction,
@@ -766,6 +842,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       activeSpeech !== null ||
       reaction !== null ||
       showcaseRun !== null ||
+      careActivity !== null ||
       nowPlaying === null ||
       !hasBuddyShowcaseRuntimeTrigger(nowPlaying)
     ) {
@@ -787,6 +864,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     startShowcase(true);
   }, [
     activeSpeech,
+    careActivity,
     runtimeShowcaseEventIds,
     nextRuntimeShowcaseAtMs,
     nowPlaying,
@@ -833,7 +911,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           : activeIntents;
       });
 
-      if (showcaseRun !== null || activeSpeech !== null) {
+      if (
+        showcaseRun !== null ||
+        activeSpeech !== null ||
+        careActivity !== null
+      ) {
         setDirectorIntent(null);
         return;
       }
@@ -891,6 +973,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     return () => window.clearInterval(timer);
   }, [
     activeSpeech,
+    careActivity,
     directorIntent,
     directorIntentStartedAtMs,
     nextDirectorSpeechAtMs,
@@ -913,6 +996,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
       const {
         actorIntentKind,
+        actorIntentStartedAtMs,
         actorX,
         actorY,
         compact,
@@ -956,6 +1040,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
             intentKind: actorIntentKind,
             travel,
             nowMs: Date.now(),
+            intentStartedAtMs: actorIntentStartedAtMs,
           },
         });
         if (showcaseRun) {
@@ -991,18 +1076,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       );
     }
     if (world.phase === "night") {
-      onCare("sleep");
-      if (!showcaseRun) {
-        setReaction(`${state.name} curls up under the moon and saves energy.`);
-      }
+      runCareActivity(
+        "sleep",
+        undefined,
+        `${state.name} curls up under the moon and saves energy.`,
+      );
       return;
     }
-    onCare("play", "scroll");
-    if (!showcaseRun) {
-      setReaction(
-        `${state.name} catches a warm sunbeam and opens the focus scroll.`,
-      );
-    }
+    runCareActivity(
+      "play",
+      "scroll",
+      `${state.name} catches a warm sunbeam and opens the focus scroll.`,
+    );
   };
 
   const handleWeatherClick = () => {
@@ -1028,10 +1113,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       }
       return;
     }
-    onCare("pet");
-    if (!showcaseRun) {
-      setReaction(`${state.name} chirps back at the sky.`);
-    }
+    runCareActivity("pet", undefined, `${state.name} chirps back at the sky.`);
   };
 
   const handleHomeClick = () => {
@@ -1055,13 +1137,15 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     }
   };
 
+  const carePose =
+    careDef !== null && travelPhase !== "traveling" ? careDef.pose : null;
   const showcasePose =
     showcaseRun !== null && showcaseRun.phase !== "travel"
       ? showcaseRun.pose
       : null;
   const directorPose = effectiveDirectorIntent?.pose ?? null;
   const characterPose: BuddyScenePose =
-    showcasePose ?? directorPose ?? randomPose;
+    carePose ?? showcasePose ?? directorPose ?? randomPose;
 
   return (
     <section
@@ -1075,11 +1159,16 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-showcase={showcaseRun?.kind ?? "none"}
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
       data-buddy-intent={effectiveDirectorIntent?.kind ?? "none"}
-      data-speech-priority="backend-showcase-director-local"
+      data-care-activity={careActivity?.action ?? "none"}
+      data-speech-priority="backend-care-showcase-director-local"
       data-speech-source={speechSource}
       data-speech-text={speechOverride ?? undefined}
       data-testid="buddy-world"
       aria-label={`${state.name} virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
+      onMouseMove={(event) =>
+        cursorBridgeRef.current?.move(event.clientX, event.clientY)
+      }
+      onMouseLeave={() => cursorBridgeRef.current?.leave()}
     >
       <canvas
         ref={canvasRef}
@@ -1094,7 +1183,12 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         onClick={handleCelestialClick}
         aria-label={`${world.celestialAction} with ${world.celestialLabel}`}
         title={`${world.celestialAction} with ${world.celestialLabel}`}
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{world.celestialLabel}</span>
+          <span className={styles.objectValue}>{world.celestialAction}</span>
+        </span>
+      </button>
 
       <button
         type="button"
@@ -1103,7 +1197,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         onClick={handleWeatherClick}
         aria-label={`Interact with ${world.weatherLabel}`}
         title={world.weatherLabel}
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{world.weatherLabel}</span>
+          <span className={styles.objectValue}>
+            {world.weather === "storm"
+              ? "inspect the storm"
+              : world.weather === "rain"
+                ? "follow the rain"
+                : `cheer up ${state.name}`}
+          </span>
+        </span>
+      </button>
 
       <button
         type="button"
@@ -1118,7 +1223,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         title={
           homeDoorDisabled ? `${state.name} is home` : `Open ${state.name} home`
         }
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{`${state.name}'s den`}</span>
+          <span className={styles.objectValue}>
+            {homeDoorDisabled ? "already home" : "open home"}
+          </span>
+        </span>
+      </button>
 
       {world.objects.map((item) => (
         <button
@@ -1175,6 +1287,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         traveling={travelPhase === "traveling"}
         arrived={travelPhase === "arrived"}
         travelDirection={travelDirection}
+        spritePointer
+        cursorBridgeRef={cursorBridgeRef}
         envContext={{
           phase: world.phase,
           weather: world.weather,
@@ -1217,7 +1331,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Water ${state.name}'s garden`}
-          onClick={() => onCare("feed")}
+          onClick={() => runCareActivity("feed")}
         >
           🍜
         </button>
@@ -1225,7 +1339,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Hunt bugs with ${state.name}`}
-          onClick={() => onCare("play", "bug")}
+          onClick={() => runCareActivity("play", "bug")}
         >
           🐛
         </button>
@@ -1233,7 +1347,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Clean ${state.name}`}
-          onClick={() => onCare("clean")}
+          onClick={() => runCareActivity("clean")}
         >
           🧼
         </button>
@@ -1241,7 +1355,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Let ${state.name} rest`}
-          onClick={() => onCare("sleep")}
+          onClick={() => runCareActivity("sleep")}
         >
           😴
         </button>

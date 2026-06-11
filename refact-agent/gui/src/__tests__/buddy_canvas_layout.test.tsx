@@ -17,6 +17,7 @@ const noopCanvasContext = {
   arc: vi.fn(),
   ellipse: vi.fn(),
   fill: vi.fn(),
+  clip: vi.fn(),
   moveTo: vi.fn(),
   lineTo: vi.fn(),
   stroke: vi.fn(),
@@ -218,5 +219,84 @@ describe("BuddyCanvas compact speech layout", () => {
       });
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
     });
+  });
+});
+describe("BuddyCanvas sprite pointer mode", () => {
+  let frameCallbacks: FrameRequestCallback[] = [];
+
+  beforeEach(() => {
+    frameCallbacks = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {
+      return undefined;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      noopContext,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("restricts pointer interactions to a circular sprite hit area", () => {
+    const { container } = render(
+      <BuddyCanvas
+        state={makeSemanticState()}
+        displaySize={282}
+        spritePointer
+      />,
+    );
+
+    const hitArea = screen.getByTestId("buddy-sprite-hit");
+    const canvas = container.querySelector("canvas");
+
+    expect(hitArea).toHaveStyle({
+      cursor: "pointer",
+      pointerEvents: "auto",
+      borderRadius: "9999px",
+    });
+    expect(canvas).not.toBeNull();
+    expect(canvas?.getAttribute("style")).toContain("pointer-events: none");
+    expect(canvas?.getAttribute("style")).toContain("cursor: default");
+  });
+
+  it("keeps the whole canvas interactive without sprite pointer mode", () => {
+    const { container } = render(
+      <BuddyCanvas state={makeSemanticState()} displaySize={282} />,
+    );
+
+    const canvas = container.querySelector("canvas");
+
+    expect(screen.queryByTestId("buddy-sprite-hit")).toBeNull();
+    expect(canvas?.getAttribute("style")).toContain("cursor: pointer");
+    expect(canvas?.getAttribute("style")).not.toContain("pointer-events: none");
+  });
+
+  it("installs a cursor bridge that survives until unmount", () => {
+    const bridgeRef: {
+      current: {
+        move: (x: number, y: number) => void;
+        leave: () => void;
+      } | null;
+    } = { current: null };
+    const { unmount } = render(
+      <BuddyCanvas
+        state={makeSemanticState()}
+        displaySize={282}
+        spritePointer
+        cursorBridgeRef={bridgeRef}
+      />,
+    );
+
+    expect(bridgeRef.current).not.toBeNull();
+    expect(() => bridgeRef.current?.move(40, 60)).not.toThrow();
+    expect(() => bridgeRef.current?.leave()).not.toThrow();
+
+    unmount();
+    expect(bridgeRef.current).toBeNull();
   });
 });

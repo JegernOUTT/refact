@@ -405,6 +405,7 @@ const noopCanvasContext = {
   arc: vi.fn(),
   ellipse: vi.fn(),
   fill: vi.fn(),
+  clip: vi.fn(),
   moveTo: vi.fn(),
   lineTo: vi.fn(),
   stroke: vi.fn(),
