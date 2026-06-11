@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod cron_clock;
 pub mod events;
+pub mod idle;
 pub mod lock;
 pub mod mdns;
 pub mod paths;
@@ -157,6 +158,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
     let mdns_advertisement = mdns::MdnsAdvertisement::start(actual_addr.port());
 
     let cron_clock_task = cron_clock::spawn(state.clone());
+    let idle_task = idle::spawn(state.clone());
     let serve_result = server::serve(listener, state.clone(), actual_addr.port()).await;
 
     if let Some(mdns) = mdns_advertisement {
@@ -167,6 +169,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
         signal_task.abort();
     }
     cron_clock_task.abort();
+    idle_task.abort();
     if let Err(error) = serve_result {
         tracing::error!("{error}");
     }

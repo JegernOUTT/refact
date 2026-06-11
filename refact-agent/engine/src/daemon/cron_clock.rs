@@ -13,7 +13,7 @@ use crate::daemon::supervisor::WorkerState;
 use crate::scheduler::{next_run_ms, scheduled_tasks_path, scheduler_timezone, ScheduledTask};
 
 pub(crate) const WAKE_LEAD_MS: u64 = 90_000;
-pub const CRON_PENDING_HORIZON_MS: u64 = 10 * 60 * 1000;
+pub const CRON_PENDING_HORIZON_MS: u64 = crate::daemon::idle::CRON_SOON_MS;
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const REPARSE_SOON_MS: u64 = 120_000;
 
@@ -44,7 +44,7 @@ pub fn spawn(state: Arc<DaemonState>) -> JoinHandle<()> {
 }
 
 pub fn cron_pending_blocks_idle_stop(next_fire_ms: u64, now: u64) -> bool {
-    next_fire_ms <= now.saturating_add(CRON_PENDING_HORIZON_MS)
+    crate::daemon::idle::cron_pending_blocks_idle_stop(next_fire_ms, now)
 }
 
 pub(crate) struct CronClock {

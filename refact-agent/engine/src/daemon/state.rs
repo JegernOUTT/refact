@@ -11,7 +11,14 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::events::EventBus;
+use crate::daemon::idle::WorkerIdleSnapshot;
 use crate::daemon_link::WorkerStatusReport;
+
+#[derive(Debug, Clone)]
+struct StoredWorkerStatus {
+    report: WorkerStatusReport,
+    received_ms: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonUrls {
@@ -43,7 +50,7 @@ pub struct DaemonState {
     pub started_at_ms: u64,
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
-    pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
+    worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
     pub proxy_activity: RwLock<HashMap<String, ProxyActivity>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
@@ -77,6 +84,7 @@ impl DaemonState {
             daemon_dir,
             daemon_port,
             cron_pending.clone(),
+            config.idle_timeout_secs,
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -138,18 +146,33 @@ impl DaemonState {
     }
 
     pub async fn latest_worker_status(&self, project_id: &str) -> Option<WorkerStatusReport> {
-        self.worker_statuses.read().await.get(project_id).cloned()
+        self.worker_statuses
+            .read()
+            .await
+            .get(project_id)
+            .map(|status| status.report.clone())
     }
 
     pub async fn store_worker_status(&self, report: WorkerStatusReport) -> bool {
         let project_id = report.project_id.clone();
+        if report.last_activity_ts > 0 {
+            self.supervisor
+                .note_project_activity(&project_id, report.last_activity_ts)
+                .await;
+        }
         let changed = {
             let mut statuses = self.worker_statuses.write().await;
             let changed = statuses
                 .get(&project_id)
-                .map(|previous| worker_status_event_fields_changed(previous, &report))
+                .map(|previous| worker_status_event_fields_changed(&previous.report, &report))
                 .unwrap_or(true);
-            statuses.insert(project_id.clone(), report.clone());
+            statuses.insert(
+                project_id.clone(),
+                StoredWorkerStatus {
+                    report: report.clone(),
+                    received_ms: now_ms(),
+                },
+            );
             changed
         };
         if changed {
@@ -164,15 +187,32 @@ impl DaemonState {
 
     pub async fn load_projects(&self, path: PathBuf) {
         let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
+        for entry in registry.list() {
+            self.sync_project_liveness(&entry).await;
+        }
         *self.projects.write().await = registry;
     }
 
+    pub(crate) async fn sync_project_liveness(
+        &self,
+        entry: &crate::daemon::projects::ProjectEntry,
+    ) {
+        self.supervisor
+            .set_project_liveness(&entry.id, entry.pinned, entry.last_active_ms)
+            .await;
+        let mut activity = self.proxy_activity.write().await;
+        let activity = activity.entry(entry.id.clone()).or_default();
+        activity.last_proxy_activity_ms = activity.last_proxy_activity_ms.max(entry.last_active_ms);
+    }
+
     pub async fn update_proxy_activity(&self, project_id: &str) {
+        let now = now_ms();
+        self.supervisor.note_project_activity(project_id, now).await;
         let mut activity = self.proxy_activity.write().await;
         activity
             .entry(project_id.to_string())
             .or_default()
-            .last_proxy_activity_ms = now_ms();
+            .last_proxy_activity_ms = now;
     }
 
     pub async fn increment_live_proxy_stream(&self, project_id: &str) {
@@ -186,6 +226,47 @@ impl DaemonState {
         let mut activity = self.proxy_activity.write().await;
         let activity = activity.entry(project_id.to_string()).or_default();
         activity.live_proxy_streams = activity.live_proxy_streams.saturating_sub(1);
+    }
+
+    pub(crate) async fn worker_idle_snapshots(&self) -> Vec<(String, WorkerIdleSnapshot)> {
+        let projects = {
+            let registry = self.projects.read().await;
+            registry.list()
+        };
+        let statuses = self.worker_statuses.read().await.clone();
+        let activity = self.proxy_activity.read().await.clone();
+        let cron_pending = self.cron_pending_snapshot().await;
+        let mut snapshots = Vec::new();
+        for entry in projects {
+            let Some(info) = self.supervisor.worker_info(&entry.id).await else {
+                continue;
+            };
+            let status = statuses.get(&entry.id);
+            let activity = activity.get(&entry.id).cloned().unwrap_or_default();
+            snapshots.push((
+                entry.id.clone(),
+                WorkerIdleSnapshot {
+                    state: info.state,
+                    pinned: entry.pinned,
+                    live_proxy_streams: activity.live_proxy_streams.min(u64::from(u32::MAX)) as u32,
+                    last_proxy_activity_ms: activity
+                        .last_proxy_activity_ms
+                        .max(entry.last_active_ms),
+                    lsp_clients: status
+                        .map(|status| status.report.lsp_clients.min(u32::MAX as usize) as u32)
+                        .unwrap_or(0),
+                    busy_chats: status
+                        .map(|status| status.report.busy_chats.min(u32::MAX as usize) as u32)
+                        .unwrap_or(0),
+                    exec_running: status
+                        .map(|status| status.report.exec_running.min(u32::MAX as usize) as u32)
+                        .unwrap_or(0),
+                    last_status_report_ms: status.map(|status| status.received_ms).unwrap_or(0),
+                    cron_next_fire_ms: cron_pending.get(&entry.id).copied(),
+                },
+            ));
+        }
+        snapshots
     }
 
     pub async fn proxy_activity(&self, project_id: &str) -> ProxyActivity {

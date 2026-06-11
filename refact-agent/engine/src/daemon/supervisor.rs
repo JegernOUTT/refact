@@ -78,6 +78,12 @@ struct WorkerRecord {
     monitor_task: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WorkerLiveness {
+    pinned: bool,
+    last_activity_ms: u64,
+}
+
 struct WorkerSlot {
     op_lock: Mutex<()>,
     record: Mutex<WorkerRecord>,
@@ -89,6 +95,8 @@ pub struct Supervisor {
     daemon_dir: PathBuf,
     daemon_port: RwLock<u16>,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+    project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
+    idle_timeout_secs: u64,
     client: reqwest::Client,
 }
 
@@ -99,6 +107,7 @@ impl Supervisor {
             daemon_dir,
             daemon_port,
             Arc::new(SyncRwLock::new(HashMap::new())),
+            crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
         )
     }
 
@@ -107,6 +116,7 @@ impl Supervisor {
         daemon_dir: PathBuf,
         daemon_port: u16,
         cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+        idle_timeout_secs: u64,
     ) -> Arc<Self> {
         Arc::new(Self {
             workers: RwLock::new(HashMap::new()),
@@ -114,6 +124,8 @@ impl Supervisor {
             daemon_dir,
             daemon_port: RwLock::new(daemon_port),
             cron_pending,
+            project_liveness: RwLock::new(HashMap::new()),
+            idle_timeout_secs,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .build()
@@ -129,6 +141,8 @@ impl Supervisor {
         self: &Arc<Self>,
         entry: &ProjectEntry,
     ) -> Result<WorkerInfo, String> {
+        self.set_project_liveness(&entry.id, entry.pinned, now_ms())
+            .await;
         let spec = WorkerLaunchSpec::from(entry);
         let slot = self.slot_for(&spec.project_id).await;
         let _guard = slot.op_lock.lock().await;
@@ -142,6 +156,8 @@ impl Supervisor {
         self: &Arc<Self>,
         entry: &ProjectEntry,
     ) -> Result<WorkerInfo, String> {
+        self.set_project_liveness(&entry.id, entry.pinned, now_ms())
+            .await;
         let spec = WorkerLaunchSpec::from(entry);
         let slot = self.slot_for(&spec.project_id).await;
         let _guard = slot.op_lock.lock().await;
@@ -200,12 +216,46 @@ impl Supervisor {
         self.cron_pending.read().get(project_id).copied()
     }
 
-    fn wants_alive(&self, project_id: &str) -> bool {
-        self.cron_pending(project_id)
+    pub(crate) async fn set_project_liveness(
+        &self,
+        project_id: &str,
+        pinned: bool,
+        last_activity_ms: u64,
+    ) {
+        let mut liveness = self.project_liveness.write().await;
+        let entry = liveness.entry(project_id.to_string()).or_default();
+        entry.pinned = pinned;
+        entry.last_activity_ms = entry.last_activity_ms.max(last_activity_ms);
+    }
+
+    pub(crate) async fn note_project_activity(&self, project_id: &str, activity_ms: u64) {
+        let mut liveness = self.project_liveness.write().await;
+        let entry = liveness.entry(project_id.to_string()).or_default();
+        entry.last_activity_ms = entry.last_activity_ms.max(activity_ms);
+    }
+
+    async fn wants_alive(&self, project_id: &str) -> bool {
+        let now = now_ms();
+        if self
+            .cron_pending(project_id)
             .map(|next_fire_ms| {
-                crate::daemon::cron_clock::cron_pending_blocks_idle_stop(next_fire_ms, now_ms())
+                crate::daemon::idle::cron_pending_blocks_idle_stop(next_fire_ms, now)
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        let liveness = self.project_liveness.read().await.get(project_id).cloned();
+        let Some(liveness) = liveness else {
+            return false;
+        };
+        if liveness.pinned {
+            return true;
+        }
+        if self.idle_timeout_secs == 0 {
+            return true;
+        }
+        now.saturating_sub(liveness.last_activity_ms) < self.idle_timeout_secs.saturating_mul(1000)
     }
 
     async fn slot_for(&self, project_id: &str) -> Arc<WorkerSlot> {
@@ -605,6 +655,7 @@ impl Supervisor {
         reason: String,
     ) -> (WorkerInfo, Option<Duration>) {
         let now = now_ms();
+        let wants_alive = self.wants_alive(project_id).await;
         let mut record = slot.record.lock().await;
         if record.generation != generation {
             return (record.info.clone(), None);
@@ -618,17 +669,14 @@ impl Supervisor {
             Some(code) => format!("{reason} (exit code {code})"),
             None => format!("{reason} (signal)"),
         });
-        if delay.is_some() && self.wants_alive(project_id) {
+        if delay.is_some() && wants_alive {
             record.info.state = WorkerState::Starting;
         } else if delay.is_none() {
             record.info.state = WorkerState::Crashed;
         } else {
             record.info.state = WorkerState::Stopped;
         }
-        (
-            record.info.clone(),
-            delay.filter(|_| self.wants_alive(project_id)),
-        )
+        (record.info.clone(), delay.filter(|_| wants_alive))
     }
 
     async fn emit_exit_or_crash(

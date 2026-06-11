@@ -271,6 +271,7 @@ pub async fn open_project(
             }
         }
     };
+    state.sync_project_liveness(&entry).await;
     let worker = match state.supervisor.ensure_worker(&entry).await {
         Ok(worker) => worker,
         Err(error) => {
@@ -404,6 +405,7 @@ pub async fn pin_project(
     };
     match result {
         Ok(Some(entry)) => {
+            state.sync_project_liveness(&entry).await;
             let _ = state
                 .events
                 .emit(
