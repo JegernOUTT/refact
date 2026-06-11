@@ -800,7 +800,7 @@ function drawKoiPondWatch(args: DrawShowcaseEventArgs): void {
 
   const timeline = timelineProgress(run, progress);
   const pond = {
-    x: finiteOrZero(width) * 0.13,
+    x: finiteOrZero(width) * 0.38,
     y: finiteOrZero(height) * 0.875,
   };
   const pondRX = compact ? 26 : 38;

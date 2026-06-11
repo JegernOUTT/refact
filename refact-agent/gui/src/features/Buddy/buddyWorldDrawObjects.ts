@@ -12,13 +12,17 @@ import {
   pctY,
   safeDimension,
   safeFrame,
+  strokeBezier,
   strokeLine,
   strokeEllipse,
   toneColor,
   wave,
   worldObjects,
+  worldPaletteHint,
+  worldPhase,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
+import { phaseTints } from "./buddyWorldDrawScenery";
 
 function objectPulse(
   args: DrawBuddyWorldBaseArgs,
@@ -428,6 +432,96 @@ export function drawBuddyHomeDoor(args: DrawBuddyWorldBaseArgs): void {
   );
 }
 
+interface ObjectMaterials {
+  stone: string;
+  stoneLight: string;
+  stoneDark: string;
+  wood: string;
+  woodDark: string;
+  paper: string;
+  paperShade: string;
+  moss: string;
+}
+
+function objectMaterials(args: DrawBuddyWorldBaseArgs): ObjectMaterials {
+  const hint = worldPaletteHint(args.world);
+  if (hint === "night" || hint === "dream") {
+    return {
+      stone: "#5C6678",
+      stoneLight: "#76819A",
+      stoneDark: "#3E4658",
+      wood: "#4A3A2C",
+      woodDark: "#32281E",
+      paper: "#C9CFE2",
+      paperShade: "#9AA3C0",
+      moss: "#2C5638",
+    };
+  }
+  if (hint === "storm") {
+    return {
+      stone: "#7A8494",
+      stoneLight: "#97A1B0",
+      stoneDark: "#566070",
+      wood: "#5C4A38",
+      woodDark: "#41342A",
+      paper: "#D8DCE4",
+      paperShade: "#AEB6C2",
+      moss: "#33543A",
+    };
+  }
+  if (hint === "dusk") {
+    return {
+      stone: "#9A8D95",
+      stoneLight: "#B9A8AC",
+      stoneDark: "#6E646E",
+      wood: "#6E523C",
+      woodDark: "#4C3A2C",
+      paper: "#F6DFC8",
+      paperShade: "#D9B49C",
+      moss: "#3F6340",
+    };
+  }
+  if (hint === "dawn") {
+    return {
+      stone: "#A89C92",
+      stoneLight: "#C6B8AA",
+      stoneDark: "#7A7066",
+      wood: "#73573F",
+      woodDark: "#52402F",
+      paper: "#FBEEDC",
+      paperShade: "#E4C7A8",
+      moss: "#4A7449",
+    };
+  }
+  return {
+    stone: "#A8998A",
+    stoneLight: "#C3B5A2",
+    stoneDark: "#7A6E62",
+    wood: "#6B4F3A",
+    woodDark: "#4A362A",
+    paper: "#FBF3E2",
+    paperShade: "#E2CFAE",
+    moss: "#4F8F54",
+  };
+}
+
+function canopyFleck(args: DrawBuddyWorldBaseArgs): string {
+  switch (worldPaletteHint(args.world)) {
+    case "day":
+      return "#BBF7D0";
+    case "dawn":
+      return "#D9EAC8";
+    case "dusk":
+      return "#FDBA74";
+    case "night":
+      return "#A7F3D0";
+    case "dream":
+      return "#C4B5FD";
+    case "storm":
+      return "#C2CEDC";
+  }
+}
+
 function drawTaskGrove(
   args: DrawBuddyWorldBaseArgs,
   item: BuddyWorldObject,
@@ -436,18 +530,32 @@ function drawTaskGrove(
   pulse: number,
   tone: string,
 ): void {
-  fillPixelRect(args.ctx, x - 5, y - 4, 10, 32, "#7C2D12");
-  fillPixelRect(
-    args.ctx,
-    x - 17,
-    y - 22 + pulse,
-    34,
-    18,
-    item.state === "critical" ? "#84CC16" : "#22C55E",
-  );
-  fillPixelRect(args.ctx, x - 10, y - 31 + pulse, 22, 14, "#86EFAC");
-  fillPixelRect(args.ctx, x + 11, y - 11 + pulse, 9, 7, "#BBF7D0");
-  fillPixelRect(args.ctx, x + 14, y - 8 + pulse, 6, 3, tone);
+  const tints = phaseTints(args);
+  const fleck = canopyFleck(args);
+  const restless = item.state !== "calm";
+
+  fillEllipse(args.ctx, x, y + 26, 26, 6, "#1A2E20", 0.28);
+  fillPixelRect(args.ctx, x - 4, y + 6, 5, 21, tints.trunkDark, 0.96);
+  fillPixelRect(args.ctx, x + 1, y + 6, 4, 21, tints.trunkLight, 0.96);
+  fillPixelRect(args.ctx, x - 8, y + 23, 6, 4, tints.trunkDark, 0.88);
+  fillPixelRect(args.ctx, x + 4, y + 23, 7, 4, tints.trunkLight, 0.84);
+
+  fillEllipse(args.ctx, x - 11, y + 2 + pulse * 0.4, 15, 10, tints.canopyDeep);
+  fillEllipse(args.ctx, x + 10, y + pulse * 0.5, 14, 9, tints.canopyDeep);
+  fillEllipse(args.ctx, x - 2, y - 8 + pulse, 16, 10, tints.canopyMid);
+  fillEllipse(args.ctx, x - 12, y - 9 + pulse, 9, 6, tints.canopyMid);
+  fillEllipse(args.ctx, x + 8, y - 13 + pulse, 12, 8, tints.canopyLight);
+
+  fillPixelRect(args.ctx, x - 6, y - 13 + pulse, 2, 2, fleck, 0.85);
+  fillPixelRect(args.ctx, x + 12, y - 8 + pulse, 2, 2, fleck, 0.7);
+  fillPixelRect(args.ctx, x + 2, y - 17 + pulse, 2, 2, fleck, 0.8);
+
+  if (restless) {
+    fillPixelRect(args.ctx, x - 9, y - 4 + pulse, 3, 3, tone, 0.92);
+    fillPixelRect(args.ctx, x + 6, y - 9 + pulse, 3, 3, tone, 0.92);
+    fillPixelRect(args.ctx, x + 13, y + 2 + pulse * 0.5, 3, 3, tone, 0.88);
+    fillPixelRect(args.ctx, x + 16, y + 25, 3, 3, tone, 0.66);
+  }
 }
 
 function drawMemoryFireflies(
@@ -457,6 +565,7 @@ function drawMemoryFireflies(
   y: number,
   tone: string,
 ): void {
+  const materials = objectMaterials(args);
   const count = args.reducedMotion ? 4 : args.compact ? 5 : 7;
   const attention = item.state === "attention" || item.state === "critical";
   const active = item.state === "active" || item.animation === "stream";
@@ -504,9 +613,39 @@ function drawMemoryFireflies(
       );
     }
   }
-  fillPixelRect(args.ctx, x - 14, y + 15, 28, 11, "#854D0E");
-  fillPixelRect(args.ctx, x - 9, y + 10, 18, 6, glowColor);
-  fillPixelRect(args.ctx, x - 18, y + 24, 36, 4, "#422006", 0.46);
+
+  const swing = wave(args.frame, 64, 1, 1.4, args.reducedMotion);
+  strokeLine(
+    args.ctx,
+    { x: x + swing * 0.3, y: y + 6 },
+    { x: x + 5, y: y - 18 },
+    materials.woodDark,
+    1.2,
+    0.8,
+  );
+  fillEllipse(args.ctx, x + swing, y + 15, 8, 9, materials.wood, 0.96);
+  fillEllipse(args.ctx, x + swing, y + 11, 7, 4, materials.moss, 0.9);
+  fillPixelRect(
+    args.ctx,
+    x - 6 + swing,
+    y + 14,
+    12,
+    1.6,
+    materials.woodDark,
+    0.5,
+  );
+  fillPixelRect(
+    args.ctx,
+    x - 5 + swing,
+    y + 18,
+    10,
+    1.4,
+    materials.woodDark,
+    0.4,
+  );
+  fillEllipse(args.ctx, x + swing, y + 16, 3.4, 4, "#1F1812", 0.92);
+  fillPixelRect(args.ctx, x - 1.4 + swing, y + 14.6, 3, 3, glowColor, 0.9);
+  fillEllipse(args.ctx, x, y + 26, 12, 3, "#1A2E20", 0.3);
 }
 
 function drawObservatory(
@@ -516,46 +655,106 @@ function drawObservatory(
   y: number,
   tone: string,
 ): void {
+  const materials = objectMaterials(args);
+  const tints = phaseTints(args);
+  const frame = safeFrame(args.frame);
+  const phase = worldPhase(args.world);
+  const lanternLit = phase === "evening" || phase === "night";
   const activeAlpha =
     item.state === "critical" ? 0.32 : item.state === "active" ? 0.2 : 0.1;
   const warning = item.state === "attention";
-  fillCircle(args.ctx, x + 11, y - 23, 25, tone, activeAlpha);
-  fillPixelRect(args.ctx, x - 24, y + 13, 48, 18, "#334155");
-  fillPixelRect(args.ctx, x - 18, y + 4, 36, 15, "#64748B");
-  fillPixelRect(args.ctx, x - 10, y - 3, 20, 8, "#94A3B8");
-  fillPixelRect(args.ctx, x - 4, y - 19, 8, 18, tone);
-  fillPixelRect(args.ctx, x + 4, y - 14, 26, 6, "#CBD5E1");
-  fillPixelRect(args.ctx, x + 27, y - 15, 5, 8, "#FDE68A");
+
+  fillCircle(args.ctx, x, y - 14, 25, tone, activeAlpha);
+  fillEllipse(args.ctx, x + 2, y + 24, 36, 9, tints.canopyDeep, 0.88);
+  fillEllipse(args.ctx, x - 2, y + 20, 28, 8, tints.canopyMid, 0.9);
+  fillEllipse(args.ctx, x + 14, y + 23, 12, 4, tints.canopyLight, 0.5);
+
+  const lx = x - 9;
+  fillPixelRect(args.ctx, lx - 7, y + 14, 15, 3, materials.stoneDark, 0.95);
+  fillPixelRect(args.ctx, lx - 5, y + 11, 11, 3, materials.stone, 0.95);
+  fillPixelRect(args.ctx, lx - 3, y + 2, 7, 9, materials.stone, 0.96);
+  fillPixelRect(args.ctx, lx - 3, y + 2, 2, 9, materials.stoneDark, 0.5);
+  fillPixelRect(args.ctx, lx - 6, y - 5, 13, 7, materials.stoneLight, 0.97);
+  fillPixelRect(
+    args.ctx,
+    lx - 4,
+    y - 3.4,
+    9,
+    4.4,
+    lanternLit ? "#FDE68A" : materials.stoneDark,
+    lanternLit ? 0.95 : 0.85,
+  );
+  if (lanternLit) {
+    fillCircle(
+      args.ctx,
+      lx,
+      y - 1,
+      11,
+      "#FBBF24",
+      alphaForMotion(
+        0.12 + wave(frame, 30, 1, 0.04, args.reducedMotion),
+        args.reducedMotion,
+      ),
+    );
+  }
+  fillPixelRect(args.ctx, lx - 8, y - 8, 17, 3, materials.stoneDark, 0.96);
+  fillPixelRect(args.ctx, lx - 5, y - 10.4, 11, 2.6, materials.stone, 0.96);
+  fillPixelRect(args.ctx, lx - 1.4, y - 13, 3, 3, materials.stoneDark, 0.96);
+
+  const tx = x + 10;
+  strokeLine(
+    args.ctx,
+    { x: tx - 4, y: y + 14 },
+    { x: tx + 1, y: y + 3 },
+    materials.woodDark,
+    1.6,
+    0.92,
+  );
+  strokeLine(
+    args.ctx,
+    { x: tx + 7, y: y + 14 },
+    { x: tx + 1, y: y + 3 },
+    materials.woodDark,
+    1.6,
+    0.92,
+  );
+  fillPixelRect(args.ctx, tx - 3, y - 1, 9, 4, materials.woodDark, 0.96);
+  fillPixelRect(args.ctx, tx + 4, y - 4.4, 7, 4.4, materials.wood, 0.96);
+  fillPixelRect(args.ctx, tx + 10, y - 4.4, 2.4, 4.4, "#DBEAFE", 0.9);
+
   if (item.state === "active") {
     strokeLine(
       args.ctx,
-      { x: x + 31, y: y - 16 },
-      { x: x - 48, y: y - 50 + wave(args.frame, 58, 0, 8, args.reducedMotion) },
+      { x: tx + 11, y: y - 3 },
+      {
+        x: tx + 34,
+        y: y - 36 + wave(frame, 58, 0, 6, args.reducedMotion),
+      },
       "#DBEAFE",
-      3,
+      2.4,
       0.26 + finiteOr(item.intensity, 0) * 0.18,
     );
   }
   if (warning) {
     strokeEllipse(
       args.ctx,
-      x + 7,
-      y - 11,
-      34,
-      18,
+      x,
+      y - 2,
+      30,
+      19,
       "#F59E0B",
       2,
       0.14 + finiteOr(item.intensity, 0) * 0.08,
     );
   }
   if (item.state === "critical") {
-    fillCircle(args.ctx, x + 12, y - 24, 32, "#EF4444", 0.13);
-    fillPixelRect(args.ctx, x + 33, y - 18, 8, 3, "#FACC15", 0.86);
-    fillPixelRect(args.ctx, x + 38, y - 15, 3, 8, "#FACC15", 0.86);
+    fillCircle(args.ctx, x, y - 8, 32, "#EF4444", 0.13);
+    fillPixelRect(args.ctx, x + 21, y - 22, 8, 3, "#FACC15", 0.86);
+    fillPixelRect(args.ctx, x + 26, y - 19, 3, 8, "#FACC15", 0.86);
     strokeLine(
       args.ctx,
-      { x: x + 34, y: y - 17 },
-      { x: x + 58, y: y - 44 },
+      { x: x + 22, y: y - 21 },
+      { x: x + 46, y: y - 48 },
       "#FACC15",
       2,
       0.76,
@@ -571,20 +770,55 @@ function drawSatellite(
   pulse: number,
   tone: string,
 ): void {
-  fillPixelRect(args.ctx, x - 8, y - 5 + pulse, 16, 10, "#CBD5E1");
-  fillPixelRect(args.ctx, x - 26, y - 3 + pulse, 14, 6, tone);
-  fillPixelRect(args.ctx, x + 12, y - 3 + pulse, 14, 6, tone);
-  fillPixelRect(args.ctx, x - 1, y + 5 + pulse, 2, 18, "#94A3B8");
-  if (item.animation === "orbit") {
-    strokeEllipse(
+  const materials = objectMaterials(args);
+  const frame = safeFrame(args.frame);
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const ax = pctX(width, finiteOr(item.interactionX, 78));
+  const ay = pctY(height, finiteOr(item.interactionY, 72)) + 10;
+  const sway = wave(frame, 46, 0, 4, args.reducedMotion);
+  const kx = x + sway;
+  const ky = y + pulse;
+
+  strokeBezier(
+    args.ctx,
+    { x: kx, y: ky + 9 },
+    { x: kx - 12, y: ky + 34 },
+    { x: ax + 16, y: ay - 36 },
+    { x: ax, y: ay - 8 },
+    materials.paperShade,
+    1,
+    0.6,
+  );
+  fillPixelRect(args.ctx, ax - 1.4, ay - 9, 3, 11, materials.woodDark, 0.95);
+  fillPixelRect(args.ctx, ax - 3.4, ay + 1, 7, 2.4, materials.stoneDark, 0.9);
+
+  const rows = [2, 6, 10, 13, 10, 6, 2];
+  for (let row = 0; row < rows.length; row += 1) {
+    const rowWidth = rows[row];
+    fillPixelRect(
       args.ctx,
-      x,
-      y + 1 + pulse,
-      34,
-      9,
-      "#DBEAFE",
-      1,
-      0.12 + finiteOr(item.intensity, 0) * 0.08,
+      kx - rowWidth / 2,
+      ky - 9 + row * 2.6,
+      rowWidth,
+      2.6,
+      row === 3 ? tone : row < 3 ? materials.paper : materials.paperShade,
+      0.96,
+    );
+  }
+  fillPixelRect(args.ctx, kx - 0.8, ky - 9, 1.6, 18.2, materials.woodDark, 0.6);
+  fillPixelRect(args.ctx, kx - 6.5, ky - 0.8, 13, 1.6, materials.woodDark, 0.6);
+
+  for (let bow = 0; bow < 3; bow += 1) {
+    const bowSway = wave(frame, 16 + bow * 4, bow * 1.3, 3, args.reducedMotion);
+    fillPixelRect(
+      args.ctx,
+      kx - 1.5 + bowSway,
+      ky + 12 + bow * 6,
+      3.4,
+      2.2,
+      bow % 2 === 0 ? tone : materials.paper,
+      0.9 - bow * 0.14,
     );
   }
 }
@@ -595,13 +829,61 @@ function drawGitVane(
   y: number,
   tone: string,
 ): void {
-  fillPixelRect(args.ctx, x - 2, y - 18, 4, 42, "#94A3B8");
-  fillPixelRect(args.ctx, x - 14, y - 9, 28, 3, "#CBD5E1");
-  fillPixelRect(args.ctx, x - 1, y - 22, 3, 30, "#CBD5E1");
-  fillPixelRect(args.ctx, x - 18, y - 13, 8, 8, tone);
-  fillPixelRect(args.ctx, x + 10, y - 13, 8, 8, "#86EFAC");
-  fillPixelRect(args.ctx, x - 5, y - 26, 8, 8, "#F8FAFC");
-  fillPixelRect(args.ctx, x - 4, y + 4, 8, 8, "#FDE68A");
+  const materials = objectMaterials(args);
+  const frame = safeFrame(args.frame);
+  const sway = wave(frame, 34, 0, 2.4, args.reducedMotion);
+
+  fillEllipse(args.ctx, x, y + 13, 10, 3, "#1A2E20", 0.3);
+  fillPixelRect(args.ctx, x - 4, y + 9, 8, 3.4, materials.stone, 0.92);
+  fillPixelRect(args.ctx, x - 1.6, y - 14, 3.4, 24, materials.woodDark, 0.95);
+  fillPixelRect(args.ctx, x, y - 14, 1.6, 24, materials.wood, 0.9);
+
+  fillPixelRect(
+    args.ctx,
+    x - 11 + sway,
+    y - 11,
+    22,
+    2,
+    materials.woodDark,
+    0.94,
+  );
+  fillPixelRect(
+    args.ctx,
+    x + 11 + sway,
+    y - 12.4,
+    3,
+    5,
+    materials.woodDark,
+    0.94,
+  );
+  fillPixelRect(
+    args.ctx,
+    x - 14 + sway,
+    y - 13,
+    3.4,
+    2,
+    materials.woodDark,
+    0.9,
+  );
+  fillPixelRect(
+    args.ctx,
+    x - 14 + sway,
+    y - 9,
+    3.4,
+    2,
+    materials.woodDark,
+    0.9,
+  );
+
+  const rx = x + sway * 0.6;
+  fillPixelRect(args.ctx, rx - 2.4, y - 19, 5.4, 3.4, "#7C2D12", 0.95);
+  fillPixelRect(args.ctx, rx - 4.4, y - 21.6, 2.4, 3.4, "#9A3412", 0.95);
+  fillPixelRect(args.ctx, rx + 2.6, y - 21, 2.2, 2.2, "#7C2D12", 0.95);
+  fillPixelRect(args.ctx, rx + 3, y - 22.4, 1.4, 1.4, tone, 0.95);
+  fillPixelRect(args.ctx, rx + 4.6, y - 20.2, 1.4, 1.2, "#FDE68A", 0.95);
+
+  fillPixelRect(args.ctx, x - 8, y - 2, 2, 2, materials.stone, 0.8);
+  fillPixelRect(args.ctx, x + 6, y - 2, 2, 2, materials.stone, 0.8);
 }
 
 function drawMarketComet(
@@ -610,16 +892,59 @@ function drawMarketComet(
   y: number,
   pulse: number,
 ): void {
-  fillPixelRect(args.ctx, x - 10, y - 7 + pulse, 20, 14, "#A855F7");
-  fillPixelRect(args.ctx, x - 5, y - 3 + pulse, 10, 7, "#FDE68A");
-  fillPixelRect(args.ctx, x - 29, y + pulse, 17, 3, "#FDBA74", 0.52);
-  fillPixelRect(args.ctx, x - 40, y + 3 + pulse, 9, 2, "#FDBA74", 0.32);
+  const frame = safeFrame(args.frame);
+  const drift = wave(frame, 74, 1, 3, args.reducedMotion);
+  const bx = x + drift;
+  const by = y + pulse;
+
+  fillEllipse(args.ctx, bx, by - 2, 11, 13, "#E981A0", 0.97);
+  fillPixelRect(args.ctx, bx - 7.4, by - 8, 3.2, 13, "#FBEEDC", 0.85);
+  fillPixelRect(args.ctx, bx - 1.6, by - 14, 3.2, 19, "#FBEEDC", 0.85);
+  fillPixelRect(args.ctx, bx + 4.2, by - 8, 3.2, 13, "#FBEEDC", 0.85);
+  fillEllipse(args.ctx, bx - 4, by - 8, 4, 5, "#F6C8D8", 0.55);
+  fillPixelRect(args.ctx, bx - 8, by + 8, 16, 2.4, "#C98D96", 0.95);
+
+  strokeLine(
+    args.ctx,
+    { x: bx - 6, y: by + 10 },
+    { x: bx - 3, y: by + 17 },
+    "#6B4F3A",
+    1,
+    0.85,
+  );
+  strokeLine(
+    args.ctx,
+    { x: bx + 6, y: by + 10 },
+    { x: bx + 3, y: by + 17 },
+    "#6B4F3A",
+    1,
+    0.85,
+  );
+  fillPixelRect(args.ctx, bx - 4.4, by + 17, 9, 5.4, "#8A6A4F", 0.96);
+  fillPixelRect(args.ctx, bx - 4.4, by + 19.4, 9, 1.2, "#6B4F3A", 0.9);
+  const flicker = Math.abs(wave(frame, 7, 0, 0.5, args.reducedMotion));
+  fillPixelRect(
+    args.ctx,
+    bx - 1.2,
+    by + 13.6,
+    2.4,
+    2.6,
+    "#FDE68A",
+    0.6 + flicker,
+  );
 }
 
 function drawSeed(args: DrawBuddyWorldBaseArgs, x: number, y: number): void {
-  fillPixelRect(args.ctx, x - 3, y, 6, 20, "#15803D");
-  fillPixelRect(args.ctx, x - 15, y - 12, 14, 10, "#22C55E");
-  fillPixelRect(args.ctx, x + 1, y - 16, 15, 10, "#86EFAC");
+  const frame = safeFrame(args.frame);
+  const sway = wave(frame, 40, 0, 1.6, args.reducedMotion);
+
+  fillEllipse(args.ctx, x, y + 12, 13, 4.4, "#6B4F3A", 0.92);
+  fillEllipse(args.ctx, x, y + 10.6, 10, 3, "#8A6A4F", 0.8);
+  fillPixelRect(args.ctx, x - 1 + sway * 0.4, y - 2, 2.4, 13, "#2E7D45", 0.96);
+  fillEllipse(args.ctx, x - 5 + sway, y - 4, 5.4, 3, "#74B06A", 0.95);
+  fillEllipse(args.ctx, x + 5 + sway, y - 6, 5.4, 3, "#4F8F54", 0.95);
+  fillPixelRect(args.ctx, x - 1 + sway, y - 7.4, 2.4, 2.4, "#86EFAC", 0.95);
+  drawSpark(args.ctx, x + 9, y - 10, 1.6, "#FDE68A", 0.6);
 }
 
 export function drawWorldObject(

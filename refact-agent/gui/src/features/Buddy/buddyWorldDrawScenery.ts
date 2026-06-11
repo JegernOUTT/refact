@@ -19,7 +19,7 @@ import {
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
-interface PhaseTints {
+export interface PhaseTints {
   ridgeFar: string;
   ridgeNear: string;
   snow: string;
@@ -32,7 +32,7 @@ interface PhaseTints {
   trunkLight: string;
 }
 
-function phaseTints(args: DrawBuddyWorldBaseArgs): PhaseTints {
+export function phaseTints(args: DrawBuddyWorldBaseArgs): PhaseTints {
   const hint = worldPaletteHint(args.world);
   if (hint === "night" || hint === "dream") {
     return {
@@ -838,10 +838,24 @@ export function drawStream(args: DrawBuddyWorldBaseArgs): void {
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
   const frozen = args.world.season === "winter";
-  const pondX = width * 0.13;
+  const pondX = width * 0.38;
   const pondY = height * 0.875;
-  const startX = -width * 0.01;
-  const startY = height * 0.77;
+  const startX = width * 0.296;
+  const startY = height * 0.75;
+  const cp1X = width * 0.312;
+  const cp1Y = height * 0.8;
+  const cp2X = width * 0.332;
+  const cp2Y = height * 0.85;
+
+  fillEllipse(
+    args.ctx,
+    startX,
+    startY + 2,
+    7,
+    3,
+    frozen ? "#BFDCEC" : "#6FA8CC",
+    alphaForMotion(frozen ? 0.4 : 0.5, args.reducedMotion),
+  );
 
   args.ctx.save();
   args.ctx.globalAlpha = alphaForMotion(
@@ -853,14 +867,7 @@ export function drawStream(args: DrawBuddyWorldBaseArgs): void {
   args.ctx.lineCap = "round";
   args.ctx.beginPath();
   args.ctx.moveTo(startX, startY);
-  args.ctx.bezierCurveTo(
-    width * 0.05,
-    height * 0.8,
-    width * 0.03,
-    height * 0.84,
-    pondX - 14,
-    pondY - 4,
-  );
+  args.ctx.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, pondX - 10, pondY - 3);
   args.ctx.stroke();
   args.ctx.restore();
 
@@ -871,14 +878,14 @@ export function drawStream(args: DrawBuddyWorldBaseArgs): void {
     const mt = 1 - t;
     const x =
       mt * mt * mt * startX +
-      3 * mt * mt * t * width * 0.05 +
-      3 * mt * t * t * width * 0.03 +
-      t * t * t * (pondX - 14);
+      3 * mt * mt * t * cp1X +
+      3 * mt * t * t * cp2X +
+      t * t * t * (pondX - 10);
     const y =
       mt * mt * mt * startY +
-      3 * mt * mt * t * height * 0.8 +
-      3 * mt * t * t * height * 0.84 +
-      t * t * t * (pondY - 4);
+      3 * mt * mt * t * cp1Y +
+      3 * mt * t * t * cp2Y +
+      t * t * t * (pondY - 3);
     fillPixelRect(
       args.ctx,
       x,

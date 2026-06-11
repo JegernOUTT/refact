@@ -15,76 +15,154 @@ import {
   strokeEllipse,
   wave,
   worldIntensity,
+  worldPaletteHint,
   worldPhase,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
+interface HillTints {
+  far: string;
+  near: string;
+  glow: string;
+  glowAlpha: number;
+}
+
+function hillTints(args: DrawBuddyWorldBaseArgs): HillTints {
+  const hint = worldPaletteHint(args.world);
+  const winter = args.world.season === "winter";
+  if (hint === "night" || hint === "dream") {
+    return winter
+      ? { far: "#33506B", near: "#27415C", glow: "#818CF8", glowAlpha: 0.07 }
+      : { far: "#2A4258", near: "#20364C", glow: "#818CF8", glowAlpha: 0.08 };
+  }
+  if (hint === "storm") {
+    return winter
+      ? { far: "#75879A", near: "#5F7287", glow: "#93A2B2", glowAlpha: 0.06 }
+      : { far: "#5E7270", near: "#49605C", glow: "#93A2B2", glowAlpha: 0.06 };
+  }
+  if (hint === "dusk") {
+    return winter
+      ? { far: "#9C92B4", near: "#7E7AA0", glow: "#FB7185", glowAlpha: 0.12 }
+      : { far: "#7D7C9A", near: "#5F7479", glow: "#FB7185", glowAlpha: 0.13 };
+  }
+  if (hint === "dawn") {
+    return winter
+      ? { far: "#AEBCD2", near: "#92A8C2", glow: "#FDE68A", glowAlpha: 0.13 }
+      : { far: "#8FAE92", near: "#6A9A6E", glow: "#FDE68A", glowAlpha: 0.14 };
+  }
+  return winter
+    ? { far: "#AFC4D6", near: "#93ACC2", glow: "#BBF7D0", glowAlpha: 0.1 }
+    : { far: "#7FB08A", near: "#5B9466", glow: "#BBF7D0", glowAlpha: 0.11 };
+}
+
 export function drawDistantHills(args: DrawBuddyWorldBaseArgs): void {
-  const { ctx, world } = args;
+  const { ctx } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const farY = height * 0.62;
-  const nearY = height * 0.69;
-  const phase = worldPhase(world);
-  const farColor = phase === "night" ? "#27425C" : "#76A88C";
-  const nearColor = phase === "night" ? "#1E3850" : "#4E8C5F";
+  const tints = hillTints(args);
+  const farY = height * 0.655;
+  const nearY = height * 0.7;
+  const breathe = wave(frame, 240, 0, 1.4, args.reducedMotion);
+
+  ctx.save();
+  ctx.globalAlpha = alphaForMotion(0.66, args.reducedMotion);
+  ctx.fillStyle = tints.far;
+  ctx.beginPath();
+  ctx.moveTo(0, farY + 6);
+  for (let x = 0; x <= width; x += 14) {
+    const t = x / width;
+    const mound =
+      Math.pow(Math.abs(Math.sin(t * Math.PI * 2.1 + 0.6)), 1.4) * 16 +
+      Math.sin(t * Math.PI * 5.3 + 2.2) * 3;
+    ctx.lineTo(x, farY - mound + breathe * 0.4);
+  }
+  ctx.lineTo(width, height);
+  ctx.lineTo(0, height);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 
   fillEllipse(
     ctx,
     width * 0.5,
-    farY + 4,
-    width * 0.55,
-    14,
-    phase === "night" ? "#3D5587" : "#D8ECE2",
-    alphaForMotion(0.16, args.reducedMotion),
+    farY - 4,
+    width * 0.4,
+    10,
+    tints.glow,
+    alphaForMotion(tints.glowAlpha, args.reducedMotion),
   );
 
   ctx.save();
-  ctx.fillStyle = `${farColor}88`;
+  ctx.globalAlpha = alphaForMotion(0.78, args.reducedMotion);
+  ctx.fillStyle = tints.near;
   ctx.beginPath();
-  ctx.moveTo(0, farY + 18);
-  for (let x = 0; x <= width; x += 20) {
-    const y = farY + wave(frame, 210, x / 56, 8, args.reducedMotion);
-    ctx.lineTo(x, y);
+  ctx.moveTo(0, nearY + 8);
+  for (let x = 0; x <= width; x += 12) {
+    const t = x / width;
+    const mound =
+      Math.pow(Math.abs(Math.sin(t * Math.PI * 1.6 + 2.4)), 1.3) * 13 +
+      Math.sin(t * Math.PI * 4.1 + 0.8) * 2.4;
+    ctx.lineTo(x, nearY - mound - breathe * 0.3);
   }
   ctx.lineTo(width, height);
   ctx.lineTo(0, height);
   ctx.closePath();
   ctx.fill();
-
-  ctx.fillStyle = `${nearColor}AA`;
-  ctx.beginPath();
-  ctx.moveTo(0, nearY + 16);
-  for (let x = 0; x <= width; x += 16) {
-    const y =
-      nearY +
-      wave(frame, 180, x / 42, 6, args.reducedMotion) +
-      Math.sin(finiteOr(x, 0) / 19) * 2;
-    ctx.lineTo(x, y);
-  }
-  ctx.lineTo(width, height);
-  ctx.lineTo(0, height);
-  ctx.closePath();
-  ctx.fill();
-  const horizonColor =
-    phase === "morning"
-      ? "#FDE68A"
-      : phase === "evening"
-        ? "#FB7185"
-        : phase === "night"
-          ? "#818CF8"
-          : "#BBF7D0";
-  fillEllipse(
-    ctx,
-    width * 0.5,
-    farY + 18,
-    width * (phase === "day" ? 0.28 : 0.34),
-    18,
-    horizonColor,
-    alphaForMotion(phase === "night" ? 0.08 : 0.14, args.reducedMotion),
-  );
   ctx.restore();
+}
+
+interface GardenTints {
+  band: string;
+  bandAlpha: number;
+  stem: string;
+  blade: string;
+}
+
+function gardenTints(args: DrawBuddyWorldBaseArgs): GardenTints {
+  const hint = worldPaletteHint(args.world);
+  if (args.world.season === "winter") {
+    const nightish = hint === "night" || hint === "dream";
+    return {
+      band: nightish ? "#46607E" : "#E8F1F8",
+      bandAlpha: nightish ? 0.14 : 0.22,
+      stem: nightish ? "#6E7E90" : "#9D8C6C",
+      blade: nightish ? "#5C6C7E" : "#B5A37E",
+    };
+  }
+  if (hint === "night" || hint === "dream") {
+    return {
+      band: "#2DD4BF",
+      bandAlpha: 0.12,
+      stem: "#1F5E48",
+      blade: "#3D7E62",
+    };
+  }
+  if (hint === "dusk") {
+    return {
+      band: "#C99A5E",
+      bandAlpha: 0.14,
+      stem: "#5C6E3C",
+      blade: "#8A965C",
+    };
+  }
+  if (hint === "dawn") {
+    return {
+      band: "#BCD49A",
+      bandAlpha: 0.16,
+      stem: "#3E7A48",
+      blade: "#74A86A",
+    };
+  }
+  if (hint === "storm") {
+    return {
+      band: "#6F8A74",
+      bandAlpha: 0.12,
+      stem: "#3A6244",
+      blade: "#5E8862",
+    };
+  }
+  return { band: "#9CD478", bandAlpha: 0.2, stem: "#3E8048", blade: "#6FAE6A" };
 }
 
 export function drawMidgroundGarden(args: DrawBuddyWorldBaseArgs): void {
@@ -94,6 +172,7 @@ export function drawMidgroundGarden(args: DrawBuddyWorldBaseArgs): void {
   const gardenY = height * 0.69;
   const count = countForMotion(18, args.compact, args.reducedMotion);
   const phase = worldPhase(args.world);
+  const tints = gardenTints(args);
   const seasonFlower =
     args.world.season === "spring"
       ? "#F9A8D4"
@@ -115,8 +194,8 @@ export function drawMidgroundGarden(args: DrawBuddyWorldBaseArgs): void {
     gardenY + 18,
     width * 0.18,
     args.compact ? 12 : 18,
-    phase === "night" ? "#2DD4BF" : "#86EFAC",
-    alphaForMotion(phase === "day" ? 0.2 : 0.12, args.reducedMotion),
+    tints.band,
+    alphaForMotion(tints.bandAlpha, args.reducedMotion),
   );
 
   for (let index = 0; index < count; index += 1) {
@@ -126,8 +205,8 @@ export function drawMidgroundGarden(args: DrawBuddyWorldBaseArgs): void {
       ? 0
       : Math.sin(frame / 26 - x / 55) * 2.6 +
         Math.sin(frame / 11 + index) * 0.8;
-    fillPixelRect(args.ctx, x + sway, gardenY + 7, 3, stem, "#2E7D45", 0.6);
-    fillPixelRect(args.ctx, x - 5 + sway, gardenY + 8, 11, 3, "#5FAE6B", 0.4);
+    fillPixelRect(args.ctx, x + sway, gardenY + 7, 3, stem, tints.stem, 0.6);
+    fillPixelRect(args.ctx, x - 5 + sway, gardenY + 8, 11, 3, tints.blade, 0.4);
     if (index % 4 === 0) {
       fillPixelRect(
         args.ctx,
@@ -159,71 +238,63 @@ export function drawWorkshopZones(args: DrawBuddyWorldBaseArgs): void {
   const memoryActive = hasWorldLayer(args.world, "memory_orbs");
   const alpha = alphaForMotion(active ? 0.24 : 0.16, args.reducedMotion);
   const intensity = worldIntensity(args.world);
+  const hint = worldPaletteHint(args.world);
+  const nightish = hint === "night" || hint === "dream";
+  const stone = nightish ? "#55607A" : hint === "dusk" ? "#8E8290" : "#9A8E80";
+  const stoneShade = nightish
+    ? "#3A4458"
+    : hint === "dusk"
+      ? "#675E6E"
+      : "#6E6456";
+  const mossTop = nightish
+    ? "#2C5638"
+    : hint === "dusk"
+      ? "#3F6340"
+      : "#4F8F54";
+  const logWood = nightish ? "#3A2C20" : "#6B4F3A";
+  const logShade = nightish ? "#241A14" : "#4A362A";
 
   fillEllipse(
     args.ctx,
     width * 0.62,
     height * 0.72,
-    width * 0.16,
-    14,
-    "#0F172A",
+    width * 0.14,
+    12,
+    "#13231A",
     alpha,
   );
-  fillEllipse(
-    args.ctx,
-    width * 0.34,
-    height * 0.69,
-    width * 0.12,
-    10,
-    "#422006",
-    alpha * 0.82,
-  );
-  fillEllipse(
-    args.ctx,
-    width * 0.78,
-    height * 0.64,
-    width * 0.1,
-    9,
-    "#1E1B4B",
-    alpha * 0.78,
-  );
 
-  fillPixelRect(args.ctx, width * 0.28, height * 0.58, 48, 32, "#422006", 0.74);
+  const bx = width * 0.62;
+  const by = height * 0.685;
+  fillEllipse(args.ctx, bx, by, 21, 13, stone, 0.94);
+  fillEllipse(args.ctx, bx - 5, by - 4, 12, 7, stone, 0.96);
+  fillEllipse(args.ctx, bx + 3, by - 8, 13, 5, mossTop, 0.85);
+  fillEllipse(args.ctx, bx - 9, by - 9, 7, 3.4, mossTop, 0.75);
+  fillEllipse(args.ctx, bx + 7, by + 6, 9, 5, stoneShade, 0.6);
+  fillEllipse(args.ctx, bx + 24, by + 7, 8, 5, stone, 0.9);
+  fillEllipse(args.ctx, bx + 24, by + 4.4, 6, 2.6, mossTop, 0.7);
+
+  const lx = width * 0.545;
+  const ly = height * 0.775;
+  fillEllipse(args.ctx, lx, ly + 6, 28, 4, "#13231A", alpha * 0.9);
+  fillPixelRect(args.ctx, lx - 26, ly - 3, 50, 9, logWood, 0.95);
+  fillPixelRect(args.ctx, lx - 26, ly + 4, 50, 2.4, logShade, 0.9);
+  fillEllipse(args.ctx, lx + 25, ly + 1.4, 4.4, 5.4, logShade, 0.96);
+  fillEllipse(args.ctx, lx + 25, ly + 1.4, 2.4, 3, "#8A6A4F", 0.9);
+  fillPixelRect(args.ctx, lx - 18, ly - 5.4, 9, 2.6, mossTop, 0.8);
+  fillPixelRect(args.ctx, lx - 2, ly - 5, 7, 2.4, mossTop, 0.7);
+  const shroomGlow = memoryActive ? 0.66 : 0.34;
+  fillPixelRect(args.ctx, lx + 8, ly - 6.4, 2, 3.4, "#E2CFAE", 0.9);
+  fillPixelRect(args.ctx, lx + 6.6, ly - 8.4, 5, 2.6, "#FDE68A", shroomGlow);
+  fillPixelRect(args.ctx, lx - 11, ly - 7, 1.8, 3, "#E2CFAE", 0.85);
   fillPixelRect(
     args.ctx,
-    width * 0.285,
-    height * 0.6,
-    40,
-    4,
+    lx - 12.4,
+    ly - 9,
+    4.4,
+    2.4,
     "#FDE68A",
-    memoryActive ? 0.46 : 0.24,
-  );
-  fillPixelRect(
-    args.ctx,
-    width * 0.285,
-    height * 0.65,
-    40,
-    4,
-    "#FDE68A",
-    memoryActive ? 0.4 : 0.18,
-  );
-  fillPixelRect(
-    args.ctx,
-    width * 0.615,
-    height * 0.59,
-    58,
-    43,
-    "#1E293B",
-    0.72,
-  );
-  fillPixelRect(
-    args.ctx,
-    width * 0.625,
-    height * 0.54,
-    38,
-    12,
-    active ? "#60A5FA" : "#475569",
-    active ? 0.8 : 0.62,
+    shroomGlow * 0.9,
   );
 
   for (let index = 0; index < 5; index += 1) {
@@ -243,34 +314,34 @@ export function drawWorkshopZones(args: DrawBuddyWorldBaseArgs): void {
   }
 
   if (active) {
-    const portalX = width * 0.67;
-    const portalY = height * 0.67;
+    const ringX = width * 0.67;
+    const ringY = height * 0.74;
     strokeEllipse(
       args.ctx,
-      portalX,
-      portalY,
+      ringX,
+      ringY,
       args.compact ? 24 : 34,
-      args.compact ? 13 : 18,
+      args.compact ? 8 : 11,
       "#67E8F9",
       3,
       alpha * 0.9,
     );
     strokeEllipse(
       args.ctx,
-      portalX,
-      portalY,
+      ringX,
+      ringY,
       args.compact ? 15 : 22,
-      args.compact ? 8 : 12,
+      args.compact ? 5 : 7,
       "#FDE68A",
       2,
       alpha * 0.72,
     );
     strokeLine(
       args.ctx,
-      { x: portalX - 58, y: portalY + 14 },
+      { x: ringX - 58, y: ringY + 10 },
       {
-        x: portalX + 42,
-        y: portalY - 18 + wave(frame, 54, 0, 7, args.reducedMotion),
+        x: ringX + 42,
+        y: ringY - 22 + wave(frame, 54, 0, 7, args.reducedMotion),
       },
       "#A78BFA",
       args.compact ? 2 : 3,
@@ -279,16 +350,171 @@ export function drawWorkshopZones(args: DrawBuddyWorldBaseArgs): void {
   }
 }
 
+interface GroundTints {
+  base: string;
+  baseAlpha: number;
+  ridge: string;
+  ridgeAlpha: number;
+  fleck: string;
+  fleckAlpha: number;
+  pebble: string;
+  pebbleAlpha: number;
+  grassA: string;
+  grassAAlpha: number;
+  grassB: string;
+  grassBAlpha: number;
+  grassC: string;
+  grassCAlpha: number;
+  flowers: boolean;
+}
+
+function groundTints(args: DrawBuddyWorldBaseArgs): GroundTints {
+  const hint = worldPaletteHint(args.world);
+  const nightish = hint === "night" || hint === "dream";
+  if (args.world.season === "winter") {
+    if (nightish) {
+      return {
+        base: "#3E5570",
+        baseAlpha: 0.62,
+        ridge: "#34485E",
+        ridgeAlpha: 0.94,
+        fleck: "#5E7A96",
+        fleckAlpha: 0.3,
+        pebble: "#28384A",
+        pebbleAlpha: 0.4,
+        grassA: "#8C8268",
+        grassAAlpha: 0.3,
+        grassB: "#766C56",
+        grassBAlpha: 0.26,
+        grassC: "#5E563F",
+        grassCAlpha: 0.2,
+        flowers: false,
+      };
+    }
+    return {
+      base: "#DCE8F2",
+      baseAlpha: 0.78,
+      ridge: hint === "dusk" ? "#C3C2DC" : "#C7D8E8",
+      ridgeAlpha: 0.95,
+      fleck: "#F2F7FB",
+      fleckAlpha: 0.5,
+      pebble: "#A9BDD0",
+      pebbleAlpha: 0.5,
+      grassA: "#C9B68C",
+      grassAAlpha: 0.4,
+      grassB: "#B5A37E",
+      grassBAlpha: 0.34,
+      grassC: "#9D8C6C",
+      grassCAlpha: 0.26,
+      flowers: false,
+    };
+  }
+  if (nightish) {
+    return {
+      base: "#1E4A44",
+      baseAlpha: 0.52,
+      ridge: "#173A3C",
+      ridgeAlpha: 0.9,
+      fleck: "#62A696",
+      fleckAlpha: 0.18,
+      pebble: "#48807F",
+      pebbleAlpha: 0.3,
+      grassA: "#96CDBA",
+      grassAAlpha: 0.26,
+      grassB: "#6AA694",
+      grassBAlpha: 0.22,
+      grassC: "#588E80",
+      grassCAlpha: 0.18,
+      flowers: false,
+    };
+  }
+  if (hint === "dusk") {
+    return {
+      base: "#9C8A52",
+      baseAlpha: 0.52,
+      ridge: "#7C7050",
+      ridgeAlpha: 0.9,
+      fleck: "#D9BD86",
+      fleckAlpha: 0.24,
+      pebble: "#5E5440",
+      pebbleAlpha: 0.4,
+      grassA: "#E0C896",
+      grassAAlpha: 0.32,
+      grassB: "#B6A070",
+      grassBAlpha: 0.28,
+      grassC: "#94855C",
+      grassCAlpha: 0.22,
+      flowers: true,
+    };
+  }
+  if (hint === "dawn") {
+    return {
+      base: "#8FAC60",
+      baseAlpha: 0.52,
+      ridge: "#73935A",
+      ridgeAlpha: 0.9,
+      fleck: "#C9D9A2",
+      fleckAlpha: 0.26,
+      pebble: "#4E6840",
+      pebbleAlpha: 0.4,
+      grassA: "#DCE8B0",
+      grassAAlpha: 0.34,
+      grassB: "#B2C588",
+      grassBAlpha: 0.3,
+      grassC: "#94AC6E",
+      grassCAlpha: 0.24,
+      flowers: true,
+    };
+  }
+  if (hint === "storm") {
+    return {
+      base: "#4E6650",
+      baseAlpha: 0.52,
+      ridge: "#3C5444",
+      ridgeAlpha: 0.9,
+      fleck: "#8CA890",
+      fleckAlpha: 0.2,
+      pebble: "#2E4234",
+      pebbleAlpha: 0.4,
+      grassA: "#A4C2A8",
+      grassAAlpha: 0.28,
+      grassB: "#84A48A",
+      grassBAlpha: 0.24,
+      grassC: "#6A8A70",
+      grassCAlpha: 0.2,
+      flowers: false,
+    };
+  }
+  return {
+    base: "#8FBC62",
+    baseAlpha: 0.54,
+    ridge: "#6CA34E",
+    ridgeAlpha: 0.9,
+    fleck: "#A9D87E",
+    fleckAlpha: 0.28,
+    pebble: "#477A3E",
+    pebbleAlpha: 0.42,
+    grassA: "#C9E8A6",
+    grassAAlpha: 0.36,
+    grassB: "#9CCB78",
+    grassBAlpha: 0.3,
+    grassC: "#7FB45E",
+    grassCAlpha: 0.24,
+    flowers: true,
+  };
+}
+
 export function drawGround(args: DrawBuddyWorldBaseArgs): void {
   const { ctx } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
   const baseY = height * 0.745;
-  const night = worldPhase(args.world) === "night";
+  const tints = groundTints(args);
 
   ctx.save();
-  ctx.fillStyle = night ? "rgba(26, 58, 56, 0.5)" : "rgba(58, 132, 70, 0.5)";
+  ctx.globalAlpha = tints.baseAlpha;
+  ctx.fillStyle = tints.base;
   ctx.beginPath();
   ctx.moveTo(0, baseY + 10);
   for (let x = 0; x <= width; x += 18) {
@@ -313,7 +539,8 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
       baseY + ridge,
       8,
       height - baseY - ridge,
-      night ? "rgba(22,52,52,0.9)" : "rgba(38,107,58,0.9)",
+      tints.ridge,
+      tints.ridgeAlpha,
     );
     if ((x / 8) % 11 === 0) {
       fillPixelRect(
@@ -322,7 +549,8 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
         baseY + ridge + 11,
         7,
         2,
-        night ? "rgba(98,166,150,0.18)" : "rgba(126,199,110,0.26)",
+        tints.fleck,
+        tints.fleckAlpha,
       );
     }
     if ((x / 8) % 7 === 3) {
@@ -332,7 +560,8 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
         baseY + ridge + 17,
         2,
         2,
-        night ? "rgba(72,128,116,0.3)" : "rgba(31,94,56,0.4)",
+        tints.pebble,
+        tints.pebbleAlpha,
       );
     }
   }
@@ -354,7 +583,8 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
       clumpY - grassHeight,
       3,
       grassHeight,
-      night ? "rgba(150,205,186,0.26)" : "rgba(196,235,178,0.34)",
+      tints.grassA,
+      tints.grassAAlpha,
     );
     fillPixelRect(
       ctx,
@@ -362,7 +592,8 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
       clumpY - grassHeight + 2,
       2,
       Math.max(2, grassHeight - 1),
-      night ? "rgba(106,166,148,0.22)" : "rgba(132,196,118,0.3)",
+      tints.grassB,
+      tints.grassBAlpha,
     );
     fillPixelRect(
       ctx,
@@ -370,9 +601,10 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
       clumpY - grassHeight + 4,
       2,
       Math.max(2, grassHeight - 4),
-      night ? "rgba(88,142,128,0.18)" : "rgba(108,176,96,0.24)",
+      tints.grassC,
+      tints.grassCAlpha,
     );
-    if (!night && (clumpX | 0) % 5 === 0) {
+    if (tints.flowers && (clumpX | 0) % 5 === 0) {
       fillPixelRect(
         ctx,
         clumpX + 6 + lean,
@@ -395,7 +627,6 @@ export function drawGround(args: DrawBuddyWorldBaseArgs): void {
     x += grassStep + offset;
   }
 }
-
 export function drawHomePath(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
@@ -501,6 +732,7 @@ export function drawForegroundCozyDetails(args: DrawBuddyWorldBaseArgs): void {
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
   const count = countForMotion(11, args.compact, args.reducedMotion);
+  const dot = args.world.season === "winter" ? "#E4EEF6" : "#BBF7D0";
 
   for (let index = 0; index < count; index += 1) {
     const x = (index / count) * width + ((index * 23) % 31);
@@ -511,7 +743,7 @@ export function drawForegroundCozyDetails(args: DrawBuddyWorldBaseArgs): void {
       x,
       y + wave(frame, 64, index, 1.2, args.reducedMotion),
       2.6,
-      "#BBF7D0",
+      dot,
       alpha,
     );
   }
@@ -520,7 +752,7 @@ export function drawPond(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const x = width * 0.13;
+  const x = width * 0.38;
   const y = height * 0.875;
   const rx = args.compact ? 26 : 38;
   const ry = args.compact ? 7 : 10;
@@ -726,12 +958,18 @@ export function drawWinterGroundDust(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const baseY = height * 0.8;
+  const hint = worldPaletteHint(args.world);
+  const nightish = hint === "night" || hint === "dream";
+  const shade = nightish ? "#2A3C52" : "#B5CCDE";
+  const crest = nightish ? "#54708E" : "#F2F7FB";
 
   for (let x = 14; x < width; ) {
     const offset = (x * 13) % 53;
     const px = x + offset;
     const py = baseY + 8 + ((x * 7) % 26);
-    fillEllipse(args.ctx, px, py, 12 + ((x * 11) % 9), 3, "#F8FAFC", 0.14);
+    const rx = 12 + ((x * 11) % 9);
+    fillEllipse(args.ctx, px, py + 1.4, rx, 3, shade, 0.3);
+    fillEllipse(args.ctx, px - 2, py, rx * 0.8, 2.2, crest, 0.5);
     x += (args.compact || args.reducedMotion ? 120 : 88) + offset;
   }
 }

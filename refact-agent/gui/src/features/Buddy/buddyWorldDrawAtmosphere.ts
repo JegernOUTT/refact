@@ -95,38 +95,54 @@ function drawSkyStructures(args: DrawBuddyWorldBaseArgs): void {
   const serious = args.world.atmosphere.serious;
   const warning = hasWorldLayer(args.world, "provider_flicker") && !serious;
   const active = hasWorldLayer(args.world, "workshop_runes");
+  const night =
+    worldPaletteHint(args.world) === "night" ||
+    worldPaletteHint(args.world) === "dream";
   const hillX = width * 0.84;
-  const hillY = height * 0.6;
-  const haze = alphaForMotion(0.34, args.reducedMotion);
+  const hillY = height * 0.625;
+  const haze = alphaForMotion(0.5, args.reducedMotion);
+  const moundColor = night ? "#24405A" : "#6FA382";
+  const trunkColor = night ? "#2C2118" : "#574436";
+  const leafDeep = night ? "#1C3A2A" : "#4F6E58";
+  const leafMid = night ? "#27513A" : "#5E8266";
 
-  fillEllipse(args.ctx, hillX, hillY + 14, width * 0.17, 26, "#5E7B6A", haze);
-  fillPixelRect(args.ctx, hillX - 2, hillY - 22, 4, 24, "#574436", haze + 0.1);
+  fillEllipse(args.ctx, hillX, hillY + 16, width * 0.16, 24, moundColor, haze);
+  fillEllipse(
+    args.ctx,
+    hillX - 4,
+    hillY + 9,
+    width * 0.1,
+    13,
+    moundColor,
+    haze * 0.9,
+  );
+  fillPixelRect(args.ctx, hillX - 2, hillY - 18, 4, 22, trunkColor, haze + 0.2);
   fillEllipse(
     args.ctx,
     hillX + wave(frame, 90, 0, 1.5, args.reducedMotion),
-    hillY - 30,
-    24,
-    15,
-    "#4F6E58",
+    hillY - 26,
+    22,
+    13,
+    leafDeep,
+    haze + 0.18,
+  );
+  fillEllipse(
+    args.ctx,
+    hillX - 12 + wave(frame, 84, 1, 1.2, args.reducedMotion),
+    hillY - 19,
+    12,
+    8,
+    leafMid,
     haze + 0.12,
   );
   fillEllipse(
     args.ctx,
-    hillX - 13 + wave(frame, 84, 1, 1.2, args.reducedMotion),
-    hillY - 22,
-    13,
-    9,
-    "#5E8266",
-    haze + 0.08,
-  );
-  fillEllipse(
-    args.ctx,
-    hillX + 14 + wave(frame, 96, 2, 1.2, args.reducedMotion),
-    hillY - 21,
-    12,
-    8,
-    "#5E8266",
-    haze + 0.08,
+    hillX + 13 + wave(frame, 96, 2, 1.2, args.reducedMotion),
+    hillY - 18,
+    11,
+    7,
+    leafMid,
+    haze + 0.12,
   );
 
   const toriiX = hillX - 26;
@@ -311,7 +327,7 @@ export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
         : "#FBBF24";
   const glowColor = isNight ? "#818CF8" : isEvening ? "#FB7185" : "#FBBF24";
 
-  fillCircle(ctx, x, y, isNight ? 34 : 42, glowColor, isNight ? 0.24 : 0.26);
+  fillCircle(ctx, x, y, isNight ? 30 : 42, glowColor, isNight ? 0.13 : 0.26);
   fillPixelRect(ctx, x - 13, y - 13, 26, 26, color);
   fillPixelRect(ctx, x - 18, y - 8, 36, 16, color);
   fillPixelRect(ctx, x - 8, y - 18, 16, 36, color);
@@ -323,17 +339,43 @@ export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
       1,
     );
     const illumination = 1 - Math.abs(moonPhase - 0.5) * 2;
-    const shadowWidth = Math.round(26 * (1 - illumination));
-    if (shadowWidth > 1) {
+    const shadowSpan = Math.round(36 * (1 - illumination));
+    if (shadowSpan > 1) {
+      const fromLeft = moonPhase < 0.5;
+      const barSpan = Math.min(shadowSpan, 36);
       fillPixelRect(
         ctx,
-        moonPhase < 0.5 ? x - 13 : x + 13 - shadowWidth,
-        y - 13,
-        shadowWidth,
-        26,
-        "#4C1D95",
-        0.92,
+        fromLeft ? x - 18 : x + 18 - barSpan,
+        y - 8,
+        barSpan,
+        16,
+        "#312E81",
+        0.88,
       );
+      const coreSpan = Math.min(Math.max(shadowSpan - 5, 0), 26);
+      if (coreSpan > 0) {
+        fillPixelRect(
+          ctx,
+          fromLeft ? x - 13 : x + 13 - coreSpan,
+          y - 13,
+          coreSpan,
+          26,
+          "#312E81",
+          0.88,
+        );
+      }
+      const tipSpan = Math.min(Math.max(shadowSpan - 10, 0), 16);
+      if (tipSpan > 0) {
+        fillPixelRect(
+          ctx,
+          fromLeft ? x - 8 : x + 8 - tipSpan,
+          y - 18,
+          tipSpan,
+          36,
+          "#312E81",
+          0.88,
+        );
+      }
     }
     fillPixelRect(ctx, x - 6, y - 4, 4, 4, "#C7D2FE", 0.55);
     fillPixelRect(ctx, x + 2, y + 5, 3, 3, "#C7D2FE", 0.45);
@@ -496,24 +538,29 @@ function drawAurora(args: DrawBuddyWorldBaseArgs, alpha = 0.3): void {
   const { ctx } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
-  const y = pctY(height, args.world.weatherY);
+  const y = pctY(height, args.world.weatherY) - height * 0.07;
   const frame = safeFrame(args.frame);
   const bands = countForMotion(3, args.compact, args.reducedMotion);
 
   for (let index = 0; index < bands; index += 1) {
     const color = index % 2 === 0 ? "#2DD4BF" : "#A855F7";
+    const drift = wave(
+      frame,
+      110 + index * 16,
+      index * 1.4,
+      5,
+      args.reducedMotion,
+    );
+    const lift = index * 9;
     strokeBezier(
       ctx,
-      {
-        x: 0,
-        y: y + index * 10 + wave(frame, 90, index, 3, args.reducedMotion),
-      },
-      { x: width * 0.28, y: y - 28 + index * 8 },
-      { x: width * 0.6, y: y + 36 - index * 6 },
-      { x: width, y: y - 8 + index * 8 },
+      { x: width * 0.08, y: y + 24 - lift + drift },
+      { x: width * 0.26, y: y - 26 - lift - drift * 0.6 },
+      { x: width * 0.5, y: y + 18 - lift + drift },
+      { x: width * 0.82, y: y - 30 - lift },
       color,
-      args.compact ? 5 : 8,
-      alphaForMotion(alpha, args.reducedMotion),
+      args.compact ? 7 : 11,
+      alphaForMotion(alpha * 0.55, args.reducedMotion),
     );
   }
 }
@@ -573,8 +620,8 @@ function drawButterflies(args: DrawBuddyWorldBaseArgs): void {
 function drawOwl(args: DrawBuddyWorldBaseArgs): void {
   const anchor = objectAnchor(args, "providers", { x: 72, y: 67 });
   const frame = safeFrame(args.frame);
-  const x = anchor.x + 13;
-  const y = anchor.y - 44 + wave(frame, 110, 0, 1, args.reducedMotion);
+  const x = anchor.x + 27;
+  const y = anchor.y - 38 + wave(frame, 110, 0, 1, args.reducedMotion);
 
   fillPixelRect(args.ctx, x - 4, y, 8, 9, "#475569", 0.92);
   fillPixelRect(args.ctx, x - 2, y + 4, 4, 5, "#94A3B8", 0.8);
