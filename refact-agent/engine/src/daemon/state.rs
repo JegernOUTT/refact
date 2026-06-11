@@ -13,6 +13,12 @@ use crate::daemon::events::EventBus;
 use crate::daemon_link::WorkerStatusReport;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonUrls {
+    pub loopback: String,
+    pub mdns: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonInfo {
     pub pid: u32,
     pub port: u16,
@@ -21,10 +27,12 @@ pub struct DaemonInfo {
     pub auth_token: Option<String>,
     pub started_at_ms: u64,
     pub hostname_local: String,
+    pub urls: DaemonUrls,
 }
 
 pub struct DaemonState {
     pub config: DaemonConfig,
+    pub auth_token: Option<String>,
     pub started_at_ms: u64,
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
@@ -34,10 +42,11 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    pub fn new(config: DaemonConfig, events: EventBus) -> Arc<Self> {
+    pub fn new(config: DaemonConfig, events: EventBus, auth_token: Option<String>) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             config,
+            auth_token,
             started_at_ms: now_ms(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             projects: RwLock::new(crate::daemon::projects::ProjectRegistry::empty(
@@ -61,9 +70,6 @@ impl DaemonState {
         self.worker_statuses.read().await.get(project_id).cloned()
     }
 
-    /// Stores the latest worker status report and emits a `worker_status` event
-    /// only when event-relevant fields changed (busy_chats, lsp_clients), so
-    /// 10s heartbeats do not flood the event bus.
     pub async fn store_worker_status(&self, report: WorkerStatusReport) -> bool {
         let project_id = report.project_id.clone();
         let changed = {
@@ -91,14 +97,19 @@ impl DaemonState {
     }
 
     pub fn daemon_info(&self, port: u16, bind: String) -> DaemonInfo {
+        let host_local = hostname_local();
         DaemonInfo {
             pid: std::process::id(),
             port,
             bind,
             version: self.version.clone(),
-            auth_token: None,
+            auth_token: self.auth_token.clone(),
             started_at_ms: self.started_at_ms,
-            hostname_local: hostname_local(),
+            hostname_local: host_local.clone(),
+            urls: DaemonUrls {
+                loopback: format!("http://127.0.0.1:{port}/"),
+                mdns: format!("http://{}:{port}/", host_local),
+            },
         }
     }
 }
@@ -231,8 +242,27 @@ mod tests {
             auth_token: None,
             started_at_ms: 100,
             hostname_local: "host.local".to_string(),
+            urls: DaemonUrls {
+                loopback: "http://127.0.0.1:8488/".to_string(),
+                mdns: "http://host.local:8488/".to_string(),
+            },
         };
         write_daemon_info_atomic(&path, &info).await.unwrap();
         assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
+    }
+
+    #[tokio::test]
+    async fn daemon_info_urls_contain_port_and_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("e.jsonl")),
+            None,
+        );
+        let info = state.daemon_info(9000, "0.0.0.0".to_string());
+        assert!(info.urls.loopback.contains("127.0.0.1:9000"));
+        assert!(info.urls.mdns.contains(".local:9000"));
+        assert!(info.urls.loopback.starts_with("http://"));
+        assert!(info.urls.mdns.starts_with("http://"));
     }
 }

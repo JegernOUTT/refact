@@ -475,6 +475,7 @@ mod tests {
         let state = DaemonState::new(
             DaemonConfig::default(),
             EventBus::new(dir.path().join("events.jsonl")),
+            None,
         );
         state.load_projects(dir.path().join("projects.json")).await;
 
@@ -581,6 +582,7 @@ mod tests {
         let state = DaemonState::new(
             DaemonConfig::default(),
             EventBus::new(dir.path().join("events.jsonl")),
+            None,
         );
         state.load_projects(dir.path().join("projects.json")).await;
         let router = crate::daemon::server::make_router(state, 8488);

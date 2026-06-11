@@ -4,10 +4,12 @@ use std::sync::Arc;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+pub mod auth;
 pub mod client;
 pub mod config;
 pub mod events;
 pub mod lock;
+pub mod mdns;
 pub mod paths;
 pub mod projects;
 pub mod server;
@@ -106,8 +108,15 @@ pub(crate) async fn run_daemon_entry_with_paths(
             return 1;
         }
     };
+
+    let auth_token = if config.auth.enabled {
+        Some(auth::resolve_token(config.auth.token.as_deref()))
+    } else {
+        None
+    };
+
     let events = events::EventBus::new(paths.events_jsonl_path.clone());
-    let state = state::DaemonState::new(config.clone(), events);
+    let state = state::DaemonState::new(config.clone(), events, auth_token);
     state.load_projects(paths.projects_json_path.clone()).await;
     let info = state.daemon_info(actual_addr.port(), actual_addr.ip().to_string());
     if let Err(error) = state::write_daemon_info_atomic(&paths.daemon_json_path, &info).await {
@@ -131,7 +140,15 @@ pub(crate) async fn run_daemon_entry_with_paths(
             serde_json::json!({"port": actual_addr.port()}),
         )
         .await;
+
+    let mdns_advertisement = mdns::MdnsAdvertisement::start(actual_addr.port());
+
     let serve_result = server::serve(listener, state.clone(), actual_addr.port()).await;
+
+    if let Some(mdns) = mdns_advertisement {
+        mdns.stop();
+    }
+
     if let Some(signal_task) = signal_task {
         signal_task.abort();
     }
@@ -251,6 +268,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_lifecycle_daemon_json_has_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::in_dir(dir.path());
+        let config = config::DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            ..config::DaemonConfig::default()
+        };
+        let task_paths = paths.clone();
+        let task = tokio::spawn(async move {
+            run_daemon_entry_with_paths(config, task_paths, false, false).await
+        });
+        let info = wait_for_info(&paths.daemon_json_path).await;
+        assert!(info.urls.loopback.starts_with("http://127.0.0.1:"));
+        assert!(info.urls.mdns.contains(".local:"));
+        let client = reqwest::Client::new();
+        let _ = client
+            .post(format!("http://127.0.0.1:{}/daemon/v1/shutdown", info.port))
+            .json(&serde_json::json!({"reason": "test"}))
+            .send()
+            .await
+            .unwrap();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
     async fn daemon_router_shutdown_endpoint_accepts_reason() {
         use tower::ServiceExt;
 
@@ -258,6 +301,7 @@ mod tests {
         let state = state::DaemonState::new(
             config::DaemonConfig::default(),
             events::EventBus::new(dir.path().join("events.jsonl")),
+            None,
         );
         let mut shutdown_rx = state.shutdown_receiver();
         let response = server::make_router(state, 8488)

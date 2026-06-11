@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
+use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -11,6 +12,7 @@ use futures::Stream;
 use hyper::Server;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tower_http::cors::CorsLayer;
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::state::DaemonState;
@@ -51,6 +53,7 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
 }
 
 pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
+    let auth_token = state.auth_token.clone();
     Router::new()
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/shutdown", post(shutdown))
@@ -61,6 +64,11 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/projects/:id", get(crate::daemon::projects::get_project))
         .route("/daemon/v1/projects/:id", delete(crate::daemon::projects::forget_project))
         .route("/daemon/v1/projects/:id/pin", post(crate::daemon::projects::pin_project))
+        .layer(middleware::from_fn(move |req, next| {
+            let token = auth_token.clone();
+            crate::daemon::auth::check(token, req, next)
+        }))
+        .layer(CorsLayer::permissive())
         .with_state((state, port))
 }
 
@@ -170,6 +178,7 @@ mod tests {
         let state = DaemonState::new(
             DaemonConfig::default(),
             EventBus::new(dir.path().join("events.jsonl")),
+            None,
         );
         let response = make_router(state, 8488)
             .oneshot(
@@ -185,6 +194,120 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["workers"], 0);
         assert_eq!(json["port"], 8488);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_disabled_passthrough() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/shutdown")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reason":"t"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_enabled_rejects_missing_token() {
+        use crate::daemon::config::AuthConfig;
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/shutdown")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reason":"t"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_enabled_accepts_correct_token() {
+        use crate::daemon::config::AuthConfig;
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/shutdown")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::from(r#"{"reason":"t"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_enabled_status_exempt() {
+        use crate::daemon::config::AuthConfig;
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -207,6 +330,7 @@ mod tests {
         let state = DaemonState::new(
             DaemonConfig::default(),
             EventBus::new(dir.path().join("events.jsonl")),
+            None,
         );
         let mut events = state.events.subscribe();
 

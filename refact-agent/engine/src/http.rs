@@ -44,7 +44,7 @@ pub(crate) fn resolve_http_bind_addr(
     Ok(SocketAddr::new(ip, port))
 }
 
-const MDNS_SERVICE_TYPE: &str = "_refact-lsp._tcp.local.";
+pub(crate) const MDNS_SERVICE_TYPE: &str = "_refact-lsp._tcp.local.";
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiPublicOriginCandidates {
