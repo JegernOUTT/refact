@@ -10,6 +10,7 @@ use crate::global_context::CommandLine;
 pub enum RefactCliCommand {
     Worker(CommandLine),
     Daemon { foreground: bool },
+    Run(crate::daemon::run_cmd::RunOptions),
     Version,
     Help,
 }
@@ -25,6 +26,7 @@ pub struct CliDispatchError {
 pub enum DispatchResult {
     Worker(CommandLine),
     Daemon { foreground: bool },
+    Run(crate::daemon::run_cmd::RunOptions),
     Exit(i32),
 }
 
@@ -56,6 +58,7 @@ where
     match subcommand.to_string_lossy().as_ref() {
         "worker" => parse_worker(args),
         "daemon" => parse_daemon(&args),
+        "run" => parse_run(&args),
         "version" | "--version" | "-V" => Ok(RefactCliCommand::Version),
         "help" | "--help" | "-h" => Ok(RefactCliCommand::Help),
         other => Err(usage_error(format!("unknown subcommand `{}`", other))),
@@ -66,6 +69,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
     match command {
         RefactCliCommand::Worker(cmdline) => DispatchResult::Worker(cmdline),
         RefactCliCommand::Daemon { foreground } => DispatchResult::Daemon { foreground },
+        RefactCliCommand::Run(options) => DispatchResult::Run(options),
         RefactCliCommand::Version => {
             println!("{}", version_text());
             DispatchResult::Exit(0)
@@ -78,7 +82,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    version                     Print version and build information\n\nRun `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    version                     Print version and build information\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nRun `refact worker --help` for engine flags."
 }
 
 pub fn version_text() -> String {
@@ -115,6 +119,12 @@ fn parse_daemon(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError>
         }
     }
     Ok(RefactCliCommand::Daemon { foreground })
+}
+
+fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    crate::daemon::run_cmd::parse_run_args(&args.iter().skip(2).cloned().collect::<Vec<_>>())
+        .map(RefactCliCommand::Run)
+        .map_err(usage_error)
 }
 
 fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
@@ -182,6 +192,60 @@ mod tests {
             parse_from(["refact", "daemon", "--foreground"]).unwrap(),
             RefactCliCommand::Daemon { foreground: true }
         ));
+    }
+
+    #[test]
+    fn parse_run_defaults() {
+        let command = parse_from(["refact", "run", "say hi"]).unwrap();
+        match command {
+            RefactCliCommand::Run(options) => {
+                assert_eq!(options.prompt, "say hi");
+                assert_eq!(
+                    options.approve,
+                    crate::daemon::run_cmd::ApprovalPolicy::Deny
+                );
+                assert_eq!(options.mode, crate::daemon::run_cmd::RunMode::Agent);
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parse_run_full_options() {
+        let command = parse_from([
+            "refact",
+            "run",
+            "--project",
+            "/tmp/project",
+            "--mode",
+            "explore",
+            "--model",
+            "m",
+            "--approve",
+            "auto",
+            "--json",
+            "--timeout-secs",
+            "9",
+            "do work",
+        ])
+        .unwrap();
+        match command {
+            RefactCliCommand::Run(options) => {
+                assert_eq!(
+                    options.project,
+                    Some(std::path::PathBuf::from("/tmp/project"))
+                );
+                assert_eq!(options.mode, crate::daemon::run_cmd::RunMode::Explore);
+                assert_eq!(options.model.as_deref(), Some("m"));
+                assert_eq!(
+                    options.approve,
+                    crate::daemon::run_cmd::ApprovalPolicy::Auto
+                );
+                assert!(options.json);
+                assert_eq!(options.timeout_secs, 9);
+            }
+            _ => panic!("expected run command"),
+        }
     }
 
     #[test]

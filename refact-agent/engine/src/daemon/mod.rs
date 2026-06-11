@@ -5,6 +5,7 @@ use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 pub mod auth;
+pub mod chat_client;
 pub mod client;
 pub mod config;
 pub mod cron_clock;
@@ -16,6 +17,7 @@ pub mod paths;
 pub mod ports;
 pub mod projects;
 pub mod proxy;
+pub mod run_cmd;
 pub mod server;
 pub mod state;
 pub mod supervisor;
