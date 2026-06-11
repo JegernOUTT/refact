@@ -11,8 +11,14 @@ pub enum RefactCliCommand {
     Worker(CommandLine),
     Daemon { foreground: bool },
     Run(crate::daemon::run_cmd::RunOptions),
+    Tui(TuiOptions),
     Version,
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiOptions {
+    pub project: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +33,7 @@ pub enum DispatchResult {
     Worker(CommandLine),
     Daemon { foreground: bool },
     Run(crate::daemon::run_cmd::RunOptions),
+    Tui(TuiOptions),
     Exit(i32),
 }
 
@@ -52,13 +59,13 @@ where
 {
     let args: Vec<OsString> = iter.into_iter().map(Into::into).collect();
     let Some(subcommand) = args.get(1) else {
-        // TODO(T-16): bare `refact` will launch the TUI.
-        return Ok(RefactCliCommand::Help);
+        return Ok(RefactCliCommand::Tui(TuiOptions { project: None }));
     };
     match subcommand.to_string_lossy().as_ref() {
         "worker" => parse_worker(args),
         "daemon" => parse_daemon(&args),
         "run" => parse_run(&args),
+        "tui" => parse_tui(&args),
         "version" | "--version" | "-V" => Ok(RefactCliCommand::Version),
         "help" | "--help" | "-h" => Ok(RefactCliCommand::Help),
         other => Err(usage_error(format!("unknown subcommand `{}`", other))),
@@ -70,6 +77,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
         RefactCliCommand::Worker(cmdline) => DispatchResult::Worker(cmdline),
         RefactCliCommand::Daemon { foreground } => DispatchResult::Daemon { foreground },
         RefactCliCommand::Run(options) => DispatchResult::Run(options),
+        RefactCliCommand::Tui(options) => DispatchResult::Tui(options),
         RefactCliCommand::Version => {
             println!("{}", version_text());
             DispatchResult::Exit(0)
@@ -82,7 +90,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    version                     Print version and build information\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nRun `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]       Open the full-screen TUI\n    worker [engine flags...]     Run the refact worker engine\n    daemon [--foreground]        Run the refact daemon\n    run [OPTIONS] <prompt>       Run one headless chat turn through the daemon\n    version                      Print version and build information\n\nTUI OPTIONS:\n    --project <path>             Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>             Project root (default: cwd)\n    --mode agent|explore         Chat mode (default: agent)\n    --model <model>              Model id\n    --approve deny|ask|auto      Tool approval policy (default: deny)\n    --json                       Emit final JSON instead of streaming text\n    --timeout-secs <N>           Timeout in seconds (default: 600)\n\nRun `refact worker --help` for engine flags."
 }
 
 pub fn version_text() -> String {
@@ -125,6 +133,27 @@ fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
     crate::daemon::run_cmd::parse_run_args(&args.iter().skip(2).cloned().collect::<Vec<_>>())
         .map(RefactCliCommand::Run)
         .map_err(usage_error)
+}
+
+fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    let mut project = None;
+    let mut i = 2usize;
+    while i < args.len() {
+        let value = args[i].to_string_lossy();
+        match value.as_ref() {
+            "--project" => {
+                i += 1;
+                let Some(path) = args.get(i) else {
+                    return Err(usage_error("--project requires a path".to_string()));
+                };
+                project = Some(std::path::PathBuf::from(path));
+            }
+            "--help" | "-h" => return Ok(RefactCliCommand::Help),
+            other => return Err(usage_error(format!("unexpected tui argument `{}`", other))),
+        }
+        i += 1;
+    }
+    Ok(RefactCliCommand::Tui(TuiOptions { project }))
 }
 
 fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
@@ -249,6 +278,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_tui_and_bare_refact() {
+        assert!(matches!(
+            parse_from(["refact"]).unwrap(),
+            RefactCliCommand::Tui(TuiOptions { project: None })
+        ));
+        let command = parse_from(["refact", "tui", "--project", "/tmp/project"]).unwrap();
+        match command {
+            RefactCliCommand::Tui(options) => {
+                assert_eq!(
+                    options.project,
+                    Some(std::path::PathBuf::from("/tmp/project"))
+                );
+            }
+            _ => panic!("expected tui command"),
+        }
+    }
+
+    #[test]
     fn dispatch_daemon_command() {
         assert!(matches!(
             dispatch(RefactCliCommand::Daemon { foreground: false }),
@@ -264,10 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_bare_refact_returns_help() {
-        assert!(matches!(
-            parse_from(["refact"]).unwrap(),
-            RefactCliCommand::Help
-        ));
+    fn parse_tui_rejects_unknown_argument() {
+        let error = parse_from(["refact", "tui", "--bogus"]).unwrap_err();
+        assert_eq!(error.exit_code, 2);
+        assert!(error.message.contains("unexpected tui argument"));
     }
 }

@@ -39,6 +39,24 @@ fn main() {
             let code = runtime.block_on(refact_lsp::daemon::run_cmd::run(options, &mut io));
             std::process::exit(code);
         }
+        refact_lsp::cli_dispatch::DispatchResult::Tui(options) => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.enable_all();
+            builder.thread_stack_size(tokio_worker_stack_bytes());
+            let runtime = builder.build().expect("failed to build tokio runtime");
+            let daemon = runtime
+                .block_on(refact_lsp::daemon::client::ensure_daemon_running())
+                .unwrap_or_else(|error| {
+                    eprintln!("daemon unreachable: {error}");
+                    std::process::exit(1);
+                });
+            let daemon_url = Some(refact_lsp::daemon::chat_client::daemon_base_url(&daemon));
+            let result = runtime.block_on(refact_tui::run_tui(daemon_url, options.project));
+            if let Err(error) = result {
+                eprintln!("refact tui failed: {error}");
+                std::process::exit(1);
+            }
+        }
         refact_lsp::cli_dispatch::DispatchResult::Exit(code) => std::process::exit(code),
     }
 }
