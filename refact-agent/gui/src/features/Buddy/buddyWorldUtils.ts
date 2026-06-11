@@ -11,7 +11,7 @@ export function bubblePositionForSceneX(
   sceneY: number | null = null,
 ): BubblePosition {
   const length = speechText?.length ?? 0;
-  if (compact && length > LONG_COMPACT_SPEECH_LENGTH) {
+  if (compact && (speechText?.length ?? 0) > LONG_COMPACT_SPEECH_LENGTH) {
     return "top";
   }
   if (
