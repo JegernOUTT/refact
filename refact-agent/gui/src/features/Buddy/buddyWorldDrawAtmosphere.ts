@@ -95,132 +95,87 @@ function drawSkyStructures(args: DrawBuddyWorldBaseArgs): void {
   const serious = args.world.atmosphere.serious;
   const warning = hasWorldLayer(args.world, "provider_flicker") && !serious;
   const active = hasWorldLayer(args.world, "workshop_runes");
-  const crystalX = width * 0.75;
-  const crystalY = height * 0.49;
-  const lighthouseX = width * 0.88;
-  const lighthouseY = height * 0.56;
-  const crystalTone = serious ? "#F87171" : warning ? "#F59E0B" : "#93C5FD";
-  const beaconTone = serious || warning ? "#FDE68A" : "#E0E7FF";
-  const beamAlpha = alphaForMotion(
-    serious ? 0.24 : active ? 0.17 : warning ? 0.12 : 0.1,
-    args.reducedMotion,
+  const hillX = width * 0.84;
+  const hillY = height * 0.6;
+  const haze = alphaForMotion(0.34, args.reducedMotion);
+
+  fillEllipse(args.ctx, hillX, hillY + 14, width * 0.17, 26, "#5E7B6A", haze);
+  fillPixelRect(args.ctx, hillX - 2, hillY - 22, 4, 24, "#574436", haze + 0.1);
+  fillEllipse(
+    args.ctx,
+    hillX + wave(frame, 90, 0, 1.5, args.reducedMotion),
+    hillY - 30,
+    24,
+    15,
+    "#4F6E58",
+    haze + 0.12,
+  );
+  fillEllipse(
+    args.ctx,
+    hillX - 13 + wave(frame, 84, 1, 1.2, args.reducedMotion),
+    hillY - 22,
+    13,
+    9,
+    "#5E8266",
+    haze + 0.08,
+  );
+  fillEllipse(
+    args.ctx,
+    hillX + 14 + wave(frame, 96, 2, 1.2, args.reducedMotion),
+    hillY - 21,
+    12,
+    8,
+    "#5E8266",
+    haze + 0.08,
   );
 
-  fillCircle(
-    args.ctx,
-    crystalX,
-    crystalY - 18,
-    serious ? 32 : 24,
-    crystalTone,
-    serious ? 0.07 : 0.035,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 6,
-    crystalY - 34,
-    12,
-    20,
-    crystalTone,
-    0.8,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 12,
-    crystalY - 18,
-    24,
-    18,
-    "#1E293B",
-    0.86,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 4,
-    crystalY - 28,
-    8,
-    24,
-    "#DBEAFE",
-    serious ? 0.52 : 0.42,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX + 10,
-    crystalY - 28 + wave(frame, 36, 0, 3, args.reducedMotion),
-    4,
-    4,
-    beaconTone,
-    0.72,
-  );
-  if (warning || serious) {
-    strokeCircle(
-      args.ctx,
-      crystalX,
-      crystalY - 19,
-      28 + wave(frame, warning ? 28 : 18, 0, 3, args.reducedMotion),
-      warning ? "#FCD34D" : "#F87171",
-      warning ? 1.5 : 3,
-      alphaForMotion(warning ? 0.12 : 0.32, args.reducedMotion),
-    );
+  const toriiX = hillX - 26;
+  const toriiTone = serious ? "#E25B4A" : "#C2563C";
+  fillPixelRect(args.ctx, toriiX - 7, hillY - 4, 3, 12, toriiTone, haze + 0.16);
+  fillPixelRect(args.ctx, toriiX + 4, hillY - 4, 3, 12, toriiTone, haze + 0.16);
+  fillPixelRect(args.ctx, toriiX - 10, hillY - 7, 20, 3, toriiTone, haze + 0.2);
+  fillPixelRect(args.ctx, toriiX - 6, hillY - 3, 12, 2, toriiTone, haze + 0.12);
+  if (serious) {
+    const swing = wave(frame, 26, 0, 1, args.reducedMotion);
+    fillPixelRect(args.ctx, toriiX - 5 + swing, hillY - 1, 3, 4, "#F87171");
+    fillPixelRect(args.ctx, toriiX + 3 - swing, hillY - 1, 3, 4, "#F87171");
+    fillPixelRect(args.ctx, toriiX - 4 + swing, hillY, 1, 1, "#FDE68A", 0.9);
+    fillPixelRect(args.ctx, toriiX + 4 - swing, hillY, 1, 1, "#FDE68A", 0.9);
   }
 
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 10,
-    lighthouseY - 26,
-    20,
-    44,
-    "#334155",
-    0.92,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 15,
-    lighthouseY + 15,
-    30,
-    6,
-    "#0F172A",
-    0.72,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 7,
-    lighthouseY - 36,
-    14,
-    10,
-    beaconTone,
-    0.86,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 12,
-    lighthouseY - 40,
-    24,
-    5,
-    "#CBD5E1",
-    0.9,
-  );
-  strokeLine(
-    args.ctx,
-    { x: lighthouseX - 7, y: lighthouseY - 31 },
-    {
-      x: width * 0.58,
-      y: height * 0.18 + wave(frame, 86, 0, 5, args.reducedMotion),
-    },
-    beaconTone,
-    args.compact ? 2 : 3,
-    beamAlpha,
-  );
-  if (active) {
-    strokeLine(
+  if (warning || serious) {
+    const pulse = wave(frame, warning ? 28 : 16, 0, 0.08, args.reducedMotion);
+    fillCircle(
       args.ctx,
-      { x: crystalX + 8, y: crystalY - 25 },
-      {
-        x: width * 0.48 + wave(frame, 72, 0, 14, args.reducedMotion),
-        y: height * 0.18 + wave(frame, 58, 1, 5, args.reducedMotion),
-      },
-      "#22D3EE",
-      args.compact ? 2 : 4,
-      alphaForMotion(0.22, args.reducedMotion),
+      toriiX,
+      hillY - 8,
+      serious ? 22 : 15,
+      serious ? "#F87171" : "#FCD34D",
+      alphaForMotion((serious ? 0.16 : 0.1) + pulse, args.reducedMotion),
     );
+    strokeCircle(
+      args.ctx,
+      toriiX,
+      hillY - 8,
+      18 + wave(frame, warning ? 30 : 18, 1, 3, args.reducedMotion),
+      serious ? "#F87171" : "#FCD34D",
+      serious ? 2 : 1.5,
+      alphaForMotion(serious ? 0.22 : 0.1, args.reducedMotion),
+    );
+  }
+  if (active) {
+    const count = countForMotion(4, args.compact, args.reducedMotion);
+    for (let index = 0; index < count; index += 1) {
+      const rise = ((frame * 0.4 + index * 25) % 100) / 100;
+      drawSpark(
+        args.ctx,
+        hillX - 26 + wave(frame, 22 + index, index, 4, args.reducedMotion),
+        hillY - 10 - rise * 30,
+        1.6,
+        "#FDE68A",
+        alphaForMotion((1 - rise) * 0.5, args.reducedMotion),
+      );
+    }
   }
 }
 

@@ -84,14 +84,14 @@ export const PALETTES: Palette[] = [
   },
   {
     name: "Storm",
-    body: "#94A3B8",
-    light: "#CBD5E1",
-    dark: "#475569",
-    belly: "#E2E8F0",
-    eyeDark: "#1E293B",
-    outline: "#334155",
-    rosy: "#FCA5A5",
-    accent: "#94A3B8",
+    body: "#8E99A8",
+    light: "#C5CFDA",
+    dark: "#525E6E",
+    belly: "#EDE6D6",
+    eyeDark: "#1F2733",
+    outline: "#2C3440",
+    rosy: "#E8A1A1",
+    accent: "#A7BDD3",
   },
 ];
 
@@ -675,11 +675,11 @@ export const TOY_EMOJI: Record<string, string> = {
 export const STAGE_SIZES: [number, number][] = [
   [20, 16],
   [20, 23],
-  [24, 18],
-  [26, 18],
-  [28, 18],
-  [28, 18],
-  [28, 22],
+  [22, 19],
+  [24, 20],
+  [26, 21],
+  [26, 21],
+  [28, 23],
 ];
 
 export const PERSISTENT_TOY_ACTIONS = new Set([

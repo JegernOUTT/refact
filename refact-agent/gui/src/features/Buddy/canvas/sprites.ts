@@ -1,7 +1,6 @@
-import { fillPixel, strokeArc, strokeEllipse } from "./helpers";
+import { fillPixel, strokeEllipse } from "./helpers";
 import { drawEyes, drawMouth, drawBrows } from "./eyes";
 import type { BuddyAnimState, ColorMap } from "../types";
-import { PALETTES } from "../constants";
 
 type CellCode = "O" | "L" | "B" | "D" | "W" | "S" | "H" | " ";
 
@@ -10,6 +9,9 @@ interface FaceLayout {
   eyeRX: number;
   eyeY: number;
   eyeSize: number;
+  noseX: number;
+  noseY: number;
+  noseW: number;
   mouthX: number;
   mouthY: number;
   mouthW: number;
@@ -18,36 +20,48 @@ interface FaceLayout {
   cheekY: number;
 }
 
-function blobMask(
-  w: number,
-  h: number,
-  exponent: number,
-  belly: { cx: number; cy: number; rx: number; ry: number } | null,
-): string[] {
+interface TotoroSpec {
+  grid: CellCode[][];
+  w: number;
+  h: number;
+  earSpread: number;
+  earH: number;
+  earW: number;
+  chevronRows: Array<[number, number]>;
+  face: FaceLayout;
+  whiskerY: number;
+  armY: number;
+}
+
+function totoroRadius(w: number, h: number, r: number): number {
+  const t = r / (h - 1);
+  const swell = Math.sin(Math.PI * (0.1 + 0.46 * t));
+  let radius = (w / 2) * (0.36 + 0.64 * Math.pow(swell, 0.75));
+  if (r === 0) radius *= 0.74;
+  else if (r === 1) radius *= 0.92;
+  if (t > 0.93) radius *= 1 - (t - 0.93) * 2.4;
+  return radius;
+}
+
+function totoroMask(w: number, h: number): string[] {
   const rows: string[] = [];
   const cx = (w - 1) / 2;
-  const cy = (h - 1) / 2;
-  const rx = w / 2;
-  const ry = h / 2;
   for (let r = 0; r < h; r++) {
+    const t = r / (h - 1);
+    const radius = totoroRadius(w, h, r);
+    const bt = (t - 0.3) / 0.66;
+    const bellySpan =
+      bt >= 0 && bt <= 1
+        ? radius * (0.5 + 0.42 * Math.sin(Math.PI * Math.pow(bt, 0.9)))
+        : -1;
     let row = "";
     for (let c = 0; c < w; c++) {
-      const nx = Math.abs((c - cx) / rx);
-      const ny = Math.abs((r - cy) / ry);
-      const inside = Math.pow(nx, exponent) + Math.pow(ny, exponent) <= 1.005;
-      if (!inside) {
+      const d = Math.abs(c - cx);
+      if (d > radius) {
         row += " ";
         continue;
       }
-      if (belly) {
-        const bx = (c - belly.cx) / belly.rx;
-        const by = (r - belly.cy) / belly.ry;
-        if (bx * bx + by * by <= 1) {
-          row += "W";
-          continue;
-        }
-      }
-      row += "X";
+      row += d <= bellySpan ? "W" : "X";
     }
     rows.push(row);
   }
@@ -117,21 +131,11 @@ function compileShaded(rows: string[]): CellCode[][] {
 }
 
 const GRID_EGG = compileShaded(eggMask(20, 16));
-const GRID_HATCH = compileShaded(
-  blobMask(20, 13, 2.4, { cx: 9.5, cy: 8.4, rx: 6, ry: 4 }),
-);
-const GRID_SPRITE = compileShaded(
-  blobMask(24, 16, 2.6, { cx: 11.5, cy: 10.4, rx: 7.4, ry: 4.6 }),
-);
-const GRID_IMP = compileShaded(
-  blobMask(26, 16, 2.6, { cx: 12.5, cy: 10.4, rx: 8, ry: 4.6 }),
-);
-const GRID_DAEMON = compileShaded(
-  blobMask(28, 16, 2.7, { cx: 13.5, cy: 10.4, rx: 8.6, ry: 4.6 }),
-);
-const GRID_ARCHON = compileShaded(
-  blobMask(28, 19, 2.7, { cx: 13.5, cy: 12.6, rx: 8.6, ry: 5 }),
-);
+const GRID_HATCHLING = compileShaded(totoroMask(16, 12));
+const GRID_SPRITE = compileShaded(totoroMask(22, 19));
+const GRID_IMP = compileShaded(totoroMask(24, 20));
+const GRID_DAEMON = compileShaded(totoroMask(26, 21));
+const GRID_ARCHON = compileShaded(totoroMask(28, 23));
 
 function cellColor(code: CellCode, m: ColorMap): string | null {
   switch (code) {
@@ -148,7 +152,7 @@ function cellColor(code: CellCode, m: ColorMap): string | null {
     case "S":
       return m.light;
     case "H":
-      return m.belly;
+      return m.light;
     default:
       return null;
   }
@@ -213,6 +217,22 @@ function drawFace(
     m,
     anim,
   );
+  fillPixel(
+    ctx,
+    ox + layout.noseX + off,
+    oy + layout.noseY,
+    layout.noseW,
+    1,
+    m.eyeDark,
+  );
+  fillPixel(
+    ctx,
+    ox + layout.noseX + ((layout.noseW / 2) | 0) + off,
+    oy + layout.noseY + 1,
+    1,
+    1,
+    m.eyeDark,
+  );
   fillPixel(ctx, ox + layout.cheekLX + off, oy + layout.cheekY, 2, 1, m.rosy);
   fillPixel(ctx, ox + layout.cheekRX + off, oy + layout.cheekY, 2, 1, m.rosy);
   drawMouth(
@@ -225,147 +245,69 @@ function drawFace(
   );
 }
 
-function drawCatEars(
+function drawTotoroEars(
   ctx: CanvasRenderingContext2D,
-  ox: number,
-  oy: number,
-  w: number,
+  cx: number,
+  topY: number,
+  spread: number,
+  earH: number,
+  earW: number,
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
   const lift = Math.round(Math.max(0, anim.earAnimProgress) * 2);
   const droop = anim.earAnimProgress < -0.3 ? 1 : 0;
   const twitch = anim.earTwitchTimer > 0 && anim.earTwitchTimer % 4 < 2 ? 1 : 0;
-  const lt = anim.earTwitchSide < 0 ? twitch : 0;
-  const rt = anim.earTwitchSide > 0 ? twitch : 0;
   const off = faceOffset(anim);
-  const lx = ox + Math.round(w * 0.18) + off;
-  const rx = ox + Math.round(w * 0.68) + off;
-  const ly = oy + droop - lift - lt;
-  const ry = oy + droop - lift - rt;
+  const half = (earW / 2) | 0;
 
-  fillPixel(ctx, lx + 1, ly - 3, 1, 1, m.outline);
-  fillPixel(ctx, lx, ly - 2, 3, 1, m.body);
-  fillPixel(ctx, lx - 1, ly - 1, 4, 1, m.body);
-  fillPixel(ctx, lx + 1, ly - 2, 1, 1, m.rosy);
-  fillPixel(ctx, lx - 1, ly, 5, 1, m.dark);
+  const ear = (ecx: number, tw: number, lighter: boolean, tilt: number) => {
+    const y = topY + droop - lift - tw;
+    fillPixel(ctx, ecx - half + tilt, y - earH, earW, 1, m.outline);
+    fillPixel(ctx, ecx - half - 1 + tilt, y - earH + 1, 1, earH - 1, m.outline);
+    fillPixel(ctx, ecx + half + tilt, y - earH + 1, 1, earH - 1, m.outline);
+    fillPixel(
+      ctx,
+      ecx - half + tilt,
+      y - earH + 1,
+      earW,
+      earH,
+      lighter ? m.light : m.body,
+    );
+    fillPixel(ctx, ecx - half + tilt, y - 1, earW, 1, m.dark);
+    fillPixel(ctx, ecx - half + tilt, y - earH + 1, 1, 1, m.light);
+  };
 
-  fillPixel(ctx, rx + 1, ry - 3, 1, 1, m.outline);
-  fillPixel(ctx, rx, ry - 2, 3, 1, m.body);
-  fillPixel(ctx, rx, ry - 1, 4, 1, m.body);
-  fillPixel(ctx, rx + 1, ry - 2, 1, 1, m.rosy);
-  fillPixel(ctx, rx - 1, ry, 5, 1, m.dark);
+  ear(cx - spread + off, anim.earTwitchSide < 0 ? twitch : 0, true, 0);
+  ear(cx + spread + off, anim.earTwitchSide > 0 ? twitch : 0, false, 0);
 }
 
-function drawHorns(
+function drawTotoroTail(
   ctx: CanvasRenderingContext2D,
-  ox: number,
-  oy: number,
-  w: number,
-  m: ColorMap,
-  anim: BuddyAnimState,
-  big: boolean,
-): void {
-  const lift = Math.round(Math.max(0, anim.earAnimProgress));
-  const off = faceOffset(anim);
-  const lx = ox + Math.round(w * 0.16) + off;
-  const rx = ox + Math.round(w * 0.78) + off;
-  const y = oy - lift;
-
-  fillPixel(ctx, lx + 1, y, 2, 1, m.dark);
-  fillPixel(ctx, lx, y - 1, 2, 1, m.dark);
-  fillPixel(ctx, lx - 1, y - 2, 2, 1, m.dark);
-  fillPixel(ctx, rx, y, 2, 1, m.dark);
-  fillPixel(ctx, rx + 1, y - 1, 2, 1, m.dark);
-  fillPixel(ctx, rx + 2, y - 2, 2, 1, m.dark);
-  if (big) {
-    fillPixel(ctx, lx - 1, y - 3, 1, 1, m.gold);
-    fillPixel(ctx, rx + 3, y - 3, 1, 1, m.gold);
-    fillPixel(ctx, lx + 1, y - 1, 1, 1, m.light);
-    fillPixel(ctx, rx + 1, y - 1, 1, 1, m.light);
-  }
-}
-
-function drawTail(
-  ctx: CanvasRenderingContext2D,
-  anchorX: number,
+  bodyX: number,
+  bodyW: number,
   anchorY: number,
   m: ColorMap,
   anim: BuddyAnimState,
-  stage: number,
 ): void {
   if (anim.idleAction === "doze") {
-    fillPixel(ctx, anchorX - 6, anchorY + 3, 4, 2, m.body);
-    fillPixel(ctx, anchorX - 8, anchorY + 2, 3, 2, m.dark);
+    fillPixel(ctx, bodyX - 2, anchorY + 3, 4, 2, m.body);
+    fillPixel(ctx, bodyX - 3, anchorY + 4, 2, 1, m.dark);
     return;
   }
-  const dir = anim.facingLerp >= 0 ? -1 : 1;
-  const wag = Math.sin(anim.tailPhase) * (0.3 + anim.tailEnergy * 0.75);
-  let angle = -0.35 + anim.tailDroop * 1.1;
-  let x = anchorX + dir * 1.5;
-  let y = anchorY;
-  const tipPoints: { x: number; y: number }[] = [];
-  for (let s = 0; s < 3; s++) {
-    angle += wag * (0.4 + s * 0.32);
-    x += dir * (2.3 - s * 0.4);
-    y += Math.sin(angle) * 2.1;
-    const px = Math.round(x);
-    const py = Math.round(y);
-    const size = s === 2 ? 2 : 3;
-    fillPixel(ctx, px, py, size, size, s === 2 ? m.dark : m.body);
-    if (s === 0) fillPixel(ctx, px, py - 1, 2, 1, m.light);
-    tipPoints.push({ x: px, y: py });
-  }
-  const tip = tipPoints[2];
-  if (stage === 3 || stage === 4) {
-    fillPixel(ctx, tip.x + dir * 2, tip.y, 1, 1, m.dark);
-    fillPixel(ctx, tip.x + dir * 3, tip.y - 1, 1, 1, m.dark);
-    fillPixel(ctx, tip.x + dir * 3, tip.y + 1, 1, 1, m.dark);
-    if (stage === 4) {
-      const flick = anim.frame % 8 < 4 ? 0 : 1;
-      fillPixel(ctx, tip.x + dir * 3, tip.y - flick, 1, 1, m.gold);
-    }
-  } else if (stage === 5) {
-    fillPixel(ctx, tip.x + dir * 2, tip.y - 1, 2, 3, m.light);
-    fillPixel(ctx, tip.x + dir * 2, tip.y, 2, 1, m.belly);
-  } else if (stage === 6) {
-    const pulse = anim.frame % 10 < 5 ? 0 : 1;
-    fillPixel(ctx, tip.x + dir * 2, tip.y - pulse, 2, 2, m.gold);
-  } else {
-    fillPixel(ctx, tip.x + dir, tip.y, 2, 2, m.body);
-    fillPixel(ctx, tip.x + dir, tip.y - 1, 2, 1, m.light);
-  }
-}
-
-function drawWings(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  topY: number,
-  halfW: number,
-  m: ColorMap,
-  anim: BuddyAnimState,
-  energy: boolean,
-): void {
-  const flap = anim.wingFlap;
-  const beat = Math.sin(anim.frame * 0.45) * flap;
-  const span = 4 + Math.round(flap * 5);
-  const lift = Math.round(beat * 3);
-  const edge = energy ? m.accent : m.light;
-  const fill = energy ? m.light : m.dark;
-
-  for (let i = 0; i < span; i++) {
-    const rise = Math.round(i * (0.5 + flap * 0.3)) - lift;
-    const len = Math.max(1, 4 - Math.floor(i / 2));
-    const lx = cx - halfW - i;
-    const rx = cx + halfW + i;
-    const y = topY + 5 - rise;
-    fillPixel(ctx, lx, y, 1, len, i === span - 1 ? edge : fill);
-    fillPixel(ctx, rx, y, 1, len, i === span - 1 ? edge : fill);
-    if (i % 2 === 0 && i > 0) {
-      fillPixel(ctx, lx, y - 1, 1, 1, edge);
-      fillPixel(ctx, rx, y - 1, 1, 1, edge);
-    }
-  }
+  const facingRight = anim.facingLerp >= 0;
+  const x = facingRight ? bodyX - 4 : bodyX + bodyW - 1;
+  const bob = Math.round(
+    Math.sin(anim.tailPhase) * (0.4 + anim.tailEnergy * 0.9),
+  );
+  const sag = Math.round(anim.tailDroop * 2);
+  const y = anchorY + sag - bob;
+  fillPixel(ctx, x + 1, y, 3, 1, m.outline);
+  fillPixel(ctx, x, y + 1, 1, 2, m.outline);
+  fillPixel(ctx, x + 4, y + 1, 1, 2, m.outline);
+  fillPixel(ctx, x + 1, y + 1, 3, 2, m.body);
+  fillPixel(ctx, x + 1, y + 1, 2, 1, m.light);
+  fillPixel(ctx, x + 1, y + 3, 3, 1, m.outline);
 }
 
 function drawLegs(
@@ -375,14 +317,16 @@ function drawLegs(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  const leg = (x: number, y: number): void => {
-    fillPixel(ctx, x, y - 2, 3, 2, m.body);
-    fillPixel(ctx, x - 1, y, 4, 2, m.dark);
-    fillPixel(ctx, x - 1, y, 1, 1, m.light);
+  const foot = (x: number, y: number): void => {
+    fillPixel(ctx, x, y - 1, 5, 2, m.body);
+    fillPixel(ctx, x, y - 1, 2, 1, m.light);
+    fillPixel(ctx, x, y + 1, 5, 1, m.dark);
+    fillPixel(ctx, x + 1, y + 1, 1, 1, m.outline);
+    fillPixel(ctx, x + 3, y + 1, 1, 1, m.outline);
   };
   if (anim.idleAction === "doze") {
-    fillPixel(ctx, cx - 6, footY - 1, 4, 2, m.dark);
-    fillPixel(ctx, cx + 3, footY - 1, 4, 2, m.dark);
+    fillPixel(ctx, cx - 7, footY, 5, 1, m.dark);
+    fillPixel(ctx, cx + 2, footY, 5, 1, m.dark);
     return;
   }
   if (anim.walking && Math.abs(anim.walkVel) > 0.08) {
@@ -391,121 +335,110 @@ function drawLegs(
     const strideA = Math.cos(anim.walkPhase) * 1.8 * anim.walkDirection;
     const strideB =
       Math.cos(anim.walkPhase + Math.PI) * 1.8 * anim.walkDirection;
-    leg(Math.round(cx - 6 + strideA), Math.round(footY - liftA));
-    leg(Math.round(cx + 3 + strideB), Math.round(footY - liftB));
+    foot(Math.round(cx - 7 + strideA), Math.round(footY - liftA));
+    foot(Math.round(cx + 2 + strideB), Math.round(footY - liftB));
     return;
   }
   if (anim.idleAction === "dance") {
     const hop = Math.sin(anim.dancePhase);
-    leg(cx - 6, footY - Math.round(Math.max(0, hop) * 3));
-    leg(cx + 3, footY - Math.round(Math.max(0, -hop) * 3));
+    foot(cx - 7, footY - Math.round(Math.max(0, hop) * 3));
+    foot(cx + 2, footY - Math.round(Math.max(0, -hop) * 3));
     return;
   }
   const shift = Math.sin(anim.frame * 0.013);
-  leg(cx - 6, footY - (shift > 0.6 ? 1 : 0));
-  leg(cx + 3, footY - (shift < -0.6 ? 1 : 0));
+  foot(cx - 7, footY - (shift > 0.6 ? 1 : 0));
+  foot(cx + 2, footY - (shift < -0.6 ? 1 : 0));
 }
 
 function drawArms(
   ctx: CanvasRenderingContext2D,
-  ox: number,
-  _oy: number,
-  w: number,
+  lx: number,
+  rx: number,
   midY: number,
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
   const f = anim.frame;
   const dir = anim.facingLerp >= 0 ? 1 : -1;
-  const lx = ox - 1;
-  const rx = ox + w - 1;
   const hand = (x: number, y: number): void => {
     fillPixel(ctx, x, y, 2, 1, m.belly);
+    fillPixel(ctx, x, y + 1, 1, 1, m.outline);
+    fillPixel(ctx, x + 1, y + 1, 1, 1, m.outline);
+  };
+  const restArm = (x: number, y: number, outer: number): void => {
+    fillPixel(ctx, x, y, 2, 5, m.body);
+    fillPixel(ctx, outer, y, 1, 4, m.dark);
+    fillPixel(ctx, x, y + 4, 2, 1, m.dark);
+    fillPixel(ctx, x, y + 5, 1, 1, m.outline);
+    fillPixel(ctx, x + 1, y + 5, 1, 1, m.outline);
   };
 
   switch (anim.armPose) {
     case "swing": {
       const sw = Math.round(Math.sin(anim.walkPhase) * 2);
-      fillPixel(ctx, lx, midY - sw, 2, 4, m.body);
-      fillPixel(ctx, lx, midY - sw + 3, 2, 1, m.dark);
-      fillPixel(ctx, rx, midY + sw, 2, 4, m.body);
-      fillPixel(ctx, rx, midY + sw + 3, 2, 1, m.dark);
+      restArm(lx, midY - sw, lx - 1);
+      restArm(rx, midY + sw, rx + 2);
       return;
     }
     case "wave": {
       const wx = dir > 0 ? rx : lx;
       const sx = dir > 0 ? lx : rx;
       const bob = Math.round(Math.sin(f * 0.28) * 1.5);
-      fillPixel(ctx, sx, midY, 2, 4, m.body);
+      restArm(sx, midY, dir > 0 ? sx - 1 : sx + 2);
       fillPixel(ctx, wx + dir, midY - 1, 2, 2, m.body);
       fillPixel(ctx, wx + dir * 2, midY - 3, 2, 2, m.body);
       fillPixel(ctx, wx + dir * 3, midY - 5 - bob, 2, 2, m.body);
-      hand(wx + dir * 3, midY - 6 - bob);
+      hand(wx + dir * 3, midY - 7 - bob);
       return;
     }
     case "raise": {
       const bounce = Math.round(Math.abs(Math.sin(f * 0.18)) * 2);
       fillPixel(ctx, lx - 1, midY - 3 - bounce, 2, 2, m.body);
       fillPixel(ctx, lx - 2, midY - 5 - bounce, 2, 2, m.body);
-      hand(lx - 2, midY - 6 - bounce);
+      hand(lx - 2, midY - 7 - bounce);
       fillPixel(ctx, rx + 1, midY - 3 - bounce, 2, 2, m.body);
       fillPixel(ctx, rx + 2, midY - 5 - bounce, 2, 2, m.body);
-      hand(rx + 2, midY - 6 - bounce);
+      hand(rx + 2, midY - 7 - bounce);
       return;
     }
     case "face": {
       const wx = dir > 0 ? rx : lx;
       const sx = dir > 0 ? lx : rx;
-      fillPixel(ctx, sx, midY, 2, 4, m.body);
+      restArm(sx, midY, dir > 0 ? sx - 1 : sx + 2);
       fillPixel(ctx, wx, midY - 1, 2, 2, m.body);
       fillPixel(ctx, wx - dir, midY - 3, 2, 2, m.body);
-      hand(wx - dir, midY - 4);
+      hand(wx - dir, midY - 5);
       return;
     }
     case "drum": {
       const beat = Math.sin(f * 0.38) > 0 ? 1 : 0;
-      fillPixel(ctx, ox + 3, midY + 3 + beat, 3, 2, m.body);
-      hand(ox + 3, midY + 4 + beat);
-      fillPixel(ctx, ox + w - 6, midY + 4 - beat, 3, 2, m.body);
-      hand(ox + w - 6, midY + 5 - beat);
+      fillPixel(ctx, lx + 3, midY + 3 + beat, 3, 2, m.body);
+      hand(lx + 3, midY + 5 + beat);
+      fillPixel(ctx, rx - 4, midY + 4 - beat, 3, 2, m.body);
+      hand(rx - 4, midY + 6 - beat);
       return;
     }
     case "hold": {
       const wx = dir > 0 ? rx : lx;
       const sx = dir > 0 ? lx : rx;
-      fillPixel(ctx, sx, midY, 2, 4, m.body);
-      fillPixel(
-        ctx,
-        wx + (dir > 0 ? 0 : -4),
-        midY + 1,
-        dir > 0 ? 5 : 5,
-        2,
-        m.body,
-      );
+      restArm(sx, midY, dir > 0 ? sx - 1 : sx + 2);
+      fillPixel(ctx, wx + (dir > 0 ? 0 : -4), midY + 1, 5, 2, m.body);
       hand(wx + dir * 4, midY + 1);
       return;
     }
     case "hug": {
-      fillPixel(ctx, ox + 4, midY + 2, 3, 2, m.body);
-      fillPixel(ctx, ox + w - 7, midY + 2, 3, 2, m.body);
-      hand(ox + 6, midY + 3);
-      hand(ox + w - 8, midY + 3);
+      fillPixel(ctx, lx + 3, midY + 2, 3, 2, m.body);
+      fillPixel(ctx, rx - 4, midY + 2, 3, 2, m.body);
+      hand(lx + 4, midY + 4);
+      hand(rx - 4, midY + 4);
       return;
     }
     default: {
       const breath = Math.round(anim.breathScale * 90);
-      fillPixel(ctx, lx, midY + breath, 2, 4, m.body);
-      fillPixel(ctx, lx, midY + breath + 3, 2, 1, m.dark);
-      fillPixel(ctx, rx, midY + breath, 2, 4, m.body);
-      fillPixel(ctx, rx, midY + breath + 3, 2, 1, m.dark);
+      restArm(lx, midY + breath, lx - 1);
+      restArm(rx, midY + breath, rx + 2);
     }
   }
-}
-
-function edgeX(w: number, h: number, exponent: number, row: number): number {
-  const ny = Math.abs((row - (h - 1) / 2) / (h / 2));
-  const inner = Math.max(0, 1 - Math.pow(ny, exponent));
-  return (w / 2) * Math.pow(inner, 1 / exponent);
 }
 
 function drawFurTufts(
@@ -514,16 +447,16 @@ function drawFurTufts(
   oy: number,
   w: number,
   h: number,
-  exponent: number,
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
   const cx = ox + w / 2;
+  const ruffle = 0.05 + anim.wingFlap * 0.12;
   const rows = [0.3, 0.46, 0.62, 0.78];
   for (let i = 0; i < rows.length; i++) {
     const r = Math.round(rows[i] * (h - 1));
-    const ex = edgeX(w, h, exponent, r);
-    const flick = Math.sin(anim.frame * 0.05 + i * 1.9) > 0.55 ? 1 : 0;
+    const ex = totoroRadius(w, h, r);
+    const flick = Math.sin(anim.frame * ruffle + i * 1.9) > 0.55 ? 1 : 0;
     fillPixel(ctx, Math.round(cx - ex) - 1 - flick, oy + r, 1, 1, m.body);
     fillPixel(ctx, Math.round(cx + ex) + flick, oy + r, 1, 1, m.body);
     if (i % 2 === 0) {
@@ -533,37 +466,45 @@ function drawFurTufts(
   }
 }
 
-function drawChestChevrons(
+function drawChevronRow(
   ctx: CanvasRenderingContext2D,
   cx: number,
   y: number,
   m: ColorMap,
   count: number,
 ): void {
-  const span = count * 5;
+  const gap = 5;
+  const span = (count - 1) * gap + 3;
   for (let i = 0; i < count; i++) {
-    const x = Math.round(cx - span / 2 + i * 5 + 1);
-    fillPixel(ctx, x, y, 1, 1, m.light);
-    fillPixel(ctx, x + 1, y + 1, 1, 1, m.light);
-    fillPixel(ctx, x + 2, y, 1, 1, m.light);
+    const x = Math.round(cx - span / 2 + i * gap);
+    fillPixel(ctx, x + 1, y, 1, 1, m.body);
+    fillPixel(ctx, x, y + 1, 1, 1, m.body);
+    fillPixel(ctx, x + 2, y + 1, 1, 1, m.body);
   }
 }
 
-function drawWhiskers(
+function drawTotoroWhiskers(
   ctx: CanvasRenderingContext2D,
-  ox: number,
-  oy: number,
-  w: number,
-  cheekY: number,
+  lx: number,
+  rx: number,
+  y: number,
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
+  const t = anim.earTwitchTimer > 0 && anim.earTwitchTimer % 4 < 2 ? 1 : 0;
   const off = faceOffset(anim);
-  const twitch = anim.earTwitchTimer > 0 && anim.earTwitchTimer % 4 < 2 ? 1 : 0;
-  fillPixel(ctx, ox - 4 + off, oy + cheekY - 2 - twitch, 3, 1, m.outline);
-  fillPixel(ctx, ox - 4 + off, oy + cheekY, 3, 1, m.outline);
-  fillPixel(ctx, ox + w + 1 + off, oy + cheekY - 2 - twitch, 3, 1, m.outline);
-  fillPixel(ctx, ox + w + 1 + off, oy + cheekY, 3, 1, m.outline);
+  const L = lx + off;
+  const R = rx + off;
+  fillPixel(ctx, L - 3, y - 2 - t, 3, 1, m.outline);
+  fillPixel(ctx, L - 4, y - 3 - t, 1, 1, m.outline);
+  fillPixel(ctx, L - 4, y, 4, 1, m.outline);
+  fillPixel(ctx, L - 3, y + 2, 3, 1, m.outline);
+  fillPixel(ctx, L - 4, y + 3, 1, 1, m.outline);
+  fillPixel(ctx, R, y - 2 - t, 3, 1, m.outline);
+  fillPixel(ctx, R + 3, y - 3 - t, 1, 1, m.outline);
+  fillPixel(ctx, R, y, 4, 1, m.outline);
+  fillPixel(ctx, R, y + 2, 3, 1, m.outline);
+  fillPixel(ctx, R + 3, y + 3, 1, 1, m.outline);
 }
 
 function drawLeafHat(
@@ -580,13 +521,208 @@ function drawLeafHat(
   fillPixel(ctx, cx - 1 + sway, topY - 3, 3, 1, "#79B26A");
 }
 
+function drawLeafUmbrella(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  topY: number,
+  anim: BuddyAnimState,
+): void {
+  const sway = Math.round(Math.sin(anim.frame * 0.04) * 1.5);
+  fillPixel(ctx, cx, topY - 3, 1, 5, "#3F6B35");
+  fillPixel(ctx, cx - 2 + sway, topY - 6, 5, 1, "#5C9450");
+  fillPixel(ctx, cx - 5 + sway, topY - 5, 11, 1, "#5C9450");
+  fillPixel(ctx, cx - 6 + sway, topY - 4, 13, 1, "#4A7D40");
+  fillPixel(ctx, cx - 6 + sway, topY - 3, 2, 1, "#4A7D40");
+  fillPixel(ctx, cx + 5 + sway, topY - 3, 2, 1, "#4A7D40");
+  fillPixel(ctx, cx - 3 + sway, topY - 5, 4, 1, "#79B26A");
+  fillPixel(ctx, cx + sway, topY - 6, 1, 1, "#79B26A");
+}
+
+function whiskerEdges(
+  spec: TotoroSpec,
+  ox: number,
+): { lx: number; rx: number } {
+  const cx = ox + (spec.w - 1) / 2;
+  const radius = totoroRadius(spec.w, spec.h, spec.whiskerY);
+  return {
+    lx: Math.round(cx - radius) + 1,
+    rx: Math.round(cx + radius),
+  };
+}
+
+function armEdges(spec: TotoroSpec, ox: number): { lx: number; rx: number } {
+  const cx = ox + (spec.w - 1) / 2;
+  const radius = totoroRadius(spec.w, spec.h, spec.armY);
+  return {
+    lx: Math.round(cx - radius * 0.92),
+    rx: Math.round(cx + radius * 0.92) - 1,
+  };
+}
+
+function drawTotoro(
+  ctx: CanvasRenderingContext2D,
+  ox: number,
+  oy: number,
+  m: ColorMap,
+  anim: BuddyAnimState,
+  spec: TotoroSpec,
+): void {
+  const cx = ox + Math.round(spec.w / 2);
+  drawTotoroTail(
+    ctx,
+    ox + 1,
+    spec.w - 2,
+    oy + Math.round(spec.h * 0.6),
+    m,
+    anim,
+  );
+  drawTotoroEars(
+    ctx,
+    cx - 1,
+    oy + 2,
+    spec.earSpread,
+    spec.earH,
+    spec.earW,
+    m,
+    anim,
+  );
+  drawGrid(ctx, ox, oy, spec.grid, m);
+  drawFurTufts(ctx, ox, oy, spec.w, spec.h, m, anim);
+  for (const [count, y] of spec.chevronRows) {
+    drawChevronRow(ctx, cx - 1, oy + y, m, count);
+  }
+  const { lx, rx } = whiskerEdges(spec, ox);
+  drawTotoroWhiskers(ctx, lx, rx, oy + spec.whiskerY, m, anim);
+  drawLegs(ctx, cx - 1, oy + spec.h - 1, m, anim);
+  drawFace(ctx, ox, oy, m, anim, spec.face);
+  const arms = armEdges(spec, ox);
+  drawArms(ctx, arms.lx, arms.rx, oy + spec.armY, m, anim);
+}
+
+const SPEC_SPRITE: TotoroSpec = {
+  grid: GRID_SPRITE,
+  w: 22,
+  h: 19,
+  earSpread: 4,
+  earH: 4,
+  earW: 2,
+  chevronRows: [[3, 10]],
+  face: {
+    eyeLX: 5,
+    eyeRX: 14,
+    eyeY: 3,
+    eyeSize: 3,
+    noseX: 10,
+    noseY: 5,
+    noseW: 2,
+    mouthX: 9,
+    mouthY: 7,
+    mouthW: 4,
+    cheekLX: 3,
+    cheekRX: 17,
+    cheekY: 6,
+  },
+  whiskerY: 6,
+  armY: 9,
+};
+
+const SPEC_IMP: TotoroSpec = {
+  grid: GRID_IMP,
+  w: 24,
+  h: 20,
+  earSpread: 4,
+  earH: 5,
+  earW: 2,
+  chevronRows: [
+    [3, 10],
+    [2, 13],
+  ],
+  face: {
+    eyeLX: 6,
+    eyeRX: 15,
+    eyeY: 3,
+    eyeSize: 3,
+    noseX: 11,
+    noseY: 5,
+    noseW: 2,
+    mouthX: 10,
+    mouthY: 8,
+    mouthW: 4,
+    cheekLX: 3,
+    cheekRX: 19,
+    cheekY: 7,
+  },
+  whiskerY: 7,
+  armY: 9,
+};
+
+const SPEC_DAEMON: TotoroSpec = {
+  grid: GRID_DAEMON,
+  w: 26,
+  h: 21,
+  earSpread: 5,
+  earH: 6,
+  earW: 2,
+  chevronRows: [
+    [4, 10],
+    [3, 13],
+  ],
+  face: {
+    eyeLX: 6,
+    eyeRX: 17,
+    eyeY: 3,
+    eyeSize: 3,
+    noseX: 11,
+    noseY: 5,
+    noseW: 3,
+    mouthX: 11,
+    mouthY: 8,
+    mouthW: 4,
+    cheekLX: 3,
+    cheekRX: 21,
+    cheekY: 7,
+  },
+  whiskerY: 7,
+  armY: 10,
+};
+
+const SPEC_ARCHON: TotoroSpec = {
+  grid: GRID_ARCHON,
+  w: 28,
+  h: 23,
+  earSpread: 5,
+  earH: 6,
+  earW: 2,
+  chevronRows: [
+    [4, 11],
+    [3, 14],
+  ],
+  face: {
+    eyeLX: 7,
+    eyeRX: 18,
+    eyeY: 4,
+    eyeSize: 3,
+    noseX: 12,
+    noseY: 6,
+    noseW: 3,
+    mouthX: 12,
+    mouthY: 9,
+    mouthW: 4,
+    cheekLX: 4,
+    cheekRX: 22,
+    cheekY: 8,
+  },
+  whiskerY: 8,
+  armY: 11,
+};
+
 const EGG_SPECKLES = [
-  [6, 5],
+  [6, 8],
   [13, 7],
   [9, 10],
   [5, 9],
   [14, 12],
-  [8, 3],
+  [8, 13],
 ] as const;
 
 export function drawEgg(
@@ -604,27 +740,51 @@ export function drawEgg(
   for (const [sx, sy] of EGG_SPECKLES) {
     fillPixel(ctx, x + sx, oy + sy, 1, 1, m.light);
   }
-  fillPixel(ctx, x + 6, oy + 3, 2, 1, m.belly);
-  fillPixel(ctx, x + 5, oy + 4, 1, 2, m.belly);
+
+  for (let r = 0; r < 6; r++) {
+    const row = GRID_EGG[r];
+    for (let c = 0; c < row.length; c++) {
+      if (row[c] === " ") continue;
+      const zig = 4 + (c % 4 < 2 ? 1 : 0);
+      if (r < zig) {
+        fillPixel(ctx, x + c, oy + r, 1, 1, m.dark);
+      } else if (r === zig) {
+        fillPixel(ctx, x + c, oy + r, 1, 1, m.outline);
+      }
+    }
+  }
+  fillPixel(ctx, x + 9, oy - 2, 2, 2, m.outline);
+  fillPixel(ctx, x + 9, oy - 3, 3, 1, m.dark);
+  fillPixel(ctx, x + 5, oy + 1, 2, 1, m.light);
 
   if (crack > 0.1) {
     const d = Math.floor(crack * 8);
     const cx = x + 10;
-    fillPixel(ctx, cx, oy + 3, 1, 1, m.outline);
-    if (d > 1) fillPixel(ctx, cx - 1, oy + 4, 1, 1, m.outline);
-    if (d > 2) fillPixel(ctx, cx, oy + 5, 1, 1, m.outline);
-    if (d > 3) fillPixel(ctx, cx + 1, oy + 6, 1, 1, m.outline);
-    if (d > 4) fillPixel(ctx, cx, oy + 7, 1, 1, m.outline);
-    if (d > 5) fillPixel(ctx, cx - 1, oy + 8, 1, 1, m.outline);
-    if (d > 6) fillPixel(ctx, cx, oy + 9, 1, 1, m.outline);
-    if (d > 7) fillPixel(ctx, cx + 1, oy + 10, 1, 1, m.outline);
+    fillPixel(ctx, cx, oy + 6, 1, 1, m.outline);
+    if (d > 1) fillPixel(ctx, cx - 1, oy + 7, 1, 1, m.outline);
+    if (d > 2) fillPixel(ctx, cx, oy + 8, 1, 1, m.outline);
+    if (d > 3) fillPixel(ctx, cx + 1, oy + 9, 1, 1, m.outline);
+    if (d > 4) fillPixel(ctx, cx, oy + 10, 1, 1, m.outline);
+    if (d > 5) fillPixel(ctx, cx - 1, oy + 11, 1, 1, m.outline);
+    if (d > 6) fillPixel(ctx, cx, oy + 12, 1, 1, m.outline);
+    if (d > 7) fillPixel(ctx, cx + 1, oy + 13, 1, 1, m.outline);
   }
   if (crack > 0.5) {
     ctx.globalAlpha = Math.min(1, (crack - 0.5) * 3);
-    fillPixel(ctx, x + 7, oy + 7, 2, 2, m.eyeDark);
-    fillPixel(ctx, x + 13, oy + 7, 2, 2, m.eyeDark);
+    fillPixel(ctx, x + 7, oy + 9, 2, 2, m.eyeDark);
+    fillPixel(ctx, x + 13, oy + 9, 2, 2, m.eyeDark);
     ctx.globalAlpha = 1;
   }
+}
+
+function paleColorMap(m: ColorMap): ColorMap {
+  return {
+    ...m,
+    body: m.belly,
+    light: m.white,
+    dark: m.light,
+    belly: m.white,
+  };
 }
 
 export function drawHatch(
@@ -634,34 +794,39 @@ export function drawHatch(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  const bodyY = oy + 6;
-  drawTail(ctx, ox + 3, bodyY + 8, m, anim, 1);
-  drawGrid(ctx, ox, bodyY, GRID_HATCH, m);
-  drawFurTufts(ctx, ox, bodyY, 20, 13, 2.4, m, anim);
-  drawLeafHat(ctx, ox + 10, bodyY - 4, anim);
+  const bodyY = oy + 7;
+  const pale = paleColorMap(m);
+  const bx = ox + 2;
+  const cx = bx + 8;
+
+  drawGrid(ctx, bx, bodyY, GRID_HATCHLING, pale);
 
   const off = faceOffset(anim);
   const hatTilt = Math.round(Math.sin(anim.frame * 0.02) * 1);
-  const hatX = ox + 5 + off + hatTilt;
-  fillPixel(ctx, hatX, bodyY - 3, 10, 3, m.belly);
-  fillPixel(ctx, hatX + 1, bodyY - 4, 8, 1, m.belly);
-  fillPixel(ctx, hatX, bodyY, 2, 1, m.belly);
-  fillPixel(ctx, hatX + 3, bodyY, 2, 1, m.belly);
-  fillPixel(ctx, hatX + 6, bodyY, 2, 1, m.belly);
-  fillPixel(ctx, hatX + 9, bodyY, 1, 1, m.belly);
-  fillPixel(ctx, hatX + 1, bodyY - 3, 2, 1, m.white);
+  const hatX = bx + 3 + off + hatTilt;
+  fillPixel(ctx, hatX, bodyY - 2, 10, 3, m.belly);
+  fillPixel(ctx, hatX + 1, bodyY - 3, 8, 1, m.belly);
+  fillPixel(ctx, hatX, bodyY + 1, 2, 1, m.belly);
+  fillPixel(ctx, hatX + 3, bodyY + 1, 2, 1, m.belly);
+  fillPixel(ctx, hatX + 6, bodyY + 1, 2, 1, m.belly);
+  fillPixel(ctx, hatX + 9, bodyY + 1, 1, 1, m.belly);
+  fillPixel(ctx, hatX + 1, bodyY - 2, 2, 1, m.white);
+  drawTotoroEars(ctx, cx - 1, bodyY, 3, 3, 2, pale, anim);
 
-  drawFace(ctx, ox, bodyY, m, anim, {
-    eyeLX: 5,
-    eyeRX: 12,
-    eyeY: 4,
+  drawFace(ctx, bx, bodyY, pale, anim, {
+    eyeLX: 3,
+    eyeRX: 11,
+    eyeY: 3,
     eyeSize: 2,
-    mouthX: 8,
-    mouthY: 8,
+    noseX: 7,
+    noseY: 4,
+    noseW: 2,
+    mouthX: 6,
+    mouthY: 6,
     mouthW: 3,
-    cheekLX: 3,
-    cheekRX: 15,
-    cheekY: 6,
+    cheekLX: 1,
+    cheekRX: 13,
+    cheekY: 5,
   });
 
   const shellY = oy + 18;
@@ -684,27 +849,8 @@ export function drawSprite(
   if (anim.quirkActive && anim.quirkType === "phase")
     ctx.globalAlpha = anim.phaseAlpha;
 
-  drawTail(ctx, ox + 3, oy + 10, m, anim, 2);
-  drawCatEars(ctx, ox, oy + 1, 24, m, anim);
-  drawGrid(ctx, ox, oy, GRID_SPRITE, m);
-  drawFurTufts(ctx, ox, oy, 24, 16, 2.6, m, anim);
-  drawChestChevrons(ctx, ox + 12, oy + 12, m, 3);
-  drawLeafHat(ctx, ox + 12, oy, anim);
-  drawWhiskers(ctx, ox, oy, 24, 8, m, anim);
-  drawLegs(ctx, ox + 12, oy + 17, m, anim);
-  drawFace(ctx, ox, oy, m, anim, {
-    eyeLX: 6,
-    eyeRX: 15,
-    eyeY: 5,
-    eyeSize: 3,
-    mouthX: 10,
-    mouthY: 10,
-    mouthW: 3,
-    cheekLX: 3,
-    cheekRX: 19,
-    cheekY: 8,
-  });
-  drawArms(ctx, ox, oy, 24, oy + 9, m, anim);
+  drawTotoro(ctx, ox, oy, m, anim, SPEC_SPRITE);
+  drawLeafHat(ctx, ox + 11, oy + 1, anim);
 
   if (anim.quirkActive && anim.quirkType === "phase") ctx.globalAlpha = 1;
 }
@@ -716,30 +862,11 @@ export function drawImp(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  drawTail(ctx, ox + 3, oy + 10, m, anim, 3);
-  drawHorns(ctx, ox, oy + 1, 26, m, anim, false);
-  drawGrid(ctx, ox, oy, GRID_IMP, m);
-  drawFurTufts(ctx, ox, oy, 26, 16, 2.6, m, anim);
-  drawChestChevrons(ctx, ox + 13, oy + 12, m, 3);
-  drawWhiskers(ctx, ox, oy, 26, 8, m, anim);
-  drawLegs(ctx, ox + 13, oy + 17, m, anim);
-  drawFace(ctx, ox, oy, m, anim, {
-    eyeLX: 7,
-    eyeRX: 16,
-    eyeY: 5,
-    eyeSize: 3,
-    mouthX: 11,
-    mouthY: 10,
-    mouthW: 4,
-    cheekLX: 4,
-    cheekRX: 21,
-    cheekY: 8,
-  });
+  drawTotoro(ctx, ox, oy, m, anim, SPEC_IMP);
   const off = faceOffset(anim);
   if (anim.moodType !== "concerned" && anim.idleAction !== "doze") {
-    fillPixel(ctx, ox + 15 + off, oy + 11, 1, 1, m.white);
+    fillPixel(ctx, ox + 13 + off, oy + 9, 1, 1, m.white);
   }
-  drawArms(ctx, ox, oy, 26, oy + 9, m, anim);
 }
 
 export function drawDaemon(
@@ -749,34 +876,7 @@ export function drawDaemon(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  drawTail(ctx, ox + 3, oy + 10, m, anim, 4);
-  drawWings(ctx, ox + 14, oy, 12, m, anim, false);
-  drawHorns(ctx, ox, oy + 1, 28, m, anim, true);
-  drawGrid(ctx, ox, oy, GRID_DAEMON, m);
-  drawFurTufts(ctx, ox, oy, 28, 16, 2.7, m, anim);
-  drawChestChevrons(ctx, ox + 14, oy + 12, m, 3);
-  drawWhiskers(ctx, ox, oy, 28, 8, m, anim);
-  drawLegs(ctx, ox + 14, oy + 17, m, anim);
-  drawFace(ctx, ox, oy, m, anim, {
-    eyeLX: 8,
-    eyeRX: 17,
-    eyeY: 5,
-    eyeSize: 3,
-    mouthX: 12,
-    mouthY: 10,
-    mouthW: 4,
-    cheekLX: 5,
-    cheekRX: 22,
-    cheekY: 8,
-  });
-  drawArms(ctx, ox, oy, 28, oy + 9, m, anim);
-
-  if (anim.shadowClone) {
-    ctx.globalAlpha = anim.shadowClone.alpha * 0.25;
-    ctx.fillStyle = PALETTES[0].dark;
-    ctx.fillRect(anim.shadowClone.x | 0, anim.shadowClone.y | 0, 22, 14);
-    ctx.globalAlpha = 1;
-  }
+  drawTotoro(ctx, ox, oy, m, anim, SPEC_DAEMON);
 }
 
 export function drawSage(
@@ -786,61 +886,17 @@ export function drawSage(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  drawTail(ctx, ox + 3, oy + 10, m, anim, 5);
-  drawWings(ctx, ox + 14, oy, 12, m, anim, false);
-  drawHorns(ctx, ox, oy + 1, 28, m, anim, true);
-  drawGrid(ctx, ox, oy, GRID_DAEMON, m);
-  drawFurTufts(ctx, ox, oy, 28, 16, 2.7, m, anim);
-  drawChestChevrons(ctx, ox + 14, oy + 12, m, 3);
-  drawLegs(ctx, ox + 14, oy + 17, m, anim);
+  drawTotoro(ctx, ox, oy, m, anim, SPEC_DAEMON);
+  drawLeafUmbrella(ctx, ox + 12, oy, anim);
 
   const off = faceOffset(anim);
-  drawFace(ctx, ox, oy, m, anim, {
-    eyeLX: 8,
-    eyeRX: 17,
-    eyeY: 5,
-    eyeSize: 3,
-    mouthX: 12,
-    mouthY: 10,
-    mouthW: 4,
-    cheekLX: 5,
-    cheekRX: 22,
-    cheekY: 8,
-  });
-
-  const beardSway = Math.round(Math.sin(anim.frame * 0.04) * 1);
-  fillPixel(ctx, ox + 10 + off, oy + 12, 8, 1, m.white);
-  fillPixel(ctx, ox + 11 + off + beardSway, oy + 13, 6, 1, m.white);
-  fillPixel(ctx, ox + 12 + off + beardSway, oy + 14, 4, 1, m.belly);
-
-  strokeArc(
-    ctx,
-    ox + 9.5 + off,
-    oy + 6.5,
-    2.5,
-    Math.PI * 0.05,
-    Math.PI * 1.95,
-    m.accent,
-  );
-  strokeArc(
-    ctx,
-    ox + 18.5 + off,
-    oy + 6.5,
-    2.5,
-    Math.PI * 1.05,
-    Math.PI * 2.95,
-    m.accent,
-  );
-  fillPixel(ctx, ox + 12 + off, oy + 6, 4, 1, m.accent);
-  fillPixel(ctx, ox + 13 + off, oy + 2, 2, 1, m.accent);
-  fillPixel(ctx, ox + 13 + off, oy + 1, 2, 1, m.gold);
-
-  drawArms(ctx, ox, oy, 28, oy + 9, m, anim);
+  fillPixel(ctx, ox + 11 + off, oy + 7, 1, 1, m.white);
+  fillPixel(ctx, ox + 14 + off, oy + 7, 1, 1, m.white);
 
   if (anim.auraPulseIntensity > 0) {
     ctx.globalAlpha = anim.auraPulseIntensity * 0.3;
     const r = 13 + Math.sin(anim.frame * 0.05) * 3;
-    strokeEllipse(ctx, ox + 14, oy + 8, r, r * 0.72, m.gold);
+    strokeEllipse(ctx, ox + 13, oy + 10, r, r * 0.78, m.gold);
     ctx.globalAlpha = 1;
   }
 }
@@ -853,51 +909,18 @@ export function drawArchon(
   anim: BuddyAnimState,
 ): void {
   const f = anim.frame;
-  for (let i = 0; i < 12; i++) {
-    ctx.globalAlpha = 0.4 + Math.sin(f * 0.06 + i * 0.7) * 0.35;
-    fillPixel(ctx, ox + 8 + i, oy - 3 + (i < 3 || i > 8 ? 1 : 0), 1, 1, m.gold);
-  }
+  drawTotoro(ctx, ox, oy, m, anim, SPEC_ARCHON);
+
+  const cx = ox + 13;
+  const crownY = oy - 3;
+  fillPixel(ctx, cx, crownY - 1, 1, 1, m.outline);
+  fillPixel(ctx, cx - 1, crownY, 3, 1, m.dark);
+  fillPixel(ctx, cx - 1, crownY + 1, 3, 2, m.gold);
+
+  const glow = 0.18 + Math.sin(f * 0.07) * 0.1;
+  ctx.globalAlpha = glow;
+  fillPixel(ctx, cx - 2, oy + 13, 5, 3, m.gold);
   ctx.globalAlpha = 1;
-
-  drawTail(ctx, ox + 3, oy + 12, m, anim, 6);
-  drawWings(ctx, ox + 14, oy + 2, 12, m, anim, true);
-  drawGrid(ctx, ox, oy, GRID_ARCHON, m);
-  drawFurTufts(ctx, ox, oy, 28, 19, 2.7, m, anim);
-  drawChestChevrons(ctx, ox + 14, oy + 16, m, 3);
-
-  const crestPulse = Math.sin(f * 0.08) > 0 ? 0 : 1;
-  fillPixel(ctx, ox + 13, oy - 2 - crestPulse, 2, 2, m.gold);
-  fillPixel(ctx, ox + 9, oy - 1, 1, 2, m.gold);
-  fillPixel(ctx, ox + 18, oy - 1, 1, 2, m.gold);
-
-  fillPixel(ctx, ox + 6, oy + 4, 1, 4, m.light);
-  fillPixel(ctx, ox + 7, oy + 8, 1, 3, m.light);
-  fillPixel(ctx, ox + 21, oy + 6, 1, 4, m.light);
-  fillPixel(ctx, ox + 20, oy + 10, 1, 3, m.light);
-
-  drawLegs(ctx, ox + 14, oy + 20, m, anim);
-  drawFace(ctx, ox, oy, m, anim, {
-    eyeLX: 8,
-    eyeRX: 17,
-    eyeY: 6,
-    eyeSize: 3,
-    mouthX: 12,
-    mouthY: 11,
-    mouthW: 4,
-    cheekLX: 5,
-    cheekRX: 22,
-    cheekY: 9,
-  });
-
-  const corePulse = 0.55 + Math.sin(f * 0.1) * 0.3;
-  ctx.globalAlpha = corePulse;
-  fillPixel(ctx, ox + 13, oy + 13, 2, 2, m.accent);
-  fillPixel(ctx, ox + 12, oy + 14, 1, 1, m.accent);
-  fillPixel(ctx, ox + 15, oy + 14, 1, 1, m.accent);
-  fillPixel(ctx, ox + 13, oy + 12, 2, 1, m.gold);
-  ctx.globalAlpha = 1;
-
-  drawArms(ctx, ox, oy + 2, 28, oy + 11, m, anim);
 
   for (let i = 0; i < 4; i++) {
     const a = f * 0.02 + i * 1.57;

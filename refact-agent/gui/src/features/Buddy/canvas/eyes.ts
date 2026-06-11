@@ -1,29 +1,6 @@
 import { fillPixel, fillRect } from "./helpers";
 import type { BuddyAnimState, ColorMap } from "../types";
 
-export function drawEarOverlay(
-  ctx: CanvasRenderingContext2D,
-  bodyX: number,
-  bodyY: number,
-  m: ColorMap,
-  anim: BuddyAnimState,
-): void {
-  const twitching = anim.earTwitchTimer > 0;
-  if (Math.abs(anim.earAnimProgress) < 0.1 && !twitching) return;
-  const perked = anim.earAnimProgress > 0;
-  const offset = Math.round(Math.abs(anim.earAnimProgress) * 2);
-  const flick = twitching && anim.earTwitchTimer % 4 < 2 ? 1 : 0;
-  const leftFlick = anim.earTwitchSide < 0 ? flick : 0;
-  const rightFlick = anim.earTwitchSide > 0 ? flick : 0;
-  if (perked || twitching) {
-    fillPixel(ctx, bodyX, bodyY - offset - leftFlick, 1, 1, m.body);
-    fillPixel(ctx, bodyX + 4, bodyY - offset - rightFlick, 1, 1, m.body);
-  } else {
-    fillPixel(ctx, bodyX, bodyY + offset + leftFlick, 1, 1, m.dark);
-    fillPixel(ctx, bodyX + 4, bodyY + offset + rightFlick, 1, 1, m.dark);
-  }
-}
-
 const BROWLESS_EYE_STYLES = new Set([
   "angry",
   "X",
