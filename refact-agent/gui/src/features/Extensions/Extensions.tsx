@@ -11,7 +11,6 @@ import {
   SegmentedControl,
 } from "../../components/ui";
 import type { Config } from "../Config/configSlice";
-import { useAppDispatch } from "../../hooks";
 import {
   useGetExtRegistryQuery,
   useDeleteSkillMutation,
@@ -25,7 +24,6 @@ import {
   CreateItemDialog,
 } from "./components";
 import styles from "./Extensions.module.css";
-import { push } from "../Pages/pagesSlice";
 import { SettingsSection } from "../Settings/SettingsSection";
 
 export type ExtensionsTab = "skills" | "commands" | "hooks";
@@ -54,7 +52,6 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   draftId,
   embedded = false,
 }) => {
-  const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(initialTab);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(
     initialTab === "skills" ? initialItemId ?? null : null,
@@ -133,14 +130,6 @@ export const Extensions: React.FC<ExtensionsProps> = ({
     setCreateDialogType(type);
     setCreateDialogOpen(true);
   }, []);
-
-  const openSkillsMarketplace = useCallback(() => {
-    dispatch(push({ name: "marketplace hub", tab: "skills" }));
-  }, [dispatch]);
-
-  const openCommandsMarketplace = useCallback(() => {
-    dispatch(push({ name: "marketplace hub", tab: "commands" }));
-  }, [dispatch]);
 
   const hasProjectRoot = registry?.has_project_root ?? false;
 
@@ -238,22 +227,13 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <div className={`${styles.actionsStack} rf-stagger`}>
-                <Button
-                  variant="soft"
-                  size="sm"
-                  onClick={openSkillsMarketplace}
-                >
-                  Browse Skills Marketplace
-                </Button>
-                <ExtItemList
-                  items={registry?.skills ?? []}
-                  selectedId={selectedSkill}
-                  onSelect={setSelectedSkill}
-                  onCreate={() => openCreateDialog("skill")}
-                  onDelete={handleDeleteSkill}
-                />
-              </div>
+              <ExtItemList
+                items={registry?.skills ?? []}
+                selectedId={selectedSkill}
+                onSelect={setSelectedSkill}
+                onCreate={() => openCreateDialog("skill")}
+                onDelete={handleDeleteSkill}
+              />
             ))}
 
           {activeTab === "commands" &&
@@ -264,22 +244,13 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <div className={`${styles.actionsStack} rf-stagger`}>
-                <Button
-                  variant="soft"
-                  size="sm"
-                  onClick={openCommandsMarketplace}
-                >
-                  Browse Commands Marketplace
-                </Button>
-                <ExtItemList
-                  items={registry?.slash_commands ?? []}
-                  selectedId={selectedCommand}
-                  onSelect={setSelectedCommand}
-                  onCreate={() => openCreateDialog("command")}
-                  onDelete={handleDeleteCommand}
-                />
-              </div>
+              <ExtItemList
+                items={registry?.slash_commands ?? []}
+                selectedId={selectedCommand}
+                onSelect={setSelectedCommand}
+                onCreate={() => openCreateDialog("command")}
+                onDelete={handleDeleteCommand}
+              />
             ))}
 
           {activeTab === "hooks" && <HooksEditor />}

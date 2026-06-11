@@ -1,6 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { Badge, Button, FieldError } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  FieldError,
+  StatusDot,
+  Surface,
+} from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -13,7 +19,7 @@ import {
   selectCurrentThreadId,
   selectThreadMode,
 } from "../Chat/Thread/selectors";
-import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
+import { SettingsSection } from "../Settings/SettingsSection";
 import { CronCreateForm } from "./CronCreateForm";
 import { selectLastCronFireAt } from "./schedulerSlice";
 import { CronList } from "./CronList";
@@ -101,9 +107,23 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
 
   const summary = (
     <div className={styles.summaryBadges} aria-label="Scheduler summary">
-      <Badge tone="default">{tasks.length} total</Badge>
-      <Badge tone="success">{recurringCount} recurring</Badge>
-      <Badge tone="accent">{durableCount} durable</Badge>
+      <Badge tone="default" variant="glass">
+        <StatusDot status="idle" />
+        {tasks.length} total
+      </Badge>
+      <Badge tone="success" variant="glass">
+        <StatusDot status="success" />
+        {recurringCount} recurring
+      </Badge>
+      <Badge tone="accent" variant="glass">
+        <StatusDot status="running" />
+        {durableCount} durable
+      </Badge>
+      {lastCronFireAt ? (
+        <Badge tone="muted" variant="glass">
+          Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
+        </Badge>
+      ) : null}
     </div>
   );
 
@@ -114,43 +134,54 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       actions={actions}
       subNav={summary}
     >
-      <SettingsGroup title="Create schedule">
-        <CronCreateForm
-          onSubmit={handleCreate}
-          isLoading={createState.isLoading}
-          error={createState.error}
-          taskCount={tasks.length}
-        />
-      </SettingsGroup>
-      <SettingsGroup title="Scheduled prompts">
-        <div className={styles.sectionStack}>
-          <div className={styles.listHeader}>
-            <p className={styles.sectionHint}>
-              Review the next fire time, schedule scope, recurrence, and prompt
-              description.
-            </p>
-            {lastCronFireAt ? (
-              <span className={styles.lastFired}>
-                Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
-              </span>
+      <div className={styles.panel}>
+        <div className={styles.layout}>
+          <Surface
+            className={styles.createCard}
+            variant="glass"
+            animated="rise"
+          >
+            <h3 className={styles.paneTitle}>New schedule</h3>
+            <CronCreateForm
+              onSubmit={handleCreate}
+              isLoading={createState.isLoading}
+              error={createState.error}
+              taskCount={tasks.length}
+            />
+          </Surface>
+
+          <section
+            className={styles.listPane}
+            aria-labelledby="scheduler-list-title"
+          >
+            <div className={styles.listHeader}>
+              <div className={styles.listTitleBlock}>
+                <h3 className={styles.paneTitle} id="scheduler-list-title">
+                  Scheduled prompts
+                </h3>
+                <p className={styles.sectionHint}>
+                  Review the next fire time, schedule scope, recurrence, and
+                  prompt description.
+                </p>
+              </div>
+            </div>
+            {error ? (
+              <FieldError>{schedulerErrorMessage(error)}</FieldError>
             ) : null}
-          </div>
-          {error ? (
-            <FieldError>{schedulerErrorMessage(error)}</FieldError>
-          ) : null}
-          {renderedDeleteError ? (
-            <FieldError>
-              {schedulerErrorMessage(renderedDeleteError)}
-            </FieldError>
-          ) : null}
-          <CronList
-            tasks={sortedTasks}
-            isLoading={isFetching}
-            deletingId={deletingId}
-            onDelete={deleteTask}
-          />
+            {renderedDeleteError ? (
+              <FieldError>
+                {schedulerErrorMessage(renderedDeleteError)}
+              </FieldError>
+            ) : null}
+            <CronList
+              tasks={sortedTasks}
+              isLoading={isFetching}
+              deletingId={deletingId}
+              onDelete={deleteTask}
+            />
+          </section>
         </div>
-      </SettingsGroup>
+      </div>
     </SettingsSection>
   );
 };

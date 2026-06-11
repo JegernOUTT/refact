@@ -62,6 +62,12 @@ vi.mock("../Scheduler", () => ({
   ),
 }));
 
+vi.mock("../MarketplaceHub", () => ({
+  MarketplaceHub: ({ embedded }: { embedded?: boolean }) => (
+    <div data-testid="marketplace-section" data-embedded={String(embedded)} />
+  ),
+}));
+
 vi.mock("./GeneralSettingsSection", () => ({
   GeneralSettingsSection: () => <div data-testid="general-section" />,
 }));
@@ -129,6 +135,13 @@ describe("SettingsHub — section routing by page name", () => {
     renderHub({ name: "general settings" });
     expect(screen.getByTestId("general-section")).toBeInTheDocument();
   });
+
+  it("shows Marketplace section for marketplace hub page", () => {
+    renderHub({ name: "marketplace hub" });
+    const section = screen.getByTestId("marketplace-section");
+    expect(section).toBeInTheDocument();
+    expect(section).toHaveAttribute("data-embedded", "true");
+  });
 });
 
 describe("SettingsHub — left nav dispatches change(), not push()", () => {
@@ -152,6 +165,17 @@ describe("SettingsHub — left nav dispatches change(), not push()", () => {
     const pages = store.getState().pages;
     expect(pages.length).toBe(initialLength);
     expect(pages[pages.length - 1].name).toBe("default models");
+  });
+
+  it("switches to marketplace section via change (stack length unchanged)", () => {
+    const { store } = renderHub({ name: "general settings" });
+    const initialLength = store.getState().pages.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Marketplace" }));
+
+    const pages = store.getState().pages;
+    expect(pages.length).toBe(initialLength);
+    expect(pages[pages.length - 1].name).toBe("marketplace hub");
   });
 });
 

@@ -11,6 +11,7 @@ import { MCPMarketplace } from "../MCPMarketplace";
 import { change } from "../Pages/pagesSlice";
 import type { Page } from "../Pages/pagesSlice";
 import { SkillsMarketplace } from "../SkillsMarketplace";
+import { SettingsSection } from "../Settings/SettingsSection";
 import { SubagentsMarketplace } from "../SubagentsMarketplace";
 import {
   marketplacePageToTab,
@@ -24,7 +25,11 @@ type MarketplaceHubProps = {
   tabbed: Config["tabbed"];
   back: () => void;
   page: Page;
+  embedded?: boolean;
 };
+
+const MARKETPLACE_DESCRIPTION =
+  "Browse and install skills, commands, subagents, MCP servers, and extension plugins from curated community sources.";
 
 const tabs: { id: MarketplaceTabId; label: string }[] = [
   { id: "skills", label: "Skills" },
@@ -39,6 +44,7 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   tabbed,
   back,
   page,
+  embedded = false,
 }) => {
   const dispatch = useAppDispatch();
   const activeTab = marketplacePageToTab(page) ?? "skills";
@@ -47,6 +53,82 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   const handleTabChange = (next: string) => {
     dispatch(change(marketplaceTabToPage(next as MarketplaceTabId)));
   };
+
+  const tabsList = (
+    <Tabs.List
+      activeIndex={Math.max(activeIndex, 0)}
+      itemCount={tabs.length}
+      className={styles.tabsList}
+    >
+      {tabs.map((tab) => (
+        <Tabs.Trigger key={tab.id} value={tab.id}>
+          {tab.label}
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
+  );
+
+  const panels = (
+    <>
+      <Tabs.Content value="skills" className={styles.tabPanel}>
+        {activeTab === "skills" && (
+          <SkillsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="commands" className={styles.tabPanel}>
+        {activeTab === "commands" && (
+          <CommandsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="subagents" className={styles.tabPanel}>
+        {activeTab === "subagents" && (
+          <SubagentsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="mcp" className={styles.tabPanel}>
+        {activeTab === "mcp" && (
+          <MCPMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="extensions" className={styles.tabPanel}>
+        {activeTab === "extensions" && <MarketplacePanel />}
+      </Tabs.Content>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <SettingsSection
+          title="Marketplace"
+          description={MARKETPLACE_DESCRIPTION}
+          subNav={tabsList}
+        >
+          {panels}
+        </SettingsSection>
+      </Tabs>
+    );
+  }
 
   return (
     <PageWrapper host={host}>
@@ -63,10 +145,7 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
             </Button>
             <div className={styles.headerText}>
               <h2 className={styles.title}>Marketplace</h2>
-              <p className={styles.description}>
-                Browse and install extensions for Refact. Each category is
-                backed by curated community sources.
-              </p>
+              <p className={styles.description}>{MARKETPLACE_DESCRIPTION}</p>
             </div>
           </div>
 
@@ -75,61 +154,8 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
             onValueChange={handleTabChange}
             className={styles.tabsRoot}
           >
-            <Tabs.List
-              activeIndex={Math.max(activeIndex, 0)}
-              itemCount={tabs.length}
-              className={styles.tabsList}
-            >
-              {tabs.map((tab) => (
-                <Tabs.Trigger key={tab.id} value={tab.id}>
-                  {tab.label}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
-
-            <Tabs.Content value="skills" className={styles.tabPanel}>
-              {activeTab === "skills" && (
-                <SkillsMarketplace
-                  embedded
-                  host={host}
-                  tabbed={tabbed}
-                  backFromMarketplace={back}
-                />
-              )}
-            </Tabs.Content>
-            <Tabs.Content value="commands" className={styles.tabPanel}>
-              {activeTab === "commands" && (
-                <CommandsMarketplace
-                  embedded
-                  host={host}
-                  tabbed={tabbed}
-                  backFromMarketplace={back}
-                />
-              )}
-            </Tabs.Content>
-            <Tabs.Content value="subagents" className={styles.tabPanel}>
-              {activeTab === "subagents" && (
-                <SubagentsMarketplace
-                  embedded
-                  host={host}
-                  tabbed={tabbed}
-                  backFromMarketplace={back}
-                />
-              )}
-            </Tabs.Content>
-            <Tabs.Content value="mcp" className={styles.tabPanel}>
-              {activeTab === "mcp" && (
-                <MCPMarketplace
-                  embedded
-                  host={host}
-                  tabbed={tabbed}
-                  backFromMarketplace={back}
-                />
-              )}
-            </Tabs.Content>
-            <Tabs.Content value="extensions" className={styles.tabPanel}>
-              {activeTab === "extensions" && <MarketplacePanel />}
-            </Tabs.Content>
+            {tabsList}
+            {panels}
           </Tabs>
         </div>
       </ScrollArea>

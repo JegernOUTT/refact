@@ -367,7 +367,10 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     >
       {MODEL_TYPE_KEYS.map((key) => (
         <Tabs.Trigger key={key} value={key}>
-          {MODEL_TYPE_LABELS[key].shortLabel}
+          <span className={styles.roleTabLabel}>
+            <Icon icon={MODEL_TYPE_LABELS[key].icon} size="sm" />
+            <span>{MODEL_TYPE_LABELS[key].shortLabel}</span>
+          </span>
         </Tabs.Trigger>
       ))}
     </Tabs.List>

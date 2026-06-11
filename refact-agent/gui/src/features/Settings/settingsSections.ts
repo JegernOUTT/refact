@@ -7,6 +7,7 @@ import {
   Plug,
   Settings,
   Sparkles,
+  Store,
   Timer,
 } from "lucide-react";
 
@@ -18,7 +19,8 @@ export type SettingsSectionId =
   | "integrations"
   | "scheduler"
   | "documentation"
-  | "extensions";
+  | "extensions"
+  | "marketplace";
 
 export interface SettingsSectionDef {
   id: SettingsSectionId;
@@ -35,4 +37,5 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "scheduler", label: "Scheduler", icon: Timer },
   { id: "documentation", label: "Documentation", icon: BookOpen },
   { id: "extensions", label: "Extensions", icon: Sparkles },
+  { id: "marketplace", label: "Marketplace", icon: Store },
 ];

@@ -19,6 +19,8 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
       return { name: "documentation settings" };
     case "extensions":
       return { name: "extensions" };
+    case "marketplace":
+      return { name: "marketplace hub" };
   }
 }
 
@@ -40,6 +42,12 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
       return "documentation";
     case "extensions":
       return "extensions";
+    case "marketplace hub":
+    case "skills marketplace":
+    case "commands marketplace":
+    case "subagents marketplace":
+    case "mcp marketplace":
+      return "marketplace";
     default:
       return null;
   }

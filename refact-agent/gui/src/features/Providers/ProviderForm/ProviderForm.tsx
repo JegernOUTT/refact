@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React from "react";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
@@ -14,11 +14,8 @@ import type {
   OpenAICodexRateLimit,
   OpenAICodexUsageData,
   OpenAICodexUsageWindow,
-  ModelTypeDefaults,
-  ProviderDefaults,
 } from "../../../services/refact";
-import { ModelSelector } from "../../../components/Chat/ModelSelector";
-import { Badge, Button, SettingItem, Surface } from "../../../components/ui";
+import { Badge, Button, Surface } from "../../../components/ui";
 
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
@@ -26,9 +23,6 @@ import {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
-  useGetDefaultsQuery,
-  useGetCapsQuery,
-  useUpdateDefaultsMutation,
 } from "../../../services/refact";
 import {
   clampPercent,
@@ -328,173 +322,6 @@ const CodexUsagePanel: React.FC<{ data: OpenAICodexUsageData }> = ({
   </Surface>
 );
 
-type DefaultModelKey =
-  | "chat"
-  | "chat_model_2"
-  | "task_planner_agent_model"
-  | "chat_light"
-  | "chat_thinking"
-  | "chat_buddy";
-
-const DEFAULT_MODEL_FIELDS: {
-  key: DefaultModelKey;
-  label: string;
-  description: string;
-}[] = [
-  {
-    key: "chat",
-    label: "Default chat",
-    description: "Primary model for normal conversations.",
-  },
-  {
-    key: "chat_model_2",
-    label: "Chat model 2",
-    description: "Secondary chat model slot for future chat workflows.",
-  },
-  {
-    key: "task_planner_agent_model",
-    label: "Task planner agent",
-    description: "Model used by task management when spawning task agents.",
-  },
-  {
-    key: "chat_light",
-    label: "Light",
-    description: "Fast model used by quick subagents and gathering steps.",
-  },
-  {
-    key: "chat_thinking",
-    label: "Thinking",
-    description: "Reasoning model used by planning, review, and research.",
-  },
-  {
-    key: "chat_buddy",
-    label: "Companion",
-    description: "Background companion model.",
-  },
-];
-
-function normalizeProviderDefaults(
-  defaults: ProviderDefaults | undefined,
-): ProviderDefaults {
-  return {
-    chat: defaults?.chat ?? {},
-    chat_model_2: defaults?.chat_model_2 ?? {},
-    task_planner_agent_model: defaults?.task_planner_agent_model ?? {},
-    chat_light: defaults?.chat_light ?? {},
-    chat_thinking: defaults?.chat_thinking ?? {},
-    chat_buddy: defaults?.chat_buddy ?? {},
-    completion_model: defaults?.completion_model,
-    embedding_model: defaults?.embedding_model,
-  };
-}
-
-const ProviderDefaultModelsSetup: React.FC = () => {
-  const {
-    data: defaults,
-    isLoading,
-    isError,
-    refetch,
-  } = useGetDefaultsQuery(undefined);
-  const { data: caps, refetch: refetchCaps } = useGetCapsQuery(undefined);
-  const [updateDefaults, { isLoading: isSaving }] = useUpdateDefaultsMutation();
-  const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>(() =>
-    normalizeProviderDefaults(undefined),
-  );
-  const [hasChanges, setHasChanges] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!defaults) return;
-    setLocalDefaults(normalizeProviderDefaults(defaults));
-    setHasChanges(false);
-    setSaveError(null);
-  }, [defaults]);
-
-  const capsDefaults = useMemo(
-    () => ({
-      chat: caps?.chat_default_model ?? "",
-      chat_model_2: caps?.chat_model_2 ?? "",
-      task_planner_agent_model: caps?.task_planner_agent_model ?? "",
-      chat_light: caps?.chat_light_model ?? "",
-      chat_thinking: caps?.chat_thinking_model ?? "",
-      chat_buddy: caps?.chat_buddy_model ?? "",
-    }),
-    [caps],
-  );
-
-  const handleModelChange = useCallback(
-    (key: DefaultModelKey, model: string) => {
-      setLocalDefaults((prev) => ({
-        ...prev,
-        [key]: { ...(prev[key] ?? {}), model } as ModelTypeDefaults,
-      }));
-      setHasChanges(true);
-      setSaveError(null);
-    },
-    [],
-  );
-
-  const handleSave = useCallback(async () => {
-    try {
-      await updateDefaults(localDefaults).unwrap();
-      setHasChanges(false);
-      setSaveError(null);
-      void refetch();
-      void refetchCaps();
-    } catch {
-      setSaveError("Failed to save default models.");
-    }
-  }, [localDefaults, refetch, refetchCaps, updateDefaults]);
-
-  if (isError) return null;
-
-  return (
-    <Surface className={styles.defaultsPanel} variant="glass" animated="rise">
-      <div className={styles.defaultHeader}>
-        <div>
-          <div className={styles.defaultTitle}>Global default models</div>
-          <div className={styles.defaultDescription}>
-            These defaults apply across all providers. Enable provider models
-            above, then choose which model type each feature should use. Empty
-            slots stay unset.
-          </div>
-        </div>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => void handleSave()}
-          disabled={!hasChanges || isSaving || isLoading}
-        >
-          {isSaving ? "Saving..." : "Save"}
-        </Button>
-      </div>
-      {saveError ? <div className={styles.errorText}>{saveError}</div> : null}
-      <div className={styles.defaultRows}>
-        {DEFAULT_MODEL_FIELDS.map(({ key, label, description }) => (
-          <SettingItem
-            key={key}
-            className="rf-enter-rise"
-            title={label}
-            description={description}
-            layout="stack"
-          >
-            <ModelSelector
-              value={localDefaults[key]?.model}
-              onValueChange={(model) => handleModelChange(key, model)}
-              defaultValue={capsDefaults[key]}
-              showLabel={false}
-              compact={false}
-              allowUnset
-              unsetLabel="None"
-              disabled={isLoading || isSaving}
-            />
-          </SettingItem>
-        ))}
-      </div>
-    </Surface>
-  );
-};
-
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
@@ -636,7 +463,6 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         {hasCredentials ? (
           <ProviderModelsList provider={currentProvider} />
         ) : null}
-        {hasCredentials ? <ProviderDefaultModelsSetup /> : null}
       </div>
     </div>
   );

@@ -51,7 +51,6 @@ import { LoginPage } from "./Login";
 import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 
-import { MarketplaceHub, isMarketplacePage } from "./MarketplaceHub";
 import { StatsDashboard } from "./StatsDashboard";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
@@ -533,14 +532,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
 
-            {!pageSwitching && isMarketplacePage(renderedPage) && (
-              <MarketplaceHub
-                page={renderedPage}
-                back={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
           </PageWrapper>
           <ProcessCompletedToasts />

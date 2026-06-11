@@ -20,27 +20,23 @@
   overflow-wrap: anywhere;
 }
 
-.usagePanel,
-.defaultsPanel {
+.usagePanel {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
 }
 
-.usagePanel,
-.defaultsPanel {
+.usagePanel {
   padding: var(--rf-space-3);
 }
 
 .usagePanel,
-.defaultsPanel,
 .codeBox {
   box-sizing: border-box;
 }
 
-.usageHeader,
-.defaultHeader {
+.usageHeader {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -49,36 +45,25 @@
   flex-wrap: wrap;
 }
 
-.usageTitle,
-.defaultTitle {
+.usageTitle {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
   font-weight: 600;
 }
 
 .defaultDescription,
-.usageMeta,
-.errorText {
+.usageMeta {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
 }
 
-.errorText {
-  color: var(--rf-color-danger);
-}
-
 .usageRows,
-.defaultRows,
 .formFields {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
-}
-
-.defaultRows {
-  composes: rf-stagger from global;
 }
 
 .usageRow {

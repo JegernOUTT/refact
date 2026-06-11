@@ -12,7 +12,7 @@ import {
 const ALL_SECTION_IDS: SettingsSectionId[] = SETTINGS_SECTIONS.map((s) => s.id);
 
 describe("isSettingsPage", () => {
-  it("returns true for all 8 settings page names", () => {
+  it("returns true for all 9 settings page names", () => {
     const settingsPages: Page[] = [
       { name: "general settings" },
       { name: "providers page" },
@@ -22,6 +22,7 @@ describe("isSettingsPage", () => {
       { name: "scheduler" },
       { name: "documentation settings" },
       { name: "extensions" },
+      { name: "marketplace hub" },
     ];
     for (const page of settingsPages) {
       expect(
@@ -36,7 +37,6 @@ describe("isSettingsPage", () => {
       { name: "chat" },
       { name: "history" },
       { name: "stats dashboard" },
-      { name: "marketplace hub" },
       { name: "buddy" },
       { name: "knowledge graph" },
     ];
@@ -70,6 +70,11 @@ describe("settingsPageToSection", () => {
       [{ name: "scheduler" }, "scheduler"],
       [{ name: "documentation settings" }, "documentation"],
       [{ name: "extensions" }, "extensions"],
+      [{ name: "marketplace hub" }, "marketplace"],
+      [{ name: "skills marketplace" }, "marketplace"],
+      [{ name: "commands marketplace" }, "marketplace"],
+      [{ name: "subagents marketplace" }, "marketplace"],
+      [{ name: "mcp marketplace" }, "marketplace"],
     ];
     for (const [page, expectedId] of cases) {
       expect(settingsPageToSection(page), `failed for "${page.name}"`).toBe(

@@ -1,7 +1,7 @@
 .section {
   display: grid;
   width: 100%;
-  max-width: min(100%, var(--rf-settings-w, 720px));
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-2);
   padding: var(--rf-panel-pad);
@@ -10,7 +10,7 @@
 }
 
 .wide {
-  max-width: min(100%, var(--rf-settings-w-wide, 1040px));
+  max-width: 100%;
 }
 
 .header {
@@ -26,16 +26,10 @@
 }
 
 .subNav {
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--rf-space-2);
 }
 
 .copy {
@@ -100,12 +94,6 @@
   min-width: 0;
   max-width: 100%;
   gap: var(--rf-row-gap);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .subNav {
-    backdrop-filter: none;
-  }
 }
 
 @media (width <= 640px) {

@@ -3,7 +3,6 @@ import {
   Button,
   Field,
   FieldError,
-  FieldSelect,
   FieldSwitch,
   FieldText,
   FieldTextarea,
@@ -18,7 +17,7 @@ type CronPreset = "hourly" | "daily" | "weekdays" | "five-min" | "custom";
 
 type CronCreateFormData = Omit<CreateCronRequest, "chat_id" | "mode">;
 
-type CronCreateFormProps = {
+export type CronCreateFormProps = {
   onSubmit: (request: CronCreateFormData) => Promise<void>;
   isLoading?: boolean;
   error?: unknown;
@@ -33,7 +32,7 @@ const PRESETS: Record<Exclude<CronPreset, "custom">, string> = {
   "five-min": "*/5 * * * *",
 };
 
-const PRESET_OPTIONS = [
+const PRESET_OPTIONS: { value: CronPreset; label: string }[] = [
   { value: "hourly", label: "Hourly" },
   { value: "daily", label: "Daily 9am" },
   { value: "weekdays", label: "Weekdays 9am" },
@@ -72,11 +71,10 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     return schedulerErrorMessage(error);
   }, [error]);
 
-  const setSelectedPreset = (value: string) => {
-    const nextPreset = value as CronPreset;
-    setPreset(nextPreset);
-    if (nextPreset !== "custom") {
-      setCron(PRESETS[nextPreset]);
+  const setSelectedPreset = (value: CronPreset) => {
+    setPreset(value);
+    if (value !== "custom") {
+      setCron(PRESETS[value]);
     }
   };
 
@@ -129,31 +127,43 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
 
   return (
     <form className={styles.form} onSubmit={submitForm}>
-      <div className={styles.formIntro}>
-        <p className={styles.sectionHint}>
-          Use standard 5-field cron syntax. Examples: hourly{" "}
-          <code>7 * * * *</code>, weekdays <code>3 9 * * 1-5</code>.
-        </p>
+      <p className={styles.sectionHint}>
+        Use standard 5-field cron syntax. Examples: hourly{" "}
+        <code>7 * * * *</code>, weekdays <code>3 9 * * 1-5</code>.
+      </p>
+
+      <div
+        className={styles.presetGroup}
+        role="group"
+        aria-label="Cron presets"
+      >
+        {PRESET_OPTIONS.map((option) => (
+          <button
+            className={styles.presetPill}
+            type="button"
+            key={option.value}
+            aria-pressed={preset === option.value}
+            onClick={() => setSelectedPreset(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
-      <div className={styles.inlineFields}>
-        <Field label="Cron expression" required>
-          <FieldText
-            className={styles.fieldControl}
-            value={cron}
-            onChange={handleCronChange}
-            aria-label="Cron expression"
-            placeholder="7 * * * *"
-          />
-        </Field>
-        <Field label="Preset">
-          <FieldSelect
-            value={preset}
-            options={PRESET_OPTIONS}
-            onChange={setSelectedPreset}
-            aria-label="Cron preset"
-          />
-        </Field>
-      </div>
+
+      <Field
+        label="Cron expression"
+        helper="minute hour day month weekday"
+        required
+      >
+        <FieldText
+          className={styles.monoField}
+          value={cron}
+          onChange={handleCronChange}
+          aria-label="Cron expression"
+          placeholder="7 * * * *"
+        />
+      </Field>
+
       <Field label="Description" helper={`${description.length}/80`} required>
         <FieldText
           className={styles.fieldControl}
@@ -163,6 +173,7 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
           aria-label="Description"
         />
       </Field>
+
       <Field label="Prompt" required>
         <FieldTextarea
           className={styles.fieldControl}
@@ -172,6 +183,7 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
           rows={4}
         />
       </Field>
+
       <div className={styles.toggles}>
         <Field label="Recurring" helper="Run on every matching schedule.">
           <FieldSwitch
@@ -188,7 +200,9 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
           />
         </Field>
       </div>
+
       {errorMessage ? <FieldError>{errorMessage}</FieldError> : null}
+
       <div className={styles.formActions}>
         <Button
           type="submit"

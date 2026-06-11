@@ -26,21 +26,27 @@ export const Providers: React.FC<ProvidersProps> = ({
 
   if (!isSuccess) return <Spinner spinning />;
 
-  const content = (
-    <ScrollArea scrollbars="vertical" fullHeight className={styles.scrollArea}>
-      <div className={styles.content}>
-        <ProvidersView
-          configuredProviders={configuredProvidersData.providers}
-          backFromProviders={backFromProviders}
-          embedded={embedded}
-        />
-      </div>
-    </ScrollArea>
+  const providersView = (
+    <ProvidersView
+      configuredProviders={configuredProvidersData.providers}
+      backFromProviders={backFromProviders}
+      embedded={embedded}
+    />
   );
 
   if (embedded) {
-    return <div className={styles.page}>{content}</div>;
+    return (
+      <div className={styles.page}>
+        <div className={styles.content}>{providersView}</div>
+      </div>
+    );
   }
+
+  const content = (
+    <ScrollArea scrollbars="vertical" fullHeight className={styles.scrollArea}>
+      <div className={styles.content}>{providersView}</div>
+    </ScrollArea>
+  );
 
   return (
     <PageWrapper host={host} className={styles.page} noPadding>

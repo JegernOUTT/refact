@@ -14,6 +14,7 @@ import { Customization } from "../Customization";
 import { Integrations } from "../Integrations";
 import { SchedulerPanel } from "../Scheduler";
 import { Extensions } from "../Extensions";
+import { MarketplaceHub } from "../MarketplaceHub";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 import { DocumentationSettingsSection } from "./DocumentationSettingsSection";
 
@@ -121,6 +122,16 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           />
         );
       }
+      case "marketplace":
+        return (
+          <MarketplaceHub
+            embedded
+            page={page}
+            host={host}
+            tabbed={tabbed}
+            back={onBack}
+          />
+        );
     }
   };
 

@@ -9,13 +9,6 @@
   gap: var(--rf-space-1);
 }
 
-.actionsStack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
 .panelContainer {
   min-width: 0;
 }

@@ -97,18 +97,22 @@
   width: 100%;
 }
 
-.roleTabsList.roleTabsList {
-  grid-auto-flow: row;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
-  overflow-x: visible;
-}
-
-.roleTabsList > span[aria-hidden="true"] {
-  display: none;
-}
-
 .roleTabsList [data-state="active"] {
   background: var(--rf-color-accent-soft);
+}
+
+.roleTabLabel {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-1);
+}
+
+.roleTabLabel > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .roleTabContent {
