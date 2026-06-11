@@ -12,6 +12,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::daemon::state::{now_ms, DaemonState};
+use crate::daemon::supervisor::WorkerInfo;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSettings {
@@ -155,7 +156,11 @@ impl ProjectRegistry {
         }
     }
 
-    pub async fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<Option<ProjectEntry>, String> {
+    pub async fn set_pinned(
+        &mut self,
+        id: &str,
+        pinned: bool,
+    ) -> Result<Option<ProjectEntry>, String> {
         if self.entries.contains_key(id) {
             if let Some(entry) = self.entries.get_mut(id) {
                 entry.pinned = pinned;
@@ -227,7 +232,7 @@ struct OpenResponse {
     slug: String,
     root: PathBuf,
     pinned: bool,
-    worker: Option<serde_json::Value>,
+    worker: Option<WorkerInfo>,
 }
 
 #[derive(Deserialize)]
@@ -249,11 +254,7 @@ pub async fn open_project(
     let root = match canonicalize_root(&request.root) {
         Ok(p) => p,
         Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": message})),
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response();
         }
     };
     let entry = {
@@ -269,6 +270,16 @@ pub async fn open_project(
             }
         }
     };
+    let worker = match state.supervisor.ensure_worker(&entry).await {
+        Ok(worker) => worker,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
     let _ = state
         .events
         .emit(
@@ -282,7 +293,7 @@ pub async fn open_project(
         slug: entry.slug,
         root: entry.root,
         pinned: entry.pinned,
-        worker: None, // TODO(T-5)
+        worker: Some(worker),
     })
     .into_response()
 }
@@ -305,6 +316,55 @@ pub async fn get_project(
     }
 }
 
+pub async fn restart_project_worker(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let entry = {
+        let registry = state.projects.read().await;
+        match registry.get(&id) {
+            Some(entry) => entry.clone(),
+            None => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})))
+                    .into_response();
+            }
+        }
+    };
+    match state.supervisor.restart_worker(&entry).await {
+        Ok(worker) => Json(worker).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn stop_project_worker(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    {
+        let registry = state.projects.read().await;
+        if registry.get(&id).is_none() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+        }
+    }
+    match state.supervisor.stop_worker(&id).await {
+        Ok(Some(worker)) => Json(worker).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "worker not found"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn forget_project(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     AxumPath(id): AxumPath<String>,
@@ -321,9 +381,7 @@ pub async fn forget_project(
                 .await;
             Json(json!({"success": true})).into_response()
         }
-        Ok(false) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
-        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
@@ -353,9 +411,7 @@ pub async fn pin_project(
                 .await;
             Json(entry).into_response()
         }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
-        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
@@ -368,6 +424,55 @@ pub async fn pin_project(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    struct EnvGuard {
+        keys: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn fake_worker() -> Option<Self> {
+            let python = "python3";
+            if std::process::Command::new(python)
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return None;
+            }
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fake_worker.py");
+            let keys = vec![
+                (
+                    "REFACT_DAEMON_WORKER_CMD",
+                    std::env::var("REFACT_DAEMON_WORKER_CMD").ok(),
+                ),
+                (
+                    "REFACT_DAEMON_SUPERVISOR_BACKOFF_MS",
+                    std::env::var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS").ok(),
+                ),
+                ("FAKE_WORKER_CRASH", std::env::var("FAKE_WORKER_CRASH").ok()),
+            ];
+            std::env::set_var(
+                "REFACT_DAEMON_WORKER_CMD",
+                format!("{} {}", python, script.display()),
+            );
+            std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
+            std::env::remove_var("FAKE_WORKER_CRASH");
+            Some(Self { keys })
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.keys.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn make_registry(dir: &tempfile::TempDir) -> ProjectRegistry {
         ProjectRegistry::empty(dir.path().join("projects.json"))
@@ -462,7 +567,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn open_list_get_pin_forget_flow() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
         use crate::daemon::{config::DaemonConfig, events::EventBus, state::DaemonState};
         use axum::body::Body;
         use hyper::{Request, StatusCode};
@@ -481,7 +590,8 @@ mod tests {
 
         let router = crate::daemon::server::make_router(state.clone(), 8488);
 
-        let body = serde_json::to_vec(&serde_json::json!({"root": proj.to_str().unwrap()})).unwrap();
+        let body =
+            serde_json::to_vec(&serde_json::json!({"root": proj.to_str().unwrap()})).unwrap();
         let resp = router
             .clone()
             .oneshot(
@@ -498,7 +608,8 @@ mod tests {
         let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
         let open_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let project_id = open_resp["project_id"].as_str().unwrap().to_string();
-        assert_eq!(open_resp["worker"], serde_json::Value::Null);
+        assert_eq!(open_resp["worker"]["state"], "ready");
+        assert!(open_resp["worker"]["pid"].as_u64().is_some());
 
         let list_resp = router
             .clone()
@@ -527,8 +638,7 @@ mod tests {
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::OK);
 
-        let pin_body =
-            serde_json::to_vec(&serde_json::json!({"pinned": true})).unwrap();
+        let pin_body = serde_json::to_vec(&serde_json::json!({"pinned": true})).unwrap();
         let pin_resp = router
             .clone()
             .oneshot(
@@ -545,6 +655,40 @@ mod tests {
         let bytes = hyper::body::to_bytes(pin_resp.into_body()).await.unwrap();
         let pinned_entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(pinned_entry["pinned"], true);
+
+        let restart_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/daemon/v1/projects/{project_id}/restart"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart_resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(restart_resp.into_body())
+            .await
+            .unwrap();
+        let restarted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restarted["state"], "ready");
+
+        let stop_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/daemon/v1/projects/{project_id}/stop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stop_resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(stop_resp.into_body()).await.unwrap();
+        let stopped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stopped["state"], "stopped");
 
         let forget_resp = router
             .clone()
@@ -587,10 +731,9 @@ mod tests {
         state.load_projects(dir.path().join("projects.json")).await;
         let router = crate::daemon::server::make_router(state, 8488);
 
-        let body = serde_json::to_vec(
-            &serde_json::json!({"root": "/definitely/does/not/exist/at/all"}),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_vec(&serde_json::json!({"root": "/definitely/does/not/exist/at/all"}))
+                .unwrap();
         let resp = router
             .oneshot(
                 Request::builder()

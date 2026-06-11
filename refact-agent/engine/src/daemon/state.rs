@@ -37,13 +37,32 @@ pub struct DaemonState {
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
+    pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub events: EventBus,
     shutdown_tx: broadcast::Sender<String>,
 }
 
 impl DaemonState {
     pub fn new(config: DaemonConfig, events: EventBus, auth_token: Option<String>) -> Arc<Self> {
+        Self::new_with_daemon_dir(
+            config,
+            events,
+            auth_token,
+            crate::daemon::paths::daemon_dir(),
+            0,
+        )
+    }
+
+    pub fn new_with_daemon_dir(
+        config: DaemonConfig,
+        events: EventBus,
+        auth_token: Option<String>,
+        daemon_dir: PathBuf,
+        daemon_port: u16,
+    ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
+        let supervisor =
+            crate::daemon::supervisor::Supervisor::new(events.clone(), daemon_dir, daemon_port);
         Arc::new(Self {
             config,
             auth_token,
@@ -53,6 +72,7 @@ impl DaemonState {
                 crate::daemon::paths::projects_json_path(),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
+            supervisor,
             events,
             shutdown_tx,
         })

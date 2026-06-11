@@ -59,11 +59,34 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
         .route("/daemon/v1/worker-status", post(worker_status))
-        .route("/daemon/v1/projects/open", post(crate::daemon::projects::open_project))
-        .route("/daemon/v1/projects", get(crate::daemon::projects::list_projects))
-        .route("/daemon/v1/projects/:id", get(crate::daemon::projects::get_project))
-        .route("/daemon/v1/projects/:id", delete(crate::daemon::projects::forget_project))
-        .route("/daemon/v1/projects/:id/pin", post(crate::daemon::projects::pin_project))
+        .route(
+            "/daemon/v1/projects/open",
+            post(crate::daemon::projects::open_project),
+        )
+        .route(
+            "/daemon/v1/projects",
+            get(crate::daemon::projects::list_projects),
+        )
+        .route(
+            "/daemon/v1/projects/:id",
+            get(crate::daemon::projects::get_project),
+        )
+        .route(
+            "/daemon/v1/projects/:id",
+            delete(crate::daemon::projects::forget_project),
+        )
+        .route(
+            "/daemon/v1/projects/:id/pin",
+            post(crate::daemon::projects::pin_project),
+        )
+        .route(
+            "/daemon/v1/projects/:id/restart",
+            post(crate::daemon::projects::restart_project_worker),
+        )
+        .route(
+            "/daemon/v1/projects/:id/stop",
+            post(crate::daemon::projects::stop_project_worker),
+        )
         .layer(middleware::from_fn(move |req, next| {
             let token = auth_token.clone();
             crate::daemon::auth::check(token, req, next)
@@ -97,7 +120,7 @@ async fn status(State((state, port)): State<(Arc<DaemonState>, u16)>) -> Json<St
         port,
         started_at_ms: state.started_at_ms,
         uptime_secs,
-        workers: 0,
+        workers: state.supervisor.worker_count().await,
     })
 }
 
@@ -229,7 +252,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let config = DaemonConfig {
-            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+            },
             ..DaemonConfig::default()
         };
         let state = DaemonState::new(
@@ -259,7 +285,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let config = DaemonConfig {
-            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+            },
             ..DaemonConfig::default()
         };
         let state = DaemonState::new(
@@ -290,7 +319,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let config = DaemonConfig {
-            auth: AuthConfig { enabled: true, token: Some("secret".to_string()) },
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+            },
             ..DaemonConfig::default()
         };
         let state = DaemonState::new(

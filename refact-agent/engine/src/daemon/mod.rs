@@ -11,9 +11,11 @@ pub mod events;
 pub mod lock;
 pub mod mdns;
 pub mod paths;
+pub mod ports;
 pub mod projects;
 pub mod server;
 pub mod state;
+pub mod supervisor;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePaths {
@@ -22,6 +24,7 @@ pub(crate) struct RuntimePaths {
     events_jsonl_path: PathBuf,
     daemon_log_path: PathBuf,
     projects_json_path: PathBuf,
+    daemon_dir_path: PathBuf,
 }
 
 impl RuntimePaths {
@@ -32,6 +35,7 @@ impl RuntimePaths {
             events_jsonl_path: paths::events_jsonl_path(),
             daemon_log_path: paths::daemon_log_path(),
             projects_json_path: paths::projects_json_path(),
+            daemon_dir_path: paths::daemon_dir(),
         }
     }
 
@@ -43,6 +47,7 @@ impl RuntimePaths {
             events_jsonl_path: path.join("events.jsonl"),
             daemon_log_path: path.join("logs").join("daemon.log"),
             projects_json_path: path.join("projects.json"),
+            daemon_dir_path: path.to_path_buf(),
         }
     }
 }
@@ -116,7 +121,13 @@ pub(crate) async fn run_daemon_entry_with_paths(
     };
 
     let events = events::EventBus::new(paths.events_jsonl_path.clone());
-    let state = state::DaemonState::new(config.clone(), events, auth_token);
+    let state = state::DaemonState::new_with_daemon_dir(
+        config.clone(),
+        events,
+        auth_token,
+        paths.daemon_dir_path.clone(),
+        actual_addr.port(),
+    );
     state.load_projects(paths.projects_json_path.clone()).await;
     let info = state.daemon_info(actual_addr.port(), actual_addr.ip().to_string());
     if let Err(error) = state::write_daemon_info_atomic(&paths.daemon_json_path, &info).await {
@@ -155,6 +166,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
     if let Err(error) = serve_result {
         tracing::error!("{error}");
     }
+    state.supervisor.stop_all().await;
     let _ = state
         .events
         .emit("daemon_stopped", None, serde_json::json!({}))
