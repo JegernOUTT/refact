@@ -14,6 +14,7 @@ pub mod mdns;
 pub mod paths;
 pub mod ports;
 pub mod projects;
+pub mod proxy;
 pub mod server;
 pub mod state;
 pub mod supervisor;

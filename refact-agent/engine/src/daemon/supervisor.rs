@@ -177,6 +177,13 @@ impl Supervisor {
         Some(info)
     }
 
+    pub fn notify_proxy_unreachable(self: &Arc<Self>, entry: ProjectEntry) {
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            supervisor.restart_worker(&entry).await.ok();
+        });
+    }
+
     pub async fn worker_count(&self) -> u64 {
         let slots: Vec<Arc<WorkerSlot>> = self.workers.read().await.values().cloned().collect();
         let mut count = 0;

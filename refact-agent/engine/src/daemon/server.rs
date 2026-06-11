@@ -3,10 +3,10 @@ use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use futures::Stream;
 use hyper::Server;
@@ -88,6 +88,18 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/daemon/v1/projects/:id/stop",
             post(crate::daemon::projects::stop_project_worker),
         )
+        .route("/p/:project_id/v1", any(crate::daemon::proxy::proxy_v1))
+        .route(
+            "/p/:project_id/v1/*path",
+            any(crate::daemon::proxy::proxy_v1),
+        )
+        .route(
+            "/p/:project_id/build_info",
+            any(crate::daemon::proxy::proxy_build_info),
+        )
+        .layer(DefaultBodyLimit::max(
+            crate::daemon::proxy::PROXY_BODY_LIMIT,
+        ))
         .layer(middleware::from_fn(move |req, next| {
             let token = auth_token.clone();
             crate::daemon::auth::check(token, req, next)

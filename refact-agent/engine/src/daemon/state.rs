@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,12 @@ pub struct DaemonInfo {
     pub urls: DaemonUrls,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyActivity {
+    pub last_proxy_activity_ms: u64,
+    pub live_proxy_streams: u64,
+}
+
 pub struct DaemonState {
     pub config: DaemonConfig,
     pub auth_token: Option<String>,
@@ -38,7 +44,9 @@ pub struct DaemonState {
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
+    pub proxy_activity: RwLock<HashMap<String, ProxyActivity>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
+    pub proxy_client: reqwest::Client,
     pub events: EventBus,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     shutdown_tx: broadcast::Sender<String>,
@@ -70,6 +78,12 @@ impl DaemonState {
             daemon_port,
             cron_pending.clone(),
         );
+        let proxy_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("failed to build daemon proxy http client");
         Arc::new(Self {
             config,
             auth_token,
@@ -79,7 +93,9 @@ impl DaemonState {
                 crate::daemon::paths::projects_json_path(),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
+            proxy_activity: RwLock::new(HashMap::new()),
             supervisor,
+            proxy_client,
             events,
             cron_pending,
             shutdown_tx,
@@ -149,6 +165,36 @@ impl DaemonState {
     pub async fn load_projects(&self, path: PathBuf) {
         let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
         *self.projects.write().await = registry;
+    }
+
+    pub async fn update_proxy_activity(&self, project_id: &str) {
+        let mut activity = self.proxy_activity.write().await;
+        activity
+            .entry(project_id.to_string())
+            .or_default()
+            .last_proxy_activity_ms = now_ms();
+    }
+
+    pub async fn increment_live_proxy_stream(&self, project_id: &str) {
+        let mut activity = self.proxy_activity.write().await;
+        let activity = activity.entry(project_id.to_string()).or_default();
+        activity.last_proxy_activity_ms = now_ms();
+        activity.live_proxy_streams = activity.live_proxy_streams.saturating_add(1);
+    }
+
+    pub async fn decrement_live_proxy_stream(&self, project_id: &str) {
+        let mut activity = self.proxy_activity.write().await;
+        let activity = activity.entry(project_id.to_string()).or_default();
+        activity.live_proxy_streams = activity.live_proxy_streams.saturating_sub(1);
+    }
+
+    pub async fn proxy_activity(&self, project_id: &str) -> ProxyActivity {
+        self.proxy_activity
+            .read()
+            .await
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn daemon_info(&self, port: u16, bind: String) -> DaemonInfo {

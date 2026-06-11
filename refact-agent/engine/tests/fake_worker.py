@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -14,6 +16,19 @@ class WorkerHandler(BaseHTTPRequestHandler):
             self.send_header("content-type", "text/plain")
             self.end_headers()
             self.wfile.write((self.server.ping_message + "\n").encode())
+            return
+        if self.path.startswith("/v1/echo"):
+            self.send_echo(b"")
+            return
+        if self.path == "/v1/sse":
+            self.send_sse()
+            return
+        if self.path == "/v1/slow":
+            time.sleep(2)
+            self.send_json({"ok": True})
+            return
+        if self.path == "/build_info":
+            self.send_json({"version": "fake-worker"})
             return
         self.send_response(404)
         self.end_headers()
@@ -26,8 +41,44 @@ class WorkerHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"success":true}')
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
+        if self.path.startswith("/v1/echo"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
         self.send_response(404)
         self.end_headers()
+
+    def send_echo(self, body):
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        payload = {
+            "method": self.command,
+            "path": self.path,
+            "headers": headers,
+            "body_len": len(body),
+            "body_text": body.decode("utf-8", "replace") if len(body) <= 8192 else None,
+        }
+        self.send_json(payload)
+
+    def send_sse(self):
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.end_headers()
+        for chunk in [b"data: chunk-a\n\n", b"data: chunk-b\n\n", b"data: chunk-c\n\n"]:
+            self.wfile.write(chunk)
+            self.wfile.flush()
+            time.sleep(0.5)
+
+    def send_json(self, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.send_header("x-hop-test", "visible")
+        self.send_header("connection", "x-hidden")
+        self.send_header("x-hidden", "hidden")
+        self.end_headers()
+        self.wfile.write(data)
 
     def log_message(self, format, *args):
         return
