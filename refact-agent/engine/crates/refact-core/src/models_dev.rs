@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 
-use crate::model_caps::ModelCapabilities;
+use crate::model_caps::{predefined_cloud_tokenizer_for_model, ModelCapabilities};
 use crate::provider_types::{ModelPricing, ModelPricingTier};
 
 pub const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
@@ -404,6 +404,9 @@ fn models_dev_model_to_model_caps(
         .map(|modalities| modalities.input.as_slice())
         .unwrap_or(&[]);
     let reasoning_controls = reasoning_controls_for_model(provider_key, provider, model);
+    let tokenizer = predefined_cloud_tokenizer_for_model(provider_key, &model.id)
+        .unwrap_or("fake")
+        .to_string();
     ModelCapabilities {
         n_ctx: limit.and_then(|limit| limit.context).unwrap_or_default(),
         max_output_tokens: limit.and_then(|limit| limit.output).unwrap_or_default(),
@@ -419,7 +422,7 @@ fn models_dev_model_to_model_caps(
         supports_thinking_budget: reasoning_controls.supports_thinking_budget,
         supports_adaptive_thinking_budget: reasoning_controls.supports_adaptive_thinking_budget,
         supports_cache_control: false,
-        tokenizer: "fake".to_string(),
+        tokenizer,
         pricing: model_cost_to_pricing(model),
         raw_cost: model
             .cost
@@ -1040,5 +1043,26 @@ mod tests {
         let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
 
         assert!(!caps.supports_cache_control);
+    }
+
+    #[test]
+    fn model_caps_use_predefined_cloud_tokenizers_for_openai_and_anthropic() {
+        let openai_provider = ModelsDevProvider {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            ..Default::default()
+        };
+        let openai_model = ModelsDevModel {
+            id: "gpt-4.1".to_string(),
+            name: "gpt-4.1".to_string(),
+            ..Default::default()
+        };
+
+        let openai_caps = models_dev_model_to_model_caps("openai", &openai_provider, &openai_model);
+        let anthropic_caps =
+            models_dev_model_to_model_caps("anthropic", &test_provider(), &test_model(None));
+
+        assert_eq!(openai_caps.tokenizer, "openai");
+        assert_eq!(anthropic_caps.tokenizer, "anthropic");
     }
 }

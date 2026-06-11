@@ -314,10 +314,10 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
           />
           <FieldStack
             label="Tokenizer"
-            helper="HuggingFace tokenizer path for accurate token counting."
+            helper="Use openai/anthropic for provider cloud token counting, hf://..., URL, or file path. fake is for testing only."
             control={
               <FieldText
-                placeholder="hf://Xenova/claude-tokenizer"
+                placeholder="anthropic"
                 value={tokenizer}
                 onChange={setTokenizer}
               />

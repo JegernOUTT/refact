@@ -3,6 +3,7 @@ pub mod cache_diagnostics;
 pub mod cache_guard;
 #[cfg(test)]
 mod cache_stability_tests;
+pub mod cloud_token_count;
 pub mod config;
 mod content;
 pub mod diagnostics;

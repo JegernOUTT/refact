@@ -1776,6 +1776,32 @@ async fn run_streaming_generation(
             supports_temperature: model_rec.supports_temperature,
         };
 
+        let cloud_input_usage = crate::chat::cloud_token_count::try_count_input_tokens(
+            &app.runtime.http_client,
+            &llm_request,
+            &model_rec.base,
+        )
+        .await;
+        if let Some(count) = cloud_input_usage.as_ref() {
+            let usage = &count.usage;
+            let context_limit = llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx);
+            let output_token_reserve = count.output_token_reserve;
+            if crate::chat::cloud_token_count::cloud_input_exceeds_context(
+                usage,
+                context_limit,
+                output_token_reserve,
+            ) {
+                return Err(LlmStreamError::from(
+                    crate::chat::cloud_token_count::cloud_context_limit_message(
+                        usage,
+                        &model_rec.base,
+                        context_limit,
+                        output_token_reserve,
+                    ),
+                ));
+            }
+        }
+
         enum CollectorEventPayload {
             DeltaOps(Vec<DeltaOp>),
             Usage(ChatUsage),
@@ -1832,6 +1858,10 @@ async fn run_streaming_generation(
             overflow_usage: overflow_usage.clone(),
             overflow_ops: overflow_ops.clone(),
         };
+
+        if let Some(count) = cloud_input_usage.as_ref() {
+            collector.on_usage(&count.usage);
+        }
 
         let session_arc_emitter = session_arc.clone();
         let emitter_task = tokio::spawn(async move {
@@ -2039,6 +2069,11 @@ async fn run_streaming_generation(
 
         match &results {
             Err(e) => {
+                let usage_for_error = {
+                    let session = session_arc.lock().await;
+                    session.draft_usage.clone()
+                }
+                .or_else(|| cloud_input_usage.as_ref().map(|count| count.usage.clone()));
                 let (provider, model) = split_model_provider(&model_id_for_stats);
                 let event = LlmCallEvent {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -2064,11 +2099,22 @@ async fn run_streaming_generation(
                     finish_reason: None,
                     attempt_n: attempt,
                     retry_reason: None,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cache_read_tokens: None,
-                    cache_creation_tokens: None,
-                    total_tokens: 0,
+                    prompt_tokens: usage_for_error
+                        .as_ref()
+                        .map(|u| u.prompt_tokens)
+                        .unwrap_or(0),
+                    completion_tokens: usage_for_error
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(0),
+                    cache_read_tokens: usage_for_error.as_ref().and_then(|u| u.cache_read_tokens),
+                    cache_creation_tokens: usage_for_error
+                        .as_ref()
+                        .and_then(|u| u.cache_creation_tokens),
+                    total_tokens: usage_for_error
+                        .as_ref()
+                        .map(|u| u.total_tokens)
+                        .unwrap_or(0),
                     cost_usd: None,
                 };
                 if let Some(sender) = &app.model.llm_stats_sender {
@@ -2083,6 +2129,26 @@ async fn run_streaming_generation(
         let results = results?;
 
         let mut result = results.into_iter().next().unwrap_or_default();
+
+        if let Some(count) = cloud_input_usage.clone() {
+            let usage = count.usage;
+            result.usage = Some(match result.usage.take() {
+                Some(provider_usage) => ChatUsage {
+                    prompt_tokens: usage.prompt_tokens,
+                    total_tokens: usage
+                        .prompt_tokens
+                        .saturating_add(provider_usage.completion_tokens)
+                        .saturating_add(provider_usage.cache_creation_tokens.unwrap_or(0))
+                        .saturating_add(provider_usage.cache_read_tokens.unwrap_or(0)),
+                    ..provider_usage
+                },
+                None => usage,
+            });
+        }
+        if let Some(usage) = result.usage.clone() {
+            let mut session = session_arc.lock().await;
+            session.draft_usage = Some(usage);
+        }
 
         if is_result_empty(&result) {
             let draft_usage = {

@@ -120,7 +120,7 @@ chat_models:
     supports_tools: true
     supports_multimodality: true
     supports_agent: true
-    tokenizer: hf://your-tokenizer-path
+    tokenizer: anthropic
 ```
 
 For related defaults, also review completion and embedding presets in the engine YAML/config directories.
@@ -344,7 +344,7 @@ chat_models:
     supports_agent: true
     supports_reasoning: anthropic
     supports_boost_reasoning: true
-    tokenizer: hf://Xenova/claude-tokenizer
+    tokenizer: anthropic
 
   claude-3-7-sonnet-latest:
     n_ctx: 200000
@@ -353,7 +353,7 @@ chat_models:
     supports_agent: true
     supports_reasoning: anthropic
     supports_boost_reasoning: true
-    tokenizer: hf://Xenova/claude-tokenizer
+    tokenizer: anthropic
 ```
 
 ### Example 2: Adding a New FIM Model
