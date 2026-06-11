@@ -2,29 +2,31 @@
 import * as vscode from 'vscode';
 import * as fetchH2 from 'fetch-h2';
 import * as fetchAPI from "./fetchAPI";
-import { join } from 'path';
 import * as lspClient from 'vscode-languageclient/node';
 import * as net from 'net';
 import * as os from 'os';
 import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
-
+import * as refactDaemon from './refactDaemon';
 
 const DEBUG_HTTP_PORT = 8001;
 const DEBUG_LSP_PORT = 8002;
 
-
 export class RustBinaryBlob {
     public asset_path: string;
-    public cmdline: string[] = [];
     public port: number = 0;
+    public project_id: string = "";
+    public lsp_port: number = 0;
     public lsp_disposable: vscode.Disposable | undefined = undefined;
     public lsp_client: lspClient.LanguageClient | undefined = undefined;
     public lsp_socket: net.Socket | undefined = undefined;
     public lsp_client_options: lspClient.LanguageClientOptions;
-    public ping_response: string = "";
     private lifecycleQueue: Promise<void> = Promise.resolve();
     private lifecycleGeneration: number = 0;
+    private reconnectGeneration: number | undefined = undefined;
+    private reconnectTimer: NodeJS.Timeout | undefined = undefined;
+    private reconnectAttempts: number = 0;
+    private openedProjects: Map<string, refactDaemon.OpenProjectResponse> = new Map();
 
     constructor(asset_path: string) {
         this.asset_path = asset_path;
@@ -46,51 +48,38 @@ export class RustBinaryBlob {
     }
 
     public get_port(): number {
-        let xdebug = this.x_debug();
-        if (xdebug) {
-            return 8001;
-        } else {
-            return this.port;
+        if (this.x_debug()) {
+            return DEBUG_HTTP_PORT;
         }
+        return this.port;
     }
 
     public rust_url(): string {
-        let xdebug = this.x_debug();
-        let port = xdebug ? 8001 : this.port;
-        if (!port) {
+        if (this.x_debug()) {
+            return `http2://127.0.0.1:${DEBUG_HTTP_PORT}/`;
+        }
+        if (!this.port || !this.project_id) {
             return "";
         }
-        return "http2://127.0.0.1:" + port.toString() + "/";
+        return refactDaemon.projectProxyBaseUrl(this.port, this.project_id);
     }
 
     public browser_url(): string {
-        const port = this.get_port();
-        if (!port) {
+        if (this.x_debug()) {
+            const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
+            const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
+            return `http://${host}:${DEBUG_HTTP_PORT}/`;
+        }
+        if (!this.port || !this.project_id) {
             return "";
         }
         const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
         const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
-        return `http://${host}:${port}/`;
+        return refactDaemon.browserProjectUrl(host, this.port, this.project_id);
     }
 
     private default_browser_host(): string {
         return this.default_mdns_host();
-    }
-
-    private default_lan_ipv4_host(): string | undefined {
-        for (const infos of Object.values(os.networkInterfaces())) {
-            for (const info of infos ?? []) {
-                if (
-                    info.family === "IPv4" &&
-                    !info.internal &&
-                    !info.address.startsWith("169.254.") &&
-                    info.address !== "0.0.0.0"
-                ) {
-                    return info.address;
-                }
-            }
-        }
-        return undefined;
     }
 
     private default_mdns_host(): string {
@@ -103,11 +92,13 @@ export class RustBinaryBlob {
     }
 
     public attemping_to_reach(): string {
-        let xdebug = this.x_debug();
-        if (xdebug) {
+        if (this.x_debug()) {
             return `debug rust binary on ports ${DEBUG_HTTP_PORT} and ${DEBUG_LSP_PORT}`;
         }
-        return "local Refact engine";
+        if (this.project_id) {
+            return `Refact daemon project ${this.project_id} on port ${this.daemon_port()}`;
+        }
+        return `Refact daemon on port ${this.daemon_port()}`;
     }
 
     public async settings_changed() {
@@ -123,81 +114,15 @@ export class RustBinaryBlob {
 
     private async settings_changed_serialized(generation: number) {
         try {
-            for (let i = 0; i < 5; i++) {
-                if (generation !== this.lifecycleGeneration) {
-                    return;
-                }
-                console.log(`RUST settings changed, attempt to restart ${i + 1}`);
-                let xdebug = this.x_debug();
-                let port: number;
-                let ping_response: string;
-
-                if (xdebug === 0) {
-                    if (this.lsp_client) { // running
-                        port = this.port;  // keep the same port
-                        ping_response = this.ping_response;
-                    } else {
-                        port = Math.floor(Math.random() * 20) + 9080;
-                        ping_response = `ping-${Math.floor(Math.random() * 0x10000000000000000).toString(16)}`;
-                    }
-                } else {
-                    port = DEBUG_HTTP_PORT;
-                    console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
-                    console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
-                    this.cmdline = [];
-                    await this.terminate_serialized(generation);  // terminate our own
-                    if (generation !== this.lifecycleGeneration) {
-                        return;
-                    }
-                    await this.read_caps();  // debugging rust already running, can read here
-
-                    await this.fetch_toolbox_config();
-                    // await register_commands();
-                    await this.start_lsp_socket(generation);
-                    return;
-                }
-                const httpHost = vscode.workspace.getConfiguration().get<string>("refactai.httpHost")?.trim() || "0.0.0.0";
-                let new_cmdline: string[] = [
-                    join(this.asset_path, "refact-lsp"),
-                    "--ping-message", ping_response,
-                    "--http-port", port.toString(),
-                    "--http-host", httpHost,
-                    "--lsp-stdin-stdout", "1",
-                ];
-
-                if (vscode.workspace.getConfiguration().get<boolean>("refactai.vecdb")) {
-                    new_cmdline.push("--vecdb");
-                    const vecdb_limit = vscode.workspace.getConfiguration().get<number>("refactai.vecdbFileLimit") ?? 15000;
-                    new_cmdline.push(`--vecdb-max-files`);
-                    new_cmdline.push(`${vecdb_limit}`);
-                }
-                if (vscode.workspace.getConfiguration().get<boolean>("refactai.ast")) {
-                    new_cmdline.push("--ast");
-                    const ast_limit = vscode.workspace.getConfiguration().get<number>("refactai.astFileLimit") ?? 15000;
-                    new_cmdline.push(`--ast-max-files`);
-                    new_cmdline.push(`${ast_limit}`);
-                }
-                let insecureSSL = vscode.workspace.getConfiguration().get("refactai.insecureSSL");
-                if (insecureSSL) {
-                    new_cmdline.push("--insecure");
-                }
-                let experimental = vscode.workspace.getConfiguration().get("refactai.xperimental");
-                if (experimental) {
-                    new_cmdline.push("--experimental");
-                }
-
-                let cmdline_existing: string = this.cmdline.join(" ");
-                let cmdline_new: string = new_cmdline.join(" ");
-                if (cmdline_existing !== cmdline_new) {
-                    this.cmdline = new_cmdline;
-                    this.port = port;
-                    this.ping_response = ping_response;
-                    await this.launch_serialized(generation);
-                }
-                if (this.lsp_disposable !== undefined) {
-                    break;
-                }
+            if (this.x_debug()) {
+                await this.attach_debug_serialized(generation);
+            } else {
+                await this.attach_daemon_serialized(generation);
             }
+        } catch (error) {
+            console.log(["Refact attach failed", error]);
+            global.have_caps = false;
+            global.status_bar.set_socket_error(true, error instanceof Error ? error.message : String(error));
         } finally {
             global.side_panel?.handleSettingsChange();
         }
@@ -208,19 +133,79 @@ export class RustBinaryBlob {
     }
 
     private async launch_serialized(generation: number) {
-        await this.terminate_serialized(generation);
+        await this.settings_changed_serialized(generation);
+    }
+
+    private async attach_debug_serialized(generation: number) {
+        this.clearReconnectTimer();
+        await this.stop_lsp(generation);
         if (generation !== this.lifecycleGeneration) {
             return;
         }
-        let xdebug = this.x_debug();
-        if (xdebug) {
-            await this.start_lsp_socket(generation);
-        } else {
-            await this.start_lsp_stdin_stdout(generation);
+        this.port = DEBUG_HTTP_PORT;
+        this.lsp_port = DEBUG_LSP_PORT;
+        this.project_id = "";
+        this.openedProjects.clear();
+        console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
+        console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
+        await this.start_lsp_socket(generation);
+    }
+
+    private async attach_daemon_serialized(generation: number) {
+        this.clearReconnectTimer();
+        await this.stop_lsp(generation);
+        if (generation !== this.lifecycleGeneration) {
+            return;
         }
+
+        const daemonPort = this.daemon_port();
+        const roots = this.workspace_roots();
+        if (roots.length === 0) {
+            this.project_id = "";
+            this.lsp_port = 0;
+            throw new Error("Open a workspace folder before starting Refact.");
+        }
+
+        this.port = daemonPort;
+        const binPath = refactDaemon.resolveBundledBinaryPath(this.asset_path);
+        const pluginVersion = this.plugin_version();
+        await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
+
+        this.openedProjects.clear();
+        const settings = this.project_settings();
+        let primary: refactDaemon.OpenProjectResponse | undefined;
+        for (const root of roots) {
+            const response = await refactDaemon.openProject(root, {
+                port: daemonPort,
+                clientKind: "vscode",
+                settings,
+            });
+            this.openedProjects.set(root, response);
+            if (!primary) {
+                primary = response;
+            }
+        }
+
+        if (!primary) {
+            throw new Error("Refact daemon did not open a project.");
+        }
+        const lspPort = primary.worker?.lsp_port;
+        if (!lspPort) {
+            throw new Error(`Refact daemon opened project ${primary.project_id} without an LSP port.`);
+        }
+        this.project_id = primary.project_id;
+        this.lsp_port = lspPort;
+        await this.start_lsp_socket(generation);
     }
 
     public async stop_lsp(generation: number = this.lifecycleGeneration) {
+        if (generation === this.lifecycleGeneration) {
+            this.reconnectGeneration = undefined;
+            this.clearReconnectTimer();
+        }
         let my_lsp_client_copy = this.lsp_client;
         if (my_lsp_client_copy) {
             console.log("RUST STOP");
@@ -247,8 +232,12 @@ export class RustBinaryBlob {
             this.lsp_disposable.dispose();
             this.lsp_disposable = undefined;
         }
+        const socket = this.lsp_socket;
         this.lsp_client = undefined;
         this.lsp_socket = undefined;
+        if (socket && !socket.destroyed) {
+            socket.destroy();
+        }
     }
 
     public async terminate() {
@@ -260,6 +249,7 @@ export class RustBinaryBlob {
         if (generation !== this.lifecycleGeneration) {
             return;
         }
+        await refactDaemon.detach();
         await fetchH2.disconnectAll();
         global.have_caps = false;
         global.status_bar.choose_color();
@@ -301,7 +291,10 @@ export class RustBinaryBlob {
             fetchAPI.lsp_set_active_document(current_editor);
         }
 
-        const promptCustomization = await fetchAPI.get_prompt_customization();
+        const promptCustomization = await fetchAPI.get_prompt_customization().catch(error => {
+            console.log(["get_prompt_customization", error]);
+            return undefined;
+        });
         if (promptCustomization && promptCustomization.toolbox_commands) {
             await QuickActionProvider.updateActions(promptCustomization.toolbox_commands as Record<string, ToolboxCommand>);
         }
@@ -324,138 +317,93 @@ export class RustBinaryBlob {
             let resp = await fetchH2.fetch(req, { timeout: 5000 });
             if (resp.status !== 200) {
                 console.log(["ping http status", resp.status]);
-                return Promise.reject("ping bad status");
+                return false;
             }
-            let pong = await resp.text();
-            let success = (pong === this.ping_response || pong === this.ping_response + "\n");
-            console.log([`pong=${pong}`, `expected ${this.ping_response}`, success]);
-            return success;
+            return true;
         } catch (e) {
             console.log(["ping error:", e]);
         }
         return false;
     }
 
-    public async start_lsp_stdin_stdout(generation: number = this.lifecycleGeneration) {
-        console.log("RUST start_lsp_stdint_stdout");
-        let path = this.cmdline[0];
-        let serverOptions: lspClient.ServerOptions;
-        serverOptions = {
-            run: {
-                command: String(path),
-                args: this.cmdline.slice(1),
-                transport: lspClient.TransportKind.stdio,
-                options: { cwd: process.cwd(), detached: false, shell: false }
-            },
-            debug: {
-                command: String(path),
-                args: this.cmdline.slice(1),
-                transport: lspClient.TransportKind.stdio,
-                options: { cwd: process.cwd(), detached: false, shell: false }
-            }
-        };
-        this.lsp_client = new lspClient.LanguageClient(
-            'RUST LSP',
-            serverOptions,
-            this.lsp_client_options
-        );
-        this.lsp_disposable = this.lsp_client.start();
-
-        console.log(`${logts()} RUST START`);
-        const somethings_wrong_timeout = 10000;
-        const startTime = Date.now();
-        let started_okay = false;
-
-        const onReadyPromise = this.lsp_client.onReady().then(() => {
-            started_okay = true;
-        });
-
-        try {
-            while (true) {
-                if (generation !== this.lifecycleGeneration) {
-                    return;
-                }
-                const elapsedTime = Date.now() - startTime;
-                if (started_okay) {
-                    console.log(`${logts()} RUST /START after ${elapsedTime}ms`);
-                    break;
-                }
-                if (elapsedTime >= somethings_wrong_timeout) {
-                    throw new Error("timeout");
-                }
-                console.log(`${logts()} RUST waiting...`);
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-        } catch (e) {
-            console.log(`${logts()} RUST START PROBLEM e=${e}`);
-            this.lsp_dispose();
-            return;
-        }
-        if (generation !== this.lifecycleGeneration) {
-            return;
-        }
-
-        let success = await this.ping();
-        if (!success) {
-            console.log("RUST ping failed");
-            this.lsp_dispose();
-            return;
-        }
-        if (generation !== this.lifecycleGeneration) {
-            return;
-        }
-        // At this point we had successful client_info and workspace_folders server to client calls,
-        // therefore the LSP server is started.
-        // A little doubt remains about the http port, but it's very likely there's no race.
-        await this.read_caps();
-        await this.fetch_toolbox_config();
-    }
-
     public async start_lsp_socket(generation: number = this.lifecycleGeneration) {
-        console.log("RUST start_lsp_socket");
-        this.lsp_socket = new net.Socket();
-        this.lsp_socket.on('error', (error) => {
-            console.log("RUST socket error");
-            console.log(error);
-            console.log("RUST /error");
-            this.lsp_dispose();
-        });
-        this.lsp_socket.on('close', () => {
-            console.log("RUST socket closed");
-            this.lsp_dispose();
-        });
-        this.lsp_socket.on('connect', async () => {
-            if (generation !== this.lifecycleGeneration) {
-                return;
-            }
-            console.log("RUST LSP socket connected");
-            this.lsp_client = new lspClient.LanguageClient(
-                'Custom rust LSP server',
-                async () => {
-                    if (this.lsp_socket === undefined) {
-                        return Promise.reject("this.lsp_socket is undefined, that should not happen");
-                    }
-                    return Promise.resolve({
-                        reader: this.lsp_socket,
-                        writer: this.lsp_socket
-                    });
-                },
-                this.lsp_client_options
-            );
-            // client.registerProposedFeatures();
-            this.lsp_disposable = this.lsp_client.start();
-            console.log(`RUST DEBUG START`);
-            try {
-                await this.lsp_client.onReady();
+        const lspPort = this.x_debug() ? DEBUG_LSP_PORT : this.lsp_port;
+        if (!lspPort) {
+            throw new Error("Refact LSP port is not available.");
+        }
+        console.log(`RUST start_lsp_socket ${lspPort}`);
+        this.reconnectGeneration = this.x_debug() ? undefined : generation;
+
+        await new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (!settled) {
+                    settled = true;
+                    resolve();
+                }
+            };
+            const socket = new net.Socket();
+            this.lsp_socket = socket;
+            socket.on('error', (error) => {
+                console.log("RUST socket error");
+                console.log(error);
+                console.log("RUST /error");
+            });
+            socket.on('close', () => {
+                console.log("RUST socket closed");
+                const shouldReconnect = this.reconnectGeneration === generation && generation === this.lifecycleGeneration && !this.x_debug();
+                this.lsp_dispose();
+                if (shouldReconnect) {
+                    this.schedule_lsp_reconnect(generation);
+                }
+                finish();
+            });
+            socket.on('connect', async () => {
                 if (generation !== this.lifecycleGeneration) {
+                    socket.destroy();
+                    finish();
                     return;
                 }
-                console.log(`RUST DEBUG /START`);
-            } catch (e) {
-                console.log(`RUST DEBUG START PROBLEM e=${e}`);
-            }
+                console.log("RUST LSP socket connected");
+                this.lsp_client = new lspClient.LanguageClient(
+                    'Custom rust LSP server',
+                    async () => {
+                        if (this.lsp_socket === undefined) {
+                            return Promise.reject("this.lsp_socket is undefined, that should not happen");
+                        }
+                        return Promise.resolve({
+                            reader: this.lsp_socket,
+                            writer: this.lsp_socket
+                        });
+                    },
+                    this.lsp_client_options
+                );
+                this.lsp_disposable = this.lsp_client.start();
+                console.log(`RUST START`);
+                try {
+                    await this.lsp_client.onReady();
+                    if (generation !== this.lifecycleGeneration) {
+                        finish();
+                        return;
+                    }
+                    this.reconnectAttempts = 0;
+                    console.log(`RUST /START`);
+                    await this.read_caps();
+                    await this.fetch_toolbox_config().catch(error => console.log(["fetch_toolbox_config", error]));
+                } catch (e) {
+                    console.log(`RUST START PROBLEM e=${e}`);
+                }
+                finish();
+            });
+            socket.connect(lspPort, "127.0.0.1");
+            setTimeout(() => {
+                if (!settled) {
+                    console.log("RUST LSP socket connect timeout");
+                    socket.destroy();
+                    finish();
+                }
+            }, 10000);
         });
-        this.lsp_socket.connect(DEBUG_LSP_PORT);
     }
 
     async rag_status() {
@@ -508,13 +456,61 @@ export class RustBinaryBlob {
             );
         }
 
-        // TBD: type-guards or some sort of runtime validation
         const json = await response.json() as ToolboxConfig;
         console.log(["success fetch_toolbox_config", json]);
 
         global.toolbox_config = json;
         await register_commands();
         return json;
+    }
+
+    private schedule_lsp_reconnect(generation: number) {
+        if (this.reconnectTimer || generation !== this.lifecycleGeneration) {
+            return;
+        }
+        const delay = Math.min(30000, 1000 * Math.pow(2, this.reconnectAttempts++));
+        console.log(`RUST scheduling daemon LSP reconnect in ${delay}ms`);
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
+            if (generation !== this.lifecycleGeneration || this.reconnectGeneration !== generation) {
+                return;
+            }
+            this.enqueueLifecycle(async (nextGeneration) => this.attach_daemon_serialized(nextGeneration));
+        }, delay);
+    }
+
+    private clearReconnectTimer() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = undefined;
+        }
+    }
+
+    private daemon_port(): number {
+        const port = vscode.workspace.getConfiguration().get<number>("refactai.daemonPort");
+        return Number.isFinite(port) && port !== undefined && port > 0
+            ? Math.trunc(port)
+            : refactDaemon.DEFAULT_DAEMON_PORT;
+    }
+
+    private plugin_version(): string | undefined {
+        return vscode.extensions.getExtension("smallcloud.codify")?.packageJSON?.version;
+    }
+
+    private workspace_roots(): string[] {
+        return (vscode.workspace.workspaceFolders ?? [])
+            .filter(folder => folder.uri.scheme === "file")
+            .map(folder => folder.uri.fsPath);
+    }
+
+    private project_settings(): refactDaemon.ProjectSettings {
+        const config = vscode.workspace.getConfiguration();
+        return {
+            ast: config.get<boolean>("refactai.ast") ?? true,
+            vecdb: config.get<boolean>("refactai.vecdb") ?? true,
+            ast_max_files: config.get<number>("refactai.astFileLimit") ?? 35000,
+            vecdb_max_files: config.get<number>("refactai.vecdbFileLimit") ?? 15000,
+        };
     }
 }
 
@@ -540,12 +536,3 @@ export type ToolboxConfig = {
     system_prompts: Record<string, SystemPrompt>;
     toolbox_commands: Record<string, ToolboxCommand>;
 };
-
-function logts() {
-    const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
-    return `${hours}${minutes}${seconds}.${milliseconds}`;
-}

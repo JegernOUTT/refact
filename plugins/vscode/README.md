@@ -21,7 +21,7 @@ npm run build
 npm pack
 ```
 
-The extension packages the local `refact-lsp` engine and `refact-chat-js` UI artifacts through the monorepo GitHub Actions workflows.
+The extension packages the local `refact` engine and `refact-chat-js` UI artifacts through the monorepo GitHub Actions workflows.
 
 ## Repository history
 

@@ -305,7 +305,8 @@ plugins/vscode/out/
 plugins/vscode/node_modules/
 plugins/vscode/chat_package*/
 plugins/vscode/*.vsix
-plugins/vscode/assets/refact-lsp*
+plugins/vscode/assets/refact*
+!plugins/vscode/assets/refact-logo*
 plugins/intellij/build/
 plugins/intellij/out/
 plugins/intellij/.gradle/

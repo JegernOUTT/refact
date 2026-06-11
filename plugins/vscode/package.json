@@ -27,6 +27,7 @@
 		"fetch-h2": "^3.0.2",
 		"json5": "^2.2.3",
 		"marked": "^4.0.8",
+		"refact-chat-js": "file:../../refact-agent/gui",
 		"uuid": "^9.0.1",
 		"vscode-languageclient": "^7.0.0"
 	},
@@ -205,17 +206,24 @@
 					"default": false,
 					"order": 14
 				},
+				"refactai.daemonPort": {
+					"type": "number",
+					"description": "Port for the local Refact daemon control API.",
+					"default": 8488,
+					"order": 15
+				},
 				"refactai.httpHost": {
 					"type": "string",
-					"markdownDescription": "Host/address the local Refact engine HTTP server binds to. Use `0.0.0.0` to allow access from your local network. This exposes local Refact APIs to your network; only use on trusted networks.",
+					"markdownDescription": "Deprecated. Refact now uses the daemon project proxy instead of a VS Code-managed worker HTTP bind host.",
+					"deprecationMessage": "Refact now connects through the local daemon and ignores this worker-spawn setting.",
 					"default": "0.0.0.0",
-					"order": 15
+					"order": 16
 				},
 				"refactai.browserHost": {
 					"type": "string",
-					"markdownDescription": "Host/IP to open for the engine-served Refact UI. Leave empty to open `127.0.0.1`. For LAN access, set this to this machine's LAN IP, for example `192.168.1.20`.",
+					"markdownDescription": "Host/IP to open for the daemon-served Refact UI. Leave empty to open this machine's `.local` name. For LAN access, set this to this machine's LAN IP, for example `192.168.1.20`.",
 					"default": "",
-					"order": 16
+					"order": 17
 				}
 			}
 		},
@@ -412,7 +420,7 @@
 		"watch": "tsc -watch -p ./",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
-		"test": "node ./out/test/runTest.js",
+		"test": "node ./out/sidebar.test.js && node ./out/refactDaemon.test.js",
 		"esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node",
 		"esbuild": "npm run esbuild-base -- --sourcemap",
 		"esbuild-watch": "npm run esbuild-base -- --sourcemap --watch"
