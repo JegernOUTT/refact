@@ -7,6 +7,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod cron_clock;
 pub mod events;
 pub mod lock;
 pub mod mdns;
@@ -154,6 +155,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
 
     let mdns_advertisement = mdns::MdnsAdvertisement::start(actual_addr.port());
 
+    let cron_clock_task = cron_clock::spawn(state.clone());
     let serve_result = server::serve(listener, state.clone(), actual_addr.port()).await;
 
     if let Some(mdns) = mdns_advertisement {
@@ -163,6 +165,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
     if let Some(signal_task) = signal_task {
         signal_task.abort();
     }
+    cron_clock_task.abort();
     if let Err(error) = serve_result {
         tracing::error!("{error}");
     }

@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Child;
@@ -87,16 +88,32 @@ pub struct Supervisor {
     events: EventBus,
     daemon_dir: PathBuf,
     daemon_port: RwLock<u16>,
+    cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     client: reqwest::Client,
 }
 
 impl Supervisor {
     pub fn new(events: EventBus, daemon_dir: PathBuf, daemon_port: u16) -> Arc<Self> {
+        Self::new_with_cron_pending(
+            events,
+            daemon_dir,
+            daemon_port,
+            Arc::new(SyncRwLock::new(HashMap::new())),
+        )
+    }
+
+    pub(crate) fn new_with_cron_pending(
+        events: EventBus,
+        daemon_dir: PathBuf,
+        daemon_port: u16,
+        cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             workers: RwLock::new(HashMap::new()),
             events,
             daemon_dir,
             daemon_port: RwLock::new(daemon_port),
+            cron_pending,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .build()
@@ -172,8 +189,16 @@ impl Supervisor {
         count
     }
 
-    fn wants_alive(&self, _project_id: &str) -> bool {
-        true
+    pub fn cron_pending(&self, project_id: &str) -> Option<u64> {
+        self.cron_pending.read().get(project_id).copied()
+    }
+
+    fn wants_alive(&self, project_id: &str) -> bool {
+        self.cron_pending(project_id)
+            .map(|next_fire_ms| {
+                crate::daemon::cron_clock::cron_pending_blocks_idle_stop(next_fire_ms, now_ms())
+            })
+            .unwrap_or(true)
     }
 
     async fn slot_for(&self, project_id: &str) -> Arc<WorkerSlot> {
@@ -627,6 +652,18 @@ impl Supervisor {
                     "worker_crashed",
                     Some(info.project_id.clone()),
                     json!({"last_error": info.last_error}),
+                )
+                .await;
+        }
+        if matches!(info.state.clone(), WorkerState::Crashed)
+            && self.cron_pending(&info.project_id).is_some()
+        {
+            let _ = self
+                .events
+                .emit(
+                    "cron_worker_crashed",
+                    Some(info.project_id.clone()),
+                    json!({"next_fire_ms": self.cron_pending(&info.project_id)}),
                 )
                 .await;
         }

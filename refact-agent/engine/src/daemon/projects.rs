@@ -233,6 +233,7 @@ struct OpenResponse {
     root: PathBuf,
     pinned: bool,
     worker: Option<WorkerInfo>,
+    cron_pending: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -280,6 +281,7 @@ pub async fn open_project(
                 .into_response();
         }
     };
+    let cron_pending = state.cron_pending(&entry.id).await;
     let _ = state
         .events
         .emit(
@@ -294,6 +296,7 @@ pub async fn open_project(
         root: entry.root,
         pinned: entry.pinned,
         worker: Some(worker),
+        cron_pending,
     })
     .into_response()
 }

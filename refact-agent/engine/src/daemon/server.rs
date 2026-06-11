@@ -25,6 +25,7 @@ struct StatusResponse {
     started_at_ms: u64,
     uptime_secs: u64,
     workers: u64,
+    cron_pending: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +122,7 @@ async fn status(State((state, port)): State<(Arc<DaemonState>, u16)>) -> Json<St
         started_at_ms: state.started_at_ms,
         uptime_secs,
         workers: state.supervisor.worker_count().await,
+        cron_pending: state.cron_pending_snapshot().await,
     })
 }
 
@@ -216,6 +218,7 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["workers"], 0);
+        assert_eq!(json["cron_pending"], serde_json::json!({}));
         assert_eq!(json["port"], 8488);
     }
 

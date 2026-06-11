@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, RwLock};
@@ -39,6 +40,7 @@ pub struct DaemonState {
     pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub events: EventBus,
+    cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     shutdown_tx: broadcast::Sender<String>,
 }
 
@@ -61,8 +63,13 @@ impl DaemonState {
         daemon_port: u16,
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
-        let supervisor =
-            crate::daemon::supervisor::Supervisor::new(events.clone(), daemon_dir, daemon_port);
+        let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
+        let supervisor = crate::daemon::supervisor::Supervisor::new_with_cron_pending(
+            events.clone(),
+            daemon_dir,
+            daemon_port,
+            cron_pending.clone(),
+        );
         Arc::new(Self {
             config,
             auth_token,
@@ -74,6 +81,7 @@ impl DaemonState {
             worker_statuses: RwLock::new(HashMap::new()),
             supervisor,
             events,
+            cron_pending,
             shutdown_tx,
         })
     }
@@ -84,6 +92,33 @@ impl DaemonState {
 
     pub fn request_shutdown(&self, reason: String) {
         let _ = self.shutdown_tx.send(reason);
+    }
+
+    pub(crate) async fn set_cron_pending(&self, project_id: &str, next_fire_ms: Option<u64>) {
+        match next_fire_ms {
+            Some(next_fire_ms) => {
+                self.cron_pending
+                    .write()
+                    .insert(project_id.to_string(), next_fire_ms);
+            }
+            None => {
+                self.cron_pending.write().remove(project_id);
+            }
+        }
+    }
+
+    pub async fn cron_pending(&self, project_id: &str) -> Option<u64> {
+        self.cron_pending.read().get(project_id).copied()
+    }
+
+    pub(crate) async fn cron_pending_snapshot(&self) -> HashMap<String, u64> {
+        self.cron_pending.read().clone()
+    }
+
+    pub(crate) async fn retain_cron_pending(&self, project_ids: &HashSet<String>) {
+        self.cron_pending
+            .write()
+            .retain(|project_id, _| project_ids.contains(project_id));
     }
 
     pub async fn latest_worker_status(&self, project_id: &str) -> Option<WorkerStatusReport> {
@@ -248,6 +283,31 @@ mod tests {
             &status_report(1, 2, 3),
             &status_report(1, 3, 3)
         ));
+    }
+
+    #[tokio::test]
+    async fn cron_pending_set_snapshot_and_retain() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("e.jsonl")),
+            None,
+        );
+
+        state.set_cron_pending("project-a", Some(100)).await;
+        state.set_cron_pending("project-b", Some(200)).await;
+        assert_eq!(state.cron_pending("project-a").await, Some(100));
+        assert_eq!(state.supervisor.cron_pending("project-a"), Some(100));
+        assert_eq!(state.cron_pending_snapshot().await.len(), 2);
+
+        state
+            .retain_cron_pending(&HashSet::from(["project-a".to_string()]))
+            .await;
+        assert_eq!(state.cron_pending("project-a").await, Some(100));
+        assert_eq!(state.cron_pending("project-b").await, None);
+
+        state.set_cron_pending("project-a", None).await;
+        assert_eq!(state.cron_pending("project-a").await, None);
     }
 
     #[tokio::test]
