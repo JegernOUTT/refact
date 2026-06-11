@@ -36,7 +36,10 @@ import {
 } from "./buddyShowcase";
 import { drawShowcaseEvent } from "./buddyShowcaseDraw";
 import { drawBuddyWorld } from "./buddyWorldDraw";
-import type { BuddyWorldTokenPalette } from "./buddyWorldDrawHelpers";
+import type {
+  BuddyWorldActorTravel,
+  BuddyWorldTokenPalette,
+} from "./buddyWorldDrawHelpers";
 import { useTokens } from "../../components/ui";
 import {
   chooseBuddyWorldIntent,
@@ -104,6 +107,35 @@ const RANDOM_POSES = [
   "look",
 ] as const satisfies readonly BuddyScenePose[];
 
+const TRAVEL_DURATION_MS = 3_800;
+const ARRIVAL_SETTLE_MS = 620;
+const DEFAULT_SCENE_Y = 86;
+
+interface ScenePoint {
+  x: number;
+  y: number;
+}
+
+function easeTravelProgress(progress: number): number {
+  const t = Math.max(0, Math.min(1, progress));
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+function interpolateScenePosition(
+  travel: BuddyWorldActorTravel | null,
+  target: ScenePoint,
+  nowMs: number,
+): ScenePoint {
+  if (!travel) return target;
+  const progress = easeTravelProgress(
+    (nowMs - travel.startedAtMs) / Math.max(1, travel.durationMs),
+  );
+  return {
+    x: travel.fromXPercent + (target.x - travel.fromXPercent) * progress,
+    y: travel.fromYPercent + (target.y - travel.fromYPercent) * progress,
+  };
+}
+
 const WORLD_TOKEN_NAMES = [
   "--rf-color-accent",
   "--rf-color-accent-soft",
@@ -139,16 +171,27 @@ function clampBuddySceneX(x: number): number {
   return Math.max(BUDDY_MIN_X, Math.min(BUDDY_MAX_X, x));
 }
 
+const SHOWCASE_FIXTURE_TARGETS: readonly BuddyShowcaseTargetCandidate[] = [
+  { id: "home", x: 33, y: 76, label: "home" },
+  { id: "pond", x: 36, y: 82, label: "pond" },
+  { id: "campfire", x: 58, y: 81, label: "campfire" },
+  { id: "meadow", x: 47, y: 80, label: "meadow" },
+  { id: "great_tree", x: 34, y: 78, label: "great tree" },
+];
+
 function buildBuddyShowcaseTargets(
   world: BuddyWorldState,
 ): BuddyShowcaseTargetCandidate[] {
-  return world.objects.map((item) => ({
-    id: item.id,
-    x: item.x,
-    y: item.y,
-    label: item.label,
-    sprite: item.sprite,
-  }));
+  return [
+    ...world.objects.map((item) => ({
+      id: item.id,
+      x: item.x,
+      y: item.y,
+      label: item.label,
+      sprite: item.sprite,
+    })),
+    ...SHOWCASE_FIXTURE_TARGETS,
+  ];
 }
 
 function buildBuddyWaypoints(
@@ -355,6 +398,17 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     RecentDirectorIntent[]
   >([]);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+  const [travelState, setTravelState] = useState<BuddyWorldActorTravel | null>(
+    null,
+  );
+  const [travelPhase, setTravelPhase] = useState<
+    "idle" | "traveling" | "arrived"
+  >("idle");
+  const [travelDirection, setTravelDirection] = useState<"left" | "right">(
+    "right",
+  );
+  const sceneTargetRef = useRef<ScenePoint | null>(null);
+  const travelStateRef = useRef<BuddyWorldActorTravel | null>(null);
   const tokenValues = useTokens([...WORLD_TOKEN_NAMES]);
   const tokenPalette = useMemo(
     () => buildWorldTokenPalette(tokenValues),
@@ -465,6 +519,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const characterDepthScale = showcaseRun
     ? 1
     : effectiveDirectorIntent?.depthScale;
+  const characterSceneYEffective = characterSceneY ?? DEFAULT_SCENE_Y;
   const directorSpeech = effectiveDirectorIntent?.speech ?? null;
   const speechOverride = resolveBuddyWorldSpeechOverride({
     activeSpeechText: activeSpeech?.text ?? null,
@@ -487,25 +542,97 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     compact,
     speechOverride,
   );
+  const actorIntentKind = showcaseRun
+    ? null
+    : effectiveDirectorIntent?.kind ?? null;
   const renderStateRef = useRef({
+    actorIntentKind,
+    actorX: characterSceneX,
+    actorY: characterSceneYEffective,
     compact,
     palette,
     reducedMotion,
     showcaseRun,
     tokenPalette,
+    travel: travelState,
     world,
   });
 
   useEffect(() => {
     renderStateRef.current = {
+      actorIntentKind,
+      actorX: characterSceneX,
+      actorY: characterSceneYEffective,
       compact,
       palette,
       reducedMotion,
       showcaseRun,
       tokenPalette,
+      travel: travelState,
       world,
     };
-  }, [compact, palette, reducedMotion, showcaseRun, tokenPalette, world]);
+  }, [
+    actorIntentKind,
+    characterSceneX,
+    characterSceneYEffective,
+    compact,
+    palette,
+    reducedMotion,
+    showcaseRun,
+    tokenPalette,
+    travelState,
+    world,
+  ]);
+
+  useEffect(() => {
+    travelStateRef.current = travelState;
+  }, [travelState]);
+
+  useEffect(() => {
+    const target = { x: characterSceneX, y: characterSceneYEffective };
+    const previousTarget = sceneTargetRef.current;
+    sceneTargetRef.current = target;
+    if (!previousTarget) return;
+    if (
+      Math.abs(previousTarget.x - target.x) < 0.5 &&
+      Math.abs(previousTarget.y - target.y) < 0.5
+    ) {
+      return;
+    }
+    if (reducedMotion) {
+      setTravelState(null);
+      setTravelPhase("idle");
+      return;
+    }
+    const nowMs = Date.now();
+    const from = interpolateScenePosition(
+      travelStateRef.current,
+      previousTarget,
+      nowMs,
+    );
+    setTravelDirection(target.x >= from.x ? "right" : "left");
+    setTravelState({
+      fromXPercent: from.x,
+      fromYPercent: from.y,
+      startedAtMs: nowMs,
+      durationMs: TRAVEL_DURATION_MS,
+    });
+    setTravelPhase("traveling");
+    const arriveTimer = window.setTimeout(() => {
+      setTravelState(null);
+      setTravelPhase("arrived");
+    }, TRAVEL_DURATION_MS);
+    return () => window.clearTimeout(arriveTimer);
+  }, [characterSceneX, characterSceneYEffective, reducedMotion]);
+
+  useEffect(() => {
+    if (travelPhase !== "arrived") return;
+    const timer = window.setTimeout(
+      () => setTravelPhase("idle"),
+      ARRIVAL_SETTLE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [travelPhase]);
 
   useEffect(() => {
     setActiveWaypointIndex(0);
@@ -537,6 +664,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         world: {
           phase: world.phase,
           weather: world.weather,
+          layers: world.atmosphere.layers,
+          season: world.season,
         },
         pulse,
         identityName: state.name,
@@ -783,11 +912,15 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       animationStartMsRef.current ??= timestampMs;
       const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
       const {
+        actorIntentKind,
+        actorX,
+        actorY,
         compact,
         palette,
         reducedMotion,
         showcaseRun,
         tokenPalette,
+        travel,
         world,
       } = renderStateRef.current;
       const canvas = canvasRef.current;
@@ -817,6 +950,13 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           height: cssHeight,
           compact,
           reducedMotion,
+          actor: {
+            xPercent: actorX,
+            yPercent: actorY,
+            intentKind: actorIntentKind,
+            travel,
+            nowMs: Date.now(),
+          },
         });
         if (showcaseRun) {
           drawShowcaseEvent({
@@ -1032,6 +1172,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         sceneYPercent={characterSceneY}
         sceneDepthScale={characterDepthScale}
         scenePose={characterPose}
+        traveling={travelPhase === "traveling"}
+        arrived={travelPhase === "arrived"}
+        travelDirection={travelDirection}
+        envContext={{
+          phase: world.phase,
+          weather: world.weather,
+          season: world.season,
+        }}
         speechText={speechOverride}
         speechControls={activeSpeech ? activeSpeech.controls : undefined}
         speechIntent={activeSpeech?.speech_intent}

@@ -159,6 +159,11 @@ export function createInitialAnimState(): BuddyAnimState {
     armAnimPhase: 0,
     wingFlap: 0,
     dancePhase: 0,
+    sweatTimer: 0,
+    veinTimer: 0,
+    cheekPuffTimer: 0,
+    auraTimer: 0,
+    envTickCooldown: 240,
   };
 }
 

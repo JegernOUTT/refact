@@ -63,6 +63,14 @@ const IDLE_SHOWCASE_REPEAT_WEIGHT = 0.34;
 const SHOWCASE_KIND_ORDER: Record<BuddyShowcaseKind, number> = {
   memory_firefly_night: 0,
   stargazing_constellation: 1,
+  rain_shelter_dash: 2,
+  koi_pond_watch: 3,
+  campfire_story: 4,
+  firefly_meadow_chase: 5,
+  snow_sculpting: 6,
+  leaf_storm_play: 7,
+  aurora_dance: 8,
+  komorebi_nap: 9,
 };
 
 export interface BuddyShowcaseDefinition {
@@ -93,6 +101,55 @@ export const BUDDY_SHOWCASE_DEFINITIONS: Record<
     speech: (name) =>
       `${name} reads the model stars and traces a careful constellation.`,
   },
+  rain_shelter_dash: {
+    kind: "rain_shelter_dash",
+    targetId: "home",
+    pose: "look",
+    speech: (name) =>
+      `${name} dashes under the awning and watches the rain curtain.`,
+  },
+  koi_pond_watch: {
+    kind: "koi_pond_watch",
+    targetId: "pond",
+    pose: "look",
+    speech: (name) => `${name} holds a koi summit at the pond's edge.`,
+  },
+  campfire_story: {
+    kind: "campfire_story",
+    targetId: "campfire",
+    pose: "meditate",
+    speech: (name) => `${name} tells the embers a tiny heroic story.`,
+  },
+  firefly_meadow_chase: {
+    kind: "firefly_meadow_chase",
+    targetId: "meadow",
+    pose: "pounce",
+    speech: (name) => `${name} chases meadow fireflies in happy zigzags.`,
+  },
+  snow_sculpting: {
+    kind: "snow_sculpting",
+    targetId: "meadow",
+    pose: "dig",
+    speech: (name) => `${name} sculpts a tiny snow twin. It approves.`,
+  },
+  leaf_storm_play: {
+    kind: "leaf_storm_play",
+    targetId: "meadow",
+    pose: "bounce",
+    speech: (name) => `${name} leaps through a spiral of autumn leaves.`,
+  },
+  aurora_dance: {
+    kind: "aurora_dance",
+    targetId: "meadow",
+    pose: "dance",
+    speech: (name) => `${name} dances with the aurora ribbons.`,
+  },
+  komorebi_nap: {
+    kind: "komorebi_nap",
+    targetId: "great_tree",
+    pose: "sleepy",
+    speech: (name) => `${name} naps in the dappled light under the great tree.`,
+  },
 };
 
 export type BuddyShowcaseChoice = BuddyShowcaseDefinition;
@@ -104,6 +161,8 @@ export interface BuddyShowcaseTargetCandidate extends BuddyShowcaseTarget {
 export interface BuddyShowcaseWorldContext {
   phase: BuddyWorldPhase;
   weather: BuddyWorldWeather;
+  layers?: readonly string[];
+  season?: "spring" | "summer" | "autumn" | "winter";
 }
 
 export interface ChooseBuddyShowcaseArgs {
@@ -280,11 +339,80 @@ function worldScore(
   }
 }
 
+function hasContextLayer(
+  world: BuddyShowcaseWorldContext | undefined,
+  layer: string,
+): boolean {
+  return world?.layers?.includes(layer) ?? false;
+}
+
+function kindEligible(
+  world: BuddyShowcaseWorldContext | undefined,
+  kind: BuddyShowcaseKind,
+): boolean {
+  switch (kind) {
+    case "memory_firefly_night":
+    case "stargazing_constellation":
+      return true;
+    case "rain_shelter_dash":
+      return world?.weather === "rain";
+    case "koi_pond_watch":
+      return hasContextLayer(world, "pond_life");
+    case "campfire_story":
+      return hasContextLayer(world, "campfire");
+    case "firefly_meadow_chase":
+      return hasContextLayer(world, "fireflies");
+    case "snow_sculpting":
+      return hasContextLayer(world, "season_snow");
+    case "leaf_storm_play":
+      return hasContextLayer(world, "season_leaves");
+    case "aurora_dance":
+      return hasContextLayer(world, "aurora");
+    case "komorebi_nap":
+      return (
+        (world?.phase === "morning" || world?.phase === "day") &&
+        world.weather === "clear" &&
+        world.season !== undefined &&
+        world.season !== "winter"
+      );
+  }
+}
+
+function flavorScore(
+  world: BuddyShowcaseWorldContext | undefined,
+  kind: BuddyShowcaseKind,
+): number {
+  if (!world) return 0;
+  switch (kind) {
+    case "rain_shelter_dash":
+      return 20;
+    case "koi_pond_watch":
+      return world.phase === "day" ? 12 : 8;
+    case "campfire_story":
+      return 14;
+    case "firefly_meadow_chase":
+      return world.season === "summer" ? 14 : 10;
+    case "snow_sculpting":
+      return 12;
+    case "leaf_storm_play":
+      return world.weather === "wind" ? 14 : 10;
+    case "aurora_dance":
+      return 16;
+    case "komorebi_nap":
+      return 8;
+    case "memory_firefly_night":
+    case "stargazing_constellation":
+      return 0;
+  }
+}
+
 function scoreDefinition(
   args: ChooseBuddyShowcaseArgs,
   definition: BuddyShowcaseDefinition,
 ): number {
-  let score = worldScore(args.world, definition.kind);
+  let score =
+    worldScore(args.world, definition.kind) +
+    flavorScore(args.world, definition.kind);
   if (definition.kind === "memory_firefly_night") {
     score += memoryPulseScore(args.pulse);
   }
@@ -302,7 +430,9 @@ function chooseWeightedDefinition(
     `${bucket}:${args.world?.phase ?? "none"}:${args.world?.weather ?? "none"}`,
   );
   const targetDefinitions = Object.values(BUDDY_SHOWCASE_DEFINITIONS).filter(
-    (definition) => findTarget(args.targets, definition),
+    (definition) =>
+      kindEligible(args.world, definition.kind) &&
+      findTarget(args.targets, definition),
   );
   const eligibleDefinitions =
     args.lastShowcaseKind && targetDefinitions.length > 1

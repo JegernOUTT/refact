@@ -44,6 +44,20 @@ export interface DrawBuddyWorldBaseArgs {
   compact: boolean;
   reducedMotion: boolean;
 }
+export interface BuddyWorldActorTravel {
+  fromXPercent: number;
+  fromYPercent: number;
+  startedAtMs: number;
+  durationMs: number;
+}
+
+export interface BuddyWorldActor {
+  xPercent: number;
+  yPercent: number;
+  intentKind: string | null;
+  travel: BuddyWorldActorTravel | null;
+  nowMs: number;
+}
 
 const FALLBACK_TOKEN_PALETTE: BuddyWorldTokenPalette = {
   accent: "#60A5FA",

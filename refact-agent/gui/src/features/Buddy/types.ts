@@ -463,6 +463,11 @@ export interface BuddyAnimState {
   armAnimPhase: number;
   wingFlap: number;
   dancePhase: number;
+  sweatTimer: number;
+  veinTimer: number;
+  cheekPuffTimer: number;
+  auraTimer: number;
+  envTickCooldown: number;
 }
 
 export interface ColorMap {
@@ -506,7 +511,15 @@ export type BuddyScenePose =
 
 export type BuddyShowcaseKind =
   | "memory_firefly_night"
-  | "stargazing_constellation";
+  | "stargazing_constellation"
+  | "rain_shelter_dash"
+  | "koi_pond_watch"
+  | "campfire_story"
+  | "firefly_meadow_chase"
+  | "snow_sculpting"
+  | "leaf_storm_play"
+  | "aurora_dance"
+  | "komorebi_nap";
 
 export type BuddyShowcasePhase =
   | "travel"
@@ -534,12 +547,19 @@ export interface BuddyShowcaseRun {
   phaseStartedAtMs: number;
 }
 
+export interface BuddyEnvContext {
+  phase: "morning" | "day" | "evening" | "night";
+  weather: "clear" | "aurora" | "busy" | "wind" | "rain" | "storm" | "dream";
+  season: "spring" | "summer" | "autumn" | "winter";
+}
+
 export interface BuddyCanvasProps {
   state: BuddySemanticState;
   onEvent?: (event: BuddyEvent) => void;
   displaySize?: number;
   className?: string;
   style?: React.CSSProperties;
+  envContext?: BuddyEnvContext | null;
   /** Override speech bubble text (from runtime/backend), takes priority over canvas statusText */
   speechOverride?: string | null;
   /** Buttons rendered inside the speech bubble */

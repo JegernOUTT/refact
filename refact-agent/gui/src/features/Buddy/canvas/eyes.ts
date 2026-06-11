@@ -468,6 +468,22 @@ export function drawMouth(
     return;
   }
 
+  if (anim.cheekPuffTimer > 0) {
+    fillRect(ctx, mx + 1, my + 1, width - 2, 1, m.eyeDark);
+    fillPixel(ctx, mx, my, 1, 1, m.eyeDark);
+    fillPixel(ctx, mx + width - 1, my, 1, 1, m.eyeDark);
+    return;
+  }
+
+  if (style === "wide") {
+    fillPixel(ctx, mx + 1, my - 1, width - 2, 1, m.eyeDark);
+    fillPixel(ctx, mx, my, 1, 2, m.eyeDark);
+    fillPixel(ctx, mx + width - 1, my, 1, 2, m.eyeDark);
+    fillPixel(ctx, mx + 1, my + 2, width - 2, 1, m.eyeDark);
+    fillPixel(ctx, mx + 1, my, width - 2, 2, m.black);
+    return;
+  }
+
   if (style === "squint" || style === "uwu") {
     fillPixel(ctx, mx - 1, my, 1, 1, m.eyeDark);
     fillPixel(ctx, mx, my + 1, 1, 1, m.eyeDark);
@@ -478,6 +494,14 @@ export function drawMouth(
   }
 
   if (mood === "happy" || mood === "celebrate") {
+    if (mood === "celebrate" && anim.successStreak >= 2) {
+      fillRect(ctx, mx, my, width, 3, m.eyeDark);
+      fillRect(ctx, mx + 1, my, width - 2, 1, m.white);
+      fillRect(ctx, mx + 1, my + 2, width - 2, 1, m.rosy);
+      fillPixel(ctx, mx - 1, my - 1, 1, 1, m.eyeDark);
+      fillPixel(ctx, mx + width, my - 1, 1, 1, m.eyeDark);
+      return;
+    }
     fillPixel(ctx, mx - 1, my, 1, 1, m.eyeDark);
     fillRect(ctx, mx, my + 1, width, 1, m.eyeDark);
     fillPixel(ctx, mx + width, my, 1, 1, m.eyeDark);
@@ -485,7 +509,10 @@ export function drawMouth(
   }
 
   if (style === "X" || style === "angry") {
-    fillRect(ctx, mx, my + 1, width, 1, m.eyeDark);
+    fillRect(ctx, mx, my, width, 2, m.eyeDark);
+    for (let tooth = 0; tooth < width; tooth += 2) {
+      fillPixel(ctx, mx + tooth, my, 1, 1, m.white);
+    }
     if (Math.floor(frame / 4) % 3 === 0)
       fillPixel(ctx, mx + ((width / 2) | 0), my + 1, 1, 1, m.white);
     return;

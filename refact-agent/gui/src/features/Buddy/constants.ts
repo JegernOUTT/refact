@@ -776,4 +776,10 @@ export const STATUS_POOLS = {
     "*overstimulated*",
     "personal space!!",
   ],
+  env_rain: ["drip drip...", "rain song ♪", "cozy rain vibes", "puddle watch"],
+  env_snow: ["brrr...", "*breath puff*", "snowflakes!!", "cold paws!!"],
+  env_summer: ["so warm...", "*melts a little*", "shade please~", "phew~"],
+  env_aurora: ["sky ribbons...", "✨ whoa ✨", "the lights dance~"],
+  env_wind: ["whoosh~", "*ears flapping*", "windy!!", "hold on tight!"],
+  env_storm: ["eep- thunder!", "*hides a little*", "storm watch duty"],
 } as const;

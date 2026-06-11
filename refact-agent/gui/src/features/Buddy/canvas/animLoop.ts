@@ -21,6 +21,7 @@ import type {
   AnimBeat,
   BuddyAnimState,
   BuddyArmPose,
+  BuddyEnvContext,
   BuddySemanticState,
   BuddyEvent,
   IdleActionType,
@@ -780,6 +781,127 @@ function updateBodyLanguage(
   anim.armPose = resolveArmPose(anim);
 }
 
+function applyEnvironmentTick(
+  anim: BuddyAnimState,
+  semantic: BuddySemanticState,
+  env: BuddyEnvContext | null,
+  emit: (e: BuddyEvent) => void,
+): void {
+  anim.envTickCooldown = 200 + Math.floor(Math.random() * 260);
+  if (!env) return;
+  if (anim.dragging || anim.toyActive) return;
+  const idle = semantic.activity.animationType === "idle";
+  const cx = CANVAS_CENTER_X + anim.walkOffsetX;
+  const roll = Math.random();
+
+  switch (env.weather) {
+    case "rain": {
+      anim.earState = Math.min(anim.earState, -0.5);
+      if (idle) {
+        anim.nextIdleBias = {
+          ...anim.nextIdleBias,
+          shakeOff: 2.2,
+          peekAround: 1.4,
+        };
+      }
+      if (roll < 0.3) {
+        anim.cursorTargetY = -0.8;
+        anim.saccadeFrames = 3;
+        anim.gazeSettleFrames = 70;
+      }
+      if (roll > 0.72 && idle) say(anim, pickFrom(STATUS_POOLS.env_rain), -20);
+      return;
+    }
+    case "storm": {
+      anim.shiverTimer = Math.max(anim.shiverTimer, 22);
+      anim.eyeStyle = "wide";
+      anim.eyeStyleTimer = Math.max(anim.eyeStyleTimer, 46);
+      if (roll < 0.4) say(anim, pickFrom(STATUS_POOLS.env_storm), -20);
+      emit({
+        type: "semantic_update",
+        patch: {
+          mood: {
+            ...semantic.mood,
+            anxiety: Math.min(100, semantic.mood.anxiety + 4),
+          },
+        },
+      });
+      return;
+    }
+    case "wind": {
+      anim.earTwitchTimer = Math.max(anim.earTwitchTimer, 12);
+      anim.earTwitchSide = roll < 0.5 ? -1 : 1;
+      if (roll < 0.3) {
+        spawnFloatingEmoji(anim, "🍃", cx - 14, CANVAS_CENTER_Y - 18);
+      }
+      if (roll > 0.78 && idle) say(anim, pickFrom(STATUS_POOLS.env_wind), -30);
+      return;
+    }
+    case "aurora": {
+      if (idle) {
+        anim.nextIdleBias = {
+          ...anim.nextIdleBias,
+          daydream: 2.6,
+          peekCamera: 1.3,
+        };
+      }
+      if (roll < 0.32) {
+        anim.eyeStyle = "star";
+        anim.eyeStyleTimer = Math.max(anim.eyeStyleTimer, 90);
+        anim.cursorTargetY = -0.7;
+        anim.gazeSettleFrames = 90;
+      }
+      if (roll > 0.74 && idle) {
+        say(anim, pickFrom(STATUS_POOLS.env_aurora), -20);
+      }
+      return;
+    }
+    case "dream":
+    case "busy":
+    case "clear":
+      break;
+  }
+
+  switch (env.season) {
+    case "winter": {
+      if (idle && roll < 0.5) {
+        anim.shiverTimer = Math.max(anim.shiverTimer, 24);
+        spawnSparks(anim, 2, "#E8F4FB");
+      }
+      if (idle) {
+        anim.nextIdleBias = { ...anim.nextIdleBias, doze: 1.5, shiver: 1.8 };
+      }
+      if (roll > 0.8 && idle) say(anim, pickFrom(STATUS_POOLS.env_snow), -20);
+      return;
+    }
+    case "summer": {
+      if (env.phase === "day" && semantic.mood.energy < 48 && roll < 0.5) {
+        anim.pantTimer = Math.max(anim.pantTimer, 80);
+        anim.sweatTimer = Math.max(anim.sweatTimer, 96);
+      }
+      if (idle) {
+        anim.nextIdleBias = { ...anim.nextIdleBias, daydream: 1.5, doze: 1.4 };
+      }
+      if (roll > 0.82 && idle) {
+        say(anim, pickFrom(STATUS_POOLS.env_summer), -20);
+      }
+      return;
+    }
+    case "spring":
+    case "autumn": {
+      if ((env.phase === "day" || env.phase === "morning") && idle) {
+        anim.nextIdleBias = {
+          ...anim.nextIdleBias,
+          sniff: 1.6,
+          lookAround: 1.3,
+          daydream: 1.4,
+        };
+      }
+      return;
+    }
+  }
+}
+
 const FRIENDLY_REACTION_SIGNALS = new Set([
   "speech_humor",
   "speech_insight",
@@ -921,9 +1043,21 @@ export function triggerSignalAnimation(
   if (def.isError) {
     anim.errorStreak++;
     anim.successStreak = 0;
+    if (anim.errorStreak >= 2) {
+      anim.veinTimer = Math.max(anim.veinTimer, 150);
+    }
   } else if (def.isWin) {
     anim.successStreak++;
     anim.errorStreak = Math.max(0, anim.errorStreak - 1);
+    if (anim.successStreak >= 3) {
+      anim.auraTimer = Math.max(anim.auraTimer, 170);
+    }
+  }
+  if (signalType === "task_failed") {
+    anim.cheekPuffTimer = Math.max(anim.cheekPuffTimer, 90);
+  }
+  if (signalType === "skill_learned") {
+    anim.auraTimer = Math.max(anim.auraTimer, 280);
   }
 
   if (def.isError) {
@@ -1098,6 +1232,7 @@ export function triggerSignalAnimation(
   if (signalType === "stage_up") {
     anim.activeSceneTimer = 360;
     anim.celebrationTimer = 360;
+    anim.auraTimer = 360;
     spawnRainbowSparks(anim, 60);
     spawnFloatingEmoji(anim, "🌟", undefined, CANVAS_CENTER_Y - 30, 5);
     spawnFloatingEmoji(anim, "⬆", undefined, CANVAS_CENTER_Y - 20, 4);
@@ -1619,6 +1754,7 @@ export function stepAnimFrame(
   anim: BuddyAnimState,
   semantic: BuddySemanticState,
   emit: (e: BuddyEvent) => void,
+  env: BuddyEnvContext | null = null,
 ): void {
   anim.frame++;
 
@@ -1645,6 +1781,18 @@ export function stepAnimFrame(
   if (anim.blushTimer > 0) anim.blushTimer--;
   if (anim.earTwitchTimer > 0) anim.earTwitchTimer--;
   if (anim.shiverTimer > 0) anim.shiverTimer--;
+  if (anim.sweatTimer > 0) anim.sweatTimer--;
+  if (anim.veinTimer > 0) anim.veinTimer--;
+  if (anim.cheekPuffTimer > 0) anim.cheekPuffTimer--;
+  if (anim.auraTimer > 0) anim.auraTimer--;
+  if (
+    anim.heat > 72 &&
+    anim.sweatTimer === 0 &&
+    anim.frame % 40 === 0 &&
+    anim.pantTimer === 0
+  ) {
+    anim.sweatTimer = 110;
+  }
 
   if (anim.combo.displayTimer > 0 && anim.frame % 6 === 0) {
     anim.sparks.push({
@@ -1830,6 +1978,9 @@ export function stepAnimFrame(
 
   if (anim.frame % 30 === 0) updateMoodDrift(anim, semantic, emit);
 
+  if (anim.envTickCooldown > 0) anim.envTickCooldown--;
+  else applyEnvironmentTick(anim, semantic, env, emit);
+
   if (anim.activeScene) {
     if (anim.activeSceneTimer > 0) {
       anim.activeSceneTimer--;
@@ -1978,6 +2129,7 @@ export function handlePet(
     anim.eyeStyleTimer = 80;
     anim.squashTargetX = 0.95;
     anim.squashTargetY = 1.05;
+    anim.cheekPuffTimer = Math.max(anim.cheekPuffTimer, 110);
     say(anim, pickFrom(STATUS_POOLS.pet_max), -20);
     if (s === 15)
       spawnFloatingEmoji(anim, "💢", buddyX + 10, CANVAS_CENTER_Y - 20);

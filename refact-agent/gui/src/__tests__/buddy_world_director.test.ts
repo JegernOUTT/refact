@@ -479,3 +479,91 @@ describe("buddy world director", () => {
     expectSafeIntent(intent);
   });
 });
+
+describe("buddy world director seasonal flavor", () => {
+  it("splashes puddles when rain falls over a calm grove", () => {
+    const now = new Date(2024, 0, 1, 14, 0, 0);
+    const world = buildBuddyWorldState({
+      now,
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    const intent = chooseBuddyWorldIntent({
+      world: { ...world, weather: "rain" },
+      previousIntent: null,
+      nowMs: now.getTime(),
+      activeSpeechVisible: false,
+      showcaseActive: false,
+      localReactionVisible: false,
+      reducedMotion: false,
+    });
+
+    expect(intent?.kind).toBe("splash_puddles");
+    expect(intent?.pose).toBe("bounce");
+    expectSafeIntent(intent);
+  });
+
+  it("naps under the great tree on lush spring days", () => {
+    const now = new Date(2024, 3, 1, 14, 0, 0);
+    const world = buildBuddyWorldState({
+      now,
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    const intent = chooseBuddyWorldIntent({
+      world,
+      previousIntent: null,
+      nowMs: now.getTime(),
+      activeSpeechVisible: false,
+      showcaseActive: false,
+      localReactionVisible: false,
+      reducedMotion: false,
+      recentIntentKinds: [
+        "smell_flowers",
+        "chase_butterfly",
+        "watch_birds",
+        "visit_pond",
+      ],
+    });
+
+    expect(intent?.kind).toBe("nap_under_tree");
+    expect(intent?.pose).toBe("sleepy");
+    expectSafeIntent(intent);
+  });
+
+  it("greets kodama at night after cozy routines rest", () => {
+    const intent = buildIntent({
+      hour: 23,
+      recentIntentKinds: [
+        "night_watch",
+        "warm_by_fire",
+        "watch_shooting_star",
+        "play_in_snow",
+      ],
+    });
+
+    expect(intent?.kind).toBe("greet_kodama");
+    expectSafeIntent(intent);
+  });
+
+  it("chases soot sprites once the kodama greeting rests", () => {
+    const intent = buildIntent({
+      hour: 23,
+      recentIntentKinds: [
+        "night_watch",
+        "warm_by_fire",
+        "watch_shooting_star",
+        "play_in_snow",
+        "greet_kodama",
+      ],
+    });
+
+    expect(intent?.kind).toBe("chase_soot_sprites");
+    expect(intent?.pose).toBe("pounce");
+    expectSafeIntent(intent);
+  });
+});

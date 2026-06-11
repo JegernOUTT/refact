@@ -216,6 +216,22 @@
   opacity: 0.94;
 }
 
+.characterBody[data-traveling="true"] {
+  animation: buddySceneTravelHop 0.56s ease-in-out infinite;
+}
+
+.characterBody[data-traveling="true"][data-travel-direction="right"] {
+  rotate: 2.2deg;
+}
+
+.characterBody[data-traveling="true"][data-travel-direction="left"] {
+  rotate: -2.2deg;
+}
+
+.characterBody[data-arrived="true"] {
+  animation: buddySceneArrive 0.58s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
 .waypointPing {
   position: absolute;
   z-index: 3;
@@ -416,6 +432,39 @@
 
   50% {
     transform: translateY(-4px);
+  }
+}
+
+@keyframes buddySceneTravelHop {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+
+  30% {
+    transform: translateY(-7px) scaleY(1.04);
+  }
+
+  62% {
+    transform: translateY(-2px) scaleY(0.99);
+  }
+
+  82% {
+    transform: translateY(0) scaleY(0.965);
+  }
+}
+
+@keyframes buddySceneArrive {
+  0% {
+    transform: translateY(-4px) scale(1.04, 0.92);
+  }
+
+  45% {
+    transform: translateY(1px) scale(0.96, 1.05);
+  }
+
+  100% {
+    transform: translateY(0) scale(1, 1);
   }
 }
 

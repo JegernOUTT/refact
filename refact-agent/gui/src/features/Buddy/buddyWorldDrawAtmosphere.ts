@@ -285,6 +285,54 @@ export function drawObservatoryStructures(args: DrawBuddyWorldBaseArgs): void {
 
   drawSkyStructures(args);
 }
+const HORIZON_HAZE_TINTS: Record<
+  BuddyWorldState["atmosphere"]["paletteHint"],
+  string
+> = {
+  dawn: "#F8E3C0",
+  day: "#DCEFF8",
+  dusk: "#F0B98A",
+  night: "#3D5587",
+  dream: "#C6B4E6",
+  storm: "#9FAEBD",
+};
+
+export function drawHorizonHaze(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const tint = HORIZON_HAZE_TINTS[worldPaletteHint(args.world)];
+  const baseY = height * 0.645;
+  const breathe = wave(frame, 210, 0, 2.2, args.reducedMotion);
+
+  fillEllipse(
+    args.ctx,
+    width * 0.5,
+    baseY + breathe,
+    width * 0.62,
+    height * 0.085,
+    tint,
+    alphaForMotion(0.16, args.reducedMotion),
+  );
+  fillEllipse(
+    args.ctx,
+    width * 0.26,
+    baseY + 7 - breathe * 0.5,
+    width * 0.3,
+    height * 0.05,
+    tint,
+    alphaForMotion(0.11, args.reducedMotion),
+  );
+  fillEllipse(
+    args.ctx,
+    width * 0.76,
+    baseY + 9 + breathe * 0.4,
+    width * 0.26,
+    height * 0.045,
+    tint,
+    alphaForMotion(0.1, args.reducedMotion),
+  );
+}
 
 export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
   const { ctx, world } = args;

@@ -26,7 +26,11 @@ export type BuddyWorldIntentKind =
   | "tend_garden"
   | "chase_butterfly"
   | "watch_birds"
-  | "visit_pond";
+  | "visit_pond"
+  | "splash_puddles"
+  | "nap_under_tree"
+  | "greet_kodama"
+  | "chase_soot_sprites";
 
 export interface BuddyWorldIntent {
   id: string;
@@ -80,6 +84,7 @@ const SAFE_TARGETS = {
   campfire: { targetX: 58, targetY: 81, depthScale: 1.05 },
   mailbox: { targetX: 35, targetY: 76, depthScale: 0.94 },
   meadow: { targetX: 47, targetY: 80, depthScale: 1.02 },
+  greatTree: { targetX: 34, targetY: 78, depthScale: 0.98 },
 } as const satisfies Record<string, IntentTarget>;
 
 function clampRange(
@@ -556,6 +561,20 @@ export function chooseBuddyWorldIntent(
 
   const flavorCandidates: BuddyWorldIntent[] = [];
 
+  if (args.world.weather === "rain") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "splash_puddles",
+        target: SAFE_TARGETS.meadow,
+        pose: "bounce",
+        speech: "Puddle physics research. Very important.",
+        durationMs: 8_800,
+        priority: 26,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
   if (hasLayer(args.world, "campfire")) {
     flavorCandidates.push(
       makeIntent({
@@ -680,6 +699,53 @@ export function chooseBuddyWorldIntent(
         speech: "The koi shared confidential pond gossip.",
         durationMs: 8_400,
         priority: 14,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (
+    (args.world.phase === "day" || args.world.phase === "morning") &&
+    args.world.weather === "clear" &&
+    args.world.season !== "winter" &&
+    args.world.vitality === "lush"
+  ) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "nap_under_tree",
+        target: SAFE_TARGETS.greatTree,
+        pose: "sleepy",
+        speech: "The leaf shade is perfect. Quick recharge nap.",
+        durationMs: 11_200,
+        priority: 18,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (args.world.phase === "night") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "greet_kodama",
+        target: SAFE_TARGETS.greatTree,
+        pose: "look",
+        speech: "The little forest spirits are out. Waving politely.",
+        durationMs: 9_200,
+        priority: 15,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (args.world.phase === "evening" || args.world.phase === "night") {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "chase_soot_sprites",
+        target: SAFE_TARGETS.home,
+        pose: "pounce",
+        speech: "Soot sprites!! Tiny, fast, suspicious.",
+        durationMs: 8_600,
+        priority: 13,
         nowMs: args.nowMs,
         reducedMotion: args.reducedMotion,
       }),

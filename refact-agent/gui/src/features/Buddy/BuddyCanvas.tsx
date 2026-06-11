@@ -17,6 +17,7 @@ import {
 import type {
   BuddyCanvasProps,
   BuddyAnimState,
+  BuddyEnvContext,
   BuddySemanticState,
   BuddyEvent,
   BubblePosition,
@@ -176,6 +177,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   displaySize = 512,
   className,
   style,
+  envContext,
   speechOverride,
   speechControls,
   speechIntent,
@@ -188,6 +190,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<BuddyAnimState>(createInitialAnimState());
   const semanticRef = useRef<BuddySemanticState>(state);
+  const envRef = useRef<BuddyEnvContext | null>(envContext ?? null);
   const prevSignalTimeRef = useRef<number>(0);
   const frameIdRef = useRef<number>(0);
   const [bubbleView, setBubbleView] = useState<BubbleView>(() => ({
@@ -237,6 +240,10 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     semanticRef.current = state;
   }, [state]);
 
+  useEffect(() => {
+    envRef.current = envContext ?? null;
+  }, [envContext]);
+
   const emit = useCallback(
     (event: BuddyEvent) => {
       onEvent?.(event);
@@ -271,7 +278,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       const ctx = canvasRef.current?.getContext("2d");
       if (ctx) {
         const sem = semanticRef.current;
-        stepAnimFrame(animRef.current, sem, emit);
+        stepAnimFrame(animRef.current, sem, emit, envRef.current);
         renderFrame(ctx, animRef.current, sem);
 
         const anim = animRef.current;

@@ -30,6 +30,7 @@ type MockCanvasContext = Pick<
   | "restore"
   | "save"
   | "stroke"
+  | "translate"
 > &
   Partial<CanvasRenderingContext2D>;
 
@@ -193,6 +194,9 @@ function makeCanvasContext(): RecordedCanvasContext {
     stroke: vi.fn(() =>
       drawOps.push(`stroke:${String(strokeStyleValue)}:${globalAlphaValue}`),
     ),
+    translate: vi.fn((x: number, y: number) => {
+      drawOps.push(`translate:${formatNumber(x)}:${formatNumber(y)}`);
+    }),
     font: "10px monospace",
     get fillStyle() {
       return fillStyleValue;
@@ -975,6 +979,115 @@ describe("drawBuddyWorld", () => {
       overlays.every((overlay) => overlay.alpha >= 0 && overlay.alpha <= 1),
     ).toBe(true);
     expect(fillRectStyleCount(ctx, "#FACC15")).toBeGreaterThanOrEqual(2);
+    expectHealthyDraw(ctx);
+  });
+  it("emits parallax translate bands for standard motion only", () => {
+    const world = makeWorld({ now: new Date("2024-01-01T23:00:00") });
+    const standardCtx = drawWorldWithOptions(world, { frame: 240 });
+    const reducedCtx = drawWorldWithOptions(world, {
+      frame: 240,
+      reducedMotion: true,
+    });
+    const translates = standardCtx.drawOps.filter((operation) =>
+      operation.startsWith("translate:"),
+    );
+
+    expect(translates.length).toBeGreaterThan(0);
+    expect(
+      reducedCtx.drawOps.some((operation) =>
+        operation.startsWith("translate:"),
+      ),
+    ).toBe(false);
+    expectHealthyDraw(standardCtx);
+    expectHealthyDraw(reducedCtx);
+  });
+
+  it("draws journey dust while the actor travels and accents after arrival", () => {
+    const world = makeWorld();
+    const baseCtx = drawWorld(world);
+    const travelingCtx = makeCanvasContext();
+    const arrivedCtx = makeCanvasContext();
+    const baseArgs = {
+      world,
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+    };
+
+    drawBuddyWorld({
+      ctx: travelingCtx,
+      ...baseArgs,
+      actor: {
+        xPercent: 58,
+        yPercent: 81,
+        intentKind: "warm_by_fire",
+        travel: {
+          fromXPercent: 33,
+          fromYPercent: 76,
+          startedAtMs: 0,
+          durationMs: 3_800,
+        },
+        nowMs: 1_900,
+      },
+    });
+    drawBuddyWorld({
+      ctx: arrivedCtx,
+      ...baseArgs,
+      actor: {
+        xPercent: 36,
+        yPercent: 82,
+        intentKind: "visit_pond",
+        travel: null,
+        nowMs: 9_000,
+      },
+    });
+
+    const dustOps = travelingCtx.drawOps.filter((operation) =>
+      operation.startsWith("fill:#D6CDBF"),
+    );
+    const rippleOps = arrivedCtx.drawOps.filter((operation) =>
+      operation.startsWith("stroke:#7DD3FC"),
+    );
+
+    expect(dustOps.length).toBeGreaterThan(0);
+    expect(rippleOps.length).toBeGreaterThan(0);
+    expect(
+      baseCtx.drawOps.some((operation) => operation.startsWith("fill:#D6CDBF")),
+    ).toBe(false);
+    expectHealthyDraw(travelingCtx);
+    expectHealthyDraw(arrivedCtx);
+  });
+
+  it("keeps actor drawing finite with hostile travel inputs", () => {
+    const world = makeWorld();
+    const ctx = makeCanvasContext();
+
+    drawBuddyWorld({
+      ctx,
+      world,
+      palette: PALETTES[0],
+      frame: Number.NaN,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: Number.POSITIVE_INFINITY,
+        yPercent: Number.NaN,
+        intentKind: "splash_puddles",
+        travel: {
+          fromXPercent: Number.NEGATIVE_INFINITY,
+          fromYPercent: Number.NaN,
+          startedAtMs: Number.NaN,
+          durationMs: 0,
+        },
+        nowMs: Number.POSITIVE_INFINITY,
+      },
+    });
+
     expectHealthyDraw(ctx);
   });
 });

@@ -18,7 +18,78 @@ import {
   STAGE_SIZES,
   PALETTES,
 } from "../constants";
-import type { BuddyAnimState, BuddySemanticState } from "../types";
+import type { BuddyAnimState, BuddySemanticState, ColorMap } from "../types";
+
+function drawExpressionOverlays(
+  ctx: CanvasRenderingContext2D,
+  anim: BuddyAnimState,
+  ox: number,
+  oy: number,
+  spriteW: number,
+  spriteH: number,
+  m: ColorMap,
+): void {
+  if (anim.cheekPuffTimer > 0) {
+    const puff = Math.min(1, anim.cheekPuffTimer / 24);
+    const cheekY = oy + Math.round(spriteH * 0.58);
+    ctx.globalAlpha = 0.85 * puff;
+    fillRect(ctx, ox + 1, cheekY, 4, 3, m.body);
+    fillRect(ctx, ox + spriteW - 5, cheekY, 4, 3, m.body);
+    ctx.globalAlpha = 0.55 * puff;
+    fillRect(ctx, ox + 2, cheekY + 1, 2, 1, m.rosy);
+    fillRect(ctx, ox + spriteW - 4, cheekY + 1, 2, 1, m.rosy);
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.sweatTimer > 0) {
+    const slide = (1 - anim.sweatTimer / 110) * 7;
+    const dropX = ox + spriteW - 3;
+    const dropY = oy + 1 + slide;
+    ctx.globalAlpha = anim.sweatTimer < 20 ? anim.sweatTimer / 20 : 0.92;
+    fillPixel(ctx, dropX, dropY, 2, 3, "#9DD6F2");
+    fillPixel(ctx, dropX, dropY + 1, 1, 1, "#E3F5FD");
+    fillPixel(ctx, dropX + 1, dropY - 1, 1, 1, "#9DD6F2");
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.veinTimer > 0) {
+    const pulse = 0.55 + Math.abs(Math.sin(anim.frame * 0.18)) * 0.45;
+    const vx = ox + spriteW - 1;
+    const vy = oy - 3;
+    ctx.globalAlpha = pulse * Math.min(1, anim.veinTimer / 30);
+    fillPixel(ctx, vx, vy + 1, 3, 1, "#F87171");
+    fillPixel(ctx, vx + 1, vy, 1, 3, "#F87171");
+    fillPixel(ctx, vx - 2, vy + 3, 2, 1, "#F87171");
+    fillPixel(ctx, vx - 1, vy + 2, 1, 3, "#F87171");
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.auraTimer > 0) {
+    const fade = Math.min(1, anim.auraTimer / 40);
+    const auraCX = ox + spriteW / 2;
+    const auraCY = oy + spriteH / 2;
+    for (let i = 0; i < 6; i++) {
+      const a = anim.frame * 0.045 + (i * Math.PI) / 3;
+      const px = auraCX + Math.cos(a) * (spriteW / 2 + 6);
+      const py = auraCY + Math.sin(a) * (spriteH / 2 + 4);
+      ctx.globalAlpha = (0.4 + Math.sin(anim.frame * 0.1 + i) * 0.3) * fade;
+      fillPixel(ctx, px, py, 1, 1, m.gold);
+      if (i % 2 === 0) {
+        fillPixel(ctx, px, py - 1, 1, 1, "#FFF7CC");
+      }
+    }
+    ctx.globalAlpha = 0.12 * fade;
+    strokeEllipse(
+      ctx,
+      auraCX,
+      auraCY + spriteH / 2 + 2,
+      spriteW / 2 + 4,
+      3,
+      m.gold,
+    );
+    ctx.globalAlpha = 1;
+  }
+}
 
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
@@ -160,6 +231,7 @@ export function renderFrame(
     );
     ctx.globalAlpha = 1;
   }
+  drawExpressionOverlays(ctx, anim, ox, oy, spriteW, spriteH, m);
   ctx.restore();
   ctx.restore();
 

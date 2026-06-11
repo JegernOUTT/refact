@@ -66,10 +66,14 @@ import {
 } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import {
+  stepAnimFrame,
   triggerSignalAnimation,
   updateSceneAnimation,
 } from "../features/Buddy/canvas/animLoop";
-import { createInitialAnimState } from "../features/Buddy/state";
+import {
+  createInitialAnimState,
+  createInitialSemanticState,
+} from "../features/Buddy/state";
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
 import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
@@ -6114,5 +6118,61 @@ describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
       ),
     );
     expect(screen.getByTestId("copy-crash-thread-json")).toBeInTheDocument();
+  });
+});
+
+describe("buddy expression FX", () => {
+  test("raises the anime vein pop after consecutive errors", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "chat_error", () => undefined, semantic);
+    expect(anim.veinTimer).toBe(0);
+    triggerSignalAnimation(anim, "chat_error", () => undefined, semantic);
+    expect(anim.veinTimer).toBeGreaterThan(0);
+  });
+
+  test("raises the gold aura on win streaks and stage up", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    expect(anim.auraTimer).toBe(0);
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    expect(anim.auraTimer).toBeGreaterThan(0);
+
+    const stageAnim = createInitialAnimState();
+    triggerSignalAnimation(stageAnim, "stage_up", () => undefined, semantic);
+    expect(stageAnim.auraTimer).toBeGreaterThanOrEqual(360);
+  });
+
+  test("puffs cheeks on task failure", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "task_failed", () => undefined, semantic);
+    expect(anim.cheekPuffTimer).toBeGreaterThan(0);
+  });
+
+  test("applies storm environment pressure when the env tick fires", () => {
+    const anim = createInitialAnimState();
+    anim.envTickCooldown = 0;
+    const semantic = createInitialSemanticState();
+    const patches: unknown[] = [];
+    stepAnimFrame(anim, semantic, (event) => patches.push(event), {
+      phase: "night",
+      weather: "storm",
+      season: "winter",
+    });
+    expect(anim.shiverTimer).toBeGreaterThan(0);
+    expect(anim.envTickCooldown).toBeGreaterThan(0);
+    expect(patches.length).toBeGreaterThan(0);
+  });
+
+  test("keeps stepping without an environment context", () => {
+    const anim = createInitialAnimState();
+    anim.envTickCooldown = 0;
+    const semantic = createInitialSemanticState();
+    stepAnimFrame(anim, semantic, () => undefined);
+    expect(anim.envTickCooldown).toBeGreaterThan(0);
+    expect(anim.frame).toBe(1);
   });
 });
