@@ -1,134 +1,116 @@
-.outer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  min-width: 0;
-}
-
 .panel {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-3);
-  min-width: 0;
-  padding: var(--rf-panel-pad);
-  border-color: var(--rf-border);
-  box-shadow: var(--rf-elev-panel);
-}
-
-.panelHeader,
-.questHeader,
-.questProgressRow,
-.traitHeader,
-.needHeader {
-  display: flex;
-  justify-content: space-between;
   gap: var(--rf-space-2);
+  height: 100%;
   min-width: 0;
-}
-
-.panelHeader,
-.questHeader {
-  align-items: flex-start;
-}
-
-.panelTitleGroup,
-.personaSection,
-.needsGrid,
-.traitsGrid,
-.listContent {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.panelTitleGroup {
-  gap: var(--rf-space-2xs);
-}
-
-.sectionLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
-.personalitySummary,
-.questDescription {
-  color: var(--rf-color-muted);
-  line-height: 1.5;
-}
-
-.personalitySummary {
-  display: -webkit-box;
+  min-height: 0;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.personaGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--rf-space-3);
-  align-items: start;
-  min-width: 0;
-}
-
-.personaSection {
-  gap: var(--rf-space-2);
   padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
 }
 
-.needsGrid,
-.traitsGrid {
-  gap: var(--rf-space-2);
-}
-
-.needRow,
-.traitRow {
+.archetype {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2xs);
   min-width: 0;
 }
 
-.needHeader,
-.traitHeader,
-.questProgressRow {
-  color: var(--rf-color-muted);
-  font-size: 11px;
-}
-
-.traitName,
-.traitValue,
-.needName,
-.needValue {
+.archetypeName,
+.vibe {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.traitName {
+.scrollBody {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--rf-color-muted);
+  line-height: 1.5;
+}
+
+.sectionLabel {
+  color: var(--rf-color-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.meterColumns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-3);
+  align-items: start;
+  min-width: 0;
+}
+
+.meterSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.meterRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+}
+
+.meterHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: 11px;
+}
+
+.meterName,
+.meterValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meterName {
   text-transform: capitalize;
 }
 
-.traitValue,
-.needValue {
+.meterValue {
   flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-.needBar,
-.questProgressBar {
+.meterBar {
   overflow: hidden;
-  height: 6px;
+  height: 4px;
   border-radius: var(--rf-radius-pill);
   background: var(--rf-surface-2);
 }
 
-.needFill,
-.questProgressFill {
+.meterFill {
   width: var(--buddy-fill);
   height: 100%;
   border-radius: inherit;
@@ -136,17 +118,18 @@
   transition: width var(--rf-dur-med) var(--rf-ease-standard);
 }
 
-.skillsRow,
-.questControls,
-.actionRow {
+.skillsSection {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--rf-space-2);
+  flex-direction: column;
+  gap: var(--rf-space-1);
   min-width: 0;
 }
 
 .skillsRow {
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .skillChip {
@@ -159,45 +142,65 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-panel-pad);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+}
+
+.questHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.questTitleGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.questTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.questDescription {
+  color: var(--rf-color-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.questControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .actionRow {
-  margin-top: auto;
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
   padding-top: var(--rf-space-2);
   border-top: var(--rf-hairline) solid var(--rf-border);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .personaSection,
-  .questCard {
-    backdrop-filter: none;
-  }
-}
-
-@media (max-width: 980px) {
-  .personaGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 720px) {
   .panel {
     padding: var(--rf-panel-pad-compact);
   }
-
-  .personaGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
-@media (max-width: 520px) {
-  .questHeader,
-  .actionRow {
-    align-items: flex-start;
-    flex-direction: column;
+@media (max-width: 360px) {
+  .meterColumns {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

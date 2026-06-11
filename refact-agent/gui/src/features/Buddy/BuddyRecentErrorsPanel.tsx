@@ -1,8 +1,18 @@
 import React from "react";
-import { Badge, Button, Surface, Text, Tooltip } from "../../components/ui";
+import { Bug, CircleCheck, ShieldAlert } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Icon,
+  Surface,
+  Text,
+  Tooltip,
+} from "../../components/ui";
 import type { BadgeTone } from "../../components/ui";
 import type { BuddyRuntimeEvent } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyRecentErrorsPanel.module.css";
 
 export type RecentBuddyError = BuddyRuntimeEvent & {
@@ -24,6 +34,19 @@ const priorityTone = (priority: RecentBuddyError["priority"]): BadgeTone => {
   return "muted";
 };
 
+function errorIcon(
+  event: RecentBuddyError,
+  acknowledged: boolean,
+): {
+  icon: LucideIcon;
+  tone: React.ComponentProps<typeof Icon>["tone"];
+} {
+  if (acknowledged) return { icon: CircleCheck, tone: "success" };
+  if (event.priority === "critical")
+    return { icon: ShieldAlert, tone: "danger" };
+  return { icon: Bug, tone: "warning" };
+}
+
 export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   recentErrors,
   onInvestigate,
@@ -36,24 +59,16 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
     radius="card"
     variant="glass"
   >
-    <div className={styles.panelHeader}>
-      <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
-        RECENT ERRORS
-      </Text>
-    </div>
+    <BuddySectionHeader icon={Bug} label="Recent errors" />
     <div className={`${styles.scrollList} rf-stagger`}>
       {recentErrors.length === 0 && (
         <Text size="1" className={styles.emptyText}>
-          No errors recorded — all clear ✨
+          No errors recorded — all clear
         </Text>
       )}
       {recentErrors.map((e) => {
         const acknowledged = Boolean(e.dismissedAll ?? e.dismissed);
-        const icon = acknowledged
-          ? "✅"
-          : e.priority === "critical"
-            ? "🚨"
-            : "🪲";
+        const { icon, tone } = errorIcon(e, acknowledged);
         const subtitle = [
           e.source,
           e.chat_id ? `chat ${e.chat_id.slice(0, 8)}` : null,
@@ -69,7 +84,9 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
             data-acknowledged={acknowledged ? "true" : undefined}
             data-priority={e.priority}
           >
-            <span className={styles.listIcon}>{icon}</span>
+            <span className={styles.listIcon}>
+              <Icon icon={icon} size="sm" tone={tone} />
+            </span>
             <div className={styles.listContent}>
               <span className={styles.listTitle}>
                 {e.title}
@@ -83,6 +100,9 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
                 )}
               </span>
               {detail && <span className={styles.listSubtitle}>{detail}</span>}
+              <span className={styles.listMeta}>
+                {formatBuddyTime(e.created_at)}
+              </span>
             </div>
             <div className={styles.errorActions}>
               <Tooltip content="Open a companion investigation and sniff the log crumbs">
@@ -108,9 +128,6 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
                 </Tooltip>
               )}
             </div>
-            <span className={styles.listMeta}>
-              {formatBuddyTime(e.created_at)}
-            </span>
           </div>
         );
       })}

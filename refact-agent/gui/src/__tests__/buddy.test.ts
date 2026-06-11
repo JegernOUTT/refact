@@ -2890,11 +2890,8 @@ describe("BuddyPanel hero layout", () => {
       path.join(buddyDir, "BuddyPanel.tsx"),
       "utf8",
     );
-    const hero = fs.readFileSync(path.join(buddyDir, "BuddyHero.tsx"), "utf8");
     expect(panel).toContain("getSignalDef(activeRuntime.signal_type)");
-    expect(hero).toContain("getSignalDef(nowPlaying.signal_type)");
     expect(panel).not.toContain("SIGNALS[activeRuntime.signal_type]");
-    expect(hero).not.toContain("SIGNALS[nowPlaying.signal_type]");
   });
 });
 

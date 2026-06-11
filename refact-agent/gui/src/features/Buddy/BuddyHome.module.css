@@ -29,6 +29,12 @@
   gap: var(--rf-space-3);
 }
 
+/* The scroll container is a flex column; children must never flex-shrink
+ * or panels with overflow: hidden collapse to zero height. */
+.homeContent > * {
+  flex-shrink: 0;
+}
+
 .topBar {
   display: flex;
   align-items: center;
@@ -51,22 +57,16 @@
   letter-spacing: 0.02em;
 }
 
-.heroBand {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
-  gap: var(--rf-space-4);
-  align-items: center;
+/* Hero — the world canvas owns the full card width; identity moved to the
+ * summary strip below so no column steals horizontal space from the scene. */
+.heroCard {
   min-width: 0;
-  padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  overflow: hidden;
+  padding: var(--rf-space-2);
 }
 
-.heroBand [data-testid="buddy-world"] {
-  height: clamp(260px, 34vh, 380px);
+.heroCard [data-testid="buddy-world"] {
+  height: clamp(280px, 38vh, 430px);
   min-height: 240px;
   margin: 0;
   border-color: var(--rf-border);
@@ -74,187 +74,50 @@
   box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-surface-2);
 }
 
-.heroCopy {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--rf-space-3);
-  width: 100%;
-  max-width: 260px;
-  min-width: 0;
-}
-
-.heroIdentityRow {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
-.heroEmoji {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 48px;
-  height: 48px;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
-  font-size: 24px;
-}
-
-.heroIdentityText {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
-}
-
-.heroName,
-.heroMeta {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.summaryRail {
-  min-width: 0;
-}
-
-.summaryStrip {
+/* Project setup strip — pinned right below the identity bar. */
+.setupStrip {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--rf-space-3);
-  row-gap: var(--rf-space-2);
+  gap: var(--rf-space-2);
   min-width: 0;
   padding: var(--rf-space-2) var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
-.statItem {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--rf-space-2xs);
-  min-width: 0;
-}
-
-.statItemGrow {
-  flex: 0 1 220px;
-  min-width: min(180px, 100%);
-}
-
-.statItemHeader,
-.statItemValueRow {
-  display: flex;
+.setupLabel {
+  display: inline-flex;
   align-items: center;
-  gap: var(--rf-space-2);
-  width: 100%;
-  min-width: 0;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.statItemHeader {
-  justify-content: space-between;
-}
-
-.statItemDivider {
-  align-self: stretch;
-  width: var(--rf-hairline);
-  min-height: 28px;
-  background: var(--rf-border);
-}
-
-.statSpacer {
-  flex: 1 1 auto;
-}
-
-.focusGrid,
-.detailsArea,
-.detailUtilityGrid,
-.row {
+/* Main grid — every card lives in one bounded grid so rows stay aligned and
+ * nothing gets squished: fixed comfortable row height on wide layouts,
+ * content-capped rows when stacked. Panels scroll internally. */
+.mainGrid {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: clamp(300px, 36vh, 420px);
+  align-items: stretch;
   gap: var(--rf-space-3);
   min-width: 0;
 }
 
-.focusGrid {
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 0.9fr);
-  grid-auto-rows: clamp(260px, 32vh, 380px);
-  align-items: stretch;
-}
-
-.focusGrid > *,
-.detailUtilityGrid > * {
-  min-width: 0;
-  min-height: 0;
+.mainGrid > * {
   height: 100%;
-  overflow: hidden;
-}
-
-.detailsArea {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.detailUtilityGrid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: clamp(220px, 28vh, 360px);
-}
-
-.detailWide,
-.cardShell,
-.workshopDock,
-.settingsSection {
   min-width: 0;
-}
-
-.cardShell {
-  display: flex;
   min-height: 0;
   overflow: hidden;
 }
 
-.cardShell > * {
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  border-color: var(--rf-border);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.row {
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
-  padding: 0;
-}
-
-.row3 {
-  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
-}
-
-.rowSingle {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.rowFlex,
-.rowFlexBottom {
-  min-height: 0;
-}
-
-.rowFlexBottom {
-  grid-template-rows: clamp(220px, 28vh, 360px);
-  grid-auto-rows: clamp(220px, 28vh, 360px);
-}
-
 .settingsSection {
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -262,520 +125,46 @@
   min-width: 0;
 }
 
-.disabledState {
-  min-height: min(360px, 60vh);
-  padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.chipStrip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--rf-space-2);
+.draftSection {
   min-width: 0;
-  padding: var(--rf-space-2) var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.chipStripLabel,
-.sectionLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
-.chipStripLabel {
-  flex: 0 0 auto;
-  color: var(--rf-color-muted);
-}
-
-.panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  min-height: 0;
-  padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.panelScroll {
-  height: 100%;
-  max-height: clamp(260px, 32vh, 380px);
-  overflow: hidden;
-}
-
-.scrollList {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
-.panelHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.panelTitleGroup {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2xs);
-  min-width: 0;
-}
-
-.personaPanel {
-  gap: var(--rf-space-3);
-}
-
-.personaGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--rf-space-3);
-  align-items: start;
-  min-width: 0;
-}
-
-.personaSection,
-.needsGrid,
-.traitsGrid,
-.list {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.personaSection,
-.needsGrid,
-.traitsGrid {
-  gap: var(--rf-space-2);
-}
-
-.list {
-  gap: var(--rf-space-1);
-}
-
-.needRow,
-.traitRow {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  min-width: 0;
-}
-
-.needHeader,
-.traitHeader,
-.questProgressRow {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  color: var(--rf-color-muted);
-  font-size: 11px;
-}
-
-.needBar,
-.traitBar,
-.questProgressBar,
-.xpBar,
-.progressBar {
-  overflow: hidden;
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
-}
-
-.needBar,
-.traitBar,
-.questProgressBar,
-.xpBar {
-  height: 6px;
-}
-
-.progressBar {
-  height: 3px;
-}
-
-.needFill,
-.traitFill,
-.questProgressFill,
-.xpFill,
-.progressBar > div {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--rf-color-accent);
-  transition: width var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-.personalitySummary,
-.questDescription {
-  line-height: 1.5;
-}
-
-.personalitySummary {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.questCard {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  margin-top: var(--rf-space-2);
-  padding: var(--rf-panel-pad);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
-}
-
-.questHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.questControls,
-.skillsRow,
-.settingsRow,
-.actionRow,
-.draftActions,
-.setupChips,
-.careBar,
-.setupChipsList,
-.errorActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.skillsRow,
-.setupChipsList {
-  gap: var(--rf-space-1);
-}
-
-.traitName,
-.listTitle,
-.listSubtitle,
-.listMeta,
-.statusTitle,
-.draftMeta {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.traitName {
-  text-transform: capitalize;
-}
-
-.traitValue {
-  flex: 0 0 auto;
-  font-weight: 600;
-}
-
-.skillChip,
-.ackBadge,
-.countBadge {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  border-radius: var(--rf-radius-chip);
-  background: var(--rf-surface-2);
-  white-space: nowrap;
-}
-
-.skillChip {
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-2xs) var(--rf-space-2);
-  font-size: 11px;
-}
-
-.ackBadge,
-.countBadge {
-  margin-left: var(--rf-space-2);
-  padding: var(--rf-space-2xs) var(--rf-space-xs);
-  font-size: 10px;
-  font-weight: 600;
-  vertical-align: 1px;
-}
-
-.ackBadge {
-  color: var(--rf-color-muted);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.countBadge {
-  color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
-  font-variant-numeric: tabular-nums;
-}
-
-.actionRow {
-  margin-top: auto;
-  padding-top: var(--rf-space-2);
-  border-top: var(--rf-hairline) solid var(--rf-border);
-}
-
-.listRow {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-row-gap);
-  width: 100%;
-  min-width: 0;
-  padding: var(--rf-row-pad);
-  border: 0;
-  border-radius: var(--rf-radius-chip);
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: default;
-  transition:
-    background var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.listRow[data-clickable] {
-  cursor: pointer;
-}
-
-.listRow:hover,
-.listRow:focus-visible {
-  background: var(--rf-surface-2);
-  outline: none;
-}
-
-.listRow[data-clickable]:active {
-  transform: translateY(1px);
-}
-
-.listIcon {
-  flex: 0 0 18px;
-  width: 18px;
-  text-align: center;
-  font-size: 14px;
-}
-
-.listContent,
-.statusContent {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--rf-space-2xs);
-  min-width: 0;
-}
-
-.listTitle {
-  color: var(--rf-color-fg);
-  font-size: 12px;
-}
-
-.listSubtitle,
-.listMeta,
-.emptyText {
-  color: var(--rf-color-muted);
-  font-size: 11px;
-}
-
-.listMeta {
-  flex: 0 0 auto;
-  font-size: 10px;
-}
-
-.emptyText {
-  padding: var(--rf-space-2) var(--rf-space-1);
-}
-
-.errorRow {
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-
-.errorRowAcknowledged {
-  opacity: 0.55;
-}
-
-.errorRowAcknowledged .listTitle,
-.errorRowAcknowledged .listSubtitle {
-  color: var(--rf-color-muted);
-}
-
-.chip,
-.setupChip,
-.careButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--rf-space-1);
-  max-width: 100%;
-  min-width: 0;
-  padding: var(--rf-space-1) var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-1);
-  color: var(--rf-color-fg);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background var(--rf-dur-fast) var(--rf-ease-standard),
-    border-color var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.chip:hover,
-.setupChip:hover,
-.careButton:hover {
-  border-color: var(--rf-border-strong);
-  background: var(--rf-surface-2);
-}
-
-.chip:focus-visible,
-.setupChip:focus-visible,
-.careButton:focus-visible {
-  outline: 2px solid var(--rf-color-accent);
-  outline-offset: 1px;
-}
-
-.chip:disabled,
-.setupChip:disabled,
-.careButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.chipPrimary {
-  composes: chip;
-}
-
-.setupChipPrimary {
-  composes: setupChip;
-}
-
-.chipPrimary,
-.setupChipPrimary {
-  border-color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
-  color: var(--rf-color-accent);
-  font-weight: 600;
-}
-
-.chipPrimary:hover,
-.setupChipPrimary:hover {
-  border-color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
-}
-
-.chipGhost {
-  composes: chip;
-  border-color: transparent;
-  background: transparent;
-  color: var(--rf-color-muted);
-}
-
-.chipGhost:hover {
-  border-color: var(--rf-border);
-  background: var(--rf-surface-2);
-}
-
-.statusBubble {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
-  width: 100%;
-  max-width: 320px;
-  min-width: 0;
-  padding: var(--rf-space-1) var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-chip);
-  background: var(--rf-surface-2);
-  font-size: 11px;
-}
-
-.statusIcon {
-  flex: 0 0 auto;
-}
-
-.stageBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-2xs) var(--rf-space-2);
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.statusText {
-  min-height: 16px;
-  color: var(--rf-color-muted);
-  text-align: center;
-  font-size: 12px;
-}
-
-.hero,
-.scene,
-.glowWrap {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 0;
-}
-
-.hero {
-  gap: var(--rf-space-1);
-}
-
-.scene,
-.glowWrap {
-  position: relative;
-}
-
-.glow {
-  position: absolute;
-  inset: calc(-1 * var(--rf-space-3));
-  border-radius: var(--rf-radius-pill);
-  opacity: 0.25;
-  filter: blur(var(--rf-blur-overlay));
-  pointer-events: none;
 }
 
 .draftPanel {
+  display: flex;
+  flex-direction: column;
   gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
+.draftHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.draftTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+}
+
+.draftLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .draftMeta {
   max-width: 40%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .draftContent {
@@ -795,39 +184,36 @@
   word-break: break-word;
 }
 
+.draftActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.unavailableBody {
+  flex: 1;
+}
+
+.disabledState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-height: min(360px, 60vh);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
 .workshopDock {
+  min-width: 0;
   margin-top: var(--rf-space-1);
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  .heroBand,
-  .summaryStrip,
-  .cardShell > *,
-  .panel,
-  .disabledState,
-  .chipStrip {
-    backdrop-filter: none;
-  }
-}
-
-@media (max-width: 980px) {
-  .heroBand,
-  .focusGrid,
-  .detailUtilityGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .personaGrid {
+@media (max-width: 1100px) {
+  .mainGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .rowFlexBottom {
-    grid-auto-rows: auto;
-    grid-template-rows: auto;
-  }
-
-  .focusGrid {
-    grid-auto-rows: clamp(240px, 34vh, 360px);
   }
 }
 
@@ -837,74 +223,37 @@
     padding: var(--rf-space-2);
   }
 
-  .heroBand {
-    align-items: stretch;
-    gap: var(--rf-space-3);
-    padding: var(--rf-space-3);
-  }
-
-  .heroCopy {
-    max-width: none;
-  }
-
-  .heroBand [data-testid="buddy-world"] {
+  .heroCard [data-testid="buddy-world"] {
     height: 250px;
+    min-height: 220px;
   }
 
-  .summaryStrip,
-  .chipStrip,
-  .panel {
-    padding: var(--rf-panel-pad-compact);
-  }
-
-  .personaGrid,
-  .row,
-  .row3 {
+  .mainGrid {
     grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: minmax(0, 420px);
+  }
+
+  .draftMeta {
+    max-width: 100%;
   }
 }
 
 @media (max-width: 520px) {
   .homeContent,
-  .focusGrid,
-  .detailsArea,
-  .detailUtilityGrid,
-  .row {
+  .mainGrid {
     gap: var(--rf-space-2);
   }
 
-  .heroBand {
-    padding: var(--rf-panel-pad-compact);
+  .heroCard {
+    padding: var(--rf-space-1);
   }
 
-  .heroIdentityRow {
-    align-items: flex-start;
-  }
-
-  .heroEmoji {
-    width: 40px;
-    height: 40px;
-    font-size: 20px;
-  }
-
-  .heroBand [data-testid="buddy-world"] {
+  .heroCard [data-testid="buddy-world"] {
     height: 230px;
-    min-height: 220px;
+    min-height: 210px;
   }
 
-  .statItemDivider,
-  .statSpacer {
-    display: none;
-  }
-
-  .scrollList {
-    flex: 1 1 auto;
-    max-height: clamp(180px, 42vh, 320px);
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
-
-  .draftMeta {
-    max-width: 100%;
+  .setupStrip {
+    padding: var(--rf-space-2);
   }
 }

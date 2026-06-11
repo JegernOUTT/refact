@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Flex, Button, LoadingState, Text } from "../../components/ui";
-import { ArrowLeftIcon, GearIcon } from "@radix-ui/react-icons";
+import {
+  Button,
+  Flex,
+  Icon,
+  IconButton,
+  LoadingState,
+  Surface,
+  Text,
+} from "../../components/ui";
+import { ArrowLeft, Settings, Wrench } from "lucide-react";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
@@ -158,29 +166,29 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
 
   if (isLoading) {
     return (
-      <div className={classNames(styles.panel, styles.draftPanel)}>
+      <Surface className={styles.draftPanel} radius="card" variant="glass">
         <LoadingState label="Loading Buddy draft…" variant="compact" />
-      </div>
+      </Surface>
     );
   }
 
   if (isError || !draft) {
     return (
-      <div className={classNames(styles.panel, styles.draftPanel)}>
+      <Surface className={styles.draftPanel} radius="card" variant="glass">
         <Text size="2" color="red">
           Draft unavailable or expired.
         </Text>
-      </div>
+      </Surface>
     );
   }
 
   const reviewable = REVIEWABLE_DRAFT_KINDS.includes(draft.kind);
 
   return (
-    <div className={classNames(styles.panel, styles.draftPanel)}>
-      <div className={styles.panelHeader}>
-        <div className={styles.panelTitleGroup}>
-          <Text size="1" color="gray" className={styles.sectionLabel}>
+    <Surface className={styles.draftPanel} radius="card" variant="glass">
+      <div className={styles.draftHeader}>
+        <div className={styles.draftTitleGroup}>
+          <Text size="1" color="gray" className={styles.draftLabel}>
             Buddy draft review
           </Text>
           <Text size="3" weight="bold">
@@ -203,28 +211,30 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
       )}
       <pre className={styles.draftContent}>{draft.yaml_or_json}</pre>
       <div className={styles.draftActions}>
-        <button
+        <Button
           type="button"
-          className={classNames(styles.chip, styles.chipPrimary)}
+          size="sm"
+          variant="primary"
           onClick={() => void handleCopy()}
         >
           {copied ? "Copied" : "Copy content"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className={styles.chip}
+          size="sm"
+          variant="ghost"
           disabled={isDeleting}
           onClick={() => void handleDismiss()}
         >
           Dismiss draft
-        </button>
+        </Button>
       </div>
       {copyError && (
         <Text size="1" color="orange">
           {copyError}
         </Text>
       )}
-    </div>
+    </Surface>
   );
 };
 
@@ -275,8 +285,9 @@ export const BuddyHome: React.FC = () => {
   const settings = snapshot?.settings;
   const activeQuest = snapshot?.state.active_quest ?? null;
 
-  const stage = STAGES[progression?.stage ?? state.progress.stage] ?? STAGES[0];
-  const nextStage = STAGES[(progression?.stage ?? state.progress.stage) + 1];
+  const stageIndex = progression?.stage ?? state.progress.stage;
+  const stage = STAGES[stageIndex] ?? STAGES[0];
+  const nextStage = STAGES[stageIndex + 1];
 
   const xp = progression?.xp ?? state.progress.xp;
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
@@ -673,8 +684,12 @@ export const BuddyHome: React.FC = () => {
     return (
       <div className={classNames(styles.page, "rf-enter")}>
         <div className={styles.topBar}>
-          <Button variant="ghost" size="1" onClick={handleBack}>
-            <ArrowLeftIcon width={14} height={14} />
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={ArrowLeft}
+            onClick={handleBack}
+          >
             Back
           </Button>
         </div>
@@ -683,7 +698,7 @@ export const BuddyHome: React.FC = () => {
           justify="center"
           direction="column"
           gap="2"
-          style={{ flex: 1 }}
+          className={styles.unavailableBody}
         >
           <Text size="2" color="gray">
             {name} is not available
@@ -697,40 +712,47 @@ export const BuddyHome: React.FC = () => {
     return (
       <div className={classNames(styles.page, "rf-enter")}>
         <div className={styles.topBar}>
-          <Button variant="ghost" size="1" onClick={handleBack}>
-            <ArrowLeftIcon width={14} height={14} />
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={ArrowLeft}
+            onClick={handleBack}
+          >
             Back
           </Button>
           <Text size="2" weight="bold" className={styles.topTitle}>
             {name}
           </Text>
-          <Button
+          <IconButton
             variant="ghost"
-            size="1"
+            size="sm"
             aria-label="Settings"
+            icon={Settings}
             onClick={() => setShowSettings((v) => !v)}
-          >
-            <GearIcon width={14} height={14} />
-          </Button>
+          />
         </div>
         <main
           className={classNames(styles.content, styles.contentPadded)}
           data-testid="buddy-home-disabled"
         >
-          <Flex
-            align="center"
-            justify="center"
-            direction="column"
-            gap="3"
-            className={classNames(styles.disabledState, "rf-enter-rise")}
+          <Surface
+            variant="glass"
+            radius="card"
+            animated="rise"
+            className={styles.disabledState}
           >
             <Text size="2" color="gray" align="center">
               {name} is disabled. Still here, just politely lurking.
             </Text>
-            <Button size="2" onClick={handleEnable} disabled={isSavingSettings}>
+            <Button
+              size="md"
+              variant="primary"
+              onClick={handleEnable}
+              disabled={isSavingSettings}
+            >
               Enable {name}
             </Button>
-          </Flex>
+          </Surface>
           {showSettings && (
             <div
               className={classNames(styles.settingsSection, "rf-expand-grid")}
@@ -748,49 +770,38 @@ export const BuddyHome: React.FC = () => {
   return (
     <div className={classNames(styles.page, "rf-enter")}>
       <div className={styles.topBar}>
-        <Button variant="ghost" size="1" onClick={handleBack}>
-          <ArrowLeftIcon width={14} height={14} />
+        <Button
+          variant="ghost"
+          size="sm"
+          leftIcon={ArrowLeft}
+          onClick={handleBack}
+        >
           Back
         </Button>
         <Text size="2" weight="bold" className={styles.topTitle}>
-          {stage.emoji} {name}
+          {name}
         </Text>
-        <Button
+        <IconButton
           variant="ghost"
-          size="1"
+          size="sm"
           aria-label="Settings"
+          icon={Settings}
           onClick={() => setShowSettings((v) => !v)}
-        >
-          <GearIcon width={14} height={14} />
-        </Button>
+        />
       </div>
 
       <main
         className={classNames(styles.content, styles.homeContent, "rf-stagger")}
         data-testid="buddy-home-content"
       >
-        <section
-          className={classNames(styles.heroBand, "rf-enter-rise")}
+        <Surface
+          as="section"
+          variant="glass"
+          radius="card"
+          animated="rise"
+          className={styles.heroCard}
           data-testid="buddy-home-hero"
         >
-          <div className={styles.heroCopy}>
-            <Text size="1" color="gray" className={styles.sectionLabel}>
-              Buddy home
-            </Text>
-            <div className={styles.heroIdentityRow}>
-              <span className={styles.heroEmoji} aria-hidden>
-                {stage.emoji}
-              </span>
-              <div className={styles.heroIdentityText}>
-                <Text size="3" weight="bold" className={styles.heroName}>
-                  {name}
-                </Text>
-                <Text size="2" color="gray" className={styles.heroMeta}>
-                  {stage.name} · {xpNext ? `${xp} / ${xpNext} XP` : `${xp} XP`}
-                </Text>
-              </div>
-            </div>
-          </div>
           <BuddyWorld
             homeDoorDisabled
             palette={palette}
@@ -809,39 +820,71 @@ export const BuddyHome: React.FC = () => {
             onOpenPage={handleOpenWorldPage}
             onSpeechControl={(control) => void handleSpeechControl(control)}
           />
-        </section>
+        </Surface>
 
-        <div className={classNames(styles.summaryRail, "rf-enter-rise")}>
-          <BuddySummaryStrip
-            stage={stage}
-            xp={xp}
-            xpNext={xpNext}
-            xpFill={xpFill}
-            pet={pet}
-            statsData={statsData}
-            successRate={successRate}
-            onViewStats={handleViewStats}
-          />
-        </div>
+        <BuddySummaryStrip
+          name={name}
+          palette={palette}
+          stage={stage}
+          stageIndex={stageIndex}
+          xp={xp}
+          xpNext={xpNext}
+          xpFill={xpFill}
+          pet={pet}
+          statsData={statsData}
+          successRate={successRate}
+          onViewStats={handleViewStats}
+        />
 
-        <section className={classNames(styles.focusGrid, "rf-stagger")}>
-          <div className={classNames(styles.cardShell, "rf-enter-rise")}>
-            <BuddyOpportunitiesFeed />
-          </div>
-          <BuddyRecentChats
+        <Surface
+          as="section"
+          variant="glass"
+          radius="card"
+          animated="rise"
+          className={styles.setupStrip}
+          data-testid="buddy-setup-strip"
+        >
+          <span className={styles.setupLabel}>
+            <Icon icon={Wrench} size="sm" tone="muted" />
+            Project setup
+          </span>
+          {SETUP_MODES.map((m) => (
+            <Button
+              key={m.mode}
+              type="button"
+              size="sm"
+              variant={m.mode === "setup" ? "primary" : "ghost"}
+              onClick={() => handleRunMode(m.mode)}
+            >
+              {m.label}
+            </Button>
+          ))}
+        </Surface>
+
+        {showSettings && (
+          <div
             className={classNames(
-              styles.panel,
-              styles.panelScroll,
+              styles.settingsSection,
+              "rf-expand-grid",
               "rf-enter-rise",
             )}
-            title="RECENT CHATS"
-          />
-          <div className={classNames(styles.cardShell, "rf-enter-rise")}>
-            <BuddyPulseCard />
+            data-state="open"
+            data-testid="buddy-home-settings-section"
+          >
+            <BuddySettingsPanel onClose={() => setShowSettings(false)} />
           </div>
-        </section>
+        )}
 
-        <section className={classNames(styles.detailsArea, "rf-stagger")}>
+        {draftId && (
+          <div className={classNames(styles.draftSection, "rf-enter-rise")}>
+            <BuddyHomeDraftReview draftId={draftId} />
+          </div>
+        )}
+
+        <section className={classNames(styles.mainGrid, "rf-stagger")}>
+          <BuddyOpportunitiesFeed />
+          <BuddyRecentChats title="Recent chats" />
+          <BuddyPulseCard />
           <BuddyPersonalityPanel
             personality={personality}
             needRows={needRows}
@@ -855,55 +898,15 @@ export const BuddyHome: React.FC = () => {
             onToggleProactive={handleSettings}
             onPromptChange={(prompt) => void handlePromptChange(prompt)}
           />
-
-          {showSettings && (
-            <div
-              className={classNames(
-                styles.settingsSection,
-                styles.detailWide,
-                "rf-expand-grid",
-                "rf-enter-rise",
-              )}
-              data-state="open"
-              data-testid="buddy-home-settings-section"
-            >
-              <BuddySettingsPanel onClose={() => setShowSettings(false)} />
-            </div>
-          )}
-
-          <div className={classNames(styles.detailUtilityGrid, "rf-stagger")}>
-            <BuddyActivityPanel
-              activities={activities}
-              onOpenChat={handleOpenActivityChat}
-            />
-            <BuddyRecentErrorsPanel
-              recentErrors={recentErrors}
-              onInvestigate={handleInvestigateError}
-              onDismiss={handleDismissError}
-            />
-          </div>
-
-          <div className={classNames(styles.chipStrip, "rf-enter-rise")}>
-            <span className={styles.chipStripLabel}>Project setup</span>
-            {SETUP_MODES.map((m) => (
-              <button
-                key={m.mode}
-                type="button"
-                className={classNames(styles.setupChip, "rf-pressable", {
-                  [styles.setupChipPrimary]: m.mode === "setup",
-                })}
-                onClick={() => handleRunMode(m.mode)}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-
-          {draftId && (
-            <div className={classNames(styles.detailWide, "rf-enter-rise")}>
-              <BuddyHomeDraftReview draftId={draftId} />
-            </div>
-          )}
+          <BuddyActivityPanel
+            activities={activities}
+            onOpenChat={handleOpenActivityChat}
+          />
+          <BuddyRecentErrorsPanel
+            recentErrors={recentErrors}
+            onInvestigate={handleInvestigateError}
+            onDismiss={handleDismissError}
+          />
         </section>
 
         <div className={classNames(styles.workshopDock, "rf-enter-rise")}>

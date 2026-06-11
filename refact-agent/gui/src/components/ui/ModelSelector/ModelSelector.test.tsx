@@ -41,5 +41,4 @@ describe("ModelSelector", () => {
     expect(selected).toHaveAttribute("aria-selected", "true");
     expect(selected).toHaveAttribute("data-selected", "true");
   });
-
 });

@@ -355,7 +355,8 @@ describe("WorktreeControl", () => {
       "utf8",
     );
     const dialogInner = css.match(/\.createDialog > div \{[^}]+\}/)?.[0] ?? "";
-    const branchPicker = css.match(/\.branchPicker,\n\.branchPicker input \{[^}]+\}/)?.[0] ?? "";
+    const branchPicker =
+      css.match(/\.branchPicker,\n\.branchPicker input \{[^}]+\}/)?.[0] ?? "";
 
     expect(dialogInner).toContain("max-width: 100%;");
     expect(dialogInner).toContain("min-width: 0;");

@@ -422,7 +422,9 @@ test.describe("overlay right-edge regressions", () => {
         },
         {
           name: "mode select selected item",
-          value: selected ? getComputedStyle(selected).scrollbarGutter : "missing",
+          value: selected
+            ? getComputedStyle(selected).scrollbarGutter
+            : "missing",
         },
       ];
     });

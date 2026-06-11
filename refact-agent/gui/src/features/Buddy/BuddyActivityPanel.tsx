@@ -1,13 +1,17 @@
 import React from "react";
+import { History } from "lucide-react";
 import {
   Badge,
+  Icon,
   SegmentedControl,
   Surface,
-  Text,
   Tooltip,
+  Text,
 } from "../../components/ui";
 import type { BuddyActivityEntry } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
+import { BuddySectionHeader } from "./BuddySectionHeader";
+import { activityIcon } from "./buddyIcons";
 import styles from "./BuddyActivityPanel.module.css";
 
 type ActivityFilter = "all" | "refact_" | "buddy_";
@@ -15,6 +19,14 @@ type ActivityFilter = "all" | "refact_" | "buddy_";
 interface BuddyActivityPanelProps {
   activities: BuddyActivityEntry[];
   onOpenChat?: (chatId: string, title: string) => void;
+}
+
+function activityTone(
+  entry: BuddyActivityEntry,
+): React.ComponentProps<typeof Icon>["tone"] {
+  if (entry.failure_category) return "warning";
+  if (entry.activity_type.startsWith("buddy_")) return "accent";
+  return "muted";
 }
 
 export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
@@ -38,16 +50,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
       radius="card"
       variant="glass"
     >
-      <div className={styles.panelHeader}>
-        <Text
-          size="1"
-          weight="bold"
-          color="gray"
-          className={styles.sectionLabel}
-        >
-          ACTIVITY
-        </Text>
-      </div>
+      <BuddySectionHeader icon={History} label="Activity" />
       <SegmentedControl
         aria-label="activity filter"
         className={styles.filter}
@@ -100,7 +103,13 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
                     }
                   : {})}
               >
-                <span className={styles.listIcon}>{a.icon}</span>
+                <span className={styles.listIcon}>
+                  <Icon
+                    icon={activityIcon(a)}
+                    size="sm"
+                    tone={activityTone(a)}
+                  />
+                </span>
                 <div className={styles.listContent}>
                   <span className={styles.listTitle}>
                     {a.title}

@@ -1,7 +1,15 @@
 import React, { useCallback, useState } from "react";
 import classNames from "classnames";
-import { Flex, LoadingState, Text } from "../../components/ui";
-import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
+import { MessagesSquare, Plus } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Icon,
+  LoadingState,
+  SegmentedControl,
+  Surface,
+  Text,
+} from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import {
@@ -13,23 +21,27 @@ import {
   useGetBuddyConversationsQuery,
   useCreateBuddyConversationMutation,
 } from "../../services/refact/buddy";
+import { BuddySectionHeader } from "./BuddySectionHeader";
+import { conversationIcon } from "./buddyIcons";
 import type { BuddyConversationEntry } from "./types";
 import styles from "./BuddyRecentChats.module.css";
 
 type FilterKind = "all" | "chat" | "setup" | "system";
 
-const FILTER_LABELS: { kind: FilterKind; label: string }[] = [
-  { kind: "all", label: "All" },
-  { kind: "chat", label: "Chats" },
-  { kind: "setup", label: "Setup" },
-  { kind: "system", label: "System" },
+const FILTER_OPTIONS: { value: FilterKind; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "chat", label: "Chats" },
+  { value: "setup", label: "Setup" },
+  { value: "system", label: "System" },
 ];
 
 const STALE_EMPTY_PLACEHOLDER_MS = 24 * 60 * 60 * 1000;
 
 function relativeTime(ts: string): string {
   if (!ts) return "";
-  const diff = Date.now() - new Date(ts).getTime();
+  const time = Date.parse(ts);
+  if (!Number.isFinite(time)) return "";
+  const diff = Date.now() - time;
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
@@ -59,32 +71,27 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
     entry.kind === "workflow";
   const content = (
     <>
-      <span className={styles.entryIcon}>{entry.icon}</span>
-      <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
-        <Flex align="center" gap="1" style={{ minWidth: 0 }}>
+      <span className={styles.entryIcon}>
+        <Icon icon={conversationIcon(entry.kind)} size="sm" tone="muted" />
+      </span>
+      <span className={styles.entryBody}>
+        <span className={styles.entryTitleRow}>
           <Text size="1" weight="medium" className={styles.entryTitle}>
             {entry.title || "Untitled"}
           </Text>
-          {entry.badge && <span className={styles.badge}>{entry.badge}</span>}
-        </Flex>
-        <Flex align="center" gap="1">
-          <Text size="1" color="gray" className={styles.entryMeta}>
-            {entry.message_count > 0
-              ? `${entry.message_count} entries`
-              : entry.status}
-          </Text>
-          {entry.updated_at && (
-            <>
-              <Text size="1" color="gray">
-                ·
-              </Text>
-              <Text size="1" color="gray" className={styles.entryMeta}>
-                {relativeTime(entry.updated_at)}
-              </Text>
-            </>
+          {entry.badge && (
+            <Badge size="xs" tone="muted" className={styles.entryBadge}>
+              {entry.badge}
+            </Badge>
           )}
-        </Flex>
-      </Flex>
+        </span>
+        <Text size="1" color="gray" className={styles.entryMeta}>
+          {entry.message_count > 0
+            ? `${entry.message_count} entries`
+            : entry.status}
+          {entry.updated_at ? ` · ${relativeTime(entry.updated_at)}` : ""}
+        </Text>
+      </span>
     </>
   );
   if (!clickable) {
@@ -167,58 +174,54 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   }, [createConversation, dispatch]);
 
   return (
-    <Flex direction="column" gap="2" className={className}>
-      <Flex align="center" justify="between">
-        <Text
-          size="1"
-          weight="bold"
-          color="gray"
-          className={styles.sectionLabel}
-        >
-          {title ?? (compact ? "RECENT ACTIVITY" : "CONVERSATIONS")}
-        </Text>
-        <Flex align="center" gap="1">
-          {onViewAll && (
-            <button
-              type="button"
-              className={styles.headerChip}
-              onClick={onViewAll}
-            >
-              View All →
-            </button>
-          )}
-          {!compact && (
-            <button
-              type="button"
-              className={styles.headerChip}
-              onClick={() => void handleNew()}
-              disabled={isCreating}
-            >
-              {isCreating ? (
-                <span className={styles.buttonSpinner} aria-hidden="true" />
-              ) : (
-                <PlusIcon width={12} height={12} />
-              )}
-              New Chat
-            </button>
-          )}
-        </Flex>
-      </Flex>
+    <Surface
+      className={classNames(styles.panel, className)}
+      data-testid="buddy-recent-chats"
+      animated="rise"
+      radius="card"
+      variant="glass"
+    >
+      <BuddySectionHeader
+        icon={MessagesSquare}
+        label={title ?? (compact ? "Recent activity" : "Conversations")}
+        actions={
+          <>
+            {onViewAll && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={onViewAll}
+              >
+                View all
+              </Button>
+            )}
+            {!compact && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                leftIcon={Plus}
+                loading={isCreating}
+                onClick={() => void handleNew()}
+              >
+                New Chat
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {showFilters && !compact && (
-        <Flex gap="1" className={styles.filterTabs}>
-          {FILTER_LABELS.map(({ kind, label }) => (
-            <button
-              key={kind}
-              type="button"
-              className={styles.filterTab}
-              data-active={filter === kind || undefined}
-              onClick={() => setFilter(kind)}
-            >
-              <Text size="1">{label}</Text>
-            </button>
-          ))}
-        </Flex>
+        <SegmentedControl
+          aria-label="conversation filter"
+          className={styles.filter}
+          name="buddy-recent-chats-filter"
+          size="sm"
+          value={filter}
+          onValueChange={(value) => setFilter(value as FilterKind)}
+          options={FILTER_OPTIONS}
+        />
       )}
 
       {isLoading && (
@@ -226,32 +229,26 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
       )}
 
       {!isLoading && conversations.length === 0 && (
-        <Flex
-          direction="column"
-          align="center"
-          justify="center"
-          gap="2"
-          py="4"
-          className={styles.empty}
-        >
-          <ChatBubbleIcon width={20} height={20} />
+        <div className={styles.empty}>
+          <Icon icon={MessagesSquare} size="lg" tone="faint" />
           <Text size="1" color="gray">
             {filter === "all" ? "No conversations yet" : `No ${filter} entries`}
           </Text>
           {filter === "all" && (
-            <button
+            <Button
               type="button"
-              className={styles.emptyChip}
+              size="sm"
+              variant="primary"
               onClick={() => void handleNew()}
             >
               Start a conversation
-            </button>
+            </Button>
           )}
-        </Flex>
+        </div>
       )}
 
       {conversations.length > 0 && (
-        <div className={classNames(styles.entriesScroll, "rf-stagger")}>
+        <div className={classNames(styles.scrollList, "rf-stagger")}>
           {conversations.map((entry) => (
             <EntryRow
               key={`${entry.kind}-${entry.id}`}
@@ -261,6 +258,6 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
           ))}
         </div>
       )}
-    </Flex>
+    </Surface>
   );
 };

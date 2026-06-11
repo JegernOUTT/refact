@@ -72,14 +72,11 @@
   min-width: 0;
 }
 
+.actions > * {
+  min-width: 0;
+}
+
 .actionError {
   color: var(--rf-color-danger);
   overflow-wrap: anywhere;
-}
-
-/* Action buttons reuse the page-wide chip pill so every clickable
- * control on the Buddy home — care, project setup, persona footer,
- * recent errors, opportunity cards — shares one visual language. */
-.actionButton {
-  composes: chip from "./BuddyHome.module.css";
 }

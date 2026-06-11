@@ -4395,36 +4395,41 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     expect(panel.querySelector('[class*="scrollList"]')).not.toBeNull();
   });
 
-  it("focus and detail grids bound redesigned panel rows", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const focusBlock = readCssBlock(css, ".focusGrid");
-    const detailUtilityBlock = readCssBlock(css, ".detailUtilityGrid");
+  it("recent chats panel uses a standalone glass surface with an internal scroll list", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    server.use(...commonHandlers);
 
-    expect(focusBlock).toContain("grid-auto-rows: clamp(260px, 32vh, 380px)");
-    expect(focusBlock).toContain("align-items: stretch");
-    expect(detailUtilityBlock).toContain(
-      "grid-auto-rows: clamp(220px, 28vh, 360px)",
+    render(<BuddyHome />, { store });
+    const panel = await screen.findByTestId("buddy-recent-chats");
+    expect(panel.className).not.toContain("panelScroll");
+    expect(panel.className).toContain("glass");
+  });
+
+  it("main grid bounds redesigned panel rows", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+    const mainGridBlock = readCssBlock(css, ".mainGrid");
+
+    expect(mainGridBlock).toContain(
+      "grid-auto-rows: clamp(300px, 36vh, 420px)",
     );
+    expect(mainGridBlock).toContain("align-items: stretch");
     expect(css).not.toContain("max-height: 860px");
   });
 
-  it("recent chats panelScroll clips panel overflow while entries scroll internally", async () => {
-    const homeCss = await readGuiSource("features/Buddy/BuddyHome.module.css");
+  it("recent chats panel clips overflow while entries scroll internally", async () => {
     const recentChatsCss = await readGuiSource(
       "features/Buddy/BuddyRecentChats.module.css",
     );
-    const panelBlock = readCssBlock(homeCss, ".panelScroll");
-    const entriesBlock = readCssBlock(recentChatsCss, ".entriesScroll");
+    const panelBlock = readCssBlock(recentChatsCss, ".panel");
+    const entriesBlock = readCssBlock(recentChatsCss, ".scrollList");
 
     expect(panelBlock).toContain("height: 100%");
-    expect(panelBlock).toContain("max-height: clamp(260px, 32vh, 380px)");
     expect(panelBlock).toContain("overflow: hidden");
     expect(entriesBlock).toContain("flex: 1");
     expect(entriesBlock).toContain("min-height: 0");
     expect(entriesBlock).toContain("overflow-y: auto");
     expect(entriesBlock).toContain("overflow-x: hidden");
-    expect(recentChatsCss).not.toContain("@media (max-width: 720px)");
-    expect(recentChatsCss).not.toContain("@media (max-width: 520px)");
   });
 
   it("activity panel CSS bounds the surface and keeps the list as the scroller", async () => {
@@ -4435,7 +4440,6 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     const scrollBlock = readCssBlock(css, ".scrollList");
 
     expect(panelBlock).toContain("height: 100%");
-    expect(panelBlock).toContain("max-height: clamp(220px, 28vh, 360px)");
     expect(panelBlock).toContain("overflow: hidden");
     expect(scrollBlock).toContain("flex: 1 1 auto");
     expect(scrollBlock).toContain("min-height: 0");
@@ -4451,7 +4455,6 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     const scrollBlock = readCssBlock(css, ".scrollList");
 
     expect(panelBlock).toContain("height: 100%");
-    expect(panelBlock).toContain("max-height: clamp(220px, 28vh, 360px)");
     expect(panelBlock).toContain("overflow: hidden");
     expect(scrollBlock).toContain("flex: 1 1 auto");
     expect(scrollBlock).toContain("min-height: 0");
@@ -4459,10 +4462,12 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     expect(scrollBlock).toContain("overflow-x: hidden");
   });
 
-  it("stacked media keeps redesigned detail panels bounded", async () => {
+  it("stacked media keeps redesigned panels bounded", async () => {
     const homeCss = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const detailUtilityBlock = readCssBlock(homeCss, ".detailUtilityGrid");
-    const homeWideStackBlock = readCssMediaBlock(homeCss, "(max-width: 980px)");
+    const homeWideStackBlock = readCssMediaBlock(
+      homeCss,
+      "(max-width: 1100px)",
+    );
     const homeIdeStackBlock = readCssMediaBlock(homeCss, "(max-width: 720px)");
     const activityCss = await readGuiSource(
       "features/Buddy/BuddyActivityPanel.module.css",
@@ -4471,11 +4476,8 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
       "features/Buddy/BuddyRecentErrorsPanel.module.css",
     );
 
-    expect(detailUtilityBlock).toContain(
-      "grid-auto-rows: clamp(220px, 28vh, 360px)",
-    );
-    expect(homeWideStackBlock).not.toContain(".detailUtilityGrid,");
-    expect(homeWideStackBlock).toContain(".rowFlexBottom");
+    expect(homeWideStackBlock).toContain("repeat(2, minmax(0, 1fr))");
+    expect(homeIdeStackBlock).toContain("grid-auto-rows: minmax(0, 420px)");
     expect(homeIdeStackBlock).not.toContain("grid-auto-rows: auto");
     expect(homeIdeStackBlock).not.toContain("overflow-y: visible");
     expect(activityCss).not.toContain("overflow-y: visible");

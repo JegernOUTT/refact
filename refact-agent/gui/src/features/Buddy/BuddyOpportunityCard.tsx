@@ -74,7 +74,6 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               size="sm"
               type="button"
               variant={action.kind === "dismiss" ? "ghost" : "primary"}
-              className={`${styles.actionButton} rf-pressable`}
               disabled={!isActive || pendingActionIndex !== null}
               aria-label={actionLabel(action)}
               aria-busy={pendingActionIndex === idx}

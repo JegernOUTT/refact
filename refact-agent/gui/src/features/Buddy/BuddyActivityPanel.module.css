@@ -3,35 +3,16 @@
   box-sizing: border-box;
   flex-direction: column;
   gap: var(--rf-space-2);
+  height: 100%;
   min-width: 0;
   min-height: 0;
-  height: 100%;
-  max-height: clamp(220px, 28vh, 360px);
+  overflow: hidden;
   padding: var(--rf-panel-pad);
-  overflow: hidden;
-  border-color: var(--rf-border);
-  box-shadow: var(--rf-elev-panel);
-}
-
-.panelHeader {
-  display: flex;
-  box-sizing: border-box;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.sectionLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
 }
 
 .filter {
   box-sizing: border-box;
+  flex-shrink: 0;
   width: 100%;
   min-width: 0;
   max-width: 320px;
@@ -88,12 +69,10 @@
 }
 
 .listIcon {
-  flex: 0 0 18px;
-  min-width: 0;
-  width: 18px;
-  text-align: center;
-  font-size: 14px;
-  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
 }
 
 .listContent {

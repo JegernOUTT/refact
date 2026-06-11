@@ -1,7 +1,9 @@
 import React from "react";
-import { Button, Surface, Text } from "../../components/ui";
+import { ArrowRight } from "lucide-react";
+import { Button, Icon, Surface, Text } from "../../components/ui";
 import { formatCompactNumber } from "./buddyUtils";
-import type { BuddyPetState, Stage } from "./types";
+import { stageIcon } from "./buddyIcons";
+import type { BuddyPetState, Palette, Stage } from "./types";
 import styles from "./BuddySummaryStrip.module.css";
 
 interface StatsSummaryData {
@@ -13,7 +15,10 @@ interface StatsSummaryData {
 }
 
 interface BuddySummaryStripProps {
+  name: string;
+  palette: Palette;
   stage: Stage;
+  stageIndex: number;
   xp: number;
   xpNext: number | undefined;
   xpFill: number;
@@ -23,8 +28,30 @@ interface BuddySummaryStripProps {
   onViewStats: () => void;
 }
 
+const StatItem: React.FC<{ label: string; value: React.ReactNode }> = ({
+  label,
+  value,
+}) => (
+  <div className={styles.stat}>
+    <Text size="1" color="gray" className={styles.statLabel}>
+      {label}
+    </Text>
+    <Text size="2" weight="bold" className={styles.statValue}>
+      {value}
+    </Text>
+  </div>
+);
+
+/**
+ * Identity & stats bar: compact avatar + name + stage/XP cluster on the
+ * left, key counters in the middle, "View stats" on the right. Replaces
+ * the old wide hero identity column.
+ */
 export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
+  name,
+  palette,
   stage,
+  stageIndex,
   xp,
   xpNext,
   xpFill,
@@ -32,95 +59,78 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
   statsData,
   successRate,
   onViewStats,
-}) => (
-  <Surface
-    className={styles.summaryStrip}
-    data-testid="buddy-summary-strip"
-    radius="card"
-    variant="glass"
-  >
-    <div className={styles.statItem}>
-      <Text size="1" color="gray">
-        Stage
-      </Text>
-      <Text size="2" weight="bold">
-        {stage.emoji} {stage.name}
-      </Text>
-    </div>
-    <div className={`${styles.statItem} ${styles.statItemGrow}`}>
-      <Text size="1" color="gray">
-        Growth
-      </Text>
-      <div className={styles.statItemValueRow}>
-        <Text size="2" weight="bold">
-          {xpNext
-            ? xp >= xpNext
-              ? `${xpNext} / ${xpNext} · MAX`
-              : `${xp} / ${xpNext}`
-            : `${xp} · MAX`}
-        </Text>
-        <div className={styles.xpBar}>
-          <div
-            className={styles.xpFill}
-            style={{ "--buddy-xp-fill": `${xpFill}%` } as React.CSSProperties}
+}) => {
+  const xpLabel = xpNext
+    ? xp >= xpNext
+      ? `${xpNext} / ${xpNext} XP · MAX`
+      : `${xp} / ${xpNext} XP`
+    : `${xp} XP · MAX`;
+
+  return (
+    <Surface
+      className={styles.strip}
+      data-testid="buddy-summary-strip"
+      radius="card"
+      variant="glass"
+      animated="rise"
+    >
+      <div
+        className={styles.identity}
+        style={{ "--buddy-tint": palette.body } as React.CSSProperties}
+      >
+        <span className={styles.avatar} aria-hidden>
+          <Icon icon={stageIcon(stageIndex)} size="lg" />
+        </span>
+        <div className={styles.identityText}>
+          <span className={styles.nameRow}>
+            <Text size="2" weight="bold" className={styles.name}>
+              {name}
+            </Text>
+            <Text size="1" color="gray" className={styles.stageMeta}>
+              {stage.name} · {xpLabel}
+            </Text>
+          </span>
+          <div className={styles.xpBar}>
+            <div
+              className={styles.xpFill}
+              style={{ "--buddy-xp-fill": `${xpFill}%` } as React.CSSProperties}
+            />
+          </div>
+        </div>
+      </div>
+      {pet && (
+        <>
+          <div className={styles.divider} aria-hidden />
+          <StatItem label="Care" value={pet.evolution.care_score} />
+          <StatItem label="Neglect" value={pet.evolution.neglect_score} />
+        </>
+      )}
+      {statsData && (
+        <>
+          <div className={styles.divider} aria-hidden />
+          <StatItem
+            label="Messages"
+            value={formatCompactNumber(statsData.totals.total_calls)}
           />
-        </div>
-      </div>
-    </div>
-    {pet && (
-      <div className={styles.statItem}>
-        <Text size="1" color="gray">
-          Care
-        </Text>
-        <Text size="2" weight="bold">
-          {pet.evolution.care_score}
-        </Text>
-      </div>
-    )}
-    {pet && (
-      <div className={styles.statItem}>
-        <Text size="1" color="gray">
-          Neglect
-        </Text>
-        <Text size="2" weight="bold">
-          {pet.evolution.neglect_score}
-        </Text>
-      </div>
-    )}
-    {statsData && (
-      <>
-        <div className={styles.statItemDivider} aria-hidden />
-        <div className={styles.statItem}>
-          <Text size="1" color="gray">
-            Messages
-          </Text>
-          <Text size="2" weight="bold">
-            {formatCompactNumber(statsData.totals.total_calls)}
-          </Text>
-        </div>
-        <div className={styles.statItem}>
-          <Text size="1" color="gray">
-            Tokens
-          </Text>
-          <Text size="2" weight="bold">
-            {formatCompactNumber(statsData.totals.total_tokens)}
-          </Text>
-        </div>
-        <div className={styles.statItem}>
-          <Text size="1" color="gray">
-            Success
-          </Text>
-          <Text size="2" weight="bold">
-            {successRate ?? 0}%
-          </Text>
-        </div>
-      </>
-    )}
-    <div className={styles.statSpacer} aria-hidden />
-    {statsData && (
-      <Button type="button" size="sm" variant="ghost" onClick={onViewStats}>
-        View Full Stats →
-      </Button>
-    )}
-  </Surface>
-);
+          <StatItem
+            label="Tokens"
+            value={formatCompactNumber(statsData.totals.total_tokens)}
+          />
+          <StatItem label="Success" value={`${successRate ?? 0}%`} />
+        </>
+      )}
+      <span className={styles.spacer} aria-hidden />
+      {statsData && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          rightIcon={ArrowRight}
+          onClick={onViewStats}
+        >
+          View stats
+        </Button>
+      )}
+    </Surface>
+  );
+};

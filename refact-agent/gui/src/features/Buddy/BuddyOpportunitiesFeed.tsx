@@ -1,11 +1,12 @@
 import React from "react";
 import classNames from "classnames";
-import { Text } from "../../components/ui";
-import { Badge, Surface } from "../../components/ui";
+import { Lightbulb } from "lucide-react";
+import { Badge, Surface, Text } from "../../components/ui";
 import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
 import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import { useAppSelector } from "../../hooks";
 import { selectBuddySuggestions } from "./buddySlice";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyOpportunitiesFeed.module.css";
 
 export const BuddyOpportunitiesFeed: React.FC = () => {
@@ -24,16 +25,17 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
       radius="card"
       variant="glass"
     >
-      <div className={styles.header}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          OPPORTUNITIES
-        </Text>
-        {itemCount > 0 && (
-          <Badge className={styles.count} tone="muted">
-            {itemCount}
-          </Badge>
-        )}
-      </div>
+      <BuddySectionHeader
+        icon={Lightbulb}
+        label="Opportunities"
+        badge={
+          itemCount > 0 ? (
+            <Badge size="xs" tone="accent" className={styles.count}>
+              {itemCount}
+            </Badge>
+          ) : undefined
+        }
+      />
       {itemCount === 0 ? (
         <Text size="1" className={styles.empty}>
           No opportunities right now.

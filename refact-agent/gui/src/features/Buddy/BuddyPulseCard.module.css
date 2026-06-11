@@ -2,25 +2,15 @@
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
+  height: 100%;
   min-width: 0;
-  padding: var(--rf-space-3);
+  min-height: 0;
   overflow: hidden;
-}
-
-.label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
-.loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
 }
 
 .humor {
+  flex-shrink: 0;
   min-width: 0;
   color: var(--rf-color-muted);
   font-style: italic;
@@ -28,10 +18,15 @@
 }
 
 .rows {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2xs);
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .row {
@@ -42,9 +37,13 @@
   padding-block: var(--rf-space-2xs);
 }
 
+.row + .row {
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
 .rowLabel {
   flex-shrink: 0;
-  min-width: 80px;
+  min-width: 92px;
 }
 
 .rowValue {
@@ -53,11 +52,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rowDot {
+  vertical-align: middle;
 }
 
 @media (max-width: 360px) {
   .card {
-    padding: var(--rf-space-2);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .row {
