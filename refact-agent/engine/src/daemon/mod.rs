@@ -9,6 +9,7 @@ pub mod config;
 pub mod events;
 pub mod lock;
 pub mod paths;
+pub mod projects;
 pub mod server;
 pub mod state;
 
@@ -18,6 +19,7 @@ pub(crate) struct RuntimePaths {
     daemon_json_path: PathBuf,
     events_jsonl_path: PathBuf,
     daemon_log_path: PathBuf,
+    projects_json_path: PathBuf,
 }
 
 impl RuntimePaths {
@@ -27,6 +29,7 @@ impl RuntimePaths {
             daemon_json_path: paths::daemon_json_path(),
             events_jsonl_path: paths::events_jsonl_path(),
             daemon_log_path: paths::daemon_log_path(),
+            projects_json_path: paths::projects_json_path(),
         }
     }
 
@@ -37,6 +40,7 @@ impl RuntimePaths {
             daemon_json_path: path.join("daemon.json"),
             events_jsonl_path: path.join("events.jsonl"),
             daemon_log_path: path.join("logs").join("daemon.log"),
+            projects_json_path: path.join("projects.json"),
         }
     }
 }
@@ -104,6 +108,7 @@ pub(crate) async fn run_daemon_entry_with_paths(
     };
     let events = events::EventBus::new(paths.events_jsonl_path.clone());
     let state = state::DaemonState::new(config.clone(), events);
+    state.load_projects(paths.projects_json_path.clone()).await;
     let info = state.daemon_info(actual_addr.port(), actual_addr.ip().to_string());
     if let Err(error) = state::write_daemon_info_atomic(&paths.daemon_json_path, &info).await {
         eprintln!("{error}");

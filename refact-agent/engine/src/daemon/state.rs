@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,7 +27,7 @@ pub struct DaemonState {
     pub config: DaemonConfig,
     pub started_at_ms: u64,
     pub version: String,
-    pub projects: RwLock<HashMap<String, Value>>,
+    pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
     pub events: EventBus,
     shutdown_tx: broadcast::Sender<String>,
@@ -40,7 +40,9 @@ impl DaemonState {
             config,
             started_at_ms: now_ms(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            projects: RwLock::new(HashMap::new()),
+            projects: RwLock::new(crate::daemon::projects::ProjectRegistry::empty(
+                crate::daemon::paths::projects_json_path(),
+            )),
             worker_statuses: RwLock::new(HashMap::new()),
             events,
             shutdown_tx,
@@ -81,6 +83,11 @@ impl DaemonState {
                 .await;
         }
         changed
+    }
+
+    pub async fn load_projects(&self, path: PathBuf) {
+        let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
+        *self.projects.write().await = registry;
     }
 
     pub fn daemon_info(&self, port: u16, bind: String) -> DaemonInfo {

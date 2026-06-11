@@ -48,6 +48,10 @@ pub fn daemon_log_path() -> PathBuf {
     logs_dir().join("daemon.log")
 }
 
+pub fn projects_json_path() -> PathBuf {
+    daemon_dir().join("projects.json")
+}
+
 pub fn daemon_config_path() -> PathBuf {
     daemon_config_root().join("daemon.yaml")
 }
