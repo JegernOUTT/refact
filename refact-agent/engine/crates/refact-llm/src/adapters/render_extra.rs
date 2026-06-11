@@ -1,11 +1,13 @@
 //! Common rendering helpers for supplemental context message roles.
 //!
-//! The message roles `context_file`, `plain_text`, `cd_instruction`, and
-//! `compression_report` carry
+//! The message roles `context_file`, `plain_text`, and `cd_instruction` carry
 //! content that must reach the model but that standard LLM APIs do not know
 //! about.  Each wire adapter is responsible for folding this content into the
 //! appropriate API primitives; the functions here produce the canonical text
 //! representation so every adapter formats it the same way.
+//!
+//! `compression_report` is a visualization-only role: it renders in the GUI
+//! and must never reach the provider wire.
 
 use refact_core::chat_types::{ChatContent, ChatMessage};
 
@@ -14,10 +16,7 @@ pub const PLAN_META_KEY: &str = "plan";
 /// Returns `true` for message roles that carry supplemental context and must
 /// be rendered into wire messages by each adapter rather than silently dropped.
 pub fn is_context_role(role: &str) -> bool {
-    matches!(
-        role,
-        "context_file" | "plain_text" | "cd_instruction" | "compression_report"
-    )
+    matches!(role, "context_file" | "plain_text" | "cd_instruction")
 }
 
 /// Render `context_file` content with per-file filename + line-range headers.
@@ -49,7 +48,7 @@ pub fn render_context_file_content(content: &ChatContent) -> String {
 pub fn render_context_message(msg: &ChatMessage) -> Option<String> {
     let text = match msg.role.as_str() {
         "context_file" => render_context_file_content(&msg.content),
-        "plain_text" | "cd_instruction" | "compression_report" => msg.content.content_text_only(),
+        "plain_text" | "cd_instruction" => msg.content.content_text_only(),
         _ => return None,
     };
     let trimmed = text.trim();

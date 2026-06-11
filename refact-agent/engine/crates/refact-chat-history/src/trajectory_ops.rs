@@ -495,15 +495,44 @@ pub fn handoff_conversation_and_excluded(
     (conversation, excluded)
 }
 
+const APPROX_IMAGE_CONTENT_CHARS: usize = 4_000;
+
 pub fn approx_token_count(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|m| {
-            let content_len = match &m.content {
+            let mut content_len = match &m.content {
                 ChatContent::SimpleText(s) => s.len(),
-                ChatContent::Multimodal(v) => v.iter().map(|_| 100).sum(),
+                ChatContent::Multimodal(v) => v
+                    .iter()
+                    .map(|el| {
+                        if el.m_type == "text" {
+                            el.m_content.len()
+                        } else {
+                            APPROX_IMAGE_CONTENT_CHARS
+                        }
+                    })
+                    .sum(),
                 ChatContent::ContextFiles(v) => v.iter().map(|cf| cf.file_content.len()).sum(),
             };
+            if let Some(tool_calls) = &m.tool_calls {
+                content_len += tool_calls
+                    .iter()
+                    .map(|tc| tc.function.name.len() + tc.function.arguments.len())
+                    .sum::<usize>();
+            }
+            if let Some(blocks) = &m.thinking_blocks {
+                content_len += blocks
+                    .iter()
+                    .map(|block| {
+                        block
+                            .get("thinking")
+                            .and_then(|t| t.as_str())
+                            .map(|t| t.len())
+                            .unwrap_or(64)
+                    })
+                    .sum::<usize>();
+            }
             content_len / 4 + 10
         })
         .sum()

@@ -2050,7 +2050,8 @@ impl Tool for ToolCompressChatApply {
         let target_met = target_tokens.map_or(true, |t| report_after_tokens <= t);
 
         let first_role = head_messages.first().map(|m| m.role.as_str()).unwrap_or("");
-        if !matches!(first_role, "system" | "user" | "event" | "plan") {
+        let first_role_valid = matches!(first_role, "system" | "user" | "event" | "plan");
+        if !dry_run && !first_role_valid {
             return Err(format!(
                 "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', or 'plan'. Compression aborted.",
                 if first_role.is_empty() { "(empty)" } else { first_role }
@@ -2098,6 +2099,7 @@ impl Tool for ToolCompressChatApply {
             })),
             "aggressive_summary_skipped_reason": stats.aggressive_summary_skipped_reason,
             "active_tail_start": active_start,
+            "would_produce_invalid_history": !first_role_valid,
         });
 
         Ok((

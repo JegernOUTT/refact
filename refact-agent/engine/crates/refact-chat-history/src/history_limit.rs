@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, SamplingParameters};
 use refact_core::custom_error::first_n_chars;
-use crate::compression_exemption::{exemption_for, CompressionExemption};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextPressure {
@@ -42,12 +41,7 @@ pub fn compute_context_budget(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
 ) -> ContextBudgetReport {
-    let measured_messages: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| exemption_for(msg) != CompressionExemption::Never)
-        .cloned()
-        .collect();
-    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(&measured_messages);
+    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
     let pressure = pressure_for_used_tokens(used_tokens_estimate, effective_n_ctx);
     ContextBudgetReport {
@@ -314,7 +308,9 @@ pub fn compress_duplicate_context_files(
                 if remaining_files.is_empty() {
                     let summary = format!(" Duplicate files compressed: '{}' files were shown earlier in the conversation history. Do not ask for these files again.", compressed_files_str);
                     messages[file.msg_idx].content = ChatContent::SimpleText(summary);
-                    messages[file.msg_idx].role = "cd_instruction".to_string();
+                    if messages[file.msg_idx].tool_call_id.is_empty() {
+                        messages[file.msg_idx].role = "cd_instruction".to_string();
+                    }
                     tracing::info!(
                         "Stage 0: Fully compressed ContextFile at index {}: all {} files removed",
                         file.msg_idx,
@@ -842,5 +838,61 @@ mod tests {
         let result = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
+    }
+    #[test]
+    fn test_dedup_keeps_context_file_role_for_tool_call_responses() {
+        let mut answered = make_context_file_msg("src/dup.rs", "line1\nline2\nline3");
+        answered.tool_call_id = "call_read".to_string();
+        let standalone = make_context_file_msg("src/dup.rs", "line1\nline2\nline3\nline4");
+        let mut messages = vec![answered, standalone];
+
+        let (count, _) = compress_duplicate_context_files(&mut messages).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(messages[0].role, "context_file");
+        assert_eq!(messages[0].tool_call_id, "call_read");
+        assert!(messages[0]
+            .content
+            .content_text_only()
+            .contains("Duplicate files compressed"));
+        assert_eq!(messages[1].role, "context_file");
+    }
+
+    #[test]
+    fn test_dedup_swaps_role_for_unanswered_duplicates() {
+        let small = make_context_file_msg("src/dup.rs", "line1\nline2\nline3");
+        let large = make_context_file_msg("src/dup.rs", "line1\nline2\nline3\nline4");
+        let mut messages = vec![small, large];
+
+        let (count, _) = compress_duplicate_context_files(&mut messages).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(messages[0].role, "cd_instruction");
+    }
+
+    #[test]
+    fn test_compute_context_budget_counts_tool_call_arguments() {
+        let plain = vec![make_user_msg_basic("short")];
+        let mut with_args = plain.clone();
+        with_args.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "call_big".to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "write".to_string(),
+                    arguments: "x".repeat(40_000),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        });
+
+        let baseline = compute_context_budget(&plain, 100_000).used_tokens_estimate;
+        let with_args_estimate = compute_context_budget(&with_args, 100_000).used_tokens_estimate;
+
+        assert!(with_args_estimate > baseline + 9_000);
     }
 }

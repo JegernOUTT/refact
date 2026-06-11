@@ -1770,7 +1770,7 @@ async fn load_trajectory_candidate(
         reactive_compact_attempts: t
             .get("reactive_compact_attempts")
             .and_then(|v| v.as_u64())
-            .map(|n| if n > 2 { 1 } else { n as usize }),
+            .map(|n| (n as usize).min(1)),
     };
 
     let auto_approve_editing_tools_present = t
@@ -12196,6 +12196,8 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
+            compression_insufficient_hashes: std::collections::HashSet::new(),
+            pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
             task_agent_error: None,
@@ -12281,6 +12283,8 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
+            compression_insufficient_hashes: std::collections::HashSet::new(),
+            pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
             task_agent_error: None,
@@ -15100,7 +15104,7 @@ mod tests {
         let loaded = load_trajectory_for_chat(gcx.clone(), "reactive-attempts-roundtrip")
             .await
             .unwrap();
-        assert_eq!(loaded.thread.reactive_compact_attempts, Some(2));
+        assert_eq!(loaded.thread.reactive_compact_attempts, Some(1));
 
         let traj_path = dir
             .path()
