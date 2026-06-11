@@ -196,6 +196,18 @@ pub struct CommandLine {
     pub privacy_yaml: String,
     #[structopt(long, help = "Disable the scheduler runner and cron scheduling tools.")]
     pub no_scheduler: bool,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon endpoint for managed workers."
+    )]
+    pub daemon_endpoint: String,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon project id for managed workers."
+    )]
+    pub project_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -876,6 +888,8 @@ pub mod tests {
             indexing_yaml: String::new(),
             privacy_yaml: String::new(),
             no_scheduler: false,
+            daemon_endpoint: String::new(),
+            project_id: String::new(),
         };
 
         let http_client = build_shared_http_client_builder()

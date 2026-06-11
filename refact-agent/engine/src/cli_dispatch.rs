@@ -144,12 +144,25 @@ mod tests {
 
     #[test]
     fn parse_worker_tail_flags() {
-        let command =
-            parse_from(["refact", "worker", "--http-port", "1234", "-w", "/tmp"]).unwrap();
+        let command = parse_from([
+            "refact",
+            "worker",
+            "--http-port",
+            "1234",
+            "-w",
+            "/tmp",
+            "--daemon-endpoint",
+            "http://127.0.0.1:8488",
+            "--project-id",
+            "abc123",
+        ])
+        .unwrap();
         match command {
             RefactCliCommand::Worker(cmdline) => {
                 assert_eq!(cmdline.http_port, 1234);
                 assert_eq!(cmdline.workspace_folder, "/tmp");
+                assert_eq!(cmdline.daemon_endpoint, "http://127.0.0.1:8488");
+                assert_eq!(cmdline.project_id, "abc123");
             }
             _ => panic!("expected worker command"),
         }

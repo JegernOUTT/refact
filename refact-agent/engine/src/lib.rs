@@ -51,6 +51,7 @@ pub mod buddy;
 pub mod caps;
 pub mod cli_dispatch;
 pub mod daemon;
+pub mod daemon_link;
 pub mod global_context;
 pub mod indexing_utils;
 pub mod json_utils;

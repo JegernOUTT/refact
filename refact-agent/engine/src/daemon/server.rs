@@ -55,6 +55,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
+        .route("/daemon/v1/worker-status", post(worker_status))
         .with_state((state, port))
 }
 
@@ -93,6 +94,14 @@ async fn shutdown(
 ) -> Json<serde_json::Value> {
     state.request_shutdown(request.reason);
     Json(json!({"success": true}))
+}
+
+async fn worker_status(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Json(report): Json<crate::daemon_link::WorkerStatusReport>,
+) -> Json<serde_json::Value> {
+    let event_emitted = state.store_worker_status(report).await;
+    Json(json!({"success": true, "event_emitted": event_emitted}))
 }
 
 async fn events(
@@ -171,5 +180,60 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["workers"], 0);
         assert_eq!(json["port"], 8488);
+    }
+
+    #[tokio::test]
+    async fn worker_status_handler_stores_report_and_emits_only_on_change() {
+        use crate::daemon_link::WorkerStatusReport;
+        use tokio::time::{timeout, Duration};
+
+        fn report(lsp_clients: usize, busy_chats: usize) -> WorkerStatusReport {
+            WorkerStatusReport {
+                project_id: "project".to_string(),
+                pid: 123,
+                lsp_clients,
+                busy_chats,
+                exec_running: 0,
+                last_activity_ts: 55,
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+        );
+        let mut events = state.events.subscribe();
+
+        let first = worker_status(State((state.clone(), 8488)), Json(report(1, 0))).await;
+        assert_eq!(first.0["event_emitted"], true);
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.kind, "worker_status");
+        assert_eq!(event.project_id.as_deref(), Some("project"));
+        assert_eq!(
+            state
+                .latest_worker_status("project")
+                .await
+                .unwrap()
+                .lsp_clients,
+            1
+        );
+
+        let second = worker_status(State((state.clone(), 8488)), Json(report(1, 0))).await;
+        assert_eq!(second.0["event_emitted"], false);
+        assert!(timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err());
+
+        let third = worker_status(State((state.clone(), 8488)), Json(report(2, 0))).await;
+        assert_eq!(third.0["event_emitted"], true);
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.payload["lsp_clients"], 2);
     }
 }

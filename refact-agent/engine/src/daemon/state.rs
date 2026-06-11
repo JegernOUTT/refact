@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::events::EventBus;
+use crate::daemon_link::WorkerStatusReport;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -27,6 +28,7 @@ pub struct DaemonState {
     pub started_at_ms: u64,
     pub version: String,
     pub projects: RwLock<HashMap<String, Value>>,
+    pub worker_statuses: RwLock<HashMap<String, WorkerStatusReport>>,
     pub events: EventBus,
     shutdown_tx: broadcast::Sender<String>,
 }
@@ -39,6 +41,7 @@ impl DaemonState {
             started_at_ms: now_ms(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             projects: RwLock::new(HashMap::new()),
+            worker_statuses: RwLock::new(HashMap::new()),
             events,
             shutdown_tx,
         })
@@ -50,6 +53,34 @@ impl DaemonState {
 
     pub fn request_shutdown(&self, reason: String) {
         let _ = self.shutdown_tx.send(reason);
+    }
+
+    pub async fn latest_worker_status(&self, project_id: &str) -> Option<WorkerStatusReport> {
+        self.worker_statuses.read().await.get(project_id).cloned()
+    }
+
+    /// Stores the latest worker status report and emits a `worker_status` event
+    /// only when event-relevant fields changed (busy_chats, lsp_clients), so
+    /// 10s heartbeats do not flood the event bus.
+    pub async fn store_worker_status(&self, report: WorkerStatusReport) -> bool {
+        let project_id = report.project_id.clone();
+        let changed = {
+            let mut statuses = self.worker_statuses.write().await;
+            let changed = statuses
+                .get(&project_id)
+                .map(|previous| worker_status_event_fields_changed(previous, &report))
+                .unwrap_or(true);
+            statuses.insert(project_id.clone(), report.clone());
+            changed
+        };
+        if changed {
+            let payload = serde_json::to_value(&report).unwrap_or(Value::Null);
+            let _ = self
+                .events
+                .emit("worker_status", Some(project_id), payload)
+                .await;
+        }
+        changed
     }
 
     pub fn daemon_info(&self, port: u16, bind: String) -> DaemonInfo {
@@ -70,6 +101,13 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+pub fn worker_status_event_fields_changed(
+    previous: &WorkerStatusReport,
+    next: &WorkerStatusReport,
+) -> bool {
+    previous.busy_chats != next.busy_chats || previous.lsp_clients != next.lsp_clients
 }
 
 fn hostname_local() -> String {
@@ -142,6 +180,37 @@ pub async fn remove_daemon_info(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_report(
+        lsp_clients: usize,
+        busy_chats: usize,
+        exec_running: usize,
+    ) -> WorkerStatusReport {
+        WorkerStatusReport {
+            project_id: "project".to_string(),
+            pid: 7,
+            lsp_clients,
+            busy_chats,
+            exec_running,
+            last_activity_ts: 11,
+        }
+    }
+
+    #[test]
+    fn worker_status_change_filter_only_checks_busy_and_lsp() {
+        assert!(!worker_status_event_fields_changed(
+            &status_report(1, 2, 3),
+            &status_report(1, 2, 99)
+        ));
+        assert!(worker_status_event_fields_changed(
+            &status_report(1, 2, 3),
+            &status_report(2, 2, 3)
+        ));
+        assert!(worker_status_event_fields_changed(
+            &status_report(1, 2, 3),
+            &status_report(1, 3, 3)
+        ));
+    }
 
     #[tokio::test]
     async fn daemon_json_atomic_write_read_roundtrip() {
