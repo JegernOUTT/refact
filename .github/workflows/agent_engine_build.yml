@@ -157,6 +157,7 @@ jobs:
         run: |
           cargo build --workspace --profile ci-release
           cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/ci-release/refact${{ matrix.ext }} ../..
 
       - name: Test artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
@@ -171,6 +172,7 @@ jobs:
         run: |
           OPENSSL_STATIC=1 cargo build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
 
       - name: Test linux-like artifact
         if: matrix.cross
@@ -187,6 +189,7 @@ jobs:
         run: |
           CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -196,3 +199,5 @@ jobs:
           path: |
             refact-lsp
             refact-lsp.exe
+            refact
+            refact.exe

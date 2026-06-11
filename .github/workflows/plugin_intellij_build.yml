@@ -63,7 +63,7 @@ jobs:
       - name: Make engine artifacts executable
         shell: bash
         working-directory: plugins/intellij
-        run: chmod +x ./src/main/resources/bin/dist-*/refact-lsp || true
+        run: chmod +x ./src/main/resources/bin/dist-*/refact || true
 
       - name: Setup Java
         uses: actions/setup-java@v4

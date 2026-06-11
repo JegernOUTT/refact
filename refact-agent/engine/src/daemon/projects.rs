@@ -116,11 +116,22 @@ impl ProjectRegistry {
     }
 
     pub async fn open(&mut self, root: PathBuf) -> Result<ProjectEntry, String> {
+        self.open_with_settings(root, None).await
+    }
+
+    pub async fn open_with_settings(
+        &mut self,
+        root: PathBuf,
+        settings: Option<ProjectSettings>,
+    ) -> Result<ProjectEntry, String> {
         let id = project_id(&root);
         let now = now_ms();
         if self.entries.contains_key(&id) {
             if let Some(entry) = self.entries.get_mut(&id) {
                 entry.last_active_ms = now;
+                if let Some(settings) = settings {
+                    entry.settings = settings;
+                }
             }
             self.save().await?;
             return Ok(self.entries[&id].clone());
@@ -132,7 +143,7 @@ impl ProjectRegistry {
             root,
             pinned: false,
             last_active_ms: now,
-            settings: ProjectSettings::default(),
+            settings: settings.unwrap_or_default(),
         };
         self.entries.insert(id.clone(), entry.clone());
         self.save().await?;
@@ -241,6 +252,8 @@ pub struct OpenRequest {
     root: String,
     #[serde(default)]
     pub client_kind: Option<String>,
+    #[serde(default)]
+    settings: Option<ProjectSettings>,
 }
 
 #[derive(Deserialize)]
@@ -260,7 +273,7 @@ pub async fn open_project(
     };
     let entry = {
         let mut registry = state.projects.write().await;
-        match registry.open(root).await {
+        match registry.open_with_settings(root, request.settings).await {
             Ok(entry) => entry,
             Err(error) => {
                 return (
@@ -572,6 +585,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_with_settings_updates_existing_entry() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut reg = make_registry(&dir);
+        let settings = ProjectSettings {
+            ast: false,
+            vecdb: true,
+            ast_max_files: 12,
+            vecdb_max_files: 34,
+        };
+        let e1 = reg
+            .open_with_settings(root.clone(), Some(settings.clone()))
+            .await
+            .unwrap();
+        assert_eq!(e1.settings, settings);
+
+        let updated = ProjectSettings {
+            ast: true,
+            vecdb: false,
+            ast_max_files: 56,
+            vecdb_max_files: 78,
+        };
+        let e2 = reg
+            .open_with_settings(root.clone(), Some(updated.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(e1.id, e2.id);
+        assert_eq!(e2.settings, updated);
+        assert_eq!(reg.list().len(), 1);
+    }
+
+    #[tokio::test]
     #[serial_test::serial]
     async fn open_list_get_pin_forget_flow() {
         let Some(_env) = EnvGuard::fake_worker() else {
@@ -595,8 +643,16 @@ mod tests {
 
         let router = crate::daemon::server::make_router(state.clone(), 8488);
 
-        let body =
-            serde_json::to_vec(&serde_json::json!({"root": proj.to_str().unwrap()})).unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "root": proj.to_str().unwrap(),
+            "settings": {
+                "ast": false,
+                "vecdb": true,
+                "ast_max_files": 123,
+                "vecdb_max_files": 456,
+            }
+        }))
+        .unwrap();
         let resp = router
             .clone()
             .oneshot(
@@ -630,6 +686,10 @@ mod tests {
         let bytes = hyper::body::to_bytes(list_resp.into_body()).await.unwrap();
         let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["settings"]["ast"], false);
+        assert_eq!(list[0]["settings"]["vecdb"], true);
+        assert_eq!(list[0]["settings"]["ast_max_files"], 123);
+        assert_eq!(list[0]["settings"]["vecdb_max_files"], 456);
 
         let get_resp = router
             .clone()

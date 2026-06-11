@@ -133,6 +133,7 @@ jobs:
         run: |
           cargo build --release || exit 1
           cp ./target/release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/release/refact${{ matrix.ext }} ../..
 
       - name: Test artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
@@ -143,6 +144,7 @@ jobs:
         run: |
           OPENSSL_STATIC=1 cargo build --release --target ${{ matrix.target }} || exit 1
           cp ./target/${{ matrix.target }}/release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/release/refact${{ matrix.ext }} ../..
 
       - name: Test linux-like artifact
         if: matrix.cross
@@ -159,12 +161,13 @@ jobs:
         run: |
           CROSS_NO_WARNINGS=0 cross build --release --target ${{ matrix.target }} || exit 1
           cp ./target/${{ matrix.target }}/release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/release/refact${{ matrix.ext }} ../..
 
       - name: Package artifact in ZIP (WIN)
         uses: vimtor/action-zip@v1.2
         if: endsWith(matrix.target, 'msvc')
         with:
-          files: refact-lsp.exe
+          files: refact-lsp.exe refact.exe
           recursive: false
           dest: dist-${{ matrix.target }}.zip
 
@@ -172,7 +175,7 @@ jobs:
         uses: vimtor/action-zip@v1.2
         if: ${{ !endsWith(matrix.target, 'msvc') }}
         with:
-          files: refact-lsp
+          files: refact-lsp refact
           recursive: false
           dest: dist-${{ matrix.target }}.zip
 

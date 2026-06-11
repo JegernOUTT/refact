@@ -56,7 +56,7 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
     }.ifEmpty { listOfNotNull(project.basePath) }
         .map { path -> runCatching { File(path).canonicalPath }.getOrElse { path } }
     val baseUrl = lsp.baseUrlOrNull() ?: return
-    val url = baseUrl.resolve("/v1/lsp-initialize")
+    val url = baseUrl.resolve("v1/lsp-initialize")
     val data = Gson().toJson(
         mapOf(
             "project_roots" to projectRoots.map { File(it).toURI().toString() },
@@ -86,7 +86,7 @@ private fun getLspBaseUrl(project: Project, startReason: String): URI? {
 
 fun lspDocumentDidChanged(project: Project, docUrl: String, text: String) {
     val baseUrl = getLspBaseUrl(project, "document-changed") ?: return
-    val url = baseUrl.resolve("/v1/lsp-did-changed")
+    val url = baseUrl.resolve("v1/lsp-did-changed")
     val data = Gson().toJson(
         mapOf(
             "uri" to docUrl,
@@ -115,7 +115,7 @@ fun lspSetActiveDocument(editor: Editor) {
     if (!vFile.exists()) return
 
     val baseUrl = getLspBaseUrl(project, "active-document-changed") ?: return
-    val url = baseUrl.resolve("/v1/lsp-set-active-document")
+    val url = baseUrl.resolve("v1/lsp-set-active-document")
     val data = Gson().toJson(
         mapOf(
             "uri" to vFile.url,
@@ -138,7 +138,7 @@ fun lspGetCodeLens(editor: Editor): String {
     val project = editor.project ?: return ""
     val virtualFile = editor.virtualFile ?: return ""
     val baseUrl = getLspBaseUrl(project, "code-lens-request") ?: return ""
-    val url = baseUrl.resolve("/v1/code-lens")
+    val url = baseUrl.resolve("v1/code-lens")
     val data = Gson().toJson(
         mapOf(
             "uri" to virtualFile.url,
@@ -168,7 +168,7 @@ fun lspGetCommitMessage(project: Project, diff: String, currentMessage: String):
 
     val baseUrl = lsp.baseUrlOrNull() ?: return ""
 
-    val url = baseUrl.resolve("/v1/commit-message-from-diff")
+    val url = baseUrl.resolve("v1/commit-message-from-diff")
     val requestBody = mutableMapOf<String, String>("diff" to diff)
     if (currentMessage.isNotBlank()) {
         requestBody["text"] = currentMessage

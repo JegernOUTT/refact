@@ -6,10 +6,22 @@ import org.junit.Test
 
 class LSPConfigTest {
     @Test
-    fun toArgsDoesNotIncludeUnsupportedClientVersionFlag() {
-        val args = LSPConfig(port = 12345, ast = false, vecdb = false).toArgs()
+    fun openProjectSettingsUseDaemonShape() {
+        val settings = LSPConfig(ast = true, astFileLimit = 123, vecdb = false, vecdbFileLimit = 456)
+            .toOpenProjectSettings()
 
-        assertEquals(listOf("--http-port", "12345", "--http-host", "0.0.0.0"), args)
-        assertFalse(args.contains("--enduser-client-version"))
+        assertEquals(true, settings["ast"])
+        assertEquals(false, settings["vecdb"])
+        assertEquals(123, settings["ast_max_files"])
+        assertEquals(456, settings["vecdb_max_files"])
+        assertFalse(settings.containsKey("port"))
+    }
+
+    @Test
+    fun openProjectSettingsFillDefaults() {
+        val settings = LSPConfig(astFileLimit = null, vecdbFileLimit = null).toOpenProjectSettings()
+
+        assertEquals(LSPConfig.DEFAULT_AST_MAX_FILES, settings["ast_max_files"])
+        assertEquals(LSPConfig.DEFAULT_VECDB_MAX_FILES, settings["vecdb_max_files"])
     }
 }
