@@ -8,6 +8,7 @@ import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import type {
   BuddyPetState,
   BuddyPulse,
+  BuddyQuest,
   BuddyRuntimeEvent,
   BuddyScenePose,
 } from "../features/Buddy/types";
@@ -118,6 +119,7 @@ function buildIntent(args?: {
   localReactionVisible?: boolean;
   reducedMotion?: boolean;
   recentIntentKinds?: readonly BuddyWorldIntentKind[];
+  activeQuest?: BuddyQuest | null;
 }): BuddyWorldIntent | null {
   const now = new Date(2024, 0, 1, args?.hour ?? 14, 0, 0);
   const world = buildBuddyWorldState({
@@ -125,7 +127,7 @@ function buildIntent(args?: {
     pulse: args && "pulse" in args ? args.pulse : makePulse(),
     pet: args?.pet ?? makePet(),
     nowPlaying: args?.nowPlaying ?? null,
-    activeQuest: null,
+    activeQuest: args?.activeQuest ?? null,
   });
   return chooseBuddyWorldIntent({
     world,
@@ -305,14 +307,19 @@ describe("buddy world director", () => {
     expectSafeIntent(intent);
   });
 
-  it("uses low-priority wander or time routines while idle", () => {
+  it("uses ambient flavor or time routines while idle", () => {
     const dayIntent = buildIntent();
     const morningIntent = buildIntent({ hour: 8 });
+    const wanderIntent = buildIntent({
+      recentIntentKinds: ["play_in_snow"],
+    });
 
-    expect(dayIntent?.kind).toBe("wander_curiously");
+    expect(dayIntent?.kind).toBe("play_in_snow");
     expect(morningIntent?.kind).toBe("morning_stretch");
+    expect(wanderIntent?.kind).toBe("wander_curiously");
     expectSafeIntent(dayIntent);
     expectSafeIntent(morningIntent);
+    expectSafeIntent(wanderIntent);
   });
 
   it("suppresses intent while active speech or showcase is visible", () => {
@@ -394,16 +401,20 @@ describe("buddy world director", () => {
       recentIntentKinds: ["seek_food"],
     });
 
-    expect(intent?.kind).toBe("wander_curiously");
+    expect(intent?.kind).toBe("play_in_snow");
     expectSafeIntent(intent);
   });
 
   it("suppresses duplicate low-priority idle intent kinds", () => {
     const idleSuppressed = buildIntent({
-      recentIntentKinds: ["wander_curiously"],
+      recentIntentKinds: ["play_in_snow", "wander_curiously"],
     });
     const allIdleSuppressed = buildIntent({
-      recentIntentKinds: ["wander_curiously", "watch_observatory"],
+      recentIntentKinds: [
+        "play_in_snow",
+        "wander_curiously",
+        "watch_observatory",
+      ],
     });
 
     expect(idleSuppressed?.kind).toBe("watch_observatory");
@@ -430,6 +441,41 @@ describe("buddy world director", () => {
     });
 
     expect(intent).toMatchObject({ kind: "seek_toy", pose: "idle" });
+    expectSafeIntent(intent);
+  });
+
+  it("checks the quest mailbox when a quest is active", () => {
+    const quest: BuddyQuest = {
+      id: "q1",
+      quest_type: "daily",
+      title: "Tidy the grove",
+      description: "Close three stuck tasks",
+      icon: "🌱",
+      created_at: "2024-01-01T00:00:00Z",
+      accepted_at: "2024-01-01T00:00:00Z",
+      status: "active",
+      progress: 0,
+      goal: 3,
+      baseline: 0,
+      reward_xp: 10,
+      controls: [],
+    };
+    const intent = buildIntent({ activeQuest: quest });
+
+    expect(intent).toMatchObject({
+      kind: "check_mailbox",
+      speechKind: "actionable",
+    });
+    expectSafeIntent(intent);
+  });
+
+  it("offers cozy night flavor like the campfire after night watch", () => {
+    const intent = buildIntent({
+      hour: 23,
+      recentIntentKinds: ["night_watch"],
+    });
+
+    expect(intent?.kind).toBe("warm_by_fire");
     expectSafeIntent(intent);
   });
 });

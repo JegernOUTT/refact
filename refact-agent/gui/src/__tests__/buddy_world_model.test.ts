@@ -200,6 +200,85 @@ describe("buddy world semantic model", () => {
     );
   });
 
+  it("derives seasons, lunar phase, and seasonal wildlife layers", () => {
+    const winterDay = buildWorld();
+    const summerDay = buildBuddyWorldState({
+      now: new Date(2024, 6, 1, 14, 0, 0),
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    const autumnMorning = buildBuddyWorldState({
+      now: new Date(2024, 9, 1, 8, 0, 0),
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: null,
+    });
+    const winterNight = buildWorld({ hour: 23 });
+
+    expect(winterDay.season).toBe("winter");
+    expect(winterDay.atmosphere.layers).toContain("season_snow");
+    expect(winterDay.atmosphere.layers).not.toContain("birds");
+    expect(winterDay.atmosphere.layers).not.toContain("pond_life");
+
+    expect(summerDay.season).toBe("summer");
+    expect(summerDay.atmosphere.layers).toEqual(
+      expect.arrayContaining([
+        "birds",
+        "butterflies",
+        "pond_life",
+        "summer_shimmer",
+      ]),
+    );
+
+    expect(autumnMorning.season).toBe("autumn");
+    expect(autumnMorning.atmosphere.layers).toEqual(
+      expect.arrayContaining(["season_leaves", "morning_fog"]),
+    );
+
+    expect(winterNight.atmosphere.layers).toEqual(
+      expect.arrayContaining(["lanterns", "campfire", "shooting_stars", "owl"]),
+    );
+    expect(winterNight.moonPhase).toBeGreaterThanOrEqual(0);
+    expect(winterNight.moonPhase).toBeLessThanOrEqual(1);
+    expect(winterNight.dayProgress).toBeGreaterThanOrEqual(0);
+    expect(winterNight.dayProgress).toBeLessThanOrEqual(1);
+    expectWorldNumbersSafe(winterDay);
+    expectWorldNumbersSafe(summerDay);
+    expectWorldNumbersSafe(winterNight);
+  });
+
+  it("adds the quest mailbox layer only while a quest is active", () => {
+    const quest = {
+      id: "q1",
+      quest_type: "daily",
+      title: "Tidy the grove",
+      description: "Close three stuck tasks",
+      icon: "🌱",
+      created_at: "2024-01-01T00:00:00Z",
+      accepted_at: "2024-01-01T00:00:00Z",
+      status: "active",
+      progress: 0,
+      goal: 3,
+      baseline: 0,
+      reward_xp: 10,
+      controls: [],
+    };
+    const withQuest = buildBuddyWorldState({
+      now: new Date(2024, 0, 1, 14, 0, 0),
+      pulse: makePulse(),
+      pet: makePet(),
+      nowPlaying: null,
+      activeQuest: quest,
+    });
+    const withoutQuest = buildWorld();
+
+    expect(withQuest.atmosphere.layers).toContain("quest_mailbox");
+    expect(withoutQuest.atmosphere.layers).not.toContain("quest_mailbox");
+  });
+
   it("turns a sleeping pet into dream mist and dream weather", () => {
     const world = buildWorld({
       pet: makePet({ condition: { sleeping: true } }),

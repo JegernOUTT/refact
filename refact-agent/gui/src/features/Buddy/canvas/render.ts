@@ -83,12 +83,15 @@ export function renderFrame(
   if (anim.mouseProximity > 0.3 && !anim.walking)
     leanX = Math.round(anim.cursorTargetX * anim.mouseProximity * 3);
   if (anim.walking) leanX += anim.walkDirection * 2;
+  if (!anim.walking && !isSleeping && anim.mouseProximity <= 0.3)
+    leanX += Math.round(Math.sin(anim.frame * 0.011) * 1.5);
+  const shiverX = anim.shiverTimer > 0 ? (anim.frame % 2 === 0 ? 1 : -1) : 0;
 
   const baseOX = Math.round(
     CANVAS_CENTER_X - spriteW / 2 + anim.nuzzleOffsetX + anim.walkOffsetX,
   );
   const baseOY = Math.round(CANVAS_CENTER_Y - spriteH / 2 + anim.nuzzleOffsetY);
-  const ox = baseOX + shakeX + leanX;
+  const ox = baseOX + shakeX + leanX + shiverX;
   const oy = baseOY + bobY - celebBounce + shakeY;
 
   updateAndRenderGroundEffects(ctx, anim, pal.accent);
@@ -143,6 +146,20 @@ export function renderFrame(
   ctx.scale(anim.squashX, anim.squashY + anim.breathScale);
   ctx.translate(-centerX, -centerY);
   drawStageCharacter(ctx, stage, ox, oy, m, anim, semantic.paletteIndex);
+  if (anim.blushTimer > 0 || semantic.mood.affection > 70) {
+    ctx.globalAlpha = 0.3 + Math.sin(anim.frame * 0.15) * 0.1;
+    const cheekY = oy + Math.round(spriteH * 0.62);
+    fillRect(ctx, ox + Math.round(spriteW * 0.14), cheekY, 3, 1, "#FB7185");
+    fillRect(
+      ctx,
+      ox + spriteW - Math.round(spriteW * 0.14) - 3,
+      cheekY,
+      3,
+      1,
+      "#FB7185",
+    );
+    ctx.globalAlpha = 1;
+  }
   ctx.restore();
   ctx.restore();
 

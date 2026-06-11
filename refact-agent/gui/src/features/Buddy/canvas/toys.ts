@@ -10,7 +10,7 @@ export function renderWalkingFeet(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  if (!anim.walking || Math.abs(anim.walkSpeed) < 0.1) return;
+  if (!anim.walking || Math.abs(anim.walkVel) < 0.08) return;
   const leftUp = Math.sin(anim.walkPhase) > 0;
   const stepHeight = Math.abs(Math.sin(anim.walkPhase)) * 2.5;
   ctx.fillStyle = m.dark;

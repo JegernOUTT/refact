@@ -252,7 +252,12 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       lastSignalType
     ) {
       prevSignalTimeRef.current = lastSignalTime;
-      triggerSignalAnimation(animRef.current, lastSignalType, emit);
+      triggerSignalAnimation(
+        animRef.current,
+        lastSignalType,
+        emit,
+        semanticRef.current,
+      );
     }
   }, [state.activity, emit]);
 
@@ -455,7 +460,14 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       const coords = toCanvasCoords(e);
       if (!coords) return;
       const stage = semanticRef.current.progress.stage;
-      handlePet(animRef.current, coords.x, coords.y, emit, stage);
+      handlePet(
+        animRef.current,
+        coords.x,
+        coords.y,
+        emit,
+        stage,
+        semanticRef.current,
+      );
     },
     [toCanvasCoords, emit],
   );

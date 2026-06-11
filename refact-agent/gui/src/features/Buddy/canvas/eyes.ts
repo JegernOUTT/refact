@@ -8,15 +8,19 @@ export function drawEarOverlay(
   m: ColorMap,
   anim: BuddyAnimState,
 ): void {
-  if (Math.abs(anim.earAnimProgress) < 0.1) return;
+  const twitching = anim.earTwitchTimer > 0;
+  if (Math.abs(anim.earAnimProgress) < 0.1 && !twitching) return;
   const perked = anim.earAnimProgress > 0;
   const offset = Math.round(Math.abs(anim.earAnimProgress) * 2);
-  if (perked) {
-    fillPixel(ctx, bodyX, bodyY - offset, 1, 1, m.body);
-    fillPixel(ctx, bodyX + 4, bodyY - offset, 1, 1, m.body);
+  const flick = twitching && anim.earTwitchTimer % 4 < 2 ? 1 : 0;
+  const leftFlick = anim.earTwitchSide < 0 ? flick : 0;
+  const rightFlick = anim.earTwitchSide > 0 ? flick : 0;
+  if (perked || twitching) {
+    fillPixel(ctx, bodyX, bodyY - offset - leftFlick, 1, 1, m.body);
+    fillPixel(ctx, bodyX + 4, bodyY - offset - rightFlick, 1, 1, m.body);
   } else {
-    fillPixel(ctx, bodyX, bodyY + offset, 1, 1, m.dark);
-    fillPixel(ctx, bodyX + 4, bodyY + offset, 1, 1, m.dark);
+    fillPixel(ctx, bodyX, bodyY + offset + leftFlick, 1, 1, m.dark);
+    fillPixel(ctx, bodyX + 4, bodyY + offset + rightFlick, 1, 1, m.dark);
   }
 }
 
@@ -32,12 +36,22 @@ export function drawEyes(
 ): void {
   const lookOffsetX = Math.round(anim.eyeLookX * 0.8);
   const lookOffsetY = Math.round(anim.eyeLookY * 0.5);
+  const lid = Math.max(anim.lidClose, anim.lidBase);
 
-  if (anim.blinking) {
+  if (lid > 0.78) {
     fillRect(ctx, leftX, leftY + ((size / 2) | 0), size, 1, m.eyeDark);
     fillRect(ctx, rightX, rightY + ((size / 2) | 0), size, 1, m.eyeDark);
     return;
   }
+
+  const drawLids = (): void => {
+    if (lid <= 0.28) return;
+    const cover = Math.max(1, Math.min(size - 1, Math.round(lid * size)));
+    fillRect(ctx, leftX, leftY, size, cover, m.body);
+    fillRect(ctx, rightX, rightY, size, cover, m.body);
+    fillRect(ctx, leftX, leftY + cover - 1, size, 1, m.dark);
+    fillRect(ctx, rightX, rightY + cover - 1, size, 1, m.dark);
+  };
 
   if (anim.idleAction === "doze" || anim.moodType === "sleepy") {
     for (let i = 0; i < size; i++) {
@@ -159,6 +173,7 @@ export function drawEyes(
     fillPixel(ctx, leftX, leftY, 1, 1, "#93C5FD");
     fillPixel(ctx, rightX, rightY, 1, 1, "#93C5FD");
     ctx.globalAlpha = 1;
+    drawLids();
     return;
   }
 
@@ -267,24 +282,120 @@ export function drawEyes(
     return;
   }
 
+  if (style === "wide") {
+    fillRect(ctx, leftX, leftY, size, size, m.white);
+    fillRect(ctx, rightX, rightY, size, size, m.white);
+    fillPixel(ctx, leftX, leftY - 1, size, 1, m.white);
+    fillPixel(ctx, rightX, rightY - 1, size, 1, m.white);
+    fillPixel(
+      ctx,
+      leftX + ((size / 2) | 0),
+      leftY + ((size / 2) | 0),
+      1,
+      1,
+      m.black,
+    );
+    fillPixel(
+      ctx,
+      rightX + ((size / 2) | 0),
+      rightY + ((size / 2) | 0),
+      1,
+      1,
+      m.black,
+    );
+    return;
+  }
+
+  if (style === "wink") {
+    fillRect(ctx, leftX, leftY, size, size, m.white);
+    fillPixel(
+      ctx,
+      Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
+      Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
+      1,
+      1,
+      m.black,
+    );
+    for (let i = 0; i < size; i++) {
+      const off = Math.round(Math.abs(i - size / 2) * 0.8);
+      fillPixel(ctx, rightX + i, rightY + size - 1 - off, 1, 1, m.eyeDark);
+    }
+    ctx.globalAlpha = 0.4;
+    fillRect(ctx, rightX - 1, rightY + size, 3, 2, m.rosy);
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  if (style === "shifty") {
+    fillRect(ctx, leftX, leftY + 1, size, size - 1, m.white);
+    fillRect(ctx, rightX, rightY + 1, size, size - 1, m.white);
+    fillRect(ctx, leftX, leftY, size, 1, m.eyeDark);
+    fillRect(ctx, rightX, rightY, size, 1, m.eyeDark);
+    const sideX = Math.floor(frame / 20) % 2 === 0 ? 0 : size - 1;
+    fillPixel(
+      ctx,
+      leftX + sideX,
+      leftY + 1 + ((size / 2) | 0) - 1,
+      1,
+      1,
+      m.black,
+    );
+    fillPixel(
+      ctx,
+      rightX + sideX,
+      rightY + 1 + ((size / 2) | 0) - 1,
+      1,
+      1,
+      m.black,
+    );
+    return;
+  }
+
   fillRect(ctx, leftX, leftY, size, size, m.white);
   fillRect(ctx, rightX, rightY, size, size, m.white);
-  fillPixel(
-    ctx,
-    Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
-    Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
-    1,
-    1,
-    m.black,
-  );
-  fillPixel(
-    ctx,
-    Math.max(rightX, Math.min(rightX + size - 1, rightX + 1 + lookOffsetX)),
-    Math.max(rightY, Math.min(rightY + size - 1, rightY + 1 + lookOffsetY)),
-    1,
-    1,
-    m.black,
-  );
+  const dilated = anim.pupilDilation > 0.75 && size >= 3;
+  if (dilated) {
+    const lpx = Math.max(
+      leftX,
+      Math.min(leftX + size - 2, leftX + 1 + lookOffsetX),
+    );
+    const lpy = Math.max(
+      leftY,
+      Math.min(leftY + size - 2, leftY + 1 + lookOffsetY),
+    );
+    const rpx = Math.max(
+      rightX,
+      Math.min(rightX + size - 2, rightX + 1 + lookOffsetX),
+    );
+    const rpy = Math.max(
+      rightY,
+      Math.min(rightY + size - 2, rightY + 1 + lookOffsetY),
+    );
+    fillPixel(ctx, lpx, lpy, 2, 2, m.black);
+    fillPixel(ctx, rpx, rpy, 2, 2, m.black);
+    ctx.globalAlpha = 0.85;
+    fillPixel(ctx, lpx, lpy, 1, 1, m.white);
+    fillPixel(ctx, rpx, rpy, 1, 1, m.white);
+    ctx.globalAlpha = 1;
+  } else {
+    fillPixel(
+      ctx,
+      Math.max(leftX, Math.min(leftX + size - 1, leftX + 1 + lookOffsetX)),
+      Math.max(leftY, Math.min(leftY + size - 1, leftY + 1 + lookOffsetY)),
+      1,
+      1,
+      m.black,
+    );
+    fillPixel(
+      ctx,
+      Math.max(rightX, Math.min(rightX + size - 1, rightX + 1 + lookOffsetX)),
+      Math.max(rightY, Math.min(rightY + size - 1, rightY + 1 + lookOffsetY)),
+      1,
+      1,
+      m.black,
+    );
+  }
+  drawLids();
 }
 
 export function drawMouth(
@@ -301,6 +412,12 @@ export function drawMouth(
 
   if (anim.idleAction === "doze") {
     fillPixel(ctx, mx + 1, my, width - 2, 1, m.eyeDark);
+    return;
+  }
+
+  if (anim.pantTimer > 0) {
+    fillRect(ctx, mx + 1, my, width - 2, 2, m.eyeDark);
+    fillPixel(ctx, mx + ((width / 2) | 0), my + 2, 1, 1, m.rosy);
     return;
   }
 

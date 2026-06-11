@@ -9,6 +9,7 @@ import type {
 } from "./types";
 
 export type BuddyWorldPhase = "morning" | "day" | "evening" | "night";
+export type BuddyWorldSeason = "spring" | "summer" | "autumn" | "winter";
 export type BuddyWorldWeather =
   | "clear"
   | "aurora"
@@ -41,7 +42,21 @@ export type BuddyWorldLayer =
   | "memory_orbs"
   | "cozy_home_glow"
   | "toy_glow"
-  | "empty_food_nook";
+  | "empty_food_nook"
+  | "season_petals"
+  | "season_leaves"
+  | "season_snow"
+  | "summer_shimmer"
+  | "morning_fog"
+  | "birds"
+  | "butterflies"
+  | "owl"
+  | "shooting_stars"
+  | "rainbow"
+  | "pond_life"
+  | "lanterns"
+  | "campfire"
+  | "quest_mailbox";
 
 export interface BuddyWorldAtmosphere {
   phase: BuddyWorldPhase;
@@ -107,6 +122,10 @@ export interface BuddyWorldObject {
 
 export interface BuddyWorldState {
   phase: BuddyWorldPhase;
+  season: BuddyWorldSeason;
+  seasonLabel: string;
+  moonPhase: number;
+  dayProgress: number;
   phaseLabel: string;
   phaseMessage: string;
   celestialEmoji: string;
@@ -487,6 +506,48 @@ function phaseFromHour(hour: number): BuddyWorldPhase {
   if (hour >= 11 && hour < 17) return "day";
   if (hour >= 17 && hour < 21) return "evening";
   return "night";
+}
+
+const SEASON_LABELS: Record<BuddyWorldSeason, string> = {
+  spring: "Blossom season",
+  summer: "High sun season",
+  autumn: "Falling leaves season",
+  winter: "Quiet snow season",
+};
+
+function seasonFromMonth(month: number): BuddyWorldSeason {
+  if (month >= 2 && month <= 4) return "spring";
+  if (month >= 5 && month <= 7) return "summer";
+  if (month >= 8 && month <= 10) return "autumn";
+  return "winter";
+}
+
+const SYNODIC_MONTH_DAYS = 29.530588;
+const NEW_MOON_REF_MS = Date.UTC(2024, 0, 11, 11, 57);
+
+function moonPhaseFromTime(nowMs: number): number {
+  if (!Number.isFinite(nowMs)) return 0.5;
+  const days = (nowMs - NEW_MOON_REF_MS) / 86_400_000;
+  const phase = (days / SYNODIC_MONTH_DAYS) % 1;
+  return phase < 0 ? phase + 1 : phase;
+}
+
+function celestialArc(now: Date): {
+  dayProgress: number;
+  x: number;
+  y: number;
+} {
+  const hour = now.getHours() + now.getMinutes() / 60;
+  const daytime = hour >= 5 && hour < 21;
+  const raw = daytime
+    ? (hour - 5) / 16
+    : (hour >= 21 ? hour - 21 : hour + 3) / 8;
+  const progress = clampRange(raw, 0, 1, 0.5);
+  return {
+    dayProgress: progress,
+    x: 12 + progress * 76,
+    y: (daytime ? 34 : 30) - Math.sin(progress * Math.PI) * (daytime ? 22 : 16),
+  };
 }
 
 function phaseDetails(
@@ -1028,6 +1089,8 @@ function hasAffectionState(args: {
 
 function buildAtmosphere(args: {
   phase: BuddyWorldPhase;
+  season: BuddyWorldSeason;
+  hasQuest: boolean;
   primaryWeather: BuddyWorldWeather;
   pulse: BuddyPulse | null | undefined;
   pet: BuddyPetState | undefined;
@@ -1087,6 +1150,52 @@ function buildAtmosphere(args: {
   if (providerRuntimeActive) addLayer(layers, "workshop_runes");
   if (args.primaryWeather === "aurora") addLayer(layers, "aurora");
 
+  const calmSky =
+    args.primaryWeather === "clear" ||
+    args.primaryWeather === "wind" ||
+    args.primaryWeather === "aurora";
+  const daylight = args.phase === "morning" || args.phase === "day";
+  switch (args.season) {
+    case "spring":
+      if (calmSky) addLayer(layers, "season_petals");
+      break;
+    case "summer":
+      if (calmSky && daylight) addLayer(layers, "summer_shimmer");
+      break;
+    case "autumn":
+      if (args.primaryWeather !== "storm" && args.primaryWeather !== "dream")
+        addLayer(layers, "season_leaves");
+      if (args.phase === "morning") addLayer(layers, "morning_fog");
+      break;
+    case "winter":
+      if (args.primaryWeather !== "storm" && args.primaryWeather !== "dream")
+        addLayer(layers, "season_snow");
+      break;
+  }
+  if (daylight && calmSky && args.season !== "winter" && !sleeping)
+    addLayer(layers, "birds");
+  if (
+    (args.season === "spring" || args.season === "summer") &&
+    daylight &&
+    args.primaryWeather === "clear" &&
+    !sleeping
+  )
+    addLayer(layers, "butterflies");
+  if (args.phase === "night" && !serious) addLayer(layers, "owl");
+  if (
+    args.phase === "night" &&
+    (args.primaryWeather === "clear" || args.primaryWeather === "aurora")
+  )
+    addLayer(layers, "shooting_stars");
+  if (args.primaryWeather === "rain" && args.phase === "day")
+    addLayer(layers, "rainbow");
+  if (args.season !== "winter") addLayer(layers, "pond_life");
+  if (args.phase === "evening" || args.phase === "night")
+    addLayer(layers, "lanterns");
+  if (args.phase === "night" && calmSky && !sleeping)
+    addLayer(layers, "campfire");
+  if (args.hasQuest) addLayer(layers, "quest_mailbox");
+
   let mood: BuddyWorldMood = args.phase === "night" ? "serene" : "curious";
   if (affectionate) mood = "affectionate";
   if (bored) mood = "bored";
@@ -1130,9 +1239,11 @@ export function buildBuddyWorldState(args: {
 }): BuddyWorldState {
   const pulse = normalizeBuddyPulse(args.pulse);
   const phase = phaseFromHour(args.now.getHours());
+  const season = seasonFromMonth(args.now.getMonth());
   const name = identityName(args.semanticState);
   const phaseInfo = phaseDetails(phase, name);
   const nowMs = args.now.getTime();
+  const arc = celestialArc(args.now);
   const visibleRuntime = visibleRuntimeEvent(args.nowPlaying, nowMs);
   const weatherInfo = weatherFromState(
     phase,
@@ -1145,6 +1256,8 @@ export function buildBuddyWorldState(args: {
   const objects = buildObjects(pulse, visibleRuntime, name);
   const atmosphere = buildAtmosphere({
     phase,
+    season,
+    hasQuest: args.activeQuest != null,
     primaryWeather: weatherInfo.weather,
     pulse,
     pet: args.pet,
@@ -1158,7 +1271,13 @@ export function buildBuddyWorldState(args: {
 
   return {
     phase,
+    season,
+    seasonLabel: SEASON_LABELS[season],
+    moonPhase: moonPhaseFromTime(nowMs),
+    dayProgress: arc.dayProgress,
     ...phaseInfo,
+    celestialX: arc.x,
+    celestialY: arc.y,
     ...weatherInfo,
     ...vitalityInfo,
     objects,

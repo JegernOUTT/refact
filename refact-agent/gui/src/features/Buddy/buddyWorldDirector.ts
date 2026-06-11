@@ -16,7 +16,17 @@ export type BuddyWorldIntentKind =
   | "seek_toy"
   | "receive_affection"
   | "wander_curiously"
-  | "celebrate_recovery";
+  | "celebrate_recovery"
+  | "check_mailbox"
+  | "warm_by_fire"
+  | "watch_shooting_star"
+  | "play_in_snow"
+  | "collect_leaves"
+  | "smell_flowers"
+  | "tend_garden"
+  | "chase_butterfly"
+  | "watch_birds"
+  | "visit_pond";
 
 export interface BuddyWorldIntent {
   id: string;
@@ -65,6 +75,11 @@ const SAFE_TARGETS = {
   food: { targetX: 38, targetY: 78, depthScale: 0.98 },
   toy: { targetX: 46, targetY: 78, depthScale: 1 },
   observatory: { targetX: 67, targetY: 74, depthScale: 1.02 },
+  pond: { targetX: 36, targetY: 82, depthScale: 1.04 },
+  garden: { targetX: 41, targetY: 79, depthScale: 1 },
+  campfire: { targetX: 58, targetY: 81, depthScale: 1.05 },
+  mailbox: { targetX: 35, targetY: 76, depthScale: 0.94 },
+  meadow: { targetX: 47, targetY: 80, depthScale: 1.02 },
 } as const satisfies Record<string, IntentTarget>;
 
 function clampRange(
@@ -476,6 +491,22 @@ export function chooseBuddyWorldIntent(
       break;
   }
 
+  if (hasLayer(args.world, "quest_mailbox")) {
+    mediumPriorityCandidates.push(
+      makeIntent({
+        kind: "check_mailbox",
+        target: SAFE_TARGETS.mailbox,
+        pose: "look",
+        speech: "The quest mailbox flag is up. New orders inside!",
+        speechKind: "actionable",
+        durationMs: 8_400,
+        priority: 56,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+
   switch (args.world.phase) {
     case "morning":
       mediumPriorityCandidates.push(
@@ -523,6 +554,138 @@ export function chooseBuddyWorldIntent(
       break;
   }
 
+  const flavorCandidates: BuddyWorldIntent[] = [];
+
+  if (hasLayer(args.world, "campfire")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "warm_by_fire",
+        target: SAFE_TARGETS.campfire,
+        pose: "meditate",
+        speech: "Campfire status: crackling within parameters.",
+        durationMs: 10_400,
+        priority: 30,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "shooting_stars")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "watch_shooting_star",
+        target: SAFE_TARGETS.observatory,
+        pose: "stargaze",
+        speech: "A star just zipped across the sky. Wish logged.",
+        durationMs: 9_200,
+        priority: 24,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "season_snow")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "play_in_snow",
+        target: SAFE_TARGETS.meadow,
+        pose: "dig",
+        speech: "Snow! I’m sculpting a tiny code angel.",
+        durationMs: 9_000,
+        priority: 22,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "season_leaves")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "collect_leaves",
+        target: SAFE_TARGETS.garden,
+        pose: "carry",
+        speech: "Collecting the crunchiest leaves for the archive.",
+        durationMs: 8_800,
+        priority: 21,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "season_petals")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "smell_flowers",
+        target: SAFE_TARGETS.garden,
+        pose: "look",
+        speech: "Petal report: fragrant and non-blocking.",
+        durationMs: 8_600,
+        priority: 21,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (
+    args.world.vitality !== "lush" &&
+    (args.world.phase === "morning" || args.world.phase === "day")
+  ) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "tend_garden",
+        target: SAFE_TARGETS.garden,
+        pose: "dig",
+        speech: "Watering the task sprouts back to green.",
+        durationMs: 9_000,
+        priority: 20,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "butterflies")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "chase_butterfly",
+        target: SAFE_TARGETS.meadow,
+        pose: "pounce",
+        speech: "A butterfly! Critical chase business.",
+        durationMs: 8_400,
+        priority: 19,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "birds")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "watch_birds",
+        target: SAFE_TARGETS.meadow,
+        pose: "look",
+        speech: "Bird patrol overhead. All wings accounted for.",
+        durationMs: 8_200,
+        priority: 16,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+  if (hasLayer(args.world, "pond_life")) {
+    flavorCandidates.push(
+      makeIntent({
+        kind: "visit_pond",
+        target: SAFE_TARGETS.pond,
+        pose: "look",
+        speech: "The koi shared confidential pond gossip.",
+        durationMs: 8_400,
+        priority: 14,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
+
   const lowPriorityCandidates = [
     makeIntent({
       kind: "wander_curiously",
@@ -555,6 +718,7 @@ export function chooseBuddyWorldIntent(
       ...highPriorityCandidates,
       ...(recoveryIntent ? [recoveryIntent] : []),
       ...mediumPriorityCandidates,
+      ...flavorCandidates,
       ...lowPriorityCandidates,
     ],
     args.recentIntentKinds,

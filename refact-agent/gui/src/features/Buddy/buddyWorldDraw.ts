@@ -11,12 +11,17 @@ import {
 } from "./buddyWorldDrawAtmosphere";
 import {
   drawBuddyLandingPad,
+  drawCampfire,
   drawDistantHills,
   drawForegroundCozyDetails,
   drawGround,
   drawHomePath,
+  drawLanterns,
+  drawMailbox,
   drawMidgroundGarden,
+  drawPond,
   drawVitality,
+  drawWinterGroundDust,
   drawWorkshopZones,
 } from "./buddyWorldDrawDiorama";
 import { drawBuddyHomeDoor, drawWorldObjects } from "./buddyWorldDrawObjects";
@@ -68,9 +73,14 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
   drawWeatherAtmosphere(drawArgs);
   drawWorldObjects(drawArgs);
   drawGround(drawArgs);
+  drawWinterGroundDust(drawArgs);
+  drawPond(drawArgs);
   drawHomePath(drawArgs);
+  drawLanterns(drawArgs);
   drawBuddyHomeDoor(drawArgs);
+  drawMailbox(drawArgs);
   drawVitality(drawArgs);
   drawBuddyLandingPad(drawArgs);
+  drawCampfire(drawArgs);
   drawForegroundCozyDetails(drawArgs);
 }

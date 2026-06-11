@@ -54,7 +54,10 @@ export type EyeStyle =
   | "angry"
   | "X"
   | "squint"
-  | "uwu";
+  | "uwu"
+  | "wide"
+  | "wink"
+  | "shifty";
 
 export type AnimType =
   | "idle"
@@ -105,7 +108,19 @@ export type IdleActionType =
   | "type_code"
   | "scratch"
   | "peekAround"
-  | "sniff";
+  | "sniff"
+  | "sigh"
+  | "earTwitch"
+  | "headTiltHold"
+  | "groom"
+  | "wiggle"
+  | "zoomies"
+  | "nodOff"
+  | "shiver"
+  | "daydream"
+  | "shakeOff"
+  | "peekCamera"
+  | "stumble";
 
 export type ToyType = "duck" | "dice" | "coffee" | "bug" | "scroll";
 
@@ -301,6 +316,32 @@ export interface BuddySpeechItem {
   speech_intent?: string;
 }
 
+export type AnimBeatKind =
+  | "squash"
+  | "sparks"
+  | "rainbow"
+  | "emoji"
+  | "impact"
+  | "dust"
+  | "speedlines"
+  | "flash"
+  | "afterimage"
+  | "status"
+  | "eyes";
+
+export interface AnimBeat {
+  at: number;
+  kind: AnimBeatKind;
+  x?: number;
+  y?: number;
+  count?: number;
+  emoji?: string;
+  text?: string;
+  color?: string;
+  eyeStyle?: EyeStyle;
+  frames?: number;
+}
+
 export interface BuddyAnimState {
   frame: number;
   blinkTick: number;
@@ -376,6 +417,32 @@ export interface BuddyAnimState {
   activeScene: string;
   activeSceneVariant: string;
   activeSceneTimer: number;
+  lidClose: number;
+  lidBase: number;
+  blinkQueue: number;
+  slowBlinkTimer: number;
+  pupilDilation: number;
+  saccadeFrames: number;
+  gazeSettleFrames: number;
+  breathPhase: number;
+  pantTimer: number;
+  recentIdleActions: IdleActionType[];
+  nextIdleBias: Partial<Record<IdleActionType, number>>;
+  idleActionTotal: number;
+  sighCooldown: number;
+  rareActionCooldown: number;
+  walkVel: number;
+  walkLeanFrames: number;
+  stumbleCooldown: number;
+  zoomiesDashesLeft: number;
+  earTwitchTimer: number;
+  earTwitchSide: number;
+  shiverTimer: number;
+  blushTimer: number;
+  beats: AnimBeat[];
+  petSessionCount: number;
+  lastPetFrame: number;
+  temperamentSeed: number;
 }
 
 export interface ColorMap {
