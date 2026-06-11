@@ -87,6 +87,7 @@ export function AnimatedCollapsible({
         className,
       )}
       data-animate={animate}
+      data-has-icon={icon ? "true" : "false"}
       data-open={isOpen}
       data-status={status}
       {...props}
@@ -95,12 +96,7 @@ export function AnimatedCollapsible({
         <button
           aria-controls={bodyId}
           aria-expanded={isOpen}
-          className={classNames(
-            styles.trigger,
-            "rf-pressable",
-            (status === "running" || status === "streaming") &&
-              "rf-active-pulse",
-          )}
+          className={classNames(styles.trigger, "rf-pressable")}
           type="button"
           onClick={handleToggle}
         >

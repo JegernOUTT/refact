@@ -14,23 +14,18 @@
 }
 
 .pulse {
-  opacity: 0.98;
-  filter: brightness(1.08);
-  transform: translateZ(0);
+  opacity: 1;
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .pulse {
-    animation: rf-active-breathe calc(var(--rf-dur-slow) * 5)
+    animation: rf-soft-pulse calc(var(--rf-dur-slow) * 4)
       var(--rf-ease-standard) infinite alternate;
-    will-change: filter, opacity, transform;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .pulse {
     animation: none;
-    filter: none;
-    transform: none;
   }
 }

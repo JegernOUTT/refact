@@ -38,9 +38,12 @@
 
 .rf-active-pulse,
 .rf-status-pulse {
-  opacity: 0.98;
-  filter: brightness(1.08);
-  transform: translateZ(0);
+  opacity: 1;
+}
+
+.rf-text-shimmer {
+  --rf-shimmer-text-base: var(--rf-color-muted);
+  --rf-shimmer-text-glow: var(--rf-color-fg);
 }
 
 .rf-shimmer {
@@ -132,7 +135,6 @@
 
   .rf-pressable {
     transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
-    will-change: transform;
   }
 
   .rf-pressable:hover {
@@ -145,9 +147,29 @@
 
   .rf-active-pulse,
   .rf-status-pulse {
-    animation: rf-active-breathe calc(var(--rf-dur-slow) * 5)
+    animation: rf-soft-pulse calc(var(--rf-dur-slow) * 4)
       var(--rf-ease-standard) infinite alternate;
-    will-change: filter, opacity, transform;
+  }
+
+  .rf-text-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--rf-shimmer-text-base) 0%,
+      var(--rf-shimmer-text-base) 38%,
+      var(--rf-shimmer-text-glow) 50%,
+      var(--rf-shimmer-text-base) 62%,
+      var(--rf-shimmer-text-base) 100%
+    );
+    background-size: 250% 100%;
+    background-position: 100% 0;
+    animation: rf-text-shimmer 2.4s linear infinite;
+    color: transparent;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .rf-spin {
+    animation: rf-spin 1.2s linear infinite;
   }
 
   .rf-shimmer::after {
@@ -161,6 +183,8 @@
   .rf-popover-motion,
   .rf-active-pulse,
   .rf-status-pulse,
+  .rf-text-shimmer,
+  .rf-spin,
   .rf-shimmer::after,
   .rf-stagger > * {
     animation: none;
@@ -218,17 +242,29 @@
   }
 }
 
-@keyframes rf-active-breathe {
+@keyframes rf-soft-pulse {
   from {
-    opacity: 0.92;
-    filter: brightness(1.04);
-    transform: translateZ(0);
+    opacity: 1;
   }
 
   to {
-    opacity: 1;
-    filter: brightness(1.24);
-    transform: translateZ(0);
+    opacity: 0.55;
+  }
+}
+
+@keyframes rf-text-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes rf-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

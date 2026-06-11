@@ -55,16 +55,21 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   }, [onToggle, preserveScrollAnchor]);
 
   const title = (
-    <span
-      className={classNames(
-        styles.titleRow,
-        status === "running" && "rf-active-pulse",
-      )}
-    >
+    <span className={styles.titleRow}>
       <span className={styles.iconWrapper}>
-        {status === "running" ? <Icon icon={LoaderCircle} /> : icon}
+        {status === "running" ? (
+          <Icon className="rf-spin" icon={LoaderCircle} />
+        ) : (
+          icon
+        )}
       </span>
-      <span className={styles.summary}>{summary}</span>
+      <span className={styles.summary}>
+        {status === "running" ? (
+          <span className="rf-text-shimmer">{summary}</span>
+        ) : (
+          summary
+        )}
+      </span>
       {meta && <span className={styles.meta}>{meta}</span>}
     </span>
   );

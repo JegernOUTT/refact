@@ -161,7 +161,7 @@ export const DashboardTextField = Object.assign(DashboardTextFieldRoot, {
 
 export function DashboardSpinner() {
   return (
-    <span className={classNames(styles.spinner, "rf-status-pulse")}>
+    <span className={classNames(styles.spinner, "rf-spin")}>
       <Icon icon={LoaderCircle} size="md" tone="muted" />
     </span>
   );

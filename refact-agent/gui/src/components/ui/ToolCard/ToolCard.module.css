@@ -1,5 +1,8 @@
 .root {
-  --rf-toolcard-body-offset: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  /* Aligns body content with the title text: toggle pad + icon column + gap. */
+  --rf-toolcard-body-offset: calc(
+    var(--rf-space-2) + var(--rf-icon) + var(--rf-space-2)
+  );
   --rf-toolcard-body-padding-block: var(--rf-space-2);
   --rf-toolcard-body-padding-inline-start: var(--rf-toolcard-body-offset);
 
@@ -39,7 +42,6 @@
 
 .toggle:hover {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
 }
 
 .toggle:focus-visible {
@@ -48,7 +50,12 @@
 }
 
 .leadingIcon {
+  display: inline-flex;
   flex: 0 0 auto;
+  width: var(--rf-icon);
+  min-width: var(--rf-icon);
+  align-items: center;
+  justify-content: center;
 }
 
 .title {
@@ -98,12 +105,12 @@
 .bodyShell {
   min-width: 0;
   opacity: 0;
-  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+  transform: translateY(var(--rf-collapse-enter-y));
 }
 
 .root[data-open="true"] .bodyShell {
   opacity: 1;
-  transform: translateY(0) translateZ(0);
+  transform: translateY(0);
 }
 
 /*
@@ -135,11 +142,6 @@
     transition:
       opacity var(--rf-toolcard-motion-duration) var(--rf-ease-entrance),
       transform var(--rf-toolcard-motion-duration) var(--rf-ease-entrance);
-    will-change: opacity, transform;
-  }
-
-  .root:not([data-open="true"]) .bodyShell {
-    will-change: auto;
   }
 }
 

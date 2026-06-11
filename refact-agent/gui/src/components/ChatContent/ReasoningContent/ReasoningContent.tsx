@@ -188,7 +188,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
 
   const headerIcon = isActivelyThinking ? (
     <span className={styles.spinner}>
-      <Icon icon={LoaderCircle} size="sm" tone="accent" />
+      <Icon className="rf-spin" icon={LoaderCircle} size="sm" tone="accent" />
     </span>
   ) : (
     <Icon icon={Zap} size="sm" tone="accent" />
@@ -197,7 +197,15 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   return (
     <AnimatedCollapsible
       className={styles.card}
-      header={<span className={styles.summary}>{summaryText}</span>}
+      header={
+        <span className={styles.summary}>
+          {isActivelyThinking ? (
+            <span className="rf-text-shimmer">{summaryText}</span>
+          ) : (
+            summaryText
+          )}
+        </span>
+      }
       icon={headerIcon}
       open={renderedOpen}
       onOpenChange={handleOpenChange}

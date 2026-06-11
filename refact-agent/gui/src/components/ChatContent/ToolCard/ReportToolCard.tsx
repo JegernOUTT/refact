@@ -295,15 +295,15 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   ) : null;
 
   const header = (
-    <span
-      className={classNames(
-        styles.titleRow,
-        status === "running" && "rf-active-pulse",
-      )}
-    >
+    <span className={styles.titleRow}>
       <span className={styles.icon}>
         {status === "running" ? (
-          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+          <Icon
+            className="rf-spin"
+            icon={LoaderCircle}
+            size="sm"
+            tone="accent"
+          />
         ) : (
           icon
         )}
@@ -317,7 +317,11 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
             styles.summaryTaskDone,
         )}
       >
-        {summary}
+        {status === "running" ? (
+          <span className="rf-text-shimmer">{summary}</span>
+        ) : (
+          summary
+        )}
       </span>
       {meta && <span className={styles.meta}>{meta}</span>}
       {status === "error" && <span className={styles.errorBadge}>failed</span>}

@@ -140,15 +140,15 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
   }, [deferredEntertainmentText, status, summary]);
 
   const header = (
-    <span
-      className={classNames(
-        styles.titleRow,
-        status === "running" && "rf-active-pulse",
-      )}
-    >
+    <span className={styles.titleRow}>
       <span className={styles.icon}>
         {status === "running" ? (
-          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+          <Icon
+            className="rf-spin"
+            icon={LoaderCircle}
+            size="sm"
+            tone="accent"
+          />
         ) : (
           icon
         )}
@@ -159,7 +159,11 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
           status === "error" && styles.error,
         )}
       >
-        {summary}
+        {status === "running" ? (
+          <span className="rf-text-shimmer">{summary}</span>
+        ) : (
+          summary
+        )}
       </span>
       {meta && <span className={styles.meta}>{meta}</span>}
       {status === "error" && <span className={styles.errorBadge}>failed</span>}

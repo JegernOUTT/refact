@@ -6,6 +6,18 @@
   overflow-x: clip;
 }
 
+/*
+ * The GUI is a fixed 100vh app shell: the page itself must never scroll.
+ * Transient layout work (portals, streaming growth, measurement passes)
+ * otherwise flashes a window scrollbar for a frame or two. Scoped via :has
+ * so harnesses without the app root (Storybook) keep page scrolling.
+ */
+html:has([data-element="app-root"]),
+body:has([data-element="app-root"]) {
+  overflow: clip;
+  overscroll-behavior: none;
+}
+
 .scrollX {
   overflow-x: auto;
   max-width: 100%;

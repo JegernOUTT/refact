@@ -3,6 +3,12 @@
   font-family: var(--rf-font-mono);
 }
 
+/* While running, let the title shimmer own the color so the whole line
+   animates uniformly. */
+[data-status="running"] .stats {
+  color: inherit;
+}
+
 .taskList {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   display: flex;
@@ -21,7 +27,6 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .taskItem svg {
@@ -36,7 +41,6 @@
 
 .inProgress {
   color: var(--rf-color-accent);
-  animation: spin 1s linear infinite;
 }
 
 .completed {
@@ -47,29 +51,12 @@
   color: var(--rf-color-danger);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .inProgress {
-    animation: none;
-  }
-}
-
 @media (prefers-reduced-transparency: reduce) {
   .taskItem {
     background: var(--rf-surface-glass);
-    backdrop-filter: none;
   }
 }
 
 :global(.radix-themes[data-host="jetbrains"]) .taskItem {
   background: var(--rf-surface-glass);
-  backdrop-filter: none;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
 }

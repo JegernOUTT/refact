@@ -11,13 +11,19 @@
 }
 
 .stack {
+  /* Root-level indent: aligns with header text (trigger pad + icon + gap). */
+  --rf-toolcard-indent: calc(
+    var(--rf-space-2) + var(--rf-icon) + var(--rf-space-2)
+  );
+
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
 }
 
 .card {
-  --rf-toolcard-indent: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  /* Inside the collapsible body, which already pads by one trigger pad. */
+  --rf-toolcard-indent: calc(var(--rf-icon) + var(--rf-space-2));
 
   overflow: visible;
 }
@@ -159,7 +165,6 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .contentUnbounded {
@@ -190,12 +195,10 @@
   .actionButton:hover,
   .content {
     background: var(--rf-surface-glass);
-    backdrop-filter: none;
   }
 }
 
 :global(.radix-themes[data-host="jetbrains"]) .actionButton:hover,
 :global(.radix-themes[data-host="jetbrains"]) .content {
   background: var(--rf-surface-glass);
-  backdrop-filter: none;
 }

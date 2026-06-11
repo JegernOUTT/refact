@@ -108,6 +108,13 @@ export function ToolCard({
   const bodyId = React.useId();
   const bodyRef = React.useRef<HTMLDivElement>(null);
   const tone = statusTone[status];
+  const isActive = status === "running" || status === "streaming";
+  const titleContent =
+    isActive && (typeof title === "string" || typeof title === "number") ? (
+      <span className="rf-text-shimmer">{title}</span>
+    ) : (
+      title
+    );
 
   useCollapsedFocusGuard(bodyRef, !isOpen);
 
@@ -132,19 +139,21 @@ export function ToolCard({
         <button
           aria-controls={bodyId}
           aria-expanded={isOpen}
-          className={classNames(
-            styles.toggle,
-            "rf-pressable",
-            (status === "running" || status === "streaming") &&
-              "rf-active-pulse",
-          )}
+          className={classNames(styles.toggle, "rf-pressable")}
           type="button"
           onClick={toggleOpen}
         >
           {icon ? (
-            <Icon className={styles.leadingIcon} icon={icon} tone={tone} />
+            <Icon
+              className={classNames(
+                styles.leadingIcon,
+                isActive && "rf-status-pulse",
+              )}
+              icon={icon}
+              tone={tone}
+            />
           ) : null}
-          <span className={styles.title}>{title}</span>
+          <span className={styles.title}>{titleContent}</span>
           <span className={styles.spacer} />
           <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
         </button>

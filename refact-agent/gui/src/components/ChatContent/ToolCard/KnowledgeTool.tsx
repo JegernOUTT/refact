@@ -34,6 +34,14 @@ interface KnowledgeToolProps {
   contextFiles?: ChatContextFile[];
 }
 
+const MAX_TITLE_PREVIEW_CHARS = 80;
+
+function titlePreview(text: string): string {
+  const firstLine = text.split("\n", 1)[0].trim();
+  if (firstLine.length <= MAX_TITLE_PREVIEW_CHARS) return firstLine;
+  return `${firstLine.slice(0, MAX_TITLE_PREVIEW_CHARS)}…`;
+}
+
 export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
   toolCall,
   toolType,
@@ -90,7 +98,7 @@ export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
 
     if (toolType === "create_knowledge") {
       const createArgs = args as CreateKnowledgeArgs;
-      const preview = createArgs.content ?? "memory";
+      const preview = titlePreview(createArgs.content ?? "memory");
       return (
         <>
           Remember <span className={styles.query}>&quot;{preview}&quot;</span>

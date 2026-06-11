@@ -37,7 +37,6 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
   line-height: var(--rf-line);
 }
 
@@ -71,7 +70,6 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
   line-height: var(--rf-line);
 }
 
@@ -95,12 +93,10 @@
   .resultPanel,
   .resultItem {
     background: var(--rf-surface-glass);
-    backdrop-filter: none;
   }
 }
 
 :global(.radix-themes[data-host="jetbrains"]) .resultPanel,
 :global(.radix-themes[data-host="jetbrains"]) .resultItem {
   background: var(--rf-surface-glass);
-  backdrop-filter: none;
 }

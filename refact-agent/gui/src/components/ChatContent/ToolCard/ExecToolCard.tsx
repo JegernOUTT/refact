@@ -466,7 +466,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           data-testid="exec-live-preview"
           title={livePreview ?? undefined}
         >
-          {livePreview ?? "Waiting for output…"}
+          <span className="rf-text-shimmer">
+            {livePreview ?? "Waiting for output…"}
+          </span>
         </Text>
       )}
 

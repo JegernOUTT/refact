@@ -29,7 +29,7 @@ const TaskStatusIcon: React.FC<{ status: Task["status"] }> = ({ status }) => {
     case "failed":
       return <CircleX className={styles.failed} />;
     case "in_progress":
-      return <RefreshCw className={styles.inProgress} />;
+      return <RefreshCw className={`${styles.inProgress} rf-spin`} />;
     default:
       return <Circle className={styles.pending} />;
   }

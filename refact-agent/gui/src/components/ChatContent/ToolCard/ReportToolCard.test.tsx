@@ -65,7 +65,7 @@ describe("ReportToolCard", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
-  test("applies the shared running pulse while report tools are pending", () => {
+  test("applies the running text shimmer and spinner while report tools are pending", () => {
     const { container } = renderReportTool();
     const toggle = screen.getByRole("button", { name: /run subagent/i });
 
@@ -73,7 +73,11 @@ describe("ReportToolCard", () => {
       "data-status",
       "running",
     );
-    expect(toggle).toHaveClass("rf-active-pulse");
+    expect(toggle).not.toHaveClass("rf-active-pulse");
+    expect(toggle.querySelector(".rf-text-shimmer")).toHaveTextContent(
+      "Run subagent",
+    );
+    expect(toggle.querySelector(".rf-spin")).toBeInTheDocument();
     expect(screen.getByText(/collecting context/)).toBeInTheDocument();
   });
 });

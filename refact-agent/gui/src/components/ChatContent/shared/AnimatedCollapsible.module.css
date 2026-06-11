@@ -1,9 +1,19 @@
 .root {
+  /* Default body offset lines up with trigger content (no icon column). */
+  --rf-collapsible-body-offset: var(--rf-space-2);
+
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
+}
+
+.root[data-has-icon="true"] {
+  /* Aligns body content with the header text: trigger pad + icon + gap. */
+  --rf-collapsible-body-offset: calc(
+    var(--rf-space-2) + var(--rf-icon) + var(--rf-space-2)
+  );
 }
 
 .variant-card {
@@ -12,7 +22,6 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .variant-compact {
@@ -47,7 +56,6 @@
 
 .trigger:hover {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
 }
 
 .trigger:focus-visible {
@@ -58,6 +66,8 @@
 .icon {
   display: inline-flex;
   flex: 0 0 auto;
+  width: var(--rf-icon);
+  min-width: var(--rf-icon);
   align-items: center;
   justify-content: center;
   color: var(--rf-color-muted);
@@ -112,19 +122,20 @@
 .bodyShell {
   min-width: 0;
   opacity: 0;
-  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+  transform: translateY(var(--rf-collapse-enter-y));
 }
 
 .bodyGrid[data-open="true"] .bodyShell {
   opacity: 1;
-  transform: translateY(0) translateZ(0);
+  transform: translateY(0);
 }
 
 .body {
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding-block: var(--rf-space-2);
+  padding: var(--rf-space-2) 0 var(--rf-space-2)
+    var(--rf-collapsible-body-offset);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
@@ -154,11 +165,6 @@
     transition:
       opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
       transform var(--rf-collapse-duration) var(--rf-ease-entrance);
-    will-change: opacity, transform;
-  }
-
-  .bodyGrid:not([data-open="true"]) .bodyShell {
-    will-change: auto;
   }
 }
 
@@ -177,11 +183,9 @@
 @media (prefers-reduced-transparency: reduce) {
   .variant-card {
     background: var(--rf-surface-glass);
-    backdrop-filter: none;
   }
 }
 
 :global(.radix-themes[data-host="jetbrains"]) .variant-card {
   background: var(--rf-surface-glass);
-  backdrop-filter: none;
 }
