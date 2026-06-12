@@ -9,7 +9,7 @@
 
   <p><strong>Refact — the open-source, local-first agentic coding engine.</strong> Autonomous agents, a task planner, persistent project memory, and a cross-device UI — all running from your IDE with zero cloud.</p>
 
-  <img src="media/hero.gif" alt="Refact agent planning, editing, and running checks" width="900">
+  <img src="media/hero.png" alt="Refact agent planning, editing, and running checks" width="900">
 
   <p>
     <a href="https://github.com/JegernOUTT/refact/stargazers"><img src="https://img.shields.io/github/stars/JegernOUTT/refact?style=for-the-badge&color=blue" alt="GitHub stars"></a>
@@ -45,7 +45,7 @@ Refact is not a one-shot autocomplete box; it is a live agent loop that can insp
 → Deep dive: [Agent Modes](https://github.com/JegernOUTT/refact/wiki/Agent-Modes), [Agent Tools](https://github.com/JegernOUTT/refact/wiki/Agent-Tools)
 
 ## Buddy — your proactive project companion
-![Buddy proactively surfacing opportunities](media/buddy.gif)
+![Buddy proactively surfacing opportunities](media/buddy.png)
 Buddy is the little project gremlin that keeps watching while you step away: it reads real project state, spots decision-ready opportunities, and comes back with a nudge plus the next safe move. It can investigate, draft, navigate, and escalate — but stays suggest-first instead of silently mutating your code.
 
 - Runs named proactive workflows including Daily Digest, Idle Suggester, Test Coverage Watcher, Dependency Radar, Docs Gardener, Architecture Drift Watcher, Error Detective, and Security Whisperer.
@@ -60,7 +60,7 @@ Buddy is the little project gremlin that keeps watching while you step away: it 
 → Deep dive: [Buddy](https://github.com/JegernOUTT/refact/wiki/Buddy)
 
 ## Task planner & agent fleets
-![Task planner board with per-card agents](media/agent-task-planner.gif)
+![Task planner board with per-card agents](media/agent-task-planner.png)
 Describe a feature once; the planner cracks it into cards, launches a tiny swarm, and keeps every agent in its own git worktree so experiments can collide with reality without colliding with each other. Watch the board light up as sandboxed agents build, test, report, race, and get squash-merged back in dependency order.
 
 - Planner chats turn broad goals into executable cards with target files, priorities, assumptions, follow-ups, and structured final reports instead of one mega-prompt trying to hold the whole quest in its paws.
@@ -75,7 +75,7 @@ Describe a feature once; the planner cracks it into cards, launches a tiny swarm
 → Deep dive: [Task Planner and Cards](https://github.com/JegernOUTT/refact/wiki/Task-Planner-and-Cards), [Worktrees](https://github.com/JegernOUTT/refact/wiki/Worktrees)
 
 ## Persistent project memory
-![Knowledge save and autoinjection](media/memory.gif)
+![Knowledge save and autoinjection](media/memory.png)
 Refact turns your repo into a local memory palace: plans, notes, trajectories, code semantics, and background signals live under `<project>/.refact/`, ready for the next session without leaving your machine.
 Static plans are the uncrushable spine—`set_plan` pins the base, `update_plan` appends deltas, and `get_plan` synthesizes the current truth while compression is forbidden from erasing it.
 
@@ -103,7 +103,7 @@ Refact runs where your code already lives: on your machine, pointed only at the 
 → Deep dive: [Privacy](https://github.com/JegernOUTT/refact/wiki/Privacy), [Agent Modes](https://github.com/JegernOUTT/refact/wiki/Agent-Modes)
 
 ## Modes, transitions, compression & scheduling
-![Switching modes and compacting context](media/chat-modes.gif)
+![Switching modes and compacting context](media/chat-modes.png)
 Refact does not run one generic chatbot forever; it shifts between purpose-built operating systems for thought, code, review, planning, execution, memory, and time. The wild part: those shifts become durable context, so the agent can hand itself a plan, compact the past, and wake up later without losing the plot.
 
 - **Mode as behavior, not branding:** `ask`, `explore`, `plan`, `agent`, `quick_agent`, `debug`, `buddy`, `task_planner`, and `task_agent` ship as separate defaults with distinct prompts, toolsets, subagent policies, and execution discipline.
@@ -118,7 +118,7 @@ Refact does not run one generic chatbot forever; it shifts between purpose-built
 → Deep dive: [Agent Modes](https://github.com/JegernOUTT/refact/wiki/Agent-Modes), [Context Compression](https://github.com/JegernOUTT/refact/wiki/Context-Compression), [Scheduler and Cron](https://github.com/JegernOUTT/refact/wiki/Scheduler-and-Cron)
 
 ## Modern extension surface — MCP, skills, slash commands, hooks, subagents & marketplace
-![MCP, skills, and subagents](media/mcp-skills.gif)
+![MCP, skills, and subagents](media/mcp-skills.png)
 Plug in almost anything — local CLIs, HTTP/SSE services, project rituals, specialist agents, reusable prompts — without dumping the whole universe into the model. Refact keeps the surface sharp: discover late, load only what matters, and fan out focused workers when the job wants a swarm.
 
 - **MCP without context spam:** connect stdio servers or Streamable HTTP/SSE endpoints, including OAuth-capable configs, then let lazy discovery do the heavy lifting: `tool_search` finds the right capability and `mcp_call` runs it only when needed.
@@ -132,6 +132,7 @@ Plug in almost anything — local CLIs, HTTP/SSE services, project rituals, spec
 → Deep dive: [MCP](https://github.com/JegernOUTT/refact/wiki/MCP), [Skills, Commands & Hooks](https://github.com/JegernOUTT/refact/wiki/Skills-Commands-Hooks), [Subagents](https://github.com/JegernOUTT/refact/wiki/Subagents), [Marketplace](https://github.com/JegernOUTT/refact/wiki/Marketplace)
 
 ## Bring your own models — any provider, any runtime
+![Bring your own models](media/byok.png)
 Refact is BYOK all the way down: hosted frontier APIs, local runtimes, self-hosted OpenAI-compatible stacks, and OAuth-backed coding agents can all sit in the same cockpit. Pick the right brain per task, keep credentials and policy local, and let capability-aware routing do the boring glue work.
 
 - 20+ provider families are first-class citizens: Anthropic, OpenAI, OpenAI Responses, OpenAI Codex, OpenRouter, Groq, DeepSeek, Doubao, xAI, xAI Responses, Google Gemini, Qwen, Kimi, Zhipu, MiniMax, GitHub Copilot, Claude Code, plus custom endpoints and local runtimes.
@@ -145,7 +146,6 @@ Refact is BYOK all the way down: hosted frontier APIs, local runtimes, self-host
 → Deep dive: [BYOK](https://github.com/JegernOUTT/refact/wiki/BYOK), [Providers](https://github.com/JegernOUTT/refact/wiki/Providers), [Supported Models](https://github.com/JegernOUTT/refact/wiki/Supported-Models)
 
 ## Rust core + cross-device UI
-![UI streamed from the Rust core, opened in a browser](media/any-device.gif)
 One Rust binary becomes the whole control room: `refact-lsp` speaks LSP to editors, serves the React chat over Axum HTTP, and streams live agent state from the same origin. Open the chat UI in any browser that can reach the engine on your trusted local network, and the IDE becomes just one window into the same running brain.
 
 - `refact-lsp` is both an Axum HTTP server and a tower-lsp server, so code completion, chat commands, caps, tools, checkpoints, and SSE snapshots all terminate in the same Rust process.
