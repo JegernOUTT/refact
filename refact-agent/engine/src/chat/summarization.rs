@@ -21,7 +21,7 @@ use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 use refact_chat_history::trajectory_ops::{
     build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
-    COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE, TOOLS_TO_PRESERVE,
+    should_preserve_tool, COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE, TOOLS_TO_PRESERVE,
 };
 
 pub const MAX_SEGMENT_SUMMARY_ATTEMPTS: usize = 2;
@@ -2890,7 +2890,7 @@ fn deterministic_truncation_eligible(
         return false;
     }
     if let Some(name) = tool_call_names.get(&message.tool_call_id) {
-        if TOOLS_TO_PRESERVE.iter().any(|preserved| preserved == name) {
+        if should_preserve_tool(name) {
             return false;
         }
     }
@@ -6919,7 +6919,13 @@ mod tests {
         let mut preserved_by_flag = tool_with_id_and_name("call_flag", "shell", &big);
         preserved_by_flag[1].preserve = Some(true);
         let mut messages = vec![user("start")];
-        messages.extend(tool_with_id_and_name("call_research", "research", &big));
+        for tool_name in TOOLS_TO_PRESERVE {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_{}", tool_name.replace('-', "_")),
+                tool_name,
+                &big,
+            ));
+        }
         messages.extend(preserved_by_flag);
         for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
             messages.extend(tool_with_id_and_name(

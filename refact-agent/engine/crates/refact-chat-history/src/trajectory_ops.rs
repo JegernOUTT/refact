@@ -519,7 +519,19 @@ fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Opti
     (before.len() != after.len()).then_some(common_len)
 }
 
-pub const TOOLS_TO_PRESERVE: &[&str] = &["research", "delegate", "plan", "review"];
+pub const TOOLS_TO_PRESERVE: &[&str] = &[
+    "subagent",
+    "delegate",
+    "delegate_with_editing",
+    "code_review",
+    "code_review_gather_files",
+    "strategic_planning",
+    "strategic_planning_gather_files",
+    "deep_research",
+    "research",
+    "plan",
+    "review",
+];
 const TOOL_PREVIEW_CHARS: usize = 200;
 const TOOL_PREVIEW_REDACTION_EXTRA_CHARS: usize = 256;
 
@@ -541,8 +553,44 @@ fn compressed_tool_preview(content_text: &str) -> String {
     refact_core::string_utils::safe_truncate(&redacted, TOOL_PREVIEW_CHARS).to_string()
 }
 
-fn should_preserve_tool(name: &str) -> bool {
-    TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
+fn to_snake_tool_name(name: &str) -> String {
+    let mut normalized = String::new();
+    let mut prev_is_word = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && prev_is_word && !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+            prev_is_word = true;
+        } else if !normalized.ends_with('_') && !normalized.is_empty() {
+            normalized.push('_');
+            prev_is_word = false;
+        } else {
+            prev_is_word = false;
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+pub fn canonical_tool_name_for_preservation(name: &str) -> String {
+    let normalized = to_snake_tool_name(name);
+    let base = normalized.strip_prefix("t_").unwrap_or(&normalized);
+    match base {
+        "task" => "subagent".to_string(),
+        "plan" => "strategic_planning".to_string(),
+        "research" => "deep_research".to_string(),
+        "review" => "code_review".to_string(),
+        _ => base.to_string(),
+    }
+}
+
+pub fn should_preserve_tool(name: &str) -> bool {
+    let normalized = to_snake_tool_name(name);
+    TOOLS_TO_PRESERVE.iter().any(|tool| *tool == normalized)
+        || TOOLS_TO_PRESERVE
+            .iter()
+            .any(|tool| *tool == canonical_tool_name_for_preservation(name))
 }
 
 fn should_preserve_message(msg: &ChatMessage, tool_call_names: &HashMap<String, String>) -> bool {
@@ -2049,7 +2097,7 @@ mod tests {
     #[test]
     fn test_compress_preserves_agentic_tools() {
         let long_content = "x".repeat(1000);
-        for tool_name in &["research", "delegate", "plan", "review"] {
+        for tool_name in TOOLS_TO_PRESERVE {
             let mut messages = vec![
                 make_user_msg("hello"),
                 make_assistant_with_tool_call("tc1", tool_name),
@@ -2127,10 +2175,25 @@ mod tests {
 
     #[test]
     fn test_should_preserve_tool() {
-        assert!(should_preserve_tool("research"));
-        assert!(should_preserve_tool("delegate"));
-        assert!(should_preserve_tool("plan"));
-        assert!(should_preserve_tool("review"));
+        for tool_name in TOOLS_TO_PRESERVE {
+            assert!(
+                should_preserve_tool(tool_name),
+                "{tool_name} should be preserved"
+            );
+        }
+        for alias in [
+            "task",
+            "Task",
+            "t_delegate",
+            "t_plan",
+            "t_research",
+            "t_review",
+            "strategicPlanning",
+            "deepResearch",
+            "codeReview",
+        ] {
+            assert!(should_preserve_tool(alias), "{alias} should be preserved");
+        }
         assert!(!should_preserve_tool("cat"));
         assert!(!should_preserve_tool("shell"));
         assert!(!should_preserve_tool("unknown_tool"));

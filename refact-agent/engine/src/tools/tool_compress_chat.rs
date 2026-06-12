@@ -15,11 +15,11 @@ use crate::tools::tools_description::{
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
 use refact_chat_history::trajectory_ops::{
     build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
-    is_memory_path, TOOLS_TO_PRESERVE,
+    is_memory_path, should_preserve_tool, TOOLS_TO_PRESERVE,
 };
-use sha2::{Digest, Sha256};
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
+use sha2::{Digest, Sha256};
 
 const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
 const MAX_PER_MESSAGE_ENTRIES: usize = 200;
@@ -44,10 +44,6 @@ fn find_preserve_cutoff(messages: &[crate::call_validation::ChatMessage], turns:
         }
     }
     0
-}
-
-fn should_preserve_tool(name: &str) -> bool {
-    TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
 }
 
 fn preserve_cutoff_for(messages: &[ChatMessage], preserve_last_turns: Option<usize>) -> usize {
@@ -1043,6 +1039,40 @@ mod tests {
             .starts_with("Tool result compressed:")));
         assert!(compression_report_index(&after) <= find_preserve_cutoff(&messages, 1));
         assert_preserved_tail_unchanged(&messages, &after, 1);
+    }
+
+    #[test]
+    fn apply_tool_truncate_preserves_agentic_tool_results() {
+        let long_output = "agentic tool output ".repeat(30);
+        for tool_name in TOOLS_TO_PRESERVE {
+            let messages = vec![
+                user_message("old user"),
+                assistant_tool_call_message("call_agentic", tool_name),
+                tool_message("call_agentic", &long_output),
+            ];
+            let drop_context_files = HashSet::new();
+            let drop_memories = HashSet::new();
+            let truncate_tool_outputs = HashSet::from(["call_agentic".to_string()]);
+            let drop_tool_outputs = HashSet::new();
+            let drop_context_messages = HashSet::new();
+            let tool_call_names =
+                HashMap::from([("call_agentic".to_string(), (*tool_name).to_string())]);
+            let request = apply_request(
+                &drop_context_files,
+                &drop_memories,
+                &truncate_tool_outputs,
+                &drop_tool_outputs,
+                &drop_context_messages,
+                &tool_call_names,
+            );
+
+            let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+            assert_eq!(stats.tool_truncated, 0, "{tool_name} should be preserved");
+            assert!(after.iter().any(|message| {
+                message.role == "tool" && message.content.content_text_only() == long_output
+            }));
+        }
     }
 
     #[test]
