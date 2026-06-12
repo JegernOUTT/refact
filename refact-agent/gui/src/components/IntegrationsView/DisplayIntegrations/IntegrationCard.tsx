@@ -1,4 +1,4 @@
-import type { FC, MouseEventHandler } from "react";
+import type { FC, KeyboardEventHandler, MouseEventHandler } from "react";
 import classNames from "classnames";
 
 import { Surface } from "../../ui";
@@ -58,22 +58,32 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
     void updateIntegrationAvailability();
   };
 
+  const openIntegration = () => {
+    if (isUpdatingAvailability) return;
+    handleIntegrationShowUp(integration);
+  };
+
+  const handleCardKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openIntegration();
+  };
+
   return (
     <Surface
       animated="rise"
-      as="button"
-      type="button"
       radius="card"
       variant="plain"
       interactive
+      role="button"
+      tabIndex={0}
       className={classNames(styles.integrationCard, {
         [styles.integrationCardInline]: isNotConfigured,
         [styles.disabledCard]: isUpdatingAvailability,
       })}
-      onClick={() => {
-        if (isUpdatingAvailability) return;
-        handleIntegrationShowUp(integration);
-      }}
+      onClick={openIntegration}
+      onKeyDown={handleCardKeyDown}
     >
       <span
         className={classNames(styles.content, {
