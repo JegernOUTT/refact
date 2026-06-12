@@ -104,6 +104,12 @@ impl PickerState {
             .collect()
     }
 
+    pub fn set_filter(&mut self, filter: impl Into<String>) {
+        self.filter = filter.into();
+        self.selected = 0;
+        self.clamp_selection();
+    }
+
     pub fn selected_item(&self) -> Option<PickerItem> {
         self.filtered_items().get(self.selected).cloned()
     }
@@ -180,22 +186,33 @@ fn match_rank(item: &PickerItem, filter: &str) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
-    let fields = [
+    let names = [
         item.id.to_ascii_lowercase(),
         item.title.to_ascii_lowercase(),
         item.title.trim_start_matches('/').to_ascii_lowercase(),
-        item.description.to_ascii_lowercase(),
     ];
-    if fields.iter().any(|field| field.starts_with(&needle)) {
+    let description = item.description.to_ascii_lowercase();
+    if names.iter().any(|field| field.starts_with(&needle)) {
         return Some(0);
     }
-    if fields.iter().any(|field| field.contains(&needle)) {
+    if names.iter().any(|field| field.contains(&needle)) {
         return Some(1);
     }
-    fields
+    if description.starts_with(&needle) {
+        return Some(2);
+    }
+    if description.contains(&needle) {
+        return Some(3);
+    }
+    if let Some(length) = names
         .iter()
-        .any(|field| fuzzy_subsequence_match(field, &needle))
-        .then_some(2)
+        .filter(|field| fuzzy_subsequence_match(field, &needle))
+        .map(String::len)
+        .min()
+    {
+        return Some(400 + length);
+    }
+    fuzzy_subsequence_match(&description, &needle).then_some(500 + description.len())
 }
 
 fn fuzzy_subsequence_match(field: &str, needle: &str) -> bool {

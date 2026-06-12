@@ -554,6 +554,22 @@ impl App {
         self.composer_mode = ComposerMode::Chat;
     }
 
+    fn update_slash_picker_filter(&mut self) {
+        let Some(picker) = self.modal_picker.as_mut() else {
+            return;
+        };
+        if picker.kind != PickerKind::SlashCommand {
+            return;
+        }
+        let filter = self
+            .composer
+            .text()
+            .strip_prefix('/')
+            .unwrap_or_default()
+            .to_string();
+        picker.set_filter(filter);
+    }
+
     fn start_file_mention_lookup(&mut self) -> AppAction {
         self.open_file_mention_picker(vec![PickerItem {
             id: String::new(),
@@ -1733,7 +1749,8 @@ impl App {
                     if picker.is_multi() {
                         picker.toggle_selected();
                     } else {
-                        picker.push_filter(' ');
+                        self.composer.insert_char(' ', Instant::now());
+                        self.update_slash_picker_filter();
                     }
                 }
                 AppAction::None
@@ -1742,7 +1759,14 @@ impl App {
                 code: KeyCode::Backspace,
                 ..
             } => {
-                if let Some(picker) = self.modal_picker.as_mut() {
+                if self
+                    .modal_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
+                {
+                    self.composer.backspace();
+                    self.update_slash_picker_filter();
+                } else if let Some(picker) = self.modal_picker.as_mut() {
                     picker.pop_filter();
                 }
                 AppAction::None
@@ -1752,7 +1776,14 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                if let Some(picker) = self.modal_picker.as_mut() {
+                if self
+                    .modal_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
+                {
+                    self.composer.insert_char(ch, Instant::now());
+                    self.update_slash_picker_filter();
+                } else if let Some(picker) = self.modal_picker.as_mut() {
                     picker.push_filter(ch);
                 }
                 AppAction::None
@@ -2005,6 +2036,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
+            RuntimeEvent::Input(Event::FocusGained | Event::FocusLost) => {}
             RuntimeEvent::Input(Event::Resize(_, _)) => {}
             RuntimeEvent::Tick => {
                 app.run_stream_commit_tick();

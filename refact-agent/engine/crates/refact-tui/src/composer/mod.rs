@@ -887,9 +887,7 @@ mod tests {
     #[test]
     fn insert_text_flushes_paste_and_inserts_at_cursor() {
         let mut composer = ComposerState::new(Vec::new());
-        composer.insert_char('a', t(0));
-        composer.insert_char('b', t(1));
-        assert!(composer.flush_pending_paste(t(100)));
+        composer.insert_paste("ab");
         composer.move_left(false);
         composer.insert_text("@src/lib.rs ");
         assert_eq!(composer.text(), "a@src/lib.rs b");
