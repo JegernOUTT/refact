@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::daemon::config::DaemonConfig;
@@ -484,23 +487,60 @@ pub async fn read_daemon_info(path: &Path) -> Result<Option<DaemonInfo>, String>
 }
 
 pub async fn write_daemon_info_atomic(path: &Path, info: &DaemonInfo) -> Result<(), String> {
+    write_daemon_state_json_atomic(path, info, "daemon info").await
+}
+
+pub(crate) async fn write_daemon_state_json_atomic<T: Serialize>(
+    path: &Path,
+    value: &T,
+    label: &str,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
-    let content = serde_json::to_vec_pretty(info)
-        .map_err(|error| format!("failed to encode daemon info: {error}"))?;
-    tokio::fs::write(&tmp, content)
-        .await
-        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
-    // std::fs::rename replaces existing destinations on all supported platforms
-    // (Windows: MoveFileExW with MOVEFILE_REPLACE_EXISTING), so no pre-remove is
-    // needed and the daemon.json never has a missing-file window.
+    match tokio::fs::remove_file(&tmp).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("failed to replace {}: {error}", tmp.display())),
+    }
+    let content = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("failed to encode {label}: {error}"))?;
+    write_daemon_state_tmp(&tmp, &content, label).await?;
     tokio::fs::rename(&tmp, path)
         .await
         .map_err(|error| format!("failed to publish {}: {error}", path.display()))?;
+    Ok(())
+}
+
+async fn write_daemon_state_tmp(path: &Path, content: &[u8], label: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    #[cfg(not(unix))]
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))?;
+    file.write_all(content)
+        .await
+        .map_err(|error| format!("failed to write {label}: {error}"))?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("failed to sync {}: {error}", path.display()))?;
     Ok(())
 }
 
@@ -515,6 +555,24 @@ pub async fn remove_daemon_info(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn test_daemon_info() -> DaemonInfo {
+        DaemonInfo {
+            pid: 42,
+            port: 8488,
+            bind: "127.0.0.1".to_string(),
+            version: "1.2.3".to_string(),
+            auth_token: None,
+            started_at_ms: 100,
+            hostname_local: "host.local".to_string(),
+            urls: DaemonUrls {
+                loopback: "http://127.0.0.1:8488/".to_string(),
+                mdns: "http://host.local:8488/".to_string(),
+            },
+        }
+    }
 
     fn status_report(
         lsp_clients: usize,
@@ -593,21 +651,32 @@ mod tests {
     async fn daemon_json_atomic_write_read_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.json");
-        let info = DaemonInfo {
-            pid: 42,
-            port: 8488,
-            bind: "127.0.0.1".to_string(),
-            version: "1.2.3".to_string(),
-            auth_token: None,
-            started_at_ms: 100,
-            hostname_local: "host.local".to_string(),
-            urls: DaemonUrls {
-                loopback: "http://127.0.0.1:8488/".to_string(),
-                mdns: "http://host.local:8488/".to_string(),
-            },
-        };
+        let info = test_daemon_info();
         write_daemon_info_atomic(&path, &info).await.unwrap();
         assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_json_write_sets_permissions_on_create_and_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let mut info = test_daemon_info();
+
+        write_daemon_info_atomic(&path, &info).await.unwrap();
+        assert_eq!(file_mode(&path), 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        info.port = 9999;
+        write_daemon_info_atomic(&path, &info).await.unwrap();
+
+        assert_eq!(file_mode(&path), 0o600);
+        assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[tokio::test]

@@ -92,27 +92,8 @@ impl ProjectRegistry {
     }
 
     async fn save(&self) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        let content = serde_json::to_vec_pretty(&self.entries)
-            .map_err(|e| format!("failed to encode projects: {e}"))?;
-        tokio::fs::write(&tmp, content)
+        crate::daemon::state::write_daemon_state_json_atomic(&self.path, &self.entries, "projects")
             .await
-            .map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
-        #[cfg(windows)]
-        match tokio::fs::remove_file(&self.path).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("failed to replace {}: {e}", self.path.display())),
-        }
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .map_err(|e| format!("failed to publish {}: {e}", self.path.display()))?;
-        Ok(())
     }
 
     pub async fn open(&mut self, root: PathBuf) -> Result<ProjectEntry, String> {
@@ -449,6 +430,8 @@ pub async fn pin_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     struct EnvGuard {
@@ -561,6 +544,29 @@ mod tests {
         let list = reg2.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].root, root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistence_sets_permissions_on_create_and_overwrite() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = dir.path().join("projects.json");
+        let mut reg = ProjectRegistry::empty(path.clone());
+
+        reg.open(root.clone()).await.unwrap();
+        assert_eq!(file_mode(&path), 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        reg.open(root).await.unwrap();
+
+        assert_eq!(file_mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[tokio::test]
