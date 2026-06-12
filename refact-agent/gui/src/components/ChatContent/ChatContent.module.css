@@ -566,14 +566,19 @@
   scrollbar-color: transparent transparent;
 }
 
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb,
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller:hover::-webkit-scrollbar-thumb,
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb:hover,
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb:active {
+.virtualizedListWrapper[data-following-scrollbar="true"]
+  .virtuosoScroller::-webkit-scrollbar-thumb,
+.virtualizedListWrapper[data-following-scrollbar="true"]
+  .virtuosoScroller:hover::-webkit-scrollbar-thumb,
+.virtualizedListWrapper[data-following-scrollbar="true"]
+  .virtuosoScroller::-webkit-scrollbar-thumb:hover,
+.virtualizedListWrapper[data-following-scrollbar="true"]
+  .virtuosoScroller::-webkit-scrollbar-thumb:active {
   background-color: transparent;
 }
 
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller:hover {
+.virtualizedListWrapper[data-following-scrollbar="true"]
+  .virtuosoScroller:hover {
   scrollbar-color: transparent transparent;
 }
 

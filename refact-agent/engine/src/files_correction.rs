@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::time::Instant;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::global_context::GlobalContext;
@@ -306,8 +306,6 @@ pub async fn check_if_its_inside_a_workspace_or_config(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
     #[cfg(not(debug_assertions))]
     #[test]

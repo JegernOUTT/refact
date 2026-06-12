@@ -524,7 +524,9 @@ export function VirtualizedChatList<T extends { key: string }>({
           overflow: "hidden",
           position: "relative",
         }}
-        data-following-scrollbar={isStreaming && !showFollowButton ? "true" : "false"}
+        data-following-scrollbar={
+          isStreaming && !showFollowButton ? "true" : "false"
+        }
         data-testid="chat-virtualized-list-wrapper"
       >
         {hasMeasuredHeight && (

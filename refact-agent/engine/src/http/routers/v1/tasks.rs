@@ -1742,7 +1742,7 @@ mod tests {
     async fn add_comment_rejects_empty_body() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-empty-body").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-empty-body".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1773,7 +1773,7 @@ mod tests {
     async fn add_comment_rejects_whitespace_only_body() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-ws-body").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-ws-body".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1804,7 +1804,7 @@ mod tests {
     async fn add_comment_validates_author_role_enum() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-role-enum").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-role-enum".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1835,7 +1835,7 @@ mod tests {
     async fn add_comment_rejects_unknown_reply_to() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-reply-to").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-reply-to".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1866,14 +1866,14 @@ mod tests {
     async fn add_comment_returns_full_uuid_id() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-uuid-id").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-uuid-id".to_string()),
             Json(create_card_request(0, "card-a")),
         )
         .await
         .unwrap();
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-uuid-id".to_string()),
             Json(UpdateBoardRequest {
@@ -1922,7 +1922,7 @@ mod tests {
     async fn delete_card_refuses_active_agent_card_without_force() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-active").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-active".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1962,7 +1962,7 @@ mod tests {
     async fn delete_card_with_force_removes_active_agent_card() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-force").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-force".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -2004,7 +2004,7 @@ mod tests {
     async fn delete_task_refuses_active_worktree_without_force() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-wt").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-wt".to_string()),
             Json(create_card_request(0, "card-wt")),
@@ -2394,7 +2394,7 @@ mod tests {
         use crate::tools::tool_task_documents::CreateDocumentRequest;
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-doc-pin").await;
-        handle_create_task_document(
+        let _ = handle_create_task_document(
             State(app(gcx.clone())),
             Path("task-doc-pin".to_string()),
             Json(CreateDocumentRequest {
