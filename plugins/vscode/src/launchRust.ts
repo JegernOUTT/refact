@@ -167,7 +167,7 @@ export class RustBinaryBlob {
         }
 
         this.port = daemonPort;
-        const binPath = refactDaemon.resolveBundledBinaryPath(this.asset_path);
+        const binPath = refactDaemon.resolveBundledRefactPath(this.asset_path);
         const pluginVersion = this.plugin_version();
         await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
         if (generation !== this.lifecycleGeneration) {

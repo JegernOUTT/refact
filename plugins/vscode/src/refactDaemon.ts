@@ -55,9 +55,12 @@ export type DaemonClientOptions = {
     timeoutMs?: number;
 };
 
+type ReadDaemonInfo = (port: number) => Promise<DaemonStatus | undefined>;
+
 export type EnsureDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
     spawnDaemon?: (binPath: string) => void;
+    readDaemonInfo?: ReadDaemonInfo;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 };
@@ -129,17 +132,33 @@ function parseVersion(version: string | undefined): [number, number, number] {
     return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
 }
 
-export function resolveBundledBinaryPath(assetPath: string): string {
-    const suffix = process.platform === "win32" ? ".exe" : "";
-    const preferred = path.join(assetPath, `refact${suffix}`);
-    if (fs.existsSync(preferred)) {
-        return preferred;
+export function missingBundledRefactError(assetPath: string): string {
+    return `refact binary not found in ${assetPath} — reinstall the extension`;
+}
+
+function bundledRefactName(): string {
+    return process.platform === "win32" ? "refact.exe" : "refact";
+}
+
+export function resolveBundledRefactPath(assetPath: string): string {
+    return path.join(assetPath, bundledRefactName());
+}
+
+export function ensureBundledRefactPath(assetPath: string): string {
+    const binPath = resolveBundledRefactPath(assetPath);
+    if (!fs.existsSync(binPath)) {
+        throw new Error(missingBundledRefactError(assetPath));
     }
-    const fallback = path.join(assetPath, `refact-lsp${suffix}`);
-    if (fs.existsSync(fallback)) {
-        return fallback;
+    return binPath;
+}
+
+function ensureDaemonSpawnTarget(binPath: string): void {
+    const assetPath = path.dirname(binPath);
+    if (path.basename(binPath) !== bundledRefactName() || !fs.existsSync(binPath)) {
+        const message = missingBundledRefactError(assetPath);
+        console.log(message);
+        throw new Error(message);
     }
-    return preferred;
 }
 
 export async function readDaemonInfo(port: number = DEFAULT_DAEMON_PORT, timeoutMs = 2000): Promise<DaemonStatus | undefined> {
@@ -157,7 +176,9 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
     const sleep = options.sleep ?? delay;
     const now = options.now ?? Date.now;
     const spawnDaemon = options.spawnDaemon ?? defaultSpawnDaemon;
-    const current = await readDaemonInfo(port);
+    const readInfo = options.readDaemonInfo ?? readDaemonInfo;
+    ensureDaemonSpawnTarget(binPath);
+    const current = await readInfo(port);
 
     if (current && !isPluginNewerThanDaemon(options.pluginVersion, current.version)) {
         return current;
@@ -170,7 +191,7 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
 
     spawnDaemon(binPath);
     const minimumVersion = current ? options.pluginVersion : undefined;
-    return pollDaemon(port, timeoutMs, minimumVersion, sleep, now);
+    return pollDaemon(port, timeoutMs, minimumVersion, sleep, now, readInfo);
 }
 
 export async function openProject(root: string, options: OpenProjectOptions = {}): Promise<OpenProjectResponse> {
@@ -212,10 +233,11 @@ async function pollDaemon(
     minimumVersion: string | undefined,
     sleep: (ms: number) => Promise<void>,
     now: () => number,
+    readInfo: ReadDaemonInfo,
 ): Promise<DaemonStatus> {
     const deadline = now() + timeoutMs;
     while (now() <= deadline) {
-        const status = await readDaemonInfo(port);
+        const status = await readInfo(port);
         if (status && (!minimumVersion || compareVersions(status.version, minimumVersion) >= 0)) {
             return status;
         }
