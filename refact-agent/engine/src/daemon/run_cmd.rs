@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::daemon::chat_client::{ChatClientError, ProxyChatClient, ToolDecision};
+use crate::daemon::client::DaemonClientError;
 use crate::daemon::state::DaemonInfo;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
@@ -49,10 +50,24 @@ pub struct RunOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunErrorKind {
     Unreachable,
+    ProjectOpen,
     Chat,
     ApprovalDenied,
     Timeout,
     Interrupted,
+}
+
+impl RunErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunErrorKind::Unreachable => "unreachable",
+            RunErrorKind::ProjectOpen => "project_open",
+            RunErrorKind::Chat => "chat",
+            RunErrorKind::ApprovalDenied => "approval_denied",
+            RunErrorKind::Timeout => "timeout",
+            RunErrorKind::Interrupted => "interrupted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +94,14 @@ pub struct RunJsonSummary {
 struct RunFailure {
     kind: RunErrorKind,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RunJsonFailure {
+    ok: bool,
+    error: String,
+    kind: String,
+    exit_code: i32,
 }
 
 pub trait RunIo {
@@ -248,6 +271,7 @@ pub fn parse_run_args(args: &[OsString]) -> Result<RunOptions, String> {
 pub fn exit_code_for(kind: RunErrorKind) -> i32 {
     match kind {
         RunErrorKind::Unreachable => 1,
+        RunErrorKind::ProjectOpen => 1,
         RunErrorKind::Chat => 2,
         RunErrorKind::ApprovalDenied => 3,
         RunErrorKind::Timeout => 4,
@@ -277,6 +301,7 @@ pub fn approval_decision(
 }
 
 pub async fn run(options: RunOptions, io: &mut dyn RunIo) -> i32 {
+    let json_output = options.json;
     let result = match crate::daemon::client::ensure_daemon_running().await {
         Ok(info) => run_with_daemon_info(options, info, io).await,
         Err(error) => Err(RunFailure {
@@ -284,7 +309,7 @@ pub async fn run(options: RunOptions, io: &mut dyn RunIo) -> i32 {
             message: format!("daemon unreachable: {error}"),
         }),
     };
-    finish_result(result, io)
+    finish_result(result, json_output, io)
 }
 
 async fn run_with_daemon_info(
@@ -300,15 +325,37 @@ async fn run_with_daemon_info(
     drive_chat(&client, &options, chat_id, io).await
 }
 
-fn finish_result(result: Result<RunJsonSummary, RunFailure>, io: &mut dyn RunIo) -> i32 {
+fn finish_result(
+    result: Result<RunJsonSummary, RunFailure>,
+    json_output: bool,
+    io: &mut dyn RunIo,
+) -> i32 {
     match result {
         Ok(_) => 0,
         Err(error) => {
-            if !error.message.is_empty() {
+            let exit_code = exit_code_for(error.kind);
+            if json_output {
+                write_json_failure(io, &error, exit_code);
+            } else if !error.message.is_empty() {
                 io.write_stderr(&format!("{}\n", error.message));
             }
-            exit_code_for(error.kind)
+            exit_code
         }
+    }
+}
+
+fn write_json_failure(io: &mut dyn RunIo, error: &RunFailure, exit_code: i32) {
+    let failure = RunJsonFailure {
+        ok: false,
+        error: error.message.clone(),
+        kind: error.kind.as_str().to_string(),
+        exit_code,
+    };
+    match serde_json::to_string(&failure) {
+        Ok(json) => io.write_stdout(&format!("{json}\n")),
+        Err(encode_error) => io.write_stdout(&format!(
+            "{{\"ok\":false,\"error\":\"failed to encode run JSON: {encode_error}\",\"kind\":\"chat\",\"exit_code\":2}}\n"
+        )),
     }
 }
 
@@ -623,39 +670,34 @@ async fn open_project(
     daemon: &DaemonInfo,
     root: &PathBuf,
 ) -> Result<OpenProjectResponse, RunFailure> {
-    let base = crate::daemon::chat_client::daemon_base_url(daemon);
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| RunFailure {
-            kind: RunErrorKind::Unreachable,
-            message: format!("failed to build daemon HTTP client: {error}"),
-        })?;
-    let mut request = client
-        .post(format!("{base}/daemon/v1/projects/open"))
-        .json(&json!({"root": root.to_string_lossy()}));
-    if let Some(token) = &daemon.auth_token {
-        request = request.bearer_auth(token);
+    crate::daemon::client::post_json(
+        daemon,
+        "/daemon/v1/projects/open",
+        &json!({"root": root.to_string_lossy()}),
+    )
+    .await
+    .map_err(project_open_error)
+}
+
+fn project_open_error(error: DaemonClientError) -> RunFailure {
+    let message = match error {
+        DaemonClientError::Http(message) => format!(
+            "daemon project open failed: {}",
+            message
+                .strip_prefix("failed to contact daemon: ")
+                .unwrap_or(&message)
+        ),
+        DaemonClientError::Status { status, body } => {
+            format!("daemon project open failed with status {status}: {body}")
+        }
+        DaemonClientError::Json(message) => {
+            format!("daemon project open returned invalid JSON: {message}")
+        }
+    };
+    RunFailure {
+        kind: RunErrorKind::ProjectOpen,
+        message,
     }
-    let response = request.send().await.map_err(|error| RunFailure {
-        kind: RunErrorKind::Unreachable,
-        message: format!("daemon project open failed: {error}"),
-    })?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(RunFailure {
-            kind: RunErrorKind::Unreachable,
-            message: format!("daemon project open failed with status {status}: {body}"),
-        });
-    }
-    response
-        .json::<OpenProjectResponse>()
-        .await
-        .map_err(|error| RunFailure {
-            kind: RunErrorKind::Unreachable,
-            message: format!("daemon project open returned invalid JSON: {error}"),
-        })
 }
 
 fn resolve_project_root(options: &RunOptions) -> Result<PathBuf, RunFailure> {
@@ -1014,12 +1056,47 @@ mod tests {
     }
 
     #[test]
+    fn run_error_kind_json_names_are_stable() {
+        assert_eq!(RunErrorKind::Unreachable.as_str(), "unreachable");
+        assert_eq!(RunErrorKind::ProjectOpen.as_str(), "project_open");
+        assert_eq!(RunErrorKind::Chat.as_str(), "chat");
+        assert_eq!(RunErrorKind::Timeout.as_str(), "timeout");
+    }
+
+    #[test]
     fn exit_code_mapping_table() {
         assert_eq!(exit_code_for(RunErrorKind::Unreachable), 1);
         assert_eq!(exit_code_for(RunErrorKind::Chat), 2);
         assert_eq!(exit_code_for(RunErrorKind::ApprovalDenied), 3);
         assert_eq!(exit_code_for(RunErrorKind::Timeout), 4);
         assert_eq!(exit_code_for(RunErrorKind::Interrupted), 130);
+    }
+
+    #[test]
+    fn run_json_failures_emit_parseable_contract() {
+        for kind in [
+            RunErrorKind::Unreachable,
+            RunErrorKind::ProjectOpen,
+            RunErrorKind::Chat,
+            RunErrorKind::Timeout,
+        ] {
+            let mut io = BufferIo::new();
+            let exit_code = finish_result(
+                Err(RunFailure {
+                    kind,
+                    message: format!("{} failure", kind.as_str()),
+                }),
+                true,
+                &mut io,
+            );
+            assert_eq!(exit_code, exit_code_for(kind));
+            assert!(io.stderr.is_empty());
+            let failure: RunJsonFailure = serde_json::from_str(io.stdout.trim()).unwrap();
+            assert!(!failure.ok);
+            assert_eq!(failure.kind, kind.as_str());
+            assert_eq!(failure.exit_code, exit_code_for(kind));
+            assert!(failure.error.contains("failure"));
+        }
     }
 
     #[test]

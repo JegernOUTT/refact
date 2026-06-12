@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -11,6 +12,19 @@ use crate::daemon::client::{self, DaemonClientError};
 use crate::daemon::events::DaemonEvent;
 use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{DaemonInfo, WorkerRow};
+
+#[cfg(not(test))]
+const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const EVENT_FOLLOW_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const EVENT_FOLLOW_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const EVENT_FOLLOW_HEADER_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const EVENT_FOLLOW_HEADER_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -444,12 +458,11 @@ async fn run_logs(
     out: &mut dyn Write,
 ) -> Result<i32, CliError> {
     let daemon = ensure_daemon().await?;
-    let path = if daemon_logs || target.is_none() {
-        "/daemon/v1/logs?tail=200".to_string()
+    let (path, file_path) = log_source(&daemon, target, daemon_logs).await?;
+    let follow_state = if follow && !json_output {
+        Some(initial_log_follow_state(&file_path).await)
     } else {
-        let projects = list_projects(&daemon).await?;
-        let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
-        format!("/daemon/v1/logs?project_id={id}&tail=200")
+        None
     };
     let text = client::get_text(&daemon, &path)
         .await
@@ -458,30 +471,115 @@ async fn run_logs(
         print_json(out, &json!({"log": text}))?;
     } else {
         write!(out, "{text}").map_err(write_error)?;
-        if follow {
-            follow_logs(&daemon, &path, text.len(), out).await?;
+        if let Some(follow_state) = follow_state {
+            follow_logs(&file_path, follow_state, out).await?;
         }
     }
     Ok(0)
 }
 
-async fn follow_logs(
+async fn log_source(
     daemon: &DaemonInfo,
-    path: &str,
-    mut seen: usize,
+    target: Option<String>,
+    daemon_logs: bool,
+) -> Result<(String, PathBuf), CliError> {
+    if daemon_logs || target.is_none() {
+        return Ok((
+            "/daemon/v1/logs?tail=200".to_string(),
+            crate::daemon::paths::daemon_log_path(),
+        ));
+    }
+    let projects = list_projects(daemon).await?;
+    let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
+    let slug = projects
+        .iter()
+        .find(|project| project.id == id)
+        .map(|project| project.slug.clone())
+        .ok_or_else(|| CliError::runtime(format!("project not registered: {id}")))?;
+    Ok((
+        format!("/daemon/v1/logs?project_id={id}&tail=200"),
+        crate::daemon::paths::logs_dir().join(format!("worker-{slug}.log")),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogFollowState {
+    offset: u64,
+}
+
+async fn follow_logs(
+    path: &Path,
+    mut state: LogFollowState,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                let text = client::get_text(daemon, path).await.map_err(client_error)?;
-                if text.len() > seen {
-                    write!(out, "{}", &text[seen..]).map_err(write_error)?;
-                    seen = text.len();
+            _ = tokio::time::sleep(LOG_FOLLOW_POLL_INTERVAL) => {
+                let delta = read_log_delta(path, &mut state).await?;
+                if !delta.is_empty() {
+                    write!(out, "{delta}").map_err(write_error)?;
                 }
             }
         }
+    }
+}
+
+async fn initial_log_follow_state(path: &Path) -> LogFollowState {
+    LogFollowState {
+        offset: tokio::fs::metadata(path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+    }
+}
+
+async fn read_log_delta(path: &Path, state: &mut LogFollowState) -> Result<String, CliError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            state.offset = 0;
+            return Ok(String::new());
+        }
+        Err(error) => {
+            return Err(CliError::runtime(format!(
+                "failed to open log file {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let len = file
+        .metadata()
+        .await
+        .map_err(|error| CliError::runtime(format!("failed to stat log file: {error}")))?
+        .len();
+    if state.offset > len {
+        state.offset = 0;
+    }
+    file.seek(std::io::SeekFrom::Start(state.offset))
+        .await
+        .map_err(|error| CliError::runtime(format!("failed to seek log file: {error}")))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .await
+        .map_err(|error| CliError::runtime(format!("failed to read log file: {error}")))?;
+    let valid_len = valid_utf8_prefix_len(&bytes);
+    if valid_len == 0 {
+        return Ok(String::new());
+    }
+    let text = std::str::from_utf8(&bytes[..valid_len])
+        .map_err(|error| CliError::runtime(format!("invalid log UTF-8 boundary: {error}")))?
+        .to_string();
+    state.offset = state.offset.saturating_add(valid_len as u64);
+    Ok(text)
+}
+
+fn valid_utf8_prefix_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) => error.valid_up_to(),
     }
 }
 
@@ -527,16 +625,20 @@ async fn follow_events(
         "{}/daemon/v1/events?follow=true",
         crate::daemon::chat_client::daemon_base_url(daemon)
     );
-    let client = reqwest::Client::new();
     let request = match &daemon.auth_token {
-        Some(token) => client.get(url).bearer_auth(token),
-        None => client.get(url),
+        Some(token) => event_follow_client().get(url).bearer_auth(token),
+        None => event_follow_client().get(url),
     };
-    let response = request.send().await.map_err(|error| {
-        CliError::runtime(format!(
-            "daemon request failed: failed to contact daemon: {error}"
-        ))
-    })?;
+    let response = tokio::time::timeout(EVENT_FOLLOW_HEADER_TIMEOUT, request.send())
+        .await
+        .map_err(|_| {
+            CliError::runtime("daemon request failed: timed out waiting for event stream headers")
+        })?
+        .map_err(|error| {
+            CliError::runtime(format!(
+                "daemon request failed: failed to contact daemon: {error}"
+            ))
+        })?;
     if !response.status().is_success() {
         return Err(CliError::runtime(format!(
             "daemon request failed with status {}",
@@ -564,6 +666,16 @@ async fn follow_events(
             }
         }
     }
+}
+
+fn event_follow_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(EVENT_FOLLOW_CONNECT_TIMEOUT)
+            .build()
+            .expect("failed to build daemon event follow client")
+    })
 }
 
 async fn run_status(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
@@ -1162,6 +1274,57 @@ mod tests {
         let events = parse_sse_events(text);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "worker_ready");
+    }
+
+    #[tokio::test]
+    async fn events_follow_half_dead_listener_fails_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept_task = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut info = daemon_info(port);
+        info.auth_token = None;
+        let mut out = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            follow_events(&info, None, false, &mut out),
+        )
+        .await
+        .unwrap();
+        let error = result.unwrap_err();
+        assert!(error
+            .message
+            .contains("timed out waiting for event stream headers"));
+        accept_task.abort();
+    }
+
+    #[tokio::test]
+    async fn log_delta_handles_rotation_and_split_multibyte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        tokio::fs::write(&path, "initial longer log\n")
+            .await
+            .unwrap();
+        let mut state = initial_log_follow_state(&path).await;
+
+        tokio::fs::write(&path, b"new\n").await.unwrap();
+        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "new\n");
+        assert_eq!(state.offset, 4);
+
+        let glyph = "💿".as_bytes();
+        let mut partial = b"new\n".to_vec();
+        partial.extend_from_slice(&glyph[..2]);
+        tokio::fs::write(&path, &partial).await.unwrap();
+        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "");
+        assert_eq!(state.offset, 4);
+
+        partial.extend_from_slice(&glyph[2..]);
+        partial.push(b'\n');
+        tokio::fs::write(&path, &partial).await.unwrap();
+        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "💿\n");
     }
 
     fn daemon_info(port: u16) -> DaemonInfo {
