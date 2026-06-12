@@ -82,6 +82,22 @@ pub struct CliOptions {
     pub command: CliCommand,
 }
 
+impl CliOptions {
+    fn json_output(&self) -> bool {
+        match &self.command {
+            CliCommand::Ps { json }
+            | CliCommand::Projects { json, .. }
+            | CliCommand::Restart { json, .. }
+            | CliCommand::Stop { json, .. }
+            | CliCommand::Logs { json, .. }
+            | CliCommand::Events { json, .. }
+            | CliCommand::Status { json }
+            | CliCommand::Doctor { json }
+            | CliCommand::Version { json } => *json,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub pid: u32,
@@ -324,10 +340,28 @@ fn take_one(args: &mut Vec<String>, name: &str) -> Result<String, String> {
 }
 
 pub async fn run(options: CliOptions) -> i32 {
-    match run_inner(options, &mut io::stdout()).await {
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    run_with_io(options, &mut stdout, &mut stderr).await
+}
+
+pub async fn run_with_io(
+    options: CliOptions,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let json_output = options.json_output();
+    match run_inner(options, stdout).await {
         Ok(code) => code,
         Err(error) => {
-            let _ = writeln!(io::stderr(), "{}", error.message);
+            if json_output {
+                let _ = print_json(
+                    stdout,
+                    &json!({"ok": false, "error": error.message, "exit_code": error.exit_code}),
+                );
+            } else {
+                let _ = writeln!(stderr, "{}", error.message);
+            }
             error.exit_code
         }
     }
@@ -693,19 +727,46 @@ fn event_follow_client() -> &'static reqwest::Client {
 }
 
 async fn run_status(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
-    let info = ensure_daemon().await?;
-    let status: DaemonStatus = client_get(&info, "/daemon/v1/status").await?;
-    if json_output {
-        print_json(out, &json!({"reachable": true, "status": status}))?;
-    } else {
-        writeln!(
-            out,
-            "daemon healthy: pid {}, port {}, version {}, uptime {}s, workers {}",
-            status.pid, status.port, status.version, status.uptime_secs, status.workers
-        )
-        .map_err(write_error)?;
+    match client::read_daemon_json().await {
+        Ok(None) => {
+            if json_output {
+                print_json(
+                    out,
+                    &json!({"reachable": false, "reason": "daemon.json not found"}),
+                )?;
+            } else {
+                writeln!(out, "daemon not running: daemon.json not found").map_err(write_error)?;
+            }
+            Ok(1)
+        }
+        Ok(Some(info)) => match client_get::<DaemonStatus>(&info, "/daemon/v1/status").await {
+            Ok(status) => {
+                if json_output {
+                    print_json(out, &json!({"reachable": true, "status": status}))?;
+                } else {
+                    writeln!(
+                        out,
+                        "daemon healthy: pid {}, port {}, version {}, uptime {}s, workers {}",
+                        status.pid, status.port, status.version, status.uptime_secs, status.workers
+                    )
+                    .map_err(write_error)?;
+                }
+                Ok(0)
+            }
+            Err(error) => {
+                if json_output {
+                    print_json(out, &json!({"reachable": false, "reason": error.message}))?;
+                } else {
+                    writeln!(out, "daemon not reachable: {}", error.message)
+                        .map_err(write_error)?;
+                }
+                Ok(1)
+            }
+        },
+        Err(error) => Err(CliError::runtime(format!(
+            "failed to read daemon.json: {error}"
+        ))),
     }
-    Ok(0)
 }
 
 async fn run_version(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
@@ -1436,6 +1497,11 @@ mod tests {
         }
     }
 
+    async fn unused_loopback_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
     struct EnvGuard {
         cache: Option<String>,
         config: Option<String>,
@@ -1445,6 +1511,22 @@ mod tests {
     }
 
     impl EnvGuard {
+        fn set_basic(cache: &Path, config: &Path) -> Self {
+            let guard = Self {
+                cache: std::env::var("REFACT_DAEMON_CACHE_DIR").ok(),
+                config: std::env::var("REFACT_DAEMON_CONFIG_DIR").ok(),
+                worker_cmd: std::env::var("REFACT_DAEMON_WORKER_CMD").ok(),
+                backoff: std::env::var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS").ok(),
+                crash: std::env::var("FAKE_WORKER_CRASH").ok(),
+            };
+            std::env::set_var("REFACT_DAEMON_CACHE_DIR", cache);
+            std::env::set_var("REFACT_DAEMON_CONFIG_DIR", config);
+            std::env::remove_var("REFACT_DAEMON_WORKER_CMD");
+            std::env::remove_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS");
+            std::env::remove_var("FAKE_WORKER_CRASH");
+            guard
+        }
+
         fn set(cache: &Path, config: &Path) -> Option<Self> {
             if std::process::Command::new("python3")
                 .arg("--version")
@@ -1571,6 +1653,103 @@ mod tests {
                 .await
                 .unwrap();
         assert!(info.is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn run_with_io_json_error_uses_stdout_and_silent_stderr() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
+        tokio::fs::create_dir_all(crate::daemon::paths::daemon_dir())
+            .await
+            .unwrap();
+        tokio::fs::write(crate::daemon::paths::daemon_json_path(), b"not json")
+            .await
+            .unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_io(
+            CliOptions {
+                command: CliCommand::Status { json: true },
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 1);
+        assert!(stderr.is_empty());
+        let value = serde_json::from_slice::<Value>(&stdout).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["exit_code"], 1);
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to read daemon.json"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn status_json_missing_daemon_json_is_passive_unreachable() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
+
+        let mut out = Vec::new();
+        assert_eq!(run_status(true, &mut out).await.unwrap(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out).unwrap(),
+            json!({"reachable": false, "reason": "daemon.json not found"})
+        );
+        assert!(!crate::daemon::paths::daemon_json_path().exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn status_human_missing_daemon_json_is_passive_unreachable() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
+
+        let mut out = Vec::new();
+        assert_eq!(run_status(false, &mut out).await.unwrap(), 1);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "daemon not running: daemon.json not found\n"
+        );
+        assert!(!crate::daemon::paths::daemon_json_path().exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn version_json_unreachable_daemon_is_valid_json() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
+        let port = unused_loopback_port().await;
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(port),
+        )
+        .await
+        .unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_io(
+            CliOptions {
+                command: CliCommand::Version { json: true },
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        let value = serde_json::from_slice::<Value>(&stdout).unwrap();
+        assert_eq!(value["client"], env!("CARGO_PKG_VERSION"));
+        assert!(value["daemon"].is_null());
     }
 
     #[tokio::test]
