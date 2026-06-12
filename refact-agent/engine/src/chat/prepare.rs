@@ -401,11 +401,15 @@ pub async fn prepare_chat_passthrough(
     let openai_tools = canonical_tools.tools;
     let alias_registry = canonical_tools.alias_registry;
 
-    // 7. History validation and fixing
-    let limited_msgs = fix_and_limit_messages_history(&messages, sampling_parameters)?;
+    // 7. Linearize summarization messages first (suppress summarized sources,
+    // inline summaries) so history validation, repair and token budgeting all
+    // operate on exactly what reaches the model. Running the limiter first
+    // mutates/reorders messages, which previously made suppression unreliable
+    // and silently re-sent every summarized source under context pressure.
+    let linearized_msgs = apply_summarization_linearize(messages);
 
-    // 7.5. Linearize summarization messages (replace summarized ranges with summary content)
-    let limited_msgs = apply_summarization_linearize(limited_msgs);
+    // 7.5. History validation and fixing
+    let limited_msgs = fix_and_limit_messages_history(&linearized_msgs, sampling_parameters)?;
 
     // 8. Strip thinking blocks if thinking is disabled
     let mut limited_adapted_msgs =
@@ -1137,6 +1141,59 @@ mod tests {
             .limited_messages
             .iter()
             .all(|message| message.role != COMPRESSION_REPORT_ROLE));
+    }
+
+    #[tokio::test]
+    async fn prepare_suppresses_summarized_sources_even_after_source_mutation() {
+        let gcx = gcx_with_model_and_modes(
+            "test/frozen-model",
+            vec![mode_config("agent", "Agent", "Do agent work")],
+        )
+        .await;
+
+        let mut source = ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("huge old assistant output ".repeat(50)),
+            ..Default::default()
+        };
+        source.message_id = "source-id".to_string();
+
+        let mut summary = segment_summary_message("compact summary of the work");
+        summary.message_id = "summary-id".to_string();
+        summary.extra.insert(
+            "compression".to_string(),
+            json!({
+                "schema_version": 3,
+                "kind": "llm_segment_summary",
+                "insert_mode": "source_preserving",
+                // Stale on purpose: in-place compaction mutates sources after
+                // summarization, and suppression must survive that.
+                "source_hash": "stale-after-in-place-mutation",
+                "source_message_ids": ["source-id"],
+                "summarized_source_message_ids": ["source-id"],
+                "preserved_source_message_ids": [],
+                "created_at": "now",
+                "summary_model": "test/frozen-model",
+            }),
+        );
+
+        let messages = vec![
+            user_message("before"),
+            source,
+            summary,
+            user_message("after"),
+        ];
+
+        let prepared = prepare_with_prefix(gcx, messages, Vec::new(), None).await;
+        let text = prepared
+            .llm_request
+            .messages
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("compact summary of the work"));
+        assert!(!text.contains("huge old assistant output"));
     }
 
     fn default_settings() -> AdapterSettings {

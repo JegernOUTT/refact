@@ -514,6 +514,7 @@ export function getAssistantCompressionMetadata(message: {
 export interface SummarizationMessage extends BaseMessage {
   role: "summarization";
   content: string;
+  paired_summary_content?: string;
   summarized_range?: [number, number];
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;

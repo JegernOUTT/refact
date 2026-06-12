@@ -176,6 +176,7 @@ function syntheticCompressionFailureError(
 function buildCompressionDisplayItem(
   message: ChatMessages[number],
   index: number,
+  pairedSummaryContent?: string,
 ): DisplayItemError | DisplayItemSummarization | null {
   if (isVisibleCompressionFailureEvent(message)) {
     return {
@@ -196,11 +197,18 @@ function buildCompressionDisplayItem(
   }
 
   if (isCompressionReportMessage(message)) {
+    const syntheticMessage = syntheticCompressionReportMessage(message);
+    const trimmedSummary = pairedSummaryContent?.trim();
     return {
       type: "summarization",
       key: getMessageKey(message, index),
       messageIndex: index,
-      message: syntheticCompressionReportMessage(message),
+      message: trimmedSummary
+        ? {
+            ...syntheticMessage,
+            paired_summary_content: trimmedSummary,
+          }
+        : syntheticMessage,
     };
   }
 
@@ -220,6 +228,25 @@ function isCompressedAssistantPairedWithReport(
     index > 0 &&
     isMatchingLlmSegmentCompressionReport(messages[index - 1], message)
   );
+}
+
+// The engine inserts the report immediately followed by its summary, so
+// pairing only inspects the adjacent next message; a non-adjacent summary
+// renders as its own card and the report simply omits the model summary.
+function pairedSummaryContentForReport(
+  messages: ChatMessages,
+  index: number,
+): string | undefined {
+  const nextMessage = messages.at(index + 1);
+  const message = messages[index];
+  if (!nextMessage || !isAssistantMessage(nextMessage)) return undefined;
+  if (!isMatchingLlmSegmentCompressionReport(message, nextMessage)) {
+    return undefined;
+  }
+  const content =
+    typeof nextMessage.content === "string" ? nextMessage.content : "";
+  const trimmedContent = content.trim();
+  return trimmedContent.length > 0 ? trimmedContent : undefined;
 }
 
 type CompressionIdentityMetadata = {
@@ -354,6 +381,10 @@ function findLastAssistantMessageIndex(messages: ChatMessages): number {
 }
 
 function findRebuildStartIndex(messages: ChatMessages, index: number): number {
+  if (isCompressedAssistantPairedWithReport(messages, index)) {
+    return index - 1;
+  }
+
   let rebuildStart = index;
   let sawSupplemental = false;
 
@@ -448,7 +479,11 @@ function buildDisplayItemsFromIndex(
 
     if (isCompressedAssistantPairedWithReport(messages, i)) continue;
 
-    const compressionItem = buildCompressionDisplayItem(head, i);
+    const compressionItem = buildCompressionDisplayItem(
+      head,
+      i,
+      pairedSummaryContentForReport(messages, i),
+    );
     if (compressionItem) {
       items.push(compressionItem);
       continue;
@@ -928,7 +963,9 @@ export function tryIncrementalDisplayItemsUpdate(
       previousItems,
       nextMessages,
       isStreaming,
-      changedIndex,
+      isCompressedAssistantPairedWithReport(nextMessages, changedIndex)
+        ? changedIndex - 1
+        : changedIndex,
     );
   }
 

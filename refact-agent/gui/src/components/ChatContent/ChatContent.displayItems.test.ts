@@ -430,6 +430,14 @@ describe("ChatContent display items", () => {
     expect(items.filter((item) => item.type === "summarization")).toHaveLength(
       1,
     );
+    const reportItem = items.find((item) => item.type === "summarization");
+    expect(reportItem?.type).toBe("summarization");
+    if (reportItem?.type !== "summarization") {
+      throw new Error("Expected summarization item");
+    }
+    expect(reportItem.message.paired_summary_content).toBe(
+      "internal compressed summary",
+    );
   });
 
   it("legacy replacement-style report and summary intentionally collapse to one report card", () => {
@@ -595,6 +603,37 @@ describe("ChatContent display items", () => {
     expect(
       (incrementalItems ?? []).filter((item) => item.type === "summarization"),
     ).toHaveLength(2);
+  });
+
+  it("incremental_appending_matching_summary_after_report_attaches_paired_content", () => {
+    const userBefore = userMessage({ message_id: "user-before" });
+    const report = matchingLlmCompressionReportMessage({
+      message_id: "compression-report",
+    });
+    const previousMessages: ChatMessages = [userBefore, report];
+    const summary = matchingCompressedAssistantMessage({
+      message_id: "paired-summary",
+    });
+    const nextMessages: ChatMessages = [...previousMessages, summary];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).not.toBeNull();
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    const summarizationItems = (incrementalItems ?? []).filter(
+      (item) => item.type === "summarization",
+    );
+    expect(summarizationItems).toHaveLength(1);
+    const reportItem = summarizationItems[0];
+    expect(reportItem.message.paired_summary_content).toBe(
+      typeof summary.content === "string" ? summary.content.trim() : "",
+    );
   });
 
   it("adjacent_deterministic_report_does_not_hide_legacy_compressed_assistant", () => {

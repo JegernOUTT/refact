@@ -14,6 +14,15 @@ function makeMessage(
   };
 }
 
+function getExpandedStats() {
+  const grids = screen.getAllByTestId("summarization-card-stats");
+  const stats = grids[grids.length - 1];
+  if (!stats) {
+    throw new Error("Expected expanded stats grid");
+  }
+  return stats;
+}
+
 describe("SummarizationMessage", () => {
   it("renders deterministic tier as the default label", () => {
     render(
@@ -159,7 +168,7 @@ describe("SummarizationMessage", () => {
       />,
     );
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Attempt");
     expect(stats).toHaveTextContent("2");
     expect(stats).toHaveTextContent("Context files deduped");
@@ -191,7 +200,7 @@ describe("SummarizationMessage", () => {
     );
 
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Context files removed");
     expect(stats).toHaveTextContent("2");
     expect(stats).toHaveTextContent("Tool outputs truncated");
@@ -228,7 +237,7 @@ describe("SummarizationMessage", () => {
     );
 
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Context files removed");
     expect(stats).toHaveTextContent("2");
     expect(stats).toHaveTextContent("Tool outputs truncated");
@@ -261,7 +270,7 @@ describe("SummarizationMessage", () => {
     );
 
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Context messages dropped");
     expect(stats).toHaveTextContent("3");
     expect(stats).toHaveTextContent("Tokens before");
@@ -301,8 +310,8 @@ describe("SummarizationMessage", () => {
         "Older context was summarized so this chat can continue within the model limit.",
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Summary kept for the model/u)).toBeNull();
-    const stats = screen.getByTestId("summarization-card-stats");
+    expect(screen.getByText(/Summary kept for the model/u)).toBeInTheDocument();
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Messages compressed");
     expect(stats).toHaveTextContent("4");
     expect(stats).not.toHaveTextContent("Summary model");
@@ -356,9 +365,37 @@ describe("SummarizationMessage", () => {
 
     await user.click(screen.getByTestId("summarization-card-header"));
     expect(
-      screen.getByText(/Details are shown in the compact report above/u),
+      screen.getByText(/Markdown details stay expandable/u),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Markdown details stay expandable/u)).toBeNull();
+    const expandedStats = getExpandedStats();
+    expect(expandedStats).toHaveTextContent("Tokens before");
+    expect(expandedStats).toHaveTextContent("12,000");
+  });
+
+  it("renders report markdown and paired model summary when expanded", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Full report\n\nReport details are visible.",
+          paired_summary_content: "Paired model summary is visible.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_message_count: 2,
+            estimated_tokens_saved: 400,
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    expect(screen.getByText("Full report")).toBeInTheDocument();
+    expect(screen.getByText(/Report details are visible/u)).toBeInTheDocument();
+    expect(screen.getByText("Model summary")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Paired model summary is visible/u),
+    ).toBeInTheDocument();
   });
 
   it("legacy compression report copy does not claim original messages remain visible", () => {
@@ -476,7 +513,7 @@ describe("SummarizationMessage", () => {
     );
 
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Context messages dropped");
     expect(stats).toHaveTextContent("3");
   });
@@ -505,7 +542,7 @@ describe("SummarizationMessage", () => {
     );
 
     await user.click(screen.getByTestId("summarization-card-header"));
-    const stats = screen.getByTestId("summarization-card-stats");
+    const stats = getExpandedStats();
     expect(stats).toHaveTextContent("Context files removed");
     expect(stats).toHaveTextContent("1");
     expect(stats).toHaveTextContent("Tokens saved");

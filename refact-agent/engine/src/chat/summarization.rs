@@ -303,22 +303,52 @@ fn segment_is_existing_summary(messages: &[ChatMessage], segment: SummarySegment
     segment.start == segment.end && is_segment_summary(&messages[segment.start])
 }
 
-fn segment_has_source_preserving_summary_after(
-    messages: &[ChatMessage],
-    segment: SummarySegment,
-) -> bool {
-    let Some(summary) = messages.get(segment.end + 2) else {
-        return false;
-    };
-    if !is_segment_summary(summary) {
+fn source_preserving_summary_metadata(message: &ChatMessage) -> Option<&Value> {
+    if !is_segment_summary(message) {
+        return None;
+    }
+    let metadata = message.extra.get("compression")?;
+    (metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE))
+        .then_some(metadata)
+}
+
+/// Union of all message ids covered by source-preserving summaries in this
+/// chat. Coverage is id-based on purpose: engine-side compaction mutates the
+/// source messages in place, so content hashes cannot be used to decide
+/// whether a segment was already summarized.
+fn summarized_source_id_union(messages: &[ChatMessage]) -> HashSet<String> {
+    let mut union = HashSet::new();
+    for message in messages {
+        let Some(metadata) = source_preserving_summary_metadata(message) else {
+            continue;
+        };
+        union.extend(compression_metadata_string_array(
+            Some(metadata),
+            "summarized_source_message_ids",
+        ));
+    }
+    union
+}
+
+fn ranges_already_summarized(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
+    let union = summarized_source_id_union(messages);
+    if union.is_empty() {
         return false;
     }
-    let source_hash = source_hash_for_messages(&messages[segment.start..=segment.end]);
-    summary.extra.get("compression").is_some_and(|metadata| {
-        metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE)
-            && metadata.get("source_hash").and_then(|value| value.as_str())
-                == Some(source_hash.as_str())
-    })
+    let mut any_message = false;
+    for range in ranges {
+        for message in &messages[range.start..=range.end] {
+            if message.message_id.is_empty() || !union.contains(&message.message_id) {
+                return false;
+            }
+            any_message = true;
+        }
+    }
+    any_message
+}
+
+fn segment_already_summarized(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    ranges_already_summarized(messages, std::slice::from_ref(&segment))
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -579,7 +609,7 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_has_source_preserving_summary_after(messages, segment)
+        && !segment_already_summarized(messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -659,7 +689,7 @@ fn segment_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> boo
         && !tail_has_pending_tool_calls(candidate)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_has_source_preserving_summary_after(messages, segment)
+        && !segment_already_summarized(messages, segment)
 }
 
 fn source_messages_for_ranges(
@@ -670,20 +700,6 @@ fn source_messages_for_ranges(
         .iter()
         .flat_map(|range| messages[range.start..=range.end].iter().cloned())
         .collect()
-}
-
-fn source_hash_has_existing_summary(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
-    let source_messages = source_messages_for_ranges(messages, ranges);
-    let source_hash = source_hash_for_messages(&source_messages);
-    messages.iter().any(|message| {
-        is_segment_summary(message)
-            && message.extra.get("compression").is_some_and(|metadata| {
-                metadata.get("insert_mode").and_then(|value| value.as_str())
-                    == Some(SUMMARY_INSERT_MODE)
-                    && metadata.get("source_hash").and_then(|value| value.as_str())
-                        == Some(source_hash.as_str())
-            })
-    })
 }
 
 fn estimated_tokens_for_ranges(messages: &[ChatMessage], ranges: &[SummarySegment]) -> usize {
@@ -775,13 +791,37 @@ fn source_hash_for_candidate(messages: &[ChatMessage], candidate: &CompressionCa
     source_hash_for_messages(&source_messages_for_candidate(messages, candidate))
 }
 
-fn find_candidate_by_source_hash(
-    messages: &[ChatMessage],
-    source_hash: &str,
-) -> Option<CompressionCandidate> {
-    compression_candidates(messages)
-        .into_iter()
-        .find(|candidate| source_hash_for_candidate(messages, candidate) == source_hash)
+fn source_preserving_pair_summarized_ids(message: &ChatMessage) -> Option<HashSet<String>> {
+    let metadata = if message.role == COMPRESSION_REPORT_ROLE {
+        let metadata = message.extra.get("compression_report")?;
+        (metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE))
+            .then_some(metadata)?
+    } else {
+        source_preserving_summary_metadata(message)?
+    };
+    let ids: HashSet<String> =
+        compression_metadata_string_array(Some(metadata), "summarized_source_message_ids")
+            .into_iter()
+            .collect();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// A new summary whose source set covers an older summary's sources supersedes
+/// it: drop the older summary message and its paired visual report so the chat
+/// does not accumulate duplicate summary cards and the model context keeps a
+/// single authoritative summary per segment.
+fn remove_superseded_summary_pairs(
+    messages: &mut Vec<ChatMessage>,
+    new_source_ids: &HashSet<String>,
+) -> usize {
+    let len_before = messages.len();
+    messages.retain(
+        |message| match source_preserving_pair_summarized_ids(message) {
+            Some(ids) => !ids.is_subset(new_source_ids),
+            None => true,
+        },
+    );
+    len_before - messages.len()
 }
 
 fn candidate_has_complete_tool_result_pair(
@@ -826,7 +866,7 @@ fn make_compression_candidate(
         || ranges
             .iter()
             .any(|segment| !segment_is_eligible(messages, *segment))
-        || source_hash_has_existing_summary(messages, &ranges)
+        || ranges_already_summarized(messages, &ranges)
     {
         return None;
     }
@@ -951,7 +991,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
-                && !segment_has_source_preserving_summary_after(messages, *segment)
+                && !segment_already_summarized(messages, *segment)
         })
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
@@ -1979,9 +2019,9 @@ fn insert_source_preserving_report_and_summary(
     insert_idx
 }
 
-fn insert_candidate_report_and_summary(
+fn insert_report_and_summary_after_sources(
     messages: &mut Vec<ChatMessage>,
-    candidate: &CompressionCandidate,
+    source_ids: &HashSet<String>,
     source_messages: &[ChatMessage],
     summary: ChatMessage,
     benefit: CompressionBenefit,
@@ -1989,12 +2029,12 @@ fn insert_candidate_report_and_summary(
     let summary = refresh_segment_summary_metadata(summary, source_messages);
     let report =
         make_segment_compression_report_message_with_benefit(&summary, source_messages, benefit);
-    let insert_idx = candidate
-        .ranges
+    let insert_idx = messages
         .iter()
-        .map(|range| range.end)
-        .max()
-        .map(|end| end + 1)
+        .rposition(|message| {
+            !message.message_id.is_empty() && source_ids.contains(&message.message_id)
+        })
+        .map(|idx| idx + 1)
         .unwrap_or(messages.len())
         .min(messages.len());
     messages.splice(insert_idx..insert_idx, [report, summary]);
@@ -2744,13 +2784,24 @@ async fn run_reserved_segment_summarization(
                 continue;
             }
 
+            let source_id_set: HashSet<String> = source_messages
+                .iter()
+                .filter(|message| !message.message_id.is_empty())
+                .map(|message| message.message_id.clone())
+                .collect();
             let mut session = session_arc.lock().await;
             if !owns_compression_attempt(&session, attempt) {
                 return applied_count > 0;
             }
-            let Some(current_candidate) =
-                find_candidate_by_source_hash(&session.messages, &source_hash)
-            else {
+            let current_source: Vec<ChatMessage> = session
+                .messages
+                .iter()
+                .filter(|message| {
+                    !message.message_id.is_empty() && source_id_set.contains(&message.message_id)
+                })
+                .cloned()
+                .collect();
+            if current_source.is_empty() {
                 if applied_count > 0 {
                     if finalize_applied_if_owned(&mut session, attempt) {
                         return true;
@@ -2763,10 +2814,7 @@ async fn run_reserved_segment_summarization(
                     CompressionReason::SourceChanged,
                 );
                 return false;
-            };
-            ensure_candidate_source_message_ids(&mut session.messages, &current_candidate);
-            let current_source =
-                source_messages_for_candidate(&session.messages, &current_candidate);
+            }
             let current_preserved_source_messages =
                 preserved_source_messages_from_summary(&summary, &current_source);
             let current_benefit = effective_compression_benefit(
@@ -2779,16 +2827,24 @@ async fn run_reserved_segment_summarization(
                 insufficient_hashes_to_record.push(source_hash.clone());
                 continue;
             }
-            let report_idx = insert_candidate_report_and_summary(
+            let superseded_removed =
+                remove_superseded_summary_pairs(&mut session.messages, &source_id_set);
+            let report_idx = insert_report_and_summary_after_sources(
                 &mut session.messages,
-                &current_candidate,
+                &source_id_set,
                 &current_source,
                 summary,
                 current_benefit,
             );
-            for index in report_idx..(report_idx + 2).min(session.messages.len()) {
-                let message = session.messages[index].clone();
-                session.emit(ChatEvent::MessageAdded { message, index });
+            if superseded_removed > 0 {
+                // Removals shift indices; resync the UI with a full snapshot.
+                let snapshot = session.snapshot();
+                session.emit(snapshot);
+            } else {
+                for index in report_idx..(report_idx + 2).min(session.messages.len()) {
+                    let message = session.messages[index].clone();
+                    session.emit(ChatEvent::MessageAdded { message, index });
+                }
             }
             session.tier1_compact_attempts += 1;
             session.tier1_compaction_disabled = false;
@@ -2905,6 +2961,27 @@ pub(crate) struct DeterministicCompactionOutcome {
     pub tokens_after: usize,
 }
 
+/// Ids of messages that source-preserving summaries currently remove from the
+/// provider wire (summarized minus explicitly preserved). Deterministic
+/// compaction skips these: truncating them frees no wire tokens and only
+/// destroys visible history.
+fn actively_suppressed_source_ids(messages: &[ChatMessage]) -> HashSet<String> {
+    let mut suppressed = summarized_source_id_union(messages);
+    if suppressed.is_empty() {
+        return suppressed;
+    }
+    for message in messages {
+        let Some(metadata) = source_preserving_summary_metadata(message) else {
+            continue;
+        };
+        for id in compression_metadata_string_array(Some(metadata), "preserved_source_message_ids")
+        {
+            suppressed.remove(&id);
+        }
+    }
+    suppressed
+}
+
 pub(crate) fn deterministic_compaction(
     messages: &[ChatMessage],
 ) -> Option<DeterministicCompactionOutcome> {
@@ -2916,11 +2993,14 @@ pub(crate) fn deterministic_compaction(
         .flatten()
         .map(|tool_call| (tool_call.id.clone(), tool_call.function.name.clone()))
         .collect();
+    let suppressed_ids = actively_suppressed_source_ids(&updated);
 
     let mut protected_recent = HashSet::new();
     let mut recent_seen = 0usize;
     for idx in (0..updated.len()).rev() {
-        if deterministic_truncation_eligible(&updated[idx], &tool_call_names) {
+        if deterministic_truncation_eligible(&updated[idx], &tool_call_names)
+            && !suppressed_ids.contains(&updated[idx].message_id)
+        {
             protected_recent.insert(idx);
             recent_seen += 1;
             if recent_seen >= DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
@@ -2933,6 +3013,7 @@ pub(crate) fn deterministic_compaction(
     for (idx, message) in updated.iter_mut().enumerate() {
         if !deterministic_truncation_eligible(message, &tool_call_names)
             || protected_recent.contains(&idx)
+            || suppressed_ids.contains(&message.message_id)
         {
             continue;
         }
@@ -3695,10 +3776,15 @@ mod tests {
             let mut applied = 0;
             let mut tried = HashSet::new();
             for _ in 0..MAX_COMPRESSION_PASSES {
-                let candidate = compression_candidates(&messages)
-                    .into_iter()
-                    .find(|candidate| tried.insert(source_hash_for_candidate(&messages, candidate)))
-                    .unwrap();
+                let Some(candidate) =
+                    compression_candidates(&messages)
+                        .into_iter()
+                        .find(|candidate| {
+                            tried.insert(source_hash_for_candidate(&messages, candidate))
+                        })
+                else {
+                    break;
+                };
                 ensure_candidate_source_message_ids(&mut messages, &candidate);
                 let source = source_messages_for_candidate(&messages, &candidate);
                 let summary = make_segment_summary_message(
@@ -3709,9 +3795,14 @@ mod tests {
                 let benefit = effective_compression_benefit(&source, &summary, &[]);
 
                 assert!(compression_benefit_is_sufficient(benefit));
-                insert_candidate_report_and_summary(
+                let source_id_set: HashSet<String> = source
+                    .iter()
+                    .filter(|message| !message.message_id.is_empty())
+                    .map(|message| message.message_id.clone())
+                    .collect();
+                insert_report_and_summary_after_sources(
                     &mut messages,
-                    &candidate,
+                    &source_id_set,
                     &source,
                     summary,
                     benefit,
@@ -3719,13 +3810,136 @@ mod tests {
                 applied += 1;
             }
 
-            assert_eq!(applied, MAX_COMPRESSION_PASSES);
+            // Id-based coverage lets the top-ranked batch candidate absorb every
+            // closed run in one pass; later passes correctly find nothing left.
+            assert!(applied >= 1);
+            assert!(compression_candidates(&messages).is_empty());
             assert_eq!(
                 messages
                     .iter()
                     .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
                     .count(),
-                MAX_COMPRESSION_PASSES
+                applied
+            );
+        }
+
+        #[test]
+        fn coverage_by_ids_survives_source_mutation_and_prevents_resummarization() {
+            let mut messages = vec![user("start")];
+            for idx in 0..3 {
+                messages.push(long_assistant(&format!("large {idx}"), 1_500));
+                messages.push(user(&format!("next {idx}")));
+            }
+            let candidate = compression_candidates(&messages)
+                .into_iter()
+                .find(|candidate| candidate.ranges == vec![SummarySegment { start: 1, end: 1 }])
+                .unwrap();
+            ensure_candidate_source_message_ids(&mut messages, &candidate);
+            let source = source_messages_for_candidate(&messages, &candidate);
+            let summary = make_segment_summary_message(
+                short_summary_text().to_string(),
+                &source,
+                "test-model",
+            );
+            let benefit = effective_compression_benefit(&source, &summary, &[]);
+            let source_id_set: HashSet<String> = source
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &source_id_set,
+                &source,
+                summary,
+                benefit,
+            );
+            let summarized_id = messages[1].message_id.clone();
+
+            // Deterministic compaction-style in-place mutation of the source.
+            messages[1].content = ChatContent::SimpleText(
+                "[tool output truncated by automatic context compaction]".to_string(),
+            );
+
+            // The mutated source stays covered: no candidate re-summarizes it.
+            for candidate in compression_candidates(&messages) {
+                let candidate_source = source_messages_for_candidate(&messages, &candidate);
+                assert!(!candidate_source
+                    .iter()
+                    .any(|message| message.message_id == summarized_id));
+            }
+        }
+
+        #[test]
+        fn superseding_summary_removes_covered_summary_pair() {
+            let mut messages = vec![
+                user("start"),
+                long_assistant("large 0", 1_500),
+                user("next 0"),
+                long_assistant("large 1", 1_500),
+                user("next 1"),
+            ];
+            let first = compression_candidates(&messages)
+                .into_iter()
+                .find(|candidate| candidate.ranges == vec![SummarySegment { start: 1, end: 1 }])
+                .unwrap();
+            ensure_candidate_source_message_ids(&mut messages, &first);
+            let source = source_messages_for_candidate(&messages, &first);
+            let first_ids: HashSet<String> = source
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            let summary = make_segment_summary_message(
+                short_summary_text().to_string(),
+                &source,
+                "test-model",
+            );
+            let benefit = effective_compression_benefit(&source, &summary, &[]);
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &first_ids,
+                &source,
+                summary,
+                benefit,
+            );
+
+            ensure_all_candidate_source_message_ids(&mut messages);
+            let both: Vec<ChatMessage> = messages
+                .iter()
+                .filter(|message| message.role == "assistant" && !is_segment_summary(message))
+                .cloned()
+                .collect();
+            assert_eq!(both.len(), 2);
+            let both_ids: HashSet<String> = both
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            assert!(both_ids.iter().all(|id| !id.is_empty()));
+            let summary2 =
+                make_segment_summary_message(short_summary_text().to_string(), &both, "test-model");
+            let benefit2 = effective_compression_benefit(&both, &summary2, &[]);
+            let removed = remove_superseded_summary_pairs(&mut messages, &both_ids);
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &both_ids,
+                &both,
+                summary2,
+                benefit2,
+            );
+
+            assert_eq!(removed, 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| is_segment_summary(message))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                    .count(),
+                1
             );
         }
 

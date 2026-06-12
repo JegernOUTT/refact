@@ -237,6 +237,11 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const tier = message.summarization_tier;
   const contentText =
     typeof message.content === "string" ? message.content : "";
+  const hasContentText = contentText.trim().length > 0;
+  const pairedSummaryContent =
+    typeof message.paired_summary_content === "string"
+      ? message.paired_summary_content.trim()
+      : "";
   const compressionReport = getCompressionReportMetadata(message);
   const isSegmentCompressionReport =
     compressionReport?.compression_kind === "llm_segment_summary";
@@ -360,13 +365,22 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           className={styles.body}
           data-testid="summarization-card-body"
         >
-          {hasMetadataReport ? (
-            <span>Details are shown in the compact report above.</span>
-          ) : contentText.length > 0 ? (
-            <ToolMarkdown>{contentText}</ToolMarkdown>
-          ) : (
-            <span>No details available.</span>
+          {hasContentText && <ToolMarkdown>{contentText}</ToolMarkdown>}
+          {pairedSummaryContent.length > 0 && (
+            <>
+              <p className={styles.description}>
+                <strong>Model summary</strong>
+              </p>
+              <ToolMarkdown>{pairedSummaryContent}</ToolMarkdown>
+            </>
           )}
+          {reportStats && reportStats.length > 0 && (
+            <StatsGrid stats={reportStats} />
+          )}
+          {!hasContentText &&
+            pairedSummaryContent.length === 0 &&
+            !reportStats &&
+            !bodyStats && <span>No details available.</span>}
           {bodyStats && bodyStats.length > 0 && <StatsGrid stats={bodyStats} />}
         </div>
       )}

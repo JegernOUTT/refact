@@ -1738,6 +1738,10 @@ impl Tool for ToolCompressChatProbe {
         };
 
         let messages = chat_facade.session_snapshot(&chat_id).await?.messages;
+        // Probe the linearized view: sources suppressed by segment summaries
+        // never reach the model, so counting them would overstate usage and
+        // tempt the agent into compressing messages that cost nothing.
+        let messages = crate::chat::linearize::apply_summarization_linearize(messages);
 
         if messages.is_empty() {
             return Err("Cannot probe an empty chat".to_string());
