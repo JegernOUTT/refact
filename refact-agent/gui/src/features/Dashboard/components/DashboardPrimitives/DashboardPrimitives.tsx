@@ -203,12 +203,11 @@ function DashboardHoverCardContent({
   void size;
   return null;
 }
-// eslint-disable-next-line react-refresh/only-export-components
-export const DashboardHoverCard = {
+export const DashboardHoverCard = Object.assign(DashboardHoverCardRoot, {
   Root: DashboardHoverCardRoot,
   Trigger: DashboardHoverCardTrigger,
   Content: DashboardHoverCardContent,
-};
+});
 
 export interface DashboardBadgeProps
   extends React.ComponentProps<typeof KitBadge> {
@@ -217,18 +216,17 @@ export interface DashboardBadgeProps
   size?: string;
 }
 
-export function DashboardBadge({
-  color,
-  size,
-  variant,
-  tone,
-  ...props
-}: DashboardBadgeProps) {
+export const DashboardBadge = React.forwardRef<
+  React.ElementRef<typeof KitBadge>,
+  DashboardBadgeProps
+>(({ color, size, variant, tone, ...props }, ref) => {
   void color;
   void size;
   void variant;
-  return <KitBadge tone={tone ?? "accent"} {...props} />;
-}
+  return <KitBadge ref={ref} tone={tone ?? "accent"} {...props} />;
+});
+
+DashboardBadge.displayName = "DashboardBadge";
 
 export function DashboardTooltip({
   content,
