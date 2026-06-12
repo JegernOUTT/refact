@@ -8,6 +8,7 @@ use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
 use crate::events_pane::{render_event_lines, render_worker_lines};
 use crate::pickers::PickerState;
+use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub mod footer;
 

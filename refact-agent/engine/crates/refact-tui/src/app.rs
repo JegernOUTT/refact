@@ -673,9 +673,7 @@ impl App {
 
     fn submit_structured_prompt(&mut self, prompt: &str) -> AppAction {
         self.composer.set_text(prompt);
-        self.submit_composer()
-            .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
-            .unwrap_or(AppAction::None)
+        self.submit_composer().unwrap_or(AppAction::None)
     }
 
     fn show_current_plan(&mut self) -> AppAction {
