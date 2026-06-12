@@ -31,6 +31,7 @@ const PATCH_LIKE_FUNCTIONS: &[&str] = &[
     "undo_textdoc",
 ];
 const CHAT_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
+const ABORT_BEFORE_QUIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -693,6 +694,23 @@ impl App {
         self.events_pane.push_event(event);
     }
 
+    fn is_chat_active(&self) -> bool {
+        matches!(
+            self.session_state,
+            SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
+        )
+    }
+
+    fn quit_action(&mut self) -> AppAction {
+        let abort_active = self.is_chat_active();
+        if abort_active {
+            self.session_state = SessionState::Idle;
+            self.approval_modal = None;
+        }
+        self.should_quit = true;
+        AppAction::Quit { abort_active }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.kind != KeyEventKind::Press {
             return AppAction::None;
@@ -729,10 +747,7 @@ impl App {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => {
-                self.should_quit = true;
-                AppAction::None
-            }
+            } => self.quit_action(),
             KeyEvent {
                 code: KeyCode::Char('n'),
                 modifiers: KeyModifiers::CONTROL,
@@ -898,7 +913,7 @@ impl App {
             self.session_state = SessionState::Idle;
             self.approval_modal = None;
             self.add_notice("Cancel requested");
-            self.last_ctrl_c = Some(Instant::now());
+            self.last_ctrl_c = None;
             return AppAction::Abort;
         }
         let now = Instant::now();
@@ -1067,6 +1082,9 @@ pub enum AppAction {
         patch: Option<Value>,
     },
     Abort,
+    Quit {
+        abort_active: bool,
+    },
 }
 
 async fn show_startup_notice(message: String) -> Result<(), TuiError> {
@@ -1261,7 +1279,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         match event {
             RuntimeEvent::Input(Event::Key(key)) => {
                 let action = app.handle_key(key);
-                run_action(&mut app, action, &client, &tx, &mut subscriptions);
+                run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
             }
             RuntimeEvent::Input(Event::Resize(_, _)) | RuntimeEvent::Tick => {}
             RuntimeEvent::Input(_) => {}
@@ -1336,7 +1354,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     Ok(())
 }
 
-fn run_action(
+async fn run_action(
     app: &mut App,
     action: AppAction,
     client: &DaemonClient,
@@ -1460,6 +1478,30 @@ fn run_action(
                 });
             }
         }
+        AppAction::Quit { abort_active } => {
+            if abort_active {
+                if let Err(error) = send_abort_for_current_chat(app, client).await {
+                    app.add_notice(format!("Abort before quit failed: {error}"));
+                }
+            }
+        }
+    }
+}
+
+async fn send_abort_for_current_chat(app: &App, client: &DaemonClient) -> Result<(), String> {
+    let Some(project_id) = app.current_project_id().map(str::to_string) else {
+        return Ok(());
+    };
+    let chat_id = app.chat_id().to_string();
+    match tokio::time::timeout(
+        ABORT_BEFORE_QUIT_TIMEOUT,
+        client.send_abort(&project_id, &chat_id),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("abort request timed out".to_string()),
     }
 }
 
@@ -1664,6 +1706,10 @@ fn approval_patch(modal: &ApprovalModalState) -> Value {
 mod tests {
     use super::*;
     use crate::approvals::PauseReason;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
 
     fn project() -> OpenProjectResponse {
         OpenProjectResponse {
@@ -1699,6 +1745,99 @@ mod tests {
             app.handle_chat_event(event);
         }
         decision
+    }
+
+    #[derive(Clone, Default)]
+    struct CommandState(Arc<(Mutex<Vec<Value>>, Condvar)>);
+
+    impl CommandState {
+        fn push(&self, command: Value) {
+            let (lock, cond) = &*self.0;
+            lock.lock().unwrap().push(command);
+            cond.notify_all();
+        }
+
+        fn wait_for(&self, command_type: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cond) = &*self.0;
+            let mut commands = lock.lock().unwrap();
+            loop {
+                if commands.iter().any(|command| {
+                    command.get("type").and_then(Value::as_str) == Some(command_type)
+                }) {
+                    return true;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let wait = deadline.saturating_duration_since(now);
+                let (next_commands, timeout) = cond.wait_timeout(commands, wait).unwrap();
+                commands = next_commands;
+                if timeout.timed_out() {
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn spawn_command_server(state: CommandState) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                handle_command_connection(stream, state.clone());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn handle_command_connection(mut stream: TcpStream, state: CommandState) {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let Ok(n) = stream.read(&mut buf) else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            data.extend_from_slice(&buf[..n]);
+            if data.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let Some(header_end) = data
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|idx| idx + 4)
+        else {
+            return;
+        };
+        let headers = String::from_utf8_lossy(&data[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then_some(value)
+            })
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while data.len() < header_end + content_length {
+            let Ok(n) = stream.read(&mut buf) else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
+        if content_length > 0 {
+            let body = &data[header_end..header_end + content_length];
+            state.push(serde_json::from_slice(body).unwrap_or(Value::Null));
+        }
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"status\":\"accepted\"}";
+        let _ = stream.write_all(response);
     }
 
     #[test]
@@ -1748,6 +1887,44 @@ mod tests {
             AppAction::None
         );
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_during_generation_aborts_without_arming_quit_countdown() {
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.should_quit());
+        assert!(app.last_ctrl_c.is_none());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(!app.should_quit());
+    }
+
+    #[tokio::test]
+    async fn active_generation_quit_sends_abort_command() {
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(action, AppAction::Quit { abort_active: true });
+        assert!(app.should_quit());
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut subscriptions = SubscriptionManager::new();
+        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+
+        assert!(state.wait_for("abort"));
     }
 
     #[test]
