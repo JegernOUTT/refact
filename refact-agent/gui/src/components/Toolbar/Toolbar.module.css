@@ -2,6 +2,7 @@
   container: toolbar / inline-size;
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   min-width: 0;
   height: 36px;
   padding: 0 var(--rf-space-2);

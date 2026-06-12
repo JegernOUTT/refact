@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
@@ -659,5 +661,19 @@ describe("Toolbar tab parity", () => {
       block: "nearest",
       inline: "nearest",
     });
+  });
+});
+
+describe("Toolbar chrome containment", () => {
+  it("toolbar_is_fixed_height_chrome_that_never_flex_shrinks", async () => {
+    const css = await readFile(
+      resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
+      "utf8",
+    );
+    const match = /\.toolbar \{[^}]*\}/.exec(css);
+    expect(match).not.toBeNull();
+    const block = match?.[0] ?? "";
+    expect(block).toContain("flex-shrink: 0");
+    expect(block).toContain("height: 36px");
   });
 });
