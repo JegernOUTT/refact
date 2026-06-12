@@ -64,6 +64,10 @@ http://127.0.0.1:<http-port>/
 
 The embedded page uses `window.location.origin` for `/v1` API and SSE calls, so browser clients and LAN clients use the same engine origin that served the page. The engine also advertises a DNS-SD service named `_refact-lsp._tcp.local.` and logs the `http://<hostname>.local:<port>/` URL when mDNS starts successfully.
 
+## Refact daemon
+
+The `refact daemon` control plane exposes `/daemon/v1/*` endpoints for IDEs, the TUI, and CLI frontends that attach to daemon-managed workers. If daemon auth is enabled, mutating control routes and project proxy routes require the `Bearer` token from `daemon.json`. `GET /daemon/v1/status` is intentionally public and read-only: clients may use it for liveness and version discovery before they have loaded local credentials, while authenticated clients still send Bearer when they have one.
+
 ## Tests
 
 ```bash

@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::cmp::Ordering;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -13,17 +15,50 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub async fn read_daemon_json() -> Option<DaemonInfo> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonInfoReadError {
+    Corrupt { path: PathBuf, message: String },
+    Io { path: PathBuf, message: String },
+}
+
+impl std::fmt::Display for DaemonInfoReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonInfoReadError::Corrupt { path, message } => {
+                write!(f, "daemon info corrupt at {}: {message}", path.display())
+            }
+            DaemonInfoReadError::Io { path, message } => {
+                write!(
+                    f,
+                    "failed to read daemon info at {}: {message}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DaemonInfoReadError {}
+
+pub async fn read_daemon_json() -> Result<Option<DaemonInfo>, DaemonInfoReadError> {
     read_daemon_json_path(&crate::daemon::paths::daemon_json_path()).await
 }
 
-async fn read_daemon_json_path(path: &Path) -> Option<DaemonInfo> {
-    match crate::daemon::state::read_daemon_info(path).await {
-        Ok(info) => info,
-        Err(error) => {
-            tracing::warn!("{error}");
-            None
+async fn read_daemon_json_path(path: &Path) -> Result<Option<DaemonInfo>, DaemonInfoReadError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => {
+            serde_json::from_str(&content)
+                .map(Some)
+                .map_err(|error| DaemonInfoReadError::Corrupt {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })
         }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DaemonInfoReadError::Io {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }),
     }
 }
 
@@ -60,7 +95,10 @@ pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
 }
 
 pub async fn shutdown_for_upgrade_if_older(my_version: &str) -> Result<Option<DaemonInfo>, String> {
-    let Some(info) = read_daemon_json().await else {
+    let Some(info) = read_daemon_json()
+        .await
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
     };
     if !version_is_older(&info.version, my_version) {
@@ -195,10 +233,14 @@ async fn ensure_daemon_running_with_starter<F>(starter: F) -> Result<DaemonInfo,
 where
     F: FnOnce() -> Result<(), String>,
 {
-    if let Some(info) = read_daemon_json().await {
-        if ping_daemon(&info).await {
-            return Ok(info);
+    match read_daemon_json().await {
+        Ok(Some(info)) => {
+            if ping_daemon(&info).await {
+                return Ok(info);
+            }
         }
+        Ok(None) => {}
+        Err(error) => return Err(error.to_string()),
     }
     starter()?;
     poll_daemon(STARTUP_TIMEOUT).await
@@ -247,10 +289,14 @@ fn configure_detached(_: &mut Command) {}
 async fn poll_daemon(timeout: Duration) -> Result<DaemonInfo, String> {
     let started = Instant::now();
     loop {
-        if let Some(info) = read_daemon_json().await {
-            if ping_daemon(&info).await {
-                return Ok(info);
+        match read_daemon_json().await {
+            Ok(Some(info)) => {
+                if ping_daemon(&info).await {
+                    return Ok(info);
+                }
             }
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
         }
         if started.elapsed() >= timeout {
             return Err("daemon did not become ready before timeout".to_string());
@@ -290,20 +336,115 @@ async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
 }
 
 fn version_is_older(current: &str, mine: &str) -> bool {
-    parse_version(current) < parse_version(mine)
+    compare_versions(current, mine) == Ordering::Less
 }
 
-fn parse_version(version: &str) -> (u64, u64, u64) {
-    let mut parts = version.split(|ch: char| !ch.is_ascii_digit() && ch != '.');
-    let first = parts.next().unwrap_or(version);
-    let mut nums = first
-        .split('.')
-        .map(|part| part.parse::<u64>().unwrap_or(0));
-    (
-        nums.next().unwrap_or(0),
-        nums.next().unwrap_or(0),
-        nums.next().unwrap_or(0),
-    )
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    match (parse_semver(left), parse_semver(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemverParts {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: Option<String>,
+}
+
+impl Ord for SemverParts {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| compare_prerelease(self.pre.as_deref(), other.pre.as_deref()))
+    }
+}
+
+impl PartialOrd for SemverParts {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn parse_semver(version: &str) -> Option<SemverParts> {
+    let without_prefix = version.trim().strip_prefix('v').unwrap_or(version.trim());
+    let without_build = without_prefix
+        .split_once('+')
+        .map(|(base, _)| base)
+        .unwrap_or(without_prefix);
+    let (core, pre) = without_build
+        .split_once('-')
+        .map(|(core, pre)| (core, Some(pre)))
+        .unwrap_or((without_build, None));
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let parse_part = |part: &str| {
+        if part.chars().all(|ch| ch.is_ascii_digit()) {
+            part.parse::<u64>().ok()
+        } else {
+            None
+        }
+    };
+    let pre = match pre {
+        Some("") => return None,
+        Some(pre) => Some(pre.to_string()),
+        None => None,
+    };
+    Some(SemverParts {
+        major: parse_part(parts[0])?,
+        minor: parse_part(parts[1])?,
+        patch: parse_part(parts[2])?,
+        pre,
+    })
+}
+
+fn compare_prerelease(left: Option<&str>, right: Option<&str>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => compare_prerelease_identifiers(left, right),
+    }
+}
+
+fn compare_prerelease_identifiers(left: &str, right: &str) -> Ordering {
+    let mut left_parts = left.split('.');
+    let mut right_parts = right.split('.');
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(left), Some(right)) => {
+                let ordering = compare_prerelease_identifier(left, right);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        }
+    }
+}
+
+fn compare_prerelease_identifier(left: &str, right: &str) -> Ordering {
+    let left_numeric = parse_numeric_identifier(left);
+    let right_numeric = parse_numeric_identifier(right);
+    match (left_numeric, right_numeric) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn parse_numeric_identifier(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok()
 }
 
 #[cfg(test)]
@@ -347,9 +488,32 @@ mod tests {
 
     #[test]
     fn daemon_version_compare_handles_triples() {
+        assert!(version_is_older("0.9.9", "0.10.0"));
         assert!(version_is_older("1.2.3", "1.2.4"));
         assert!(version_is_older("1.2.3", "1.3.0"));
         assert!(!version_is_older("2.0.0", "1.9.9"));
+        assert!(!version_is_older("1.2.3", "1.2.3"));
+    }
+
+    #[test]
+    fn daemon_version_compare_handles_prereleases() {
+        assert!(version_is_older("1.2.3-alpha", "1.2.3"));
+        assert!(version_is_older("1.2.3-alpha.1", "1.2.3-alpha.2"));
+        assert!(version_is_older("1.2.3-alpha.9", "1.2.3-alpha.10"));
+        assert!(!version_is_older("1.2.3", "1.2.3-alpha"));
+        assert!(!version_is_older("1.2.3-alpha.2", "1.2.3-alpha.2"));
+    }
+
+    #[test]
+    fn daemon_version_compare_falls_back_to_string_for_invalid_versions() {
+        assert_eq!(
+            compare_versions("dev-b", "dev-a"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("dev-a", "dev-a"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
@@ -361,11 +525,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_daemon_json_path_returns_none_for_invalid_json() {
+    async fn read_daemon_json_path_reports_corrupt_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.json");
         tokio::fs::write(&path, b"not json").await.unwrap();
-        assert!(read_daemon_json_path(&path).await.is_none());
+        let error = read_daemon_json_path(&path).await.unwrap_err();
+        assert!(matches!(error, DaemonInfoReadError::Corrupt { .. }));
+        assert!(error.to_string().contains("daemon info corrupt at"));
+        assert!(error.to_string().contains(&path.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_daemon_json_path_distinguishes_absent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        assert!(read_daemon_json_path(&path).await.unwrap().is_none());
     }
 
     fn daemon_info(port: u16, auth_token: Option<&str>) -> DaemonInfo {

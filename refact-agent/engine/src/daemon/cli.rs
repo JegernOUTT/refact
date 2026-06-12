@@ -584,8 +584,9 @@ async fn run_status(json_output: bool, out: &mut dyn Write) -> Result<i32, CliEr
 
 async fn run_version(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
     let daemon = match client::read_daemon_json().await {
-        Some(info) if client::ping_daemon(&info).await => Some(info.version),
-        _ => None,
+        Ok(Some(info)) if client::ping_daemon(&info).await => Some(info.version),
+        Ok(_) => None,
+        Err(error) => return Err(CliError::runtime(error.to_string())),
     };
     if json_output {
         print_json(
@@ -605,7 +606,10 @@ async fn run_version(json_output: bool, out: &mut dyn Write) -> Result<i32, CliE
 }
 
 async fn restart_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
-    if let Some(info) = client::read_daemon_json().await {
+    if let Some(info) = client::read_daemon_json()
+        .await
+        .map_err(|error| CliError::runtime(error.to_string()))?
+    {
         if client::ping_daemon(&info).await {
             client::shutdown_daemon(&info, "restart")
                 .await
@@ -630,7 +634,10 @@ async fn restart_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, C
 }
 
 async fn stop_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
-    let Some(info) = client::read_daemon_json().await else {
+    let Some(info) = client::read_daemon_json()
+        .await
+        .map_err(|error| CliError::runtime(error.to_string()))?
+    else {
         return print_daemon_not_running(json_output, out, "missing");
     };
     if !client::ping_daemon(&info).await {
