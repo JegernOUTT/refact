@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
 const val DEFAULT_REFACT_DAEMON_PORT = 8488
+private const val DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS = 10L
 
 interface RefactDaemonClient {
     fun status(): DaemonStatus
@@ -36,6 +37,76 @@ data class DaemonProject(
     val baseUrl: URI,
     val daemon: DaemonStatus,
 )
+
+internal enum class DaemonSpawnOs {
+    Windows,
+    Linux,
+    Other,
+}
+
+internal data class DaemonSpawnCommand(val argv: List<String>)
+
+internal fun daemonCommandCandidates(binPath: String, os: DaemonSpawnOs): List<DaemonSpawnCommand> {
+    return when (os) {
+        DaemonSpawnOs.Windows -> listOf(
+            DaemonSpawnCommand(listOf(binPath, "daemon")),
+        )
+        DaemonSpawnOs.Linux -> listOf(
+            DaemonSpawnCommand(listOf("setsid", binPath, "daemon")),
+            DaemonSpawnCommand(listOf("nohup", binPath, "daemon")),
+            DaemonSpawnCommand(listOf(binPath, "daemon")),
+        )
+        DaemonSpawnOs.Other -> listOf(
+            DaemonSpawnCommand(listOf("nohup", binPath, "daemon")),
+            DaemonSpawnCommand(listOf(binPath, "daemon")),
+        )
+    }
+}
+
+internal fun currentDaemonSpawnOs(): DaemonSpawnOs {
+    return when {
+        SystemInfo.isWindows -> DaemonSpawnOs.Windows
+        SystemInfo.isLinux -> DaemonSpawnOs.Linux
+        else -> DaemonSpawnOs.Other
+    }
+}
+
+internal fun spawnDaemonCandidateUntilHealthy(
+    commands: List<DaemonSpawnCommand>,
+    spawnCandidate: (DaemonSpawnCommand) -> Unit,
+    pollCandidate: () -> DaemonStatus,
+): DaemonStatus {
+    var lastError: Throwable? = null
+    for (command in commands) {
+        try {
+            spawnCandidate(command)
+            return pollCandidate()
+        } catch (error: Throwable) {
+            lastError = error
+        }
+    }
+    throw IOException("failed to spawn refact daemon", lastError)
+}
+
+internal fun ensureDaemonWithHealthGate(
+    status: () -> DaemonStatus,
+    pluginVersion: String,
+    commands: List<DaemonSpawnCommand>,
+    spawnCandidate: (DaemonSpawnCommand) -> Unit,
+    pollCandidate: () -> DaemonStatus,
+    shutdown: (DaemonStatus, String) -> Unit,
+    waitUntilDown: () -> Unit,
+): DaemonStatus {
+    val current = runCatching { status() }.getOrNull()
+    if (current != null) {
+        if (!versionIsOlder(current.version, pluginVersion)) {
+            return current
+        }
+        shutdown(current, "upgrade")
+        waitUntilDown()
+    }
+    return spawnDaemonCandidateUntilHealthy(commands, spawnCandidate, pollCandidate)
+}
 
 class HttpRefactDaemonClient(
     private val portProvider: () -> Int = { InferenceGlobalContext.xDebugLSPPort?.takeIf { it > 0 } ?: DEFAULT_REFACT_DAEMON_PORT },
@@ -71,16 +142,15 @@ class HttpRefactDaemonClient(
     }
 
     override fun ensureDaemon(binPath: String): DaemonStatus {
-        val current = runCatching { status() }.getOrNull()
-        if (current != null) {
-            if (!versionIsOlder(current.version, pluginVersionProvider())) {
-                return current
-            }
-            shutdown(current, "upgrade")
-            waitUntilDown()
-        }
-        spawnDaemon(binPath)
-        return pollStatus()
+        return ensureDaemonWithHealthGate(
+            status = { status() },
+            pluginVersion = pluginVersionProvider(),
+            commands = daemonCommandCandidates(binPath, currentDaemonSpawnOs()),
+            spawnCandidate = { spawnDaemonProcess(it) },
+            pollCandidate = { pollStatus() },
+            shutdown = { current, reason -> shutdown(current, reason) },
+            waitUntilDown = { waitUntilDown() },
+        )
     }
 
     override fun openProject(root: String, settings: LSPConfig): DaemonProject {
@@ -108,7 +178,7 @@ class HttpRefactDaemonClient(
     }
 
     private fun pollStatus(): DaemonStatus {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS)
         var lastError: Throwable? = null
         while (System.nanoTime() < deadline) {
             runCatching { status() }
@@ -137,39 +207,11 @@ class HttpRefactDaemonClient(
         )
     }
 
-    private fun spawnDaemon(binPath: String) {
-        val commands = daemonCommandCandidates(binPath)
-        var lastError: Throwable? = null
-        for (command in commands) {
-            try {
-                val process = command.withRedirectErrorStream(true).createProcess()
-                runCatching { process.outputStream.close() }
-                runCatching { process.inputStream.close() }
-                runCatching { process.errorStream.close() }
-                return
-            } catch (error: Throwable) {
-                lastError = error
-            }
-        }
-        throw IOException("failed to spawn refact daemon", lastError)
-    }
-
-    private fun daemonCommandCandidates(binPath: String): List<GeneralCommandLine> {
-        return when {
-            SystemInfo.isWindows -> listOf(
-                GeneralCommandLine(listOf("cmd", "/c", "start", "refact-daemon", "/b", binPath, "daemon")),
-                GeneralCommandLine(listOf(binPath, "daemon")),
-            )
-            SystemInfo.isLinux -> listOf(
-                GeneralCommandLine(listOf("setsid", binPath, "daemon")),
-                GeneralCommandLine(listOf("nohup", binPath, "daemon")),
-                GeneralCommandLine(listOf(binPath, "daemon")),
-            )
-            else -> listOf(
-                GeneralCommandLine(listOf("nohup", binPath, "daemon")),
-                GeneralCommandLine(listOf(binPath, "daemon")),
-            )
-        }
+    private fun spawnDaemonProcess(command: DaemonSpawnCommand) {
+        val process = GeneralCommandLine(command.argv).withRedirectErrorStream(true).createProcess()
+        runCatching { process.outputStream.close() }
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
     }
 
     private fun request(uri: URI, method: String, body: String?, token: String?): String {
