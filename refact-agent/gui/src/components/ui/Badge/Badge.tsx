@@ -60,28 +60,36 @@ function normalizeVariant(
   return "soft";
 }
 
-export function Badge({
-  tone = "default",
-  size = "sm",
-  variant = "soft",
-  interactive = false,
-  className,
-  ...props
-}: BadgeComponentProps) {
-  const normalizedSize = normalizeSize(size);
-  const normalizedVariant = normalizeVariant(variant);
+export const Badge = React.forwardRef<HTMLSpanElement, BadgeComponentProps>(
+  (
+    {
+      tone = "default",
+      size = "sm",
+      variant = "soft",
+      interactive = false,
+      className,
+      ...props
+    },
+    ref,
+  ) => {
+    const normalizedSize = normalizeSize(size);
+    const normalizedVariant = normalizeVariant(variant);
 
-  return (
-    <span
-      className={classNames(
-        styles.badge,
-        toneClass[tone],
-        sizeClass[normalizedSize],
-        variantClass[normalizedVariant],
-        interactive && styles.interactive,
-        className,
-      )}
-      {...props}
-    />
-  );
-}
+    return (
+      <span
+        ref={ref}
+        className={classNames(
+          styles.badge,
+          toneClass[tone],
+          sizeClass[normalizedSize],
+          variantClass[normalizedVariant],
+          interactive && styles.interactive,
+          className,
+        )}
+        {...props}
+      />
+    );
+  },
+);
+
+Badge.displayName = "Badge";
