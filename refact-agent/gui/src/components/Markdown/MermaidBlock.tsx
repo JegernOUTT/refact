@@ -7,13 +7,23 @@ import diagramStyles from "./DiagramBlock.module.css";
 import classNames from "classnames";
 import { useAppearance } from "../../hooks/useAppearance";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
+import {
+  clampPan,
+  makeCrispSvg,
+  parseSvgMeta,
+  type SvgMeta,
+} from "./renderUtils";
 
 type MermaidTheme = "dark" | "light";
 
-let mermaidInitialized: MermaidTheme | null = null;
+let mermaidInitializedTheme: MermaidTheme | null = null;
+let mermaidTaskQueue: Promise<unknown> = Promise.resolve();
 const REPORTED_MERMAID_ERRORS = new Map<string, number>();
 const MERMAID_ERROR_REPORT_INTERVAL_MS = 60_000;
 const MAX_REPORTED_MERMAID_ERRORS = 50;
+
+const FALLBACK_FONT_STACK =
+  'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
 
 const MERMAID_THEME_TOKENS = {
   primaryColor: {
@@ -128,6 +138,14 @@ function resolveTokenColor(token: string, fallback: string): string {
   return fallback;
 }
 
+function resolveAppFontFamily(): string {
+  if (typeof window === "undefined") return FALLBACK_FONT_STACK;
+  const root = getThemeRoot();
+  if (!root) return FALLBACK_FONT_STACK;
+  const family = window.getComputedStyle(root).fontFamily.trim();
+  return family !== "" ? family : FALLBACK_FONT_STACK;
+}
+
 function createMermaidThemeVariables(theme: MermaidTheme) {
   return Object.fromEntries(
     Object.entries(MERMAID_THEME_TOKENS).map(([key, config]) => [
@@ -150,65 +168,75 @@ function shouldReportMermaidError(key: string): boolean {
   return true;
 }
 
-async function getMermaid(theme: MermaidTheme) {
-  const mermaid = (await import("mermaid")).default;
-  if (mermaidInitialized !== theme) {
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: theme === "dark" ? "dark" : "default",
-      securityLevel: "strict",
-      fontFamily:
-        'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      themeVariables: createMermaidThemeVariables(theme),
-      flowchart: { curve: "basis", padding: 16, htmlLabels: false },
-    });
-    mermaidInitialized = theme;
-  }
-  return mermaid;
+const MERMAID_RENDER_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Mermaid render timed out after ${ms}ms`)),
+      ms,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+// Serializes mermaid.initialize + mermaid.render pairs. mermaid.initialize is
+// global, so without serialization two blocks rendering concurrently after a
+// theme change can race and render with the wrong theme variables. Each task
+// is bounded by a timeout so one hung render cannot starve every later
+// diagram in the queue.
+function enqueueMermaidRender(
+  theme: MermaidTheme,
+  id: string,
+  code: string,
+): Promise<{ svg: string }> {
+  const task = mermaidTaskQueue.then(() =>
+    withTimeout(
+      (async () => {
+        const mermaid = (await import("mermaid")).default;
+        if (mermaidInitializedTheme !== theme) {
+          const fontFamily = resolveAppFontFamily();
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: theme === "dark" ? "dark" : "default",
+            securityLevel: "strict",
+            fontFamily,
+            themeVariables: {
+              ...createMermaidThemeVariables(theme),
+              fontFamily,
+            },
+            flowchart: { curve: "basis", padding: 16, htmlLabels: false },
+          });
+          mermaidInitializedTheme = theme;
+        }
+        return mermaid.render(id, code);
+      })(),
+      MERMAID_RENDER_TIMEOUT_MS,
+    ),
+  );
+  mermaidTaskQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
 }
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
 const ZOOM_SENSITIVITY = 0.003;
+const FIT_PADDING = 16;
 
 function clampScale(s: number) {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
-}
-
-type SvgMeta = { viewBox: string; width: number; height: number };
-
-function parseSvgMeta(svgStr: string): SvgMeta | null {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgStr, "image/svg+xml");
-  const svg = doc.querySelector("svg");
-  if (!svg) return null;
-
-  const vbAttr = svg.getAttribute("viewBox");
-  const widthAttr = svg.getAttribute("width") ?? "";
-  const heightAttr = svg.getAttribute("height") ?? "";
-
-  const vbW = svg.viewBox.baseVal.width;
-  const vbH = svg.viewBox.baseVal.height;
-
-  const isAbsW = widthAttr !== "" && !widthAttr.includes("%");
-  const isAbsH = heightAttr !== "" && !heightAttr.includes("%");
-
-  const w = isAbsW ? parseFloat(widthAttr) || vbW : vbW;
-  const h = isAbsH ? parseFloat(heightAttr) || vbH : vbH;
-
-  const viewBox = vbAttr ?? (w && h ? `0 0 ${w} ${h}` : null);
-  if (!viewBox || !w || !h) return null;
-
-  return { viewBox, width: w, height: h };
-}
-
-function makeCrispSvg(svgStr: string, vb: string): string {
-  return svgStr
-    .replace(/\s*width="[^"]*"/, "")
-    .replace(/\s*height="[^"]*"/, "")
-    .replace(/\s*style="[^"]*"/, "")
-    .replace(/\s*viewBox="[^"]*"/, "")
-    .replace("<svg", `<svg viewBox="${vb}" width="100%" height="100%"`);
 }
 
 export type MermaidBlockProps = {
@@ -227,13 +255,14 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
   const [scale, setScale] = useState(1);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const wheelCleanupRef = useRef<(() => void) | null>(null);
+  const canvasCleanupRef = useRef<(() => void) | null>(null);
   const dragStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
-  const fittedRef = useRef(false);
+  const userInteractedRef = useRef(false);
+  const renderSeqRef = useRef(0);
 
   const uniqueId = useId().replace(/:/g, "_");
   const { appearance } = useAppearance();
-  const theme = appearance === "dark" ? "dark" : "light";
+  const theme: MermaidTheme = appearance === "dark" ? "dark" : "light";
 
   const fitToContainer = useCallback(() => {
     const canvas = canvasRef.current;
@@ -243,37 +272,44 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
     const ch = canvas.clientHeight;
     const { width: sw, height: sh } = svgMeta;
 
-    if (sw === 0 || sh === 0) return;
+    const availW = cw - FIT_PADDING * 2;
+    const availH = ch - FIT_PADDING * 2;
+    if (sw <= 0 || sh <= 0 || availW <= 0 || availH <= 0) return;
 
-    const pad = 16;
-    const fitScale = Math.min((cw - pad * 2) / sw, (ch - pad * 2) / sh);
-    const s = clampScale(fitScale);
+    const s = clampScale(Math.min(availW / sw, availH / sh));
 
     setPanX((cw - sw * s) / 2);
     setPanY((ch - sh * s) / 2);
     setScale(s);
   }, [svgMeta]);
 
+  const fitRef = useRef(fitToContainer);
+  fitRef.current = fitToContainer;
+
   useEffect(() => {
     let cancelled = false;
+    const renderId = `mermaid_${uniqueId}_${++renderSeqRef.current}`;
 
     const renderDiagram = async () => {
       try {
-        const mermaid = await getMermaid(theme);
-        const { svg } = await mermaid.render(
-          `mermaid_${uniqueId}`,
+        const { svg } = await enqueueMermaidRender(
+          theme,
+          renderId,
           code.trim(),
         );
 
         if (!cancelled) {
           const meta = parseSvgMeta(svg);
+          userInteractedRef.current = false;
           setRawSvg(svg);
           setSvgMeta(meta);
           setError(null);
-          fittedRef.current = false;
         }
       } catch (err) {
-        document.getElementById(`mermaid_${uniqueId}`)?.remove();
+        // Mermaid can leave a temporary element with the render id in the
+        // document on failure. The id is unique per render attempt, so this
+        // never touches the SVG currently on screen.
+        document.getElementById(renderId)?.remove();
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : String(err);
           setError(msg);
@@ -302,21 +338,20 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
   }, [code, uniqueId, theme]);
 
   useEffect(() => {
-    if (rawSvg && svgMeta && !fittedRef.current) {
-      requestAnimationFrame(() => {
-        fitToContainer();
-        fittedRef.current = true;
-      });
-    }
-  }, [rawSvg, svgMeta, fitToContainer]);
+    if (!rawSvg || !svgMeta) return;
+    const raf = requestAnimationFrame(() => {
+      if (!userInteractedRef.current) fitRef.current();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [rawSvg, svgMeta]);
 
   const stateRef = useRef({ scale, panX, panY, svgMeta });
   stateRef.current = { scale, panX, panY, svgMeta };
 
   const canvasCallbackRef = useCallback((node: HTMLDivElement | null) => {
-    if (wheelCleanupRef.current) {
-      wheelCleanupRef.current();
-      wheelCleanupRef.current = null;
+    if (canvasCleanupRef.current) {
+      canvasCleanupRef.current();
+      canvasCleanupRef.current = null;
     }
 
     canvasRef.current = node;
@@ -328,6 +363,8 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
       const { scale: s, panX: px, panY: py, svgMeta: meta } = stateRef.current;
       if (!meta) return;
 
+      userInteractedRef.current = true;
+
       const rect = node.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -336,19 +373,46 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
       const newScale = clampScale(s * (1 + delta));
       const ratio = newScale / s;
 
-      setPanX(mx - (mx - px) * ratio);
-      setPanY(my - (my - py) * ratio);
+      setPanX(
+        clampPan(
+          mx - (mx - px) * ratio,
+          node.clientWidth,
+          meta.width * newScale,
+        ),
+      );
+      setPanY(
+        clampPan(
+          my - (my - py) * ratio,
+          node.clientHeight,
+          meta.height * newScale,
+        ),
+      );
       setScale(newScale);
     };
 
     node.addEventListener("wheel", onWheel, { passive: false });
-    wheelCleanupRef.current = () => node.removeEventListener("wheel", onWheel);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      // Refit whenever the canvas is (re)laid out — window resizes, panel
+      // resizes, and virtualization remounts — until the user pans or zooms.
+      resizeObserver = new ResizeObserver(() => {
+        if (!userInteractedRef.current) fitRef.current();
+      });
+      resizeObserver.observe(node);
+    }
+
+    canvasCleanupRef.current = () => {
+      node.removeEventListener("wheel", onWheel);
+      resizeObserver?.disconnect();
+    };
   }, []);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      userInteractedRef.current = true;
       setDragging(true);
       dragStart.current = { x: e.clientX, y: e.clientY, px: panX, py: panY };
     },
@@ -359,8 +423,17 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
     if (!dragging) return;
 
     const handleMove = (e: MouseEvent) => {
-      setPanX(dragStart.current.px + e.clientX - dragStart.current.x);
-      setPanY(dragStart.current.py + e.clientY - dragStart.current.y);
+      const canvas = canvasRef.current;
+      const { scale: s, svgMeta: meta } = stateRef.current;
+      const nx = dragStart.current.px + e.clientX - dragStart.current.x;
+      const ny = dragStart.current.py + e.clientY - dragStart.current.y;
+      if (canvas && meta) {
+        setPanX(clampPan(nx, canvas.clientWidth, meta.width * s));
+        setPanY(clampPan(ny, canvas.clientHeight, meta.height * s));
+      } else {
+        setPanX(nx);
+        setPanY(ny);
+      }
     };
 
     const handleUp = () => setDragging(false);
@@ -381,29 +454,42 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
     onCopyClick?.(code);
   }, [onCopyClick, code]);
 
-  const handleZoomIn = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const cx = canvas.clientWidth / 2;
-    const cy = canvas.clientHeight / 2;
-    const newScale = clampScale(scale * 1.4);
-    const ratio = newScale / scale;
-    setPanX(cx - (cx - panX) * ratio);
-    setPanY(cy - (cy - panY) * ratio);
-    setScale(newScale);
-  }, [scale, panX, panY]);
+  const handleFit = useCallback(() => {
+    userInteractedRef.current = false;
+    fitToContainer();
+  }, [fitToContainer]);
 
-  const handleZoomOut = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const cx = canvas.clientWidth / 2;
-    const cy = canvas.clientHeight / 2;
-    const newScale = clampScale(scale / 1.4);
-    const ratio = newScale / scale;
-    setPanX(cx - (cx - panX) * ratio);
-    setPanY(cy - (cy - panY) * ratio);
-    setScale(newScale);
-  }, [scale, panX, panY]);
+  const zoomBy = useCallback(
+    (factor: number) => {
+      const canvas = canvasRef.current;
+      const meta = stateRef.current.svgMeta;
+      if (!canvas || !meta) return;
+      userInteractedRef.current = true;
+      const cx = canvas.clientWidth / 2;
+      const cy = canvas.clientHeight / 2;
+      const newScale = clampScale(scale * factor);
+      const ratio = newScale / scale;
+      setPanX(
+        clampPan(
+          cx - (cx - panX) * ratio,
+          canvas.clientWidth,
+          meta.width * newScale,
+        ),
+      );
+      setPanY(
+        clampPan(
+          cy - (cy - panY) * ratio,
+          canvas.clientHeight,
+          meta.height * newScale,
+        ),
+      );
+      setScale(newScale);
+    },
+    [scale, panX, panY],
+  );
+
+  const handleZoomIn = useCallback(() => zoomBy(1.4), [zoomBy]);
+  const handleZoomOut = useCallback(() => zoomBy(1 / 1.4), [zoomBy]);
 
   const zoomPercent = Math.round(scale * 100);
 
@@ -462,7 +548,7 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
                   <IconButton
                     size="sm"
                     variant="ghost"
-                    onClick={fitToContainer}
+                    onClick={handleFit}
                     aria-label="Fit to view"
                     icon={RotateCcw}
                   />
@@ -501,11 +587,13 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
           )}
         </div>
         {showSource ? (
-          <PreTag className={styles.shiki_pre}>
-            <code className={classNames(styles.code, styles.code_block)}>
-              {code}
-            </code>
-          </PreTag>
+          <div className="scrollX">
+            <PreTag className={styles.shiki_pre}>
+              <code className={classNames(styles.code, styles.code_block)}>
+                {code}
+              </code>
+            </PreTag>
+          </div>
         ) : crispSvg ? (
           <div
             ref={canvasCallbackRef}
@@ -527,6 +615,11 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
               dangerouslySetInnerHTML={{ __html: crispSvg }}
             />
           </div>
+        ) : rawSvg ? (
+          <div
+            className={diagramStyles.diagram_fallback}
+            dangerouslySetInnerHTML={{ __html: rawSvg }}
+          />
         ) : (
           <div className={diagramStyles.diagram_loading}>Rendering…</div>
         )}

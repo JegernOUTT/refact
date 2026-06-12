@@ -6,6 +6,7 @@ import styles from "./Markdown.module.css";
 import diagramStyles from "./DiagramBlock.module.css";
 import classNames from "classnames";
 import DOMPurify from "dompurify";
+import { stripExternalRefs } from "./renderUtils";
 
 export type SvgBlockProps = {
   code: string;
@@ -19,7 +20,7 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
     const trimmed = code.trim();
     if (!trimmed.includes("<svg")) return null;
 
-    return DOMPurify.sanitize(trimmed, {
+    const sanitized = DOMPurify.sanitize(trimmed, {
       USE_PROFILES: { svg: true, svgFilters: true },
       ADD_TAGS: [
         "svg",
@@ -54,7 +55,6 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
         "animate",
         "animateTransform",
         "animateMotion",
-        "foreignObject",
         "title",
         "desc",
         "symbol",
@@ -129,6 +129,8 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
         "color",
       ],
     });
+    if (!sanitized.includes("<svg")) return null;
+    return stripExternalRefs(sanitized);
   }, [code]);
 
   if (!sanitizedSvg) {
@@ -177,14 +179,16 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
           )}
         </div>
         {showSource ? (
-          <PreTag className={styles.shiki_pre}>
-            <code className={classNames(styles.code, styles.code_block)}>
-              {code}
-            </code>
-          </PreTag>
+          <div className="scrollX">
+            <PreTag className={styles.shiki_pre}>
+              <code className={classNames(styles.code, styles.code_block)}>
+                {code}
+              </code>
+            </PreTag>
+          </div>
         ) : (
           <div
-            className={diagramStyles.diagram_render}
+            className={diagramStyles.svg_render}
             dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
           />
         )}

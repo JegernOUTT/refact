@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
 import type { PluggableList } from "unified";
 import { useLinksFromLsp } from "../../hooks";
+import { maskIncompleteSpecialCodeFences } from "./renderUtils";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
 const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
@@ -40,53 +41,6 @@ export type MarkdownProps = Pick<
     wrap?: boolean;
     variant?: "chat" | "tool" | "terminal";
   } & Partial<MarkdownControls>;
-
-const STREAMING_SAFE_FENCE_LANGUAGE = "text";
-const STREAMING_SPECIAL_FENCE_LANGUAGES = new Set(["mermaid", "html", "svg"]);
-
-function maskIncompleteSpecialCodeFences(text: string): string {
-  const lines = text.split(/(?<=\n)/);
-  let inFence = false;
-  let fenceChar = "`";
-  let fenceLength = 0;
-  let specialFenceLineIndex = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/\r?\n$/, "");
-
-    if (!inFence) {
-      const opening = /^( {0,3})(`{3,}|~{3,})([^`~]*)$/.exec(line);
-      if (!opening) continue;
-
-      const info = opening[3].trim();
-      const language = info.split(/\s+/)[0]?.toLowerCase() ?? "";
-      inFence = true;
-      fenceChar = opening[2][0];
-      fenceLength = opening[2].length;
-      specialFenceLineIndex = STREAMING_SPECIAL_FENCE_LANGUAGES.has(language)
-        ? i
-        : -1;
-      continue;
-    }
-
-    const closingPattern = new RegExp(
-      `^ {0,3}${fenceChar}{${fenceLength},}\\s*$`,
-    );
-    if (closingPattern.test(line)) {
-      inFence = false;
-      specialFenceLineIndex = -1;
-    }
-  }
-
-  if (!inFence || specialFenceLineIndex < 0) return text;
-
-  lines[specialFenceLineIndex] = lines[specialFenceLineIndex].replace(
-    /^( {0,3})(`{3,}|~{3,})([^\r\n]*)(\r?\n?)$/,
-    `$1$2${STREAMING_SAFE_FENCE_LANGUAGE}$4`,
-  );
-
-  return lines.join("");
-}
 
 const PuzzleLink: React.FC<{
   children: string;

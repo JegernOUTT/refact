@@ -110,6 +110,31 @@ describe("AssistantInput", () => {
     expect(screen.getByTitle("HTML Preview")).toBeInTheDocument();
   });
 
+  test("does not mount the HTML preview card at all while streaming", () => {
+    const { rerender } = render(
+      <AssistantInput message={"```html\n<div>hello</div>\n```"} isStreaming />,
+    );
+
+    // No preview card chrome mid-stream — the fence renders as plain code, so
+    // there are no disabled-looking buttons and no remount when the iframe
+    // appears at stream end.
+    expect(screen.queryByText("HTML Preview")).not.toBeInTheDocument();
+    expect(screen.getByText(/<div>hello<\/div>/)).toBeInTheDocument();
+
+    rerender(<AssistantInput message={"```html\n<div>hello</div>\n```"} />);
+
+    expect(screen.getByText("HTML Preview")).toBeInTheDocument();
+    expect(screen.getByTitle("HTML Preview")).toBeInTheDocument();
+  });
+
+  test("dispatches uppercase fence languages to the special renderers", async () => {
+    render(
+      <AssistantInput message={"```MERMAID\nflowchart LR\nA --> B\n```"} />,
+    );
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+  });
+
   test("renders Claude Code augmented tool aliases as their specialized tool cards", () => {
     const aliasCalls: ToolCall[] = [
       {

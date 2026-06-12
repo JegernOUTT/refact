@@ -587,6 +587,10 @@ startListening({
       document.body.className !== "vscode-dark"
     ) {
       document.body.className = "vscode-dark";
+    } else if (appearance === "inherit") {
+      // Drop classes written for previous explicit choices so "inherit"
+      // resolves from the host/system signal instead of a stale class.
+      document.body.classList.remove("vscode-light", "vscode-dark");
     }
   },
 });

@@ -5,12 +5,29 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Code, Copy, Download, ExternalLink, Eye, Play } from "lucide-react";
+import {
+  Code,
+  Copy,
+  Download,
+  ExternalLink,
+  Eye,
+  FileCode,
+  Globe,
+  RefreshCw,
+} from "lucide-react";
 import { Icon, IconButton, Tooltip } from "../ui";
 import { ToolCard, type ToolStatus } from "../ChatContent/ToolCard";
 import { PreTag } from "./Pre";
 import { useAppearance } from "../../hooks/useAppearance";
+import { useConfig } from "../../hooks/useConfig";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
+import {
+  DEFAULT_IFRAME_HEIGHT,
+  MAX_IFRAME_HEIGHT,
+  MIN_HEIGHT_DELTA,
+  wrapArtifactHtml,
+} from "./renderUtils";
 import styles from "./ArtifactBlock.module.css";
 import markdownStyles from "./Markdown.module.css";
 import classNames from "classnames";
@@ -21,98 +38,30 @@ export interface ArtifactBlockProps {
   onCopyClick?: (str: string) => void;
 }
 
-const MAX_IFRAME_HEIGHT = 800;
-const RESIZE_DEBOUNCE_MS = 50;
-const MIN_HEIGHT_DELTA = 5;
-const MIN_MESSAGE_INTERVAL_MS = 50;
 const MAX_ERROR_MESSAGE_LENGTH = 500;
+const MAX_ERROR_REPORTS_PER_MOUNT = 3;
+const HEIGHT_CACHE_LIMIT = 50;
+const BLOB_URL_REVOKE_DELAY_MS = 60_000;
 
-function wrapArtifactHtml(userCode: string, isDark: boolean): string {
-  const colorScheme = isDark ? "dark" : "light";
-  const theme = isDark ? "dark" : "light";
+// Measured iframe heights survive virtualization unmounts so scrolled-back
+// previews reappear at their real height instead of jumping from the default.
+const iframeHeightCache = new Map<string, number>();
 
-  const injectedStyles = `<style data-refact-artifact>
-html:not([data-artifact-styled]) { color-scheme: ${colorScheme}; }
-html:not([data-artifact-styled]) body { margin: 8px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: Canvas; color: CanvasText; }
-</style>`;
-  const injectedScripts = `<script data-refact-artifact>
-(function() {
-  var lastH = 0;
-  var timer = null;
-  function sendHeight() {
-    var h = Math.max(
-      document.body.scrollHeight,
-      document.body.offsetHeight,
-      document.documentElement.scrollHeight,
-      document.documentElement.offsetHeight
-    );
-    if (Math.abs(h - lastH) > ${MIN_HEIGHT_DELTA}) {
-      lastH = h;
-      window.parent.postMessage({ type: 'refact-artifact-resize', height: h }, '*');
-    }
+function rememberHeight(key: string, value: number) {
+  if (iframeHeightCache.has(key)) iframeHeightCache.delete(key);
+  iframeHeightCache.set(key, value);
+  if (iframeHeightCache.size > HEIGHT_CACHE_LIMIT) {
+    const oldest = iframeHeightCache.keys().next().value;
+    if (oldest !== undefined) iframeHeightCache.delete(oldest);
   }
-  if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(function() {
-      clearTimeout(timer);
-      timer = setTimeout(sendHeight, ${RESIZE_DEBOUNCE_MS});
-    }).observe(document.body);
+}
+
+function hashArtifactCode(code: string): string {
+  let h = 0;
+  for (let i = 0; i < code.length; i++) {
+    h = (h * 31 + code.charCodeAt(i)) | 0;
   }
-  window.addEventListener('load', sendHeight);
-  setTimeout(sendHeight, 100);
-  setTimeout(sendHeight, 500);
-
-  window.onerror = function(msg, src, line, col) {
-    window.parent.postMessage({
-      type: 'refact-artifact-error',
-      message: String(msg),
-      line: line,
-      col: col
-    }, '*');
-  };
-  window.addEventListener('unhandledrejection', function(e) {
-    window.parent.postMessage({
-      type: 'refact-artifact-error',
-      message: 'Unhandled promise rejection: ' + String(e.reason)
-    }, '*');
-  });
-})();
-</script>`;
-
-  const trimmed = userCode.trim();
-  const isCompleteDocument =
-    trimmed.toLowerCase().startsWith("<!doctype") ||
-    trimmed.toLowerCase().startsWith("<html");
-
-  if (isCompleteDocument) {
-    const bodyCloseIdx = trimmed.toLowerCase().lastIndexOf("</body>");
-    if (bodyCloseIdx !== -1) {
-      return (
-        trimmed.slice(0, bodyCloseIdx) +
-        injectedStyles +
-        injectedScripts +
-        trimmed.slice(bodyCloseIdx)
-      );
-    }
-    const htmlCloseIdx = trimmed.toLowerCase().lastIndexOf("</html>");
-    if (htmlCloseIdx !== -1) {
-      return (
-        trimmed.slice(0, htmlCloseIdx) +
-        injectedStyles +
-        injectedScripts +
-        trimmed.slice(htmlCloseIdx)
-      );
-    }
-    return trimmed + injectedStyles + injectedScripts;
-  }
-
-  return `<!DOCTYPE html>
-<html data-theme="${theme}">
-<head><meta charset="utf-8">${injectedStyles}</head>
-<body>
-${userCode}
-${injectedScripts}
-</body>
-</html>`;
+  return `${code.length}_${h}`;
 }
 
 const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
@@ -120,14 +69,29 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   isStreaming = false,
   onCopyClick,
 }) => {
+  const codeKey = useMemo(() => hashArtifactCode(code), [code]);
+
   const [showSource, setShowSource] = useState(false);
   const [isOpen, setIsOpen] = useState(true);
-  const [height, setHeight] = useState(200);
+  const [height, setHeight] = useState(
+    () => iframeHeightCache.get(codeKey) ?? DEFAULT_IFRAME_HEIGHT,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const prevStreaming = useRef(isStreaming);
-  const { appearance } = useAppearance();
-  const isDark = appearance === "dark";
+  const codeKeyRef = useRef(codeKey);
+  codeKeyRef.current = codeKey;
+  const lastAppliedHeightRef = useRef(height);
+  const pendingHeightRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const errorReportsRef = useRef(0);
+
+  const { isDarkMode } = useAppearance();
+  const { host } = useConfig();
+  const { newFile } = useEventsBusForIDE();
+  const isIdeHost = host === "vscode" || host === "jetbrains" || host === "ide";
 
   useEffect(() => {
     if (prevStreaming.current && !isStreaming) {
@@ -136,53 +100,116 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
     prevStreaming.current = isStreaming;
   }, [isStreaming]);
 
-  const wrappedHtml = useMemo(
-    () => wrapArtifactHtml(code, isDark),
-    [code, isDark],
-  );
+  const wrappedHtml = useMemo(() => wrapArtifactHtml(code), [code]);
 
   useEffect(() => {
-    let lastMessageTime = 0;
     const handler = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as Record<string, unknown> | null;
       if (!data || typeof data.type !== "string") return;
 
-      const now = Date.now();
-      if (now - lastMessageTime < MIN_MESSAGE_INTERVAL_MS) return;
-      lastMessageTime = now;
-
       if (data.type === "refact-artifact-resize") {
         const h = Number(data.height);
-        if (h > 0) {
-          setHeight(Math.min(h, MAX_IFRAME_HEIGHT));
+        if (!(h > 0)) return;
+        // Coalesce resize bursts to one application per frame, always keeping
+        // the latest value, and apply hysteresis on the *clamped* height so
+        // content taller than the cap cannot oscillate the iframe.
+        pendingHeightRef.current = h;
+        if (rafRef.current === null) {
+          rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = null;
+            const pending = pendingHeightRef.current;
+            pendingHeightRef.current = null;
+            if (pending === null) return;
+            const next = Math.min(Math.round(pending), MAX_IFRAME_HEIGHT);
+            if (
+              Math.abs(next - lastAppliedHeightRef.current) <= MIN_HEIGHT_DELTA
+            ) {
+              return;
+            }
+            lastAppliedHeightRef.current = next;
+            rememberHeight(codeKeyRef.current, next);
+            setHeight(next);
+          });
         }
+        return;
       }
+
       if (data.type === "refact-artifact-error") {
         const msg = String(data.message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
         setError(msg);
-        void reportBuddyFrontendError({
-          source: "artifact_iframe",
-          error: msg,
-          sourceFile: "frontend/artifact_iframe",
-          toolName: "artifact_iframe",
-        });
+        if (errorReportsRef.current < MAX_ERROR_REPORTS_PER_MOUNT) {
+          errorReportsRef.current += 1;
+          void reportBuddyFrontendError({
+            source: "artifact_iframe",
+            error: msg,
+            sourceFile: "frontend/artifact_iframe",
+            toolName: "artifact_iframe",
+          });
+        }
       }
     };
     window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
+    return () => {
+      window.removeEventListener("message", handler);
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
   }, []);
 
   useEffect(() => {
     setError(null);
-  }, [code]);
+    errorReportsRef.current = 0;
+    // Cancel any resize application scheduled for the previous artifact so a
+    // late message cannot leak its height into the new one.
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingHeightRef.current = null;
+    const next = iframeHeightCache.get(codeKey) ?? DEFAULT_IFRAME_HEIGHT;
+    lastAppliedHeightRef.current = next;
+    setHeight(next);
+  }, [codeKey]);
+
+  const themeValue = isDarkMode ? "dark" : "light";
+  const postThemeToIframe = useCallback(() => {
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: "refact-artifact-theme", theme: themeValue },
+      "*",
+    );
+  }, [themeValue]);
+
+  useEffect(() => {
+    postThemeToIframe();
+  }, [postThemeToIframe]);
 
   const handleToggle = useCallback(() => setIsOpen((v) => !v), []);
   const handleToggleSource = useCallback(() => setShowSource((v) => !v), []);
+  const handleReload = useCallback(() => {
+    setError(null);
+    errorReportsRef.current = 0;
+    setReloadNonce((n) => n + 1);
+  }, []);
 
   const handleCopy = useCallback(() => {
     onCopyClick?.(code);
   }, [onCopyClick, code]);
+
+  const handleOpenAsIdeFile = useCallback(() => {
+    newFile(code);
+  }, [newFile, code]);
+
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([wrappedHtml], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "artifact.html";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_REVOKE_DELAY_MS);
+  }, [wrappedHtml]);
 
   const handleOpenInTab = useCallback(() => {
     const wrapperHtml = `<!DOCTYPE html>
@@ -196,19 +223,14 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
 </body></html>`;
     const blob = new Blob([wrapperHtml], { type: "text/html" });
     const url = URL.createObjectURL(blob);
-    window.open(url, "_blank", "noopener,noreferrer");
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  }, [wrappedHtml]);
-
-  const handleDownload = useCallback(() => {
-    const blob = new Blob([wrappedHtml], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "artifact.html";
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [wrappedHtml]);
+    const win = window.open(url, "_blank", "noopener,noreferrer");
+    if (!win) {
+      // Pop-up blocked: fall back to downloading the preview instead of
+      // silently doing nothing.
+      handleDownload();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_REVOKE_DELAY_MS);
+  }, [wrappedHtml, handleDownload]);
 
   const lineCount = useMemo(() => code.split("\n").length, [code]);
 
@@ -223,7 +245,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
 
   return (
     <ToolCard
-      icon={<Icon icon={Play} size="sm" />}
+      icon={<Icon icon={Globe} size="sm" />}
       summary="HTML Preview"
       meta={`${lineCount} lines`}
       status={status}
@@ -239,41 +261,74 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
                 variant="ghost"
                 onClick={handleToggleSource}
                 disabled={isStreaming}
-                aria-label={showSource ? "Show preview" : "Show source"}
-                icon={showSource ? Eye : Code}
+                aria-label={
+                  effectiveShowSource ? "Show preview" : "Show source"
+                }
+                icon={effectiveShowSource ? Eye : Code}
               />
             </Tooltip.Trigger>
             <Tooltip.Content>
-              {showSource ? "Show preview" : "Show source"}
+              {effectiveShowSource ? "Show preview" : "Show source"}
             </Tooltip.Content>
           </Tooltip>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={handleReload}
+                disabled={!showIframe}
+                aria-label="Re-run preview"
+                icon={RefreshCw}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>Re-run preview</Tooltip.Content>
+          </Tooltip>
           <div className={styles.tab_bar_spacer} />
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                size="sm"
-                variant="ghost"
-                onClick={handleOpenInTab}
-                disabled={isStreaming}
-                aria-label="Open in new tab"
-                icon={ExternalLink}
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content>Open in new tab</Tooltip.Content>
-          </Tooltip>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                size="sm"
-                variant="ghost"
-                onClick={handleDownload}
-                disabled={isStreaming}
-                aria-label="Download HTML file"
-                icon={Download}
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content>Download as .html</Tooltip.Content>
-          </Tooltip>
+          {isIdeHost ? (
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleOpenAsIdeFile}
+                  disabled={isStreaming}
+                  aria-label="Open as file in IDE"
+                  icon={FileCode}
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>Open as file in IDE</Tooltip.Content>
+            </Tooltip>
+          ) : (
+            <>
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleOpenInTab}
+                    disabled={isStreaming}
+                    aria-label="Open in new tab"
+                    icon={ExternalLink}
+                  />
+                </Tooltip.Trigger>
+                <Tooltip.Content>Open in new tab</Tooltip.Content>
+              </Tooltip>
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleDownload}
+                    disabled={isStreaming}
+                    aria-label="Download HTML file"
+                    icon={Download}
+                  />
+                </Tooltip.Trigger>
+                <Tooltip.Content>Download as .html</Tooltip.Content>
+              </Tooltip>
+            </>
+          )}
           {onCopyClick && (
             <Tooltip>
               <Tooltip.Trigger asChild>
@@ -291,7 +346,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
         </div>
 
         {effectiveShowSource && (
-          <div className={styles.source_view}>
+          <div className={classNames("scrollX", styles.source_view)}>
             <PreTag className={markdownStyles.shiki_pre}>
               <code
                 className={classNames(
@@ -307,6 +362,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
 
         {showIframe && (
           <iframe
+            key={`${codeKey}_${reloadNonce}`}
             ref={iframeRef}
             className={styles.iframe}
             srcDoc={wrappedHtml}
@@ -314,6 +370,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             referrerPolicy="no-referrer"
             title="HTML Preview"
             style={{ height: `${height}px` }}
+            onLoad={postThemeToIframe}
           />
         )}
 
