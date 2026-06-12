@@ -8,6 +8,7 @@ pub enum PickerKind {
     FileMention,
     Session,
     Permissions,
+    Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,7 @@ impl PickerState {
             PickerKind::FileMention => "files",
             PickerKind::Session => "sessions",
             PickerKind::Permissions => "permissions",
+            PickerKind::Theme => "themes",
         }
     }
 

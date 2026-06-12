@@ -17,7 +17,7 @@ use crate::client::{
     OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
 };
 use crate::commands::{
-    command_by_name, command_picker_items, session, workflow, CommandAction, CommandContext,
+    command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
     CommandPicker, InfoTopic, LocalToggle,
 };
 use crate::composer::queue::{InputQueue, QueuedInput};
@@ -785,6 +785,14 @@ impl App {
         self.composer_mode = ComposerMode::Chat;
     }
 
+    fn open_theme_picker(&mut self) {
+        self.modal_picker = Some(PickerState::new(
+            PickerKind::Theme,
+            misc::theme_picker_items(),
+        ));
+        self.composer_mode = ComposerMode::Chat;
+    }
+
     fn update_slash_picker_filter(&mut self) {
         let Some(picker) = self.modal_picker.as_mut() else {
             return;
@@ -900,6 +908,10 @@ impl App {
                     patch: session::permission_policy_patch(policy),
                 }
             }
+            (PickerKind::Theme, PickerAccept::Single(Some(item))) => {
+                self.apply_theme_name(&item.id);
+                AppAction::None
+            }
             _ => AppAction::None,
         }
     }
@@ -931,6 +943,12 @@ impl App {
             }
             CommandAction::Session { command } => self.execute_session_command(command, args),
             CommandAction::Workflow { command } => self.execute_workflow_command(command),
+            CommandAction::Misc { command } => self.execute_misc_command(command, args),
+            CommandAction::Unavailable { reason } => {
+                self.composer.clear();
+                self.add_notice(format!("/{name} unavailable: {reason}"));
+                AppAction::None
+            }
         }
     }
 
@@ -1006,10 +1024,44 @@ impl App {
         }
     }
 
+    fn execute_misc_command(&mut self, command: misc::MiscCommand, args: &str) -> AppAction {
+        match command {
+            misc::MiscCommand::Theme => {
+                self.composer.clear();
+                if args.trim().is_empty() {
+                    self.open_theme_picker();
+                } else {
+                    self.apply_theme_name(args.trim());
+                }
+                AppAction::None
+            }
+            misc::MiscCommand::ToggleVim => {
+                self.composer.clear();
+                let enabled = self.vim.toggle();
+                let label = if enabled { "enabled" } else { "disabled" };
+                self.add_notice(format!("Composer vim mode {label}"));
+                AppAction::None
+            }
+            misc::MiscCommand::DebugConfig => {
+                self.composer.clear();
+                self.show_debug_config_card();
+                AppAction::None
+            }
+            misc::MiscCommand::RawTranscript => {
+                self.composer.clear();
+                self.open_raw_transcript_overlay()
+            }
+        }
+    }
+
     fn execute_picker_command(&mut self, picker: CommandPicker) -> AppAction {
         self.composer.clear();
         match picker {
             CommandPicker::FileMention => self.start_file_mention_lookup(),
+            CommandPicker::Theme => {
+                self.open_theme_picker();
+                AppAction::None
+            }
         }
     }
 
@@ -1019,6 +1071,11 @@ impl App {
                 self.composer.clear();
                 self.replace_with_notice("Transcript cleared".to_string());
                 AppAction::None
+            }
+            LocalToggle::Events => {
+                self.composer.clear();
+                self.events_pane.toggle();
+                AppAction::RefreshWorkers
             }
             LocalToggle::Quit => self.quit_action(),
         }
@@ -1032,6 +1089,44 @@ impl App {
                 self.show_status_card();
             }
         }
+    }
+
+    fn apply_theme_name(&mut self, name: &str) {
+        match TuiTheme::named(name) {
+            Some(theme) => {
+                let theme_name = theme.name().to_string();
+                self.theme = theme;
+                self.add_notice(format!("Theme set to {theme_name}"));
+            }
+            None => self.add_notice(format!(
+                "Unknown theme `{}`; available: {}",
+                name,
+                TuiTheme::builtin_names().join(", ")
+            )),
+        }
+    }
+
+    fn show_debug_config_card(&mut self) {
+        let config_path = KeymapRegistry::default_config_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
+        self.push_history_item(TranscriptItem::Info(vec![
+            "TUI debug config".to_string(),
+            format!("Config: {config_path}"),
+            format!("Theme: {}", self.theme.name()),
+            format!(
+                "Vim: {}",
+                if self.vim.enabled() {
+                    self.vim.mode().label()
+                } else {
+                    "off"
+                }
+            ),
+            format!(
+                "Commands: {} registered",
+                crate::commands::command_registry().len()
+            ),
+        ]));
     }
 
     fn show_status_card(&mut self) {
@@ -1461,6 +1556,15 @@ impl App {
     fn open_transcript_overlay(&mut self) -> AppAction {
         self.transcript_overlay = Some(PagerOverlay::new(
             "Transcript",
+            self.transcript_rendered_text_lines(100),
+            self.transcript_raw_text_lines(),
+        ));
+        AppAction::None
+    }
+
+    fn open_raw_transcript_overlay(&mut self) -> AppAction {
+        self.transcript_overlay = Some(PagerOverlay::raw(
+            "Transcript raw",
             self.transcript_rendered_text_lines(100),
             self.transcript_raw_text_lines(),
         ));
@@ -2934,6 +3038,11 @@ impl App {
     pub fn test_set_keymap(&mut self, keymap: KeymapRegistry) {
         self.vim.set_enabled(keymap.vim_mode_enabled());
         self.keymap = keymap;
+    }
+
+    #[cfg(test)]
+    pub fn test_execute_command_name(&mut self, name: &str) -> AppAction {
+        self.execute_command_name(name)
     }
 }
 
@@ -4700,6 +4809,106 @@ new-chat = "ctrl-x"
         }]);
         assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
         assert_eq!(app.composer(), "read @src/lib.rs ");
+    }
+
+    #[test]
+    fn misc_command_group_parses_and_dispatches() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("events"),
+            AppAction::RefreshWorkers
+        );
+        assert!(app.events_pane().open);
+        assert_eq!(
+            app.execute_command_name("events"),
+            AppAction::RefreshWorkers
+        );
+        assert!(!app.events_pane().open);
+
+        assert_eq!(app.execute_command_name("help"), AppAction::None);
+        assert!(app.help_open());
+
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("keymap"), AppAction::None);
+        assert!(app.help_open());
+
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("vim"), AppAction::None);
+        assert!(app.vim_enabled());
+
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("debug-config"), AppAction::None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Info(lines) if lines.iter().any(|line| line.contains("Commands:")))
+        }));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("quit"),
+            AppAction::Quit {
+                abort_active: false
+            }
+        );
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn theme_command_applies_theme_live() {
+        let mut app = App::new(project());
+        assert_eq!(app.theme().name(), "dark");
+        assert_eq!(app.execute_command_name("theme light"), AppAction::None);
+        assert_eq!(app.theme().name(), "light");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Theme set to light"))
+        }));
+
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("theme"), AppAction::None);
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.kind, PickerKind::Theme);
+        assert_eq!(picker.filtered_items()[0].id, "dark");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.theme().name(), "light");
+    }
+
+    #[test]
+    fn help_command_shows_generated_keymap_help() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("help"), AppAction::None);
+        assert!(app.help_open());
+        let rows = app.keymap_help_rows();
+        assert!(rows.iter().any(|row| row.action == KeyAction::ShowHelp));
+        assert!(rows
+            .iter()
+            .any(|row| row.description.contains("keymap help")));
+    }
+
+    #[test]
+    fn unavailable_commands_report_explicit_reason() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("mcp"), AppAction::None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("/mcp unavailable:") && text.contains("MCP"))
+        }));
+    }
+
+    #[test]
+    fn raw_command_opens_copy_mode_overlay() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "hello"},
+                {"message_id": "a1", "role": "assistant", "content": "hi"}
+            ]}),
+        });
+        assert_eq!(app.execute_command_name("raw"), AppAction::None);
+        assert!(app
+            .transcript_overlay()
+            .is_some_and(|overlay| overlay.is_copy_mode()));
     }
 
     #[test]

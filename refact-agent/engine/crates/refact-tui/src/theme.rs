@@ -94,6 +94,10 @@ impl TuiTheme {
         }
     }
 
+    pub fn builtin_names() -> &'static [&'static str] {
+        &["dark", "light", "plain"]
+    }
+
     pub fn named(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "dark" => Some(Self::dark()),

@@ -1,5 +1,8 @@
+pub mod misc;
 pub mod session;
 pub mod workflow;
+
+use std::sync::OnceLock;
 
 use crate::pickers::PickerItem;
 
@@ -13,11 +16,13 @@ pub enum CommandAvailability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPicker {
     FileMention,
+    Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalToggle {
     ClearTranscript,
+    Events,
     Quit,
 }
 
@@ -35,6 +40,8 @@ pub enum CommandAction {
     ShowInfo { topic: InfoTopic },
     Session { command: session::SessionCommand },
     Workflow { command: workflow::WorkflowCommand },
+    Misc { command: misc::MiscCommand },
+    Unavailable { reason: &'static str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,103 +92,75 @@ impl CommandDef {
 }
 
 pub fn command_registry() -> &'static [CommandDef] {
-    &COMMANDS
+    command_registry_vec().as_slice()
 }
 
 pub fn command_by_name(name: &str) -> Option<&'static CommandDef> {
-    COMMANDS.iter().find(|command| command.matches_name(name))
+    command_registry()
+        .iter()
+        .find(|command| command.matches_name(name))
 }
 
 pub fn command_picker_items(context: CommandContext) -> Vec<PickerItem> {
-    COMMANDS
+    command_registry()
         .iter()
         .filter(|command| command.available(context))
         .map(|command| command.picker_item())
         .collect()
 }
 
-const COMMANDS: [CommandDef; 23] = [
-    session::NEW_COMMAND,
-    session::RESUME_COMMAND,
-    session::FORK_COMMAND,
-    session::RENAME_COMMAND,
-    session::ARCHIVE_COMMAND,
-    session::MODEL_COMMAND,
-    session::MODE_COMMAND,
-    session::PERMISSIONS_COMMAND,
-    session::STATUS_COMMAND,
-    session::INIT_COMMAND,
-    CommandDef {
-        name: "clear",
-        aliases: &[],
-        description: "Clear the local transcript view",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::ClearTranscript,
-        },
-    },
-    CommandDef {
-        name: "quit",
-        aliases: &["exit"],
-        description: "Exit the TUI",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::Quit,
-        },
-    },
-    CommandDef {
-        name: "mention",
-        aliases: &["file", "files"],
-        description: "picker reuse: insert a file mention",
-        args_hint: "[path]",
-        availability: CommandAvailability::Always,
-        action: CommandAction::OpenPicker {
-            picker: CommandPicker::FileMention,
-        },
-    },
-    CommandDef {
-        name: "help",
-        aliases: &["?"],
-        description: "Show TUI help",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::ShowInfo {
-            topic: InfoTopic::Help,
-        },
-    },
-    CommandDef {
-        name: "stop",
-        aliases: &["cancel"],
-        description: "backend command: stop the active generation",
-        args_hint: "",
-        availability: CommandAvailability::ActiveTurnOnly,
-        action: CommandAction::BackendCommand { command: "stop" },
-    },
-    workflow::REVIEW_COMMAND,
-    workflow::PLAN_COMMAND,
-    workflow::GOAL_COMMAND,
-    workflow::AGENT_COMMAND,
-    workflow::DIFF_COMMAND,
-    workflow::COMPACT_COMMAND,
-    CommandDef {
-        name: "copy",
-        aliases: &[],
-        description: "Copy the last response",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::BackendCommand { command: "copy" },
-    },
-    CommandDef {
-        name: "raw",
-        aliases: &[],
-        description: "Toggle raw transcript display",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::BackendCommand { command: "raw" },
-    },
-];
+fn command_registry_vec() -> &'static Vec<CommandDef> {
+    static COMMANDS: OnceLock<Vec<CommandDef>> = OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let mut commands = vec![
+            session::NEW_COMMAND,
+            session::RESUME_COMMAND,
+            session::FORK_COMMAND,
+            session::RENAME_COMMAND,
+            session::ARCHIVE_COMMAND,
+            session::MODEL_COMMAND,
+            session::MODE_COMMAND,
+            session::PERMISSIONS_COMMAND,
+            session::STATUS_COMMAND,
+            session::INIT_COMMAND,
+            misc::CLEAR_COMMAND,
+            misc::QUIT_COMMAND,
+            misc::EVENTS_COMMAND,
+            CommandDef {
+                name: "mention",
+                aliases: &["file", "files"],
+                description: "picker reuse: insert a file mention",
+                args_hint: "[path]",
+                availability: CommandAvailability::Always,
+                action: CommandAction::OpenPicker {
+                    picker: CommandPicker::FileMention,
+                },
+            },
+            misc::HELP_COMMAND,
+            misc::KEYMAP_COMMAND,
+            misc::THEME_COMMAND,
+            misc::VIM_COMMAND,
+            misc::DEBUG_CONFIG_COMMAND,
+            misc::RAW_COMMAND,
+            CommandDef {
+                name: "stop",
+                aliases: &["cancel", "clean"],
+                description: "backend command: stop the active generation",
+                args_hint: "",
+                availability: CommandAvailability::ActiveTurnOnly,
+                action: CommandAction::BackendCommand { command: "stop" },
+            },
+            workflow::REVIEW_COMMAND,
+            workflow::PLAN_COMMAND,
+            workflow::GOAL_COMMAND,
+            workflow::AGENT_COMMAND,
+            workflow::DIFF_COMMAND,
+            workflow::COMPACT_COMMAND,
+        ];
+        commands.extend_from_slice(misc::UNAVAILABLE_COMMANDS);
+        commands
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -230,6 +209,64 @@ mod tests {
                 items.iter().any(|item| item.title == title),
                 "missing {title}"
             );
+        }
+    }
+
+    #[test]
+    fn misc_command_group_is_visible_in_popup() {
+        let items = command_picker_items(CommandContext { active_turn: false });
+        for title in [
+            "/theme", "/help", "/events", "/quit", "/keymap", "/vim", "/raw",
+        ] {
+            assert!(
+                items.iter().any(|item| item.title == title),
+                "missing {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_has_no_duplicate_names_or_aliases() {
+        let commands = command_registry();
+        for (index, command) in commands.iter().enumerate() {
+            assert!(!command.name.is_empty());
+            for other in commands.iter().skip(index + 1) {
+                assert_ne!(command.name, other.name, "duplicate command name");
+                assert!(
+                    !command.aliases.iter().any(|alias| *alias == other.name),
+                    "alias /{} conflicts with command /{}",
+                    command.name,
+                    other.name
+                );
+                assert!(
+                    !other.aliases.iter().any(|alias| *alias == command.name),
+                    "alias /{} conflicts with command /{}",
+                    other.name,
+                    command.name
+                );
+                for alias in command.aliases {
+                    assert!(
+                        !other.aliases.iter().any(|other_alias| alias == other_alias),
+                        "duplicate alias /{alias}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registry_has_handler_or_explicit_unavailable_reason() {
+        for command in command_registry() {
+            match command.action {
+                CommandAction::BackendCommand { command } => assert_eq!(command, "stop"),
+                CommandAction::Unavailable { reason } => assert!(!reason.trim().is_empty()),
+                CommandAction::OpenPicker { .. }
+                | CommandAction::LocalToggle { .. }
+                | CommandAction::ShowInfo { .. }
+                | CommandAction::Session { .. }
+                | CommandAction::Workflow { .. }
+                | CommandAction::Misc { .. } => {}
+            }
         }
     }
 

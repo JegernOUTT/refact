@@ -14,37 +14,99 @@ This crate uses `competitors/codex/codex-rs/tui` as the reference implementation
 - `src/streaming/controller.rs`
 - `src/streaming/table_holdback.rs`
 
-The first TUI slice ports only the protocol-agnostic streaming and rendering helpers.
-The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the codex event-loop and terminal-restore patterns without importing codex protocol, auth, app-server, cloud, or onboarding code.
+The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the Codex event-loop and terminal-restore patterns without importing Codex protocol, auth, app-server, cloud, or onboarding code.
 
-The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the codex event-loop and terminal-restore patterns without importing codex protocol, auth, app-server, cloud, or onboarding code.
-| Card | Matrix area | Codex reference | Refact TUI target and status |
+## Parity matrix closure
+
+Every Wave C row is now dispositioned. ✅ rows have native Refact TUI implementation in the linked module(s). ❌ rows are explicitly deferred with the blocking reason; no command or matrix row is left as a silent no-op.
+
+| Card | Matrix area | Codex reference | Final Refact TUI disposition |
 |---|---|---|---|
-| C-1 | Full protocol model | `chatwidget/protocol.rs`, `chatwidget/protocol_requests.rs`, `thread_transcript.rs` | Replace ad hoc JSON matching with typed Refact SSE events and delta ops: `snapshot`, `stream_started`, `stream_delta`, `stream_finished`, `message_*`, `runtime_updated`, `pause_*`, `queue_updated`, `ack`, and `DeltaOp` variants. C-0 fixtures lock the current contract. |
-| C-2 | Streaming pipeline | `streaming/controller.rs`, `streaming/commit_tick.rs`, `streaming/chunking.rs`, `streaming/table_holdback.rs`, `markdown_stream.rs` | Match Codex's stable incremental commit behavior for text, split code fences, and Markdown tables while preserving Refact reasoning, citations, usage, thinking blocks, and server content blocks. Current status: basic MarkdownStreamCollector wiring exists; parity work continues here. |
-| C-3 | Scrollback model | `thread_transcript.rs`, `pager_overlay.rs`, `resize_reflow_cap.rs`, `wrapping.rs`, `chatwidget/transcript.rs` | Move from simple `Vec<TranscriptItem>` + `scroll_offset` to native scrollback with resize-safe reflow, raw/copy mode, and bounded history. This is the riskiest rendering state card. |
-| C-4 | Markdown and diff rendering | `markdown.rs`, `markdown_render.rs`, `markdown_render/table_key_value.rs`, `diff_render.rs`, `diff_model.rs`, `line_truncation.rs` | Bring Codex-grade Markdown tables, code fences, wrapping, syntax-neutral styling, and unified diff cells into Refact's renderer. Current status: minimal Markdown renderer and diff-colored tool output. |
-| C-5 | Rich transcript cells | `history_cell/*`, `chatwidget/transcript.rs`, `approval_events.rs` | Introduce structured cells for assistant turns, reasoning, compression/system notices, approval events, hidden-event summaries, and message grouping. Current status: flat enum cells. |
-| C-6 | Tool lifecycle cells | `chatwidget/tool_lifecycle.rs`, `chatwidget/tool_requests.rs`, `chatwidget/exec_state.rs`, `status_indicator_widget.rs` | Expand `ToolCard` into Codex-like running/success/error/server-hosted tool lifecycle cells with stable ids, collapse state, output truncation, and status labels. Current status: stable id replacement and basic result cards. |
-| C-7 | Composer | `public_widgets/composer_input.rs`, `chatwidget/input_submission.rs`, `chatwidget/input_restore.rs`, `clipboard_paste.rs`, `file_search.rs` | Add multiline editor parity: cursor movement, history restore, paste handling, file mention completion, slash completion entry point, and submit queue awareness. Current status: basic text buffer with Shift-Enter newline. |
-| C-8 | Popups and pickers | `chatwidget/model_popups.rs`, `chatwidget/permission_popups.rs`, `chatwidget/settings_popups.rs`, `chatwidget/keymap_picker.rs`, `theme_picker.rs`, `oss_selection.rs` | Replace minimal model/mode pickers with reusable modal/popup surfaces for models, permissions, settings, keymaps, themes, projects, and command palettes. |
-| C-9 | Input queue and turn runtime | `chatwidget/input_queue.rs`, `chatwidget/turn_runtime.rs`, `chatwidget/interrupts.rs`, `chatwidget/command_lifecycle.rs` | Match Codex behavior when prompts arrive during active turns: queue visibility, cancellation, retry/interrupt paths, and command completion lifecycle. Current status: local editable queue owns queued prompt order; daemon `queue_updated`/`queued_items` is rendered passively because server-side queued commands cannot be edited before dispatch. |
-| C-10 | Approvals UX | `approval_events.rs`, `chatwidget/permission_popups.rs`, `chatwidget/tool_requests.rs` | Codex-style approval overlay with FIFO requests, full-args toggle, allow once/chat, deny, and patch-tool auto-approval. Current status: FIFO approval queue and modal keymap exist. |
-| C-11 | Session ops | `session_archive_commands.rs`, `thread_transcript.rs`, `chatwidget/session_flow.rs`, `chatwidget/replay.rs`, `app_backtrack.rs` | Add session list/resume/fork/archive/new-chat/backtrack parity over Refact daemon/chat APIs. Current status: Ctrl-N new local chat and project open only. |
-| C-12 | Backtrack, overlays, external editor | `app_backtrack.rs`, `pager_overlay.rs`, `external_editor.rs`, `clipboard_copy.rs`, `get_git_diff.rs` | Add transcript backtrack, pager overlays, open-in-editor flows, copy-last-response, raw scrollback, and diff overlays. |
-| C-13 | Usage and status footer | `status_indicator_widget.rs`, `chatwidget/status_surfaces.rs`, `chatwidget/status_state.rs`, `chatwidget/status_controls.rs`, `service_tier_resolution.rs`, `chatwidget/rate_limits.rs` | Match Codex status surfaces for model/mode, worker/daemon state, queue/busy state, usage totals, service tier, and rate-limit warnings. Current status: footer shows project/model/mode/state/daemon/worker and fixture-proven usage totals. |
-| C-14 | Keymap, Vim, theme | `key_hint.rs`, `keymap_setup/*`, `tui/keyboard_modes.rs`, `theme_picker.rs`, `style.rs`, `terminal_title.rs` | Add discoverable key hints, configurable keymap, Vim composer mode, theme picker, title/statusline settings, and host-friendly colors. |
-| C-15 | Slash commands: core/session | `slash_command.rs`, `chatwidget/slash_dispatch.rs` | Adopt Refact-native `/new`, `/clear`, `/quit`, `/exit`, `/model`, `/permissions`, `/keymap`, `/vim`, `/status`, `/debug-config`, `/copy`, `/raw`, `/diff`, and `/mention`. |
-| C-16 | Slash commands: workflow/integrations | `slash_command.rs`, `chatwidget/slash_dispatch.rs`, `chatwidget/skills.rs`, `chatwidget/hooks.rs`, `chatwidget/mcp_startup.rs` | Adopt or translate `/review`, `/plan`, `/goal`, `/agent`, `/subagents`, `/side`, `/btw`, `/skills`, `/hooks`, `/memories`, `/mcp`, `/apps`, `/plugins`, `/ps`, and `/stop`. |
-| C-17 | Slash commands: settings/debug/edge | `slash_command.rs`, `debug_config.rs`, `local_chatgpt_auth.rs`, `config_update.rs`, `terminal_title.rs` | Adopt, translate, or explicitly defer the remaining Codex commands: `/rename`, `/resume`, `/fork`, `/archive`, `/init`, `/compact`, `/ide`, `/theme`, `/title`, `/statusline`, `/pets`, `/personality`, `/realtime`, `/settings`, `/feedback`, `/logout`, `/rollout`, `/approve`, `/test-approval`, `/app`, `/experimental`, `/setup-default-sandbox`, `/sandbox-add-read-dir`, `/debug-m-drop`, and `/debug-m-update`. |
+| C-1 | Full protocol model | `chatwidget/protocol.rs`, `chatwidget/protocol_requests.rs`, `thread_transcript.rs` | ✅ Done: typed Refact SSE handling and `DeltaOp` coverage live in `src/protocol/mod.rs`, `src/client.rs`, `tests/tui_protocol.rs`. |
+| C-2 | Streaming pipeline | `streaming/controller.rs`, `streaming/commit_tick.rs`, `streaming/chunking.rs`, `streaming/table_holdback.rs`, `markdown_stream.rs` | ✅ Done: stable incremental stream commit behavior lives in `src/streaming/*` with fixture coverage in `tests/tui_protocol.rs`. |
+| C-3 | Scrollback model | `thread_transcript.rs`, `pager_overlay.rs`, `resize_reflow_cap.rs`, `wrapping.rs`, `chatwidget/transcript.rs` | ✅ Done: native scrollback insertion and resize policy live in `src/history/mod.rs`, `src/app.rs`, and `src/ui/mod.rs`; fallback is gated by `REFACT_TUI_ALT_SCREEN=1`. |
+| C-4 | Markdown and diff rendering | `markdown.rs`, `markdown_render.rs`, `markdown_render/table_key_value.rs`, `diff_render.rs`, `diff_model.rs`, `line_truncation.rs` | ✅ Done: Markdown, wrapping, highlight, and unified diff rendering live in `src/render/*` and `src/history/cells.rs`. |
+| C-5 | Rich transcript cells | `history_cell/*`, `chatwidget/transcript.rs`, `approval_events.rs` | ✅ Done: assistant, reasoning, notices, info, plan, diff, approval, tool, and session cells live in `src/history/cells.rs`. |
+| C-6 | Tool lifecycle cells | `chatwidget/tool_lifecycle.rs`, `chatwidget/tool_requests.rs`, `chatwidget/exec_state.rs`, `status_indicator_widget.rs` | ✅ Done: stable tool card lifecycle, status labels, collapse state, and output truncation live in `src/tools.rs` and `src/history/cells.rs`. |
+| C-7 | Composer | `public_widgets/composer_input.rs`, `chatwidget/input_submission.rs`, `chatwidget/input_restore.rs`, `clipboard_paste.rs`, `file_search.rs` | ✅ Done: multiline composer, cursor movement, history restore, paste handling, queue awareness, file mentions, and slash popup entry live in `src/composer/*` and `src/app.rs`. |
+| C-8 | Popups and pickers | `chatwidget/model_popups.rs`, `chatwidget/permission_popups.rs`, `chatwidget/settings_popups.rs`, `chatwidget/keymap_picker.rs`, `theme_picker.rs`, `oss_selection.rs` | ✅ Done: reusable modal picker surfaces for projects, models, modes, permissions, sessions, slash commands, file mentions, and themes live in `src/pickers.rs` and `src/app.rs`; ❌ GUI-only settings panes remain deferred because they require broader configuration editors. |
+| C-9 | Input queue and turn runtime | `chatwidget/input_queue.rs`, `chatwidget/turn_runtime.rs`, `chatwidget/interrupts.rs`, `chatwidget/command_lifecycle.rs` | ✅ Done: local editable queue, cancellation, dispatch-after-finish, and passive daemon queue state live in `src/composer/queue.rs` and `src/app.rs`. |
+| C-10 | Approvals UX | `approval_events.rs`, `chatwidget/permission_popups.rs`, `chatwidget/tool_requests.rs` | ✅ Done: FIFO approval modal, details toggle, allow once/chat, deny, and patch auto-approval live in `src/approvals.rs` and `src/app.rs`. |
+| C-11 | Session ops | `session_archive_commands.rs`, `thread_transcript.rs`, `chatwidget/session_flow.rs`, `chatwidget/replay.rs`, `app_backtrack.rs` | ✅ Done: `/new`, `/resume`, `/fork`, `/rename`, `/archive`, snapshot resume, and backtrack/retry live in `src/commands/session.rs`, `src/sessions.rs`, and `src/app.rs`. |
+| C-12 | Backtrack, overlays, external editor | `app_backtrack.rs`, `pager_overlay.rs`, `external_editor.rs`, `clipboard_copy.rs`, `get_git_diff.rs` | ✅ Done: Esc-Esc backtrack, transcript pager/raw overlay, external editor, and git diff loading live in `src/overlay.rs`, `src/app.rs`, and `src/commands/workflow.rs`; ❌ system clipboard copy is deferred because no clipboard backend is linked in the TUI crate. |
+| C-13 | Usage and status footer | `status_indicator_widget.rs`, `chatwidget/status_surfaces.rs`, `chatwidget/status_state.rs`, `chatwidget/status_controls.rs`, `service_tier_resolution.rs`, `chatwidget/rate_limits.rs` | ✅ Done: model/mode, worker/daemon state, queue/busy state, usage totals, and `/status` info card live in `src/ui/footer.rs`, `src/app.rs`, and `src/commands/session.rs`; ❌ service-tier/rate-limit controls are deferred because the Refact daemon does not expose that surface to the TUI. |
+| C-14 | Keymap, Vim, theme | `key_hint.rs`, `keymap_setup/*`, `tui/keyboard_modes.rs`, `theme_picker.rs`, `style.rs`, `terminal_title.rs` | ✅ Done: configurable keymap, generated help, Vim composer mode, built-in themes, live `/theme`, and themed UI styles live in `src/keymap.rs`, `src/theme.rs`, `src/ui/*`, and `src/commands/misc.rs`; ❌ terminal title/statusline preferences are deferred because no TUI config contract exists beyond keymap/theme. |
+| C-15 | Slash commands: core/session | `slash_command.rs`, `chatwidget/slash_dispatch.rs` | ✅ Done: `/new`, `/clear`, `/quit`, `/exit`, `/model`, `/permissions`, `/keymap`, `/vim`, `/status`, `/debug-config`, `/copy`, `/raw`, `/diff`, and `/mention` are in the registry. Implemented commands link to `src/commands/session.rs`, `src/commands/workflow.rs`, `src/commands/misc.rs`; `/copy` is ❌ unavailable with an explicit reason. |
+| C-16 | Slash commands: workflow/integrations | `slash_command.rs`, `chatwidget/slash_dispatch.rs`, `chatwidget/skills.rs`, `chatwidget/hooks.rs`, `chatwidget/mcp_startup.rs` | ✅ Done: `/review`, `/plan`, `/goal`, `/agent`, `/diff`, `/compact`, `/mention`, and `/stop` live in `src/commands/workflow.rs` and `src/app.rs`; ❌ `/subagents`, `/side`, `/btw`, `/skills`, `/hooks`, `/memories`, `/mcp`, `/apps`, `/plugins`, and `/ps` are either explicit unavailable commands or mapped to `/events` where supported. |
+| C-17 | Slash commands: settings/debug/edge | `slash_command.rs`, `debug_config.rs`, `local_chatgpt_auth.rs`, `config_update.rs`, `terminal_title.rs` | ✅ Done: `/rename`, `/title`, `/resume`, `/fork`, `/archive`, `/init`, `/compact`, `/theme`, `/events`, `/help`, `/keymap`, `/vim`, `/debug-config`, `/raw`, and `/quit` have deterministic handlers; ❌ Codex-only `/ide`, `/statusline`, `/pets`, `/personality`, `/realtime`, `/settings`, `/feedback`, `/logout`, `/rollout`, `/approve`, `/test-approval`, `/app`, `/experimental`, `/setup-default-sandbox`, `/sandbox-add-read-dir`, `/debug-m-drop`, and `/debug-m-update` are explicit unavailable commands with one-line reasons. |
 
-### Slash command inventory
+### Slash command inventory closure
 
-Current Codex `SlashCommand` inventory has 54 enum entries plus aliases such as `clean` for `/stop`, `pet` for `/pets`, `subagents` for `/multi-agents`, `setup-default-sandbox`, and `sandbox-add-read-dir`. Refact TUI should not blindly clone Codex-only behavior; each command is either adopted as native Refact behavior, translated to an existing daemon/chat command, or documented as deferred.
+Commands are searchable in the slash popup via `src/commands/mod.rs`. The behavior contract is registry-wide:
 
-- C-15 adopts core/session and inspection commands: `/new`, `/clear`, `/quit`, `/exit`, `/model`, `/permissions`, `/keymap`, `/vim`, `/status`, `/debug-config`, `/copy`, `/raw`, `/diff`, `/mention`.
-- C-16 adopts workflow/integration commands where Refact has matching backend features: `/review`, `/plan`, `/goal`, `/agent`, `/subagents`, `/side`, `/btw`, `/skills`, `/hooks`, `/memories`, `/mcp`, `/apps`, `/plugins`, `/ps`, `/stop`.
-- C-17 handles settings and Codex-specific leftovers: `/rename`, `/resume`, `/fork`, `/archive`, `/init`, `/compact`, `/ide`, `/theme`, `/title`, `/statusline`, `/pets`, `/personality`, `/realtime`, `/settings`, `/feedback`, `/logout`, `/rollout`, `/approve`, `/test-approval`, `/app`, `/experimental`, `/setup-default-sandbox`, `/sandbox-add-read-dir`, `/debug-m-drop`, `/debug-m-update`.
+- `BackendCommand`: sent only for supported backend pass-through commands such as `/stop`.
+- `OpenPicker`: opens a deterministic modal picker.
+- `LocalToggle` or `ShowInfo`: changes local TUI state or displays generated information.
+- `Session`, `Workflow`, or `Misc`: invokes a concrete app handler.
+- `Unavailable`: reports the reason as a visible notice.
+
+Current adopted commands and aliases:
+
+| Command | Final disposition |
+|---|---|
+| `/new` | ✅ session handler in `src/commands/session.rs` |
+| `/clear` | ✅ local transcript clear in `src/commands/misc.rs` |
+| `/quit`, `/exit` | ✅ local quit action in `src/commands/misc.rs` |
+| `/model` | ✅ model picker via daemon caps |
+| `/mode`, `/tool-use` | ✅ mode picker via daemon modes |
+| `/permissions`, `/approval` | ✅ permissions picker using supported per-chat flags |
+| `/keymap` | ✅ generated help from the active keymap registry |
+| `/vim` | ✅ live composer Vim-mode toggle |
+| `/status` | ✅ daemon, worker, session, model, and usage info card |
+| `/debug-config`, `/debug` | ✅ TUI config path/theme/vim/registry info card |
+| `/copy` | ❌ deferred: terminal clipboard copy is not wired; use `/raw` and terminal selection |
+| `/raw` | ✅ raw transcript pager/copy mode overlay |
+| `/diff` | ✅ local `git diff --no-ext-diff --` rendered as rich diff cell |
+| `/mention`, `/file`, `/files` | ✅ file mention picker reuse |
+| `/review` | ✅ structured review prompt |
+| `/plan` | ✅ generated local plan cell from hidden plan messages |
+| `/goal` | ✅ structured goal-clarification prompt |
+| `/agent` | ✅ backend `set_params` patch for Agent mode |
+| `/compact` | ✅ structured compaction prompt fallback |
+| `/stop`, `/cancel`, `/clean` | ✅ abort active generation |
+| `/theme` | ✅ theme picker or direct built-in theme apply |
+| `/events`, `/ps` | ✅ local daemon events/workers pane toggle |
+| `/resume`, `/sessions`, `/history` | ✅ recent session picker |
+| `/fork`, `/branch` | ✅ branch current chat |
+| `/rename`, `/title` | ✅ set chat title |
+| `/archive`, `/remove` | ✅ delete current chat from recent sessions |
+| `/init` | ✅ structured bootstrap prompt |
+| `/subagents`, `/multi-agents` | ❌ deferred: no TUI subagent picker; use GUI customization |
+| `/side` | ❌ deferred: no Refact daemon side-conversation command |
+| `/btw` | ❌ deferred: no background side-note routing command |
+| `/skills` | ❌ deferred: GUI-only marketplace/editor |
+| `/hooks` | ❌ deferred: GUI-only hook editor |
+| `/memories` | ❌ deferred: memory browsing not exposed in TUI |
+| `/mcp` | ❌ deferred: MCP setup/marketplace not exposed in TUI |
+| `/apps` | ❌ deferred: no Refact daemon apps surface |
+| `/plugins` | ❌ deferred: plugin marketplace not exposed in TUI |
+| `/ide` | ❌ deferred: IDE attach state not exposed in TUI |
+| `/statusline` | ❌ deferred: terminal statusline preferences not exposed in TUI |
+| `/pets`, `/pet` | ❌ deferred: Buddy pets are GUI-only |
+| `/personality` | ❌ deferred: Buddy personality settings are GUI-only |
+| `/realtime` | ❌ deferred: realtime voice controls are GUI-only |
+| `/settings` | ❌ deferred: interactive settings are GUI-only; edit `~/.config/refact/tui.toml` for keymap/theme |
+| `/feedback` | ❌ deferred: no TUI feedback endpoint |
+| `/logout` | ❌ deferred: daemon auth/logout is not enabled for the TUI |
+| `/rollout` | ❌ deferred: no rollout-control endpoint |
+| `/approve` | ❌ deferred: approval decisions happen in the approval modal or `/permissions` picker |
+| `/test-approval` | ❌ deferred: synthetic approval injection is not release TUI behavior |
+| `/app` | ❌ deferred: no app chooser command surface |
+| `/experimental` | ❌ deferred: Codex experimental flags have no Refact equivalent |
+| `/setup-default-sandbox` | ❌ deferred: Codex sandbox defaults do not apply to Refact daemon chats |
+| `/sandbox-add-read-dir` | ❌ deferred: Codex sandbox read dirs do not apply to Refact daemon chats |
+| `/debug-m-drop` | ❌ deferred: Codex model-debug mutation has no Refact backend surface |
+| `/debug-m-update` | ❌ deferred: Codex model-debug mutation has no Refact backend surface |
 
 ## Golden protocol fixture harness
 
@@ -86,4 +148,4 @@ cd refact-agent/engine
 REFACT_SKIP_GUI_BUILD=1 REFACT_DAEMON_WORKER_CMD="python3 tests/fake_worker.py" cargo run --bin refact -- tui --project .
 ```
 
-Type a prompt and press Enter to stream the fake worker response, press Esc during a turn to send abort, and press Ctrl-Q to restore the terminal and exit cleanly.
+Type a prompt and press Enter to stream the fake worker response, press Esc during a turn to send abort, press F2 or `/events` to toggle daemon events/workers, use `/theme` to apply a built-in theme, and press Ctrl-Q or `/quit` to restore the terminal and exit cleanly.

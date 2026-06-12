@@ -44,6 +44,16 @@ impl PagerOverlay {
         }
     }
 
+    pub fn raw(
+        title: impl Into<String>,
+        rendered_lines: Vec<String>,
+        raw_lines: Vec<String>,
+    ) -> Self {
+        let mut overlay = Self::new(title, rendered_lines, raw_lines);
+        overlay.mode = PagerMode::Raw;
+        overlay
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
