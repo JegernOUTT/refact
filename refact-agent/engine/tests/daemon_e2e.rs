@@ -33,6 +33,42 @@ fn future_minute_cron(offset_secs: i64) -> (String, u64) {
     (cron, target.timestamp_millis() as u64)
 }
 
+fn past_minute_cron() -> (String, u64, u64) {
+    let tz = refact_lsp::scheduler::scheduler_timezone();
+    let target = (Utc::now().with_timezone(&tz) - chrono::Duration::minutes(1))
+        .with_second(0)
+        .and_then(|dt| dt.with_nanosecond(0))
+        .unwrap();
+    let created = target - chrono::Duration::minutes(1);
+    let cron = format!(
+        "{} {} {} {} *",
+        target.minute(),
+        target.hour(),
+        target.day(),
+        target.month()
+    );
+    (
+        cron,
+        created.timestamp_millis() as u64,
+        target.timestamp_millis() as u64,
+    )
+}
+
+fn fake_worker_cmd() -> Option<String> {
+    let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+    if std::process::Command::new(&python)
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return None;
+    }
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fake_worker.py");
+    Some(format!("{} {}", python, script.display()))
+}
+
 fn durable_task(cron: &str, created_at_ms: u64, chat_id: &str) -> Value {
     json!({
         "id": "cron_e2e_once",
@@ -223,6 +259,86 @@ async fn durable_cron_fires_without_clients_attached() {
     })
     .await;
     assert!(std::fs::metadata(&tasks_path).unwrap().modified().unwrap() > mtime_before);
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn past_due_durable_cron_wakes_dead_worker_without_clients() {
+    if !e2e_enabled() {
+        print_skip();
+        return;
+    }
+    let Some(worker_cmd) = fake_worker_cmd() else {
+        print_skip();
+        return;
+    };
+    let dirs = E2eDirs::new();
+    dirs.write_daemon_config(1800);
+    let project = make_project("daemon-cron-past-due");
+    let chat_id = "cron-e2e-past-due-chat";
+    write_minimal_trajectory(project.path(), chat_id);
+    let (cron, created_at_ms, target_ms) = past_minute_cron();
+    assert!(target_ms < Utc::now().timestamp_millis() as u64);
+    let tasks_path =
+        write_durable_task(project.path(), &durable_task(&cron, created_at_ms, chat_id));
+    let mtime_before = std::fs::metadata(&tasks_path).unwrap().modified().unwrap();
+
+    let daemon = DaemonProcess::start_with_extra_env(
+        &dirs,
+        &[
+            ("REFACT_DAEMON_WORKER_CMD", worker_cmd.as_str()),
+            ("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1"),
+        ],
+    )
+    .await;
+    let opened = open_project(&daemon, project.path()).await;
+    let project_id = opened["project_id"].as_str().unwrap().to_string();
+    let stop = daemon
+        .post_json(&format!("/daemon/v1/projects/{project_id}/stop"), json!({}))
+        .await;
+    assert!(
+        stop.status().is_success(),
+        "stop returned {}",
+        stop.status()
+    );
+
+    wait_for(Duration::from_secs(30), || {
+        let daemon = &daemon;
+        async move {
+            let status = daemon.status().await;
+            (status["workers"].as_u64() == Some(0)).then_some(())
+        }
+    })
+    .await;
+    assert_eq!(
+        std::fs::metadata(&tasks_path).unwrap().modified().unwrap(),
+        mtime_before
+    );
+
+    let (status, events_text) = wait_for(Duration::from_secs(75), || {
+        let daemon = &daemon;
+        let project_id = project_id.clone();
+        async move {
+            let status = daemon.status().await;
+            if status["workers"].as_u64().unwrap_or_default() == 0 {
+                return None;
+            }
+            let response = daemon.get("/daemon/v1/events").await;
+            let events_text = response.text().await.ok()?;
+            (events_text.contains("\"kind\":\"cron_wake\"") && events_text.contains(&project_id))
+                .then_some((status, events_text))
+        }
+    })
+    .await;
+    assert_eq!(status["workers"], json!(1));
+    assert!(status["cron_pending"].get(&project_id).is_some());
+    assert!(events_text.contains("cron_e2e_once"));
+    assert_eq!(
+        std::fs::metadata(&tasks_path).unwrap().modified().unwrap(),
+        mtime_before,
+        "fake-worker e2e proves wake; real worker owns task firing"
+    );
 
     daemon.shutdown().await;
 }

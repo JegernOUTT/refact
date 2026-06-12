@@ -54,6 +54,10 @@ pub struct DaemonProcess {
 
 impl DaemonProcess {
     pub async fn start(dirs: &E2eDirs) -> Self {
+        Self::start_with_extra_env(dirs, &[]).await
+    }
+
+    pub async fn start_with_extra_env(dirs: &E2eDirs, extra_env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(refact_bin());
         command
             .arg("daemon")
@@ -65,6 +69,9 @@ impl DaemonProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         let child = command.spawn().unwrap();
         let process = Self {
             child,
