@@ -8,6 +8,7 @@ pub mod history;
 pub mod pickers;
 pub mod protocol;
 pub mod render;
+pub mod sessions;
 pub mod streaming;
 pub mod terminal;
 pub mod tools;

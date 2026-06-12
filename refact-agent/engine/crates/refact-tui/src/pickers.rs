@@ -6,6 +6,7 @@ pub enum PickerKind {
     Mode,
     SlashCommand,
     FileMention,
+    Session,
     MultiSelect,
 }
 
@@ -80,6 +81,7 @@ impl PickerState {
             PickerKind::Mode => "modes",
             PickerKind::SlashCommand => "commands",
             PickerKind::FileMention => "files",
+            PickerKind::Session => "sessions",
             PickerKind::MultiSelect => "select",
         }
     }

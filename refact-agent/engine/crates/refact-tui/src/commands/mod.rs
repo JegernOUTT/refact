@@ -14,12 +14,16 @@ pub enum CommandPicker {
     Model,
     Mode,
     FileMention,
+    ResumeSession,
     Permissions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalToggle {
     NewChat,
+    ForkChat,
+    RenameChat,
+    ArchiveChat,
     ClearTranscript,
     Quit,
 }
@@ -103,7 +107,7 @@ pub fn command_picker_items(context: CommandContext) -> Vec<PickerItem> {
         .collect()
 }
 
-const COMMANDS: [CommandDef; 18] = [
+const COMMANDS: [CommandDef; 22] = [
     CommandDef {
         name: "new",
         aliases: &[],
@@ -112,6 +116,46 @@ const COMMANDS: [CommandDef; 18] = [
         availability: CommandAvailability::Always,
         action: CommandAction::LocalToggle {
             toggle: LocalToggle::NewChat,
+        },
+    },
+    CommandDef {
+        name: "resume",
+        aliases: &["sessions", "history"],
+        description: "Open recent project chats",
+        args_hint: "",
+        availability: CommandAvailability::Always,
+        action: CommandAction::OpenPicker {
+            picker: CommandPicker::ResumeSession,
+        },
+    },
+    CommandDef {
+        name: "fork",
+        aliases: &["branch"],
+        description: "Branch the current chat into a new chat",
+        args_hint: "",
+        availability: CommandAvailability::IdleOnly,
+        action: CommandAction::LocalToggle {
+            toggle: LocalToggle::ForkChat,
+        },
+    },
+    CommandDef {
+        name: "rename",
+        aliases: &["title"],
+        description: "Rename the current chat using composer text",
+        args_hint: "<title>",
+        availability: CommandAvailability::Always,
+        action: CommandAction::LocalToggle {
+            toggle: LocalToggle::RenameChat,
+        },
+    },
+    CommandDef {
+        name: "archive",
+        aliases: &["remove"],
+        description: "Remove the current chat from recent sessions",
+        args_hint: "",
+        availability: CommandAvailability::IdleOnly,
+        action: CommandAction::LocalToggle {
+            toggle: LocalToggle::ArchiveChat,
         },
     },
     CommandDef {
@@ -248,6 +292,7 @@ mod tests {
     fn command_picker_items_use_registry_rows() {
         let items = command_picker_items(CommandContext { active_turn: false });
         assert!(items.iter().any(|item| item.title == "/mention"));
+        assert!(items.iter().any(|item| item.title == "/resume"));
         assert!(items
             .iter()
             .any(|item| item.description.contains("aliases exit")));

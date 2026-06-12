@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::events_pane::{parse_daemon_event, DaemonEventRecord};
 use crate::protocol::SseEvent;
+use crate::sessions::{PaginatedTrajectories, TrajectoryMeta};
 
 const DEFAULT_DAEMON_PORT: u16 = 8488;
 const PLAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -320,6 +321,62 @@ impl DaemonClient {
             })?;
         let response: AtCommandCompletionResponse = decode_response(response).await?;
         Ok(response.completions)
+    }
+
+    pub async fn list_trajectories(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<TrajectoryMeta>, ClientError> {
+        let path = format!(
+            "/p/{}/v1/trajectories?displayable_only=true&limit={}",
+            encode_path_segment(project_id),
+            limit.clamp(1, 200)
+        );
+        let response: PaginatedTrajectories = self.get_json(&path).await?;
+        Ok(response.items)
+    }
+
+    pub async fn send_branch_from_chat(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        source_chat_id: &str,
+        up_to_message_id: &str,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": request_id("branch-from-chat"),
+                "type": "branch_from_chat",
+                "source_chat_id": source_chat_id,
+                "up_to_message_id": up_to_message_id,
+            }),
+        )
+        .await
+    }
+
+    pub async fn delete_trajectory(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+    ) -> Result<(), ClientError> {
+        let path = format!(
+            "/p/{}/v1/trajectories/{}",
+            encode_path_segment(project_id),
+            encode_path_segment(chat_id)
+        );
+        let response = self
+            .with_auth(self.client.delete(self.url(&path)))
+            .send()
+            .await
+            .map_err(|error| ClientError::Http(format!("failed to delete trajectory: {error}")))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_error(response).await)
+        }
     }
 
     pub async fn subscribe_daemon_events(&self) -> Result<DaemonEventStream, ClientError> {

@@ -333,6 +333,7 @@ fn golden_fixtures_drive_app_state_machine_offline() {
 
     let resumed = run_fixture("snapshot_resume.jsonl");
     let resumed_text = transcript_text(&resumed.app);
+    assert!(resumed_text.contains("session:Saved chat:"));
     assert!(resumed_text.contains("user:resume"));
     assert!(resumed_text.contains("assistant:old answer"));
     assert!(resumed_text.contains("tool:resume-call:cat:file body"));

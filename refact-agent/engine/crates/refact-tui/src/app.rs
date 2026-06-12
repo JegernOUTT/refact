@@ -30,6 +30,9 @@ use crate::pickers::{
 use crate::protocol::{
     content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
 };
+use crate::sessions::{
+    last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
+};
 use crate::streaming::{run_commit_tick, StreamController};
 use crate::terminal::TerminalSession;
 use crate::tools::{now_ms, ToolCard, ToolStatus};
@@ -235,6 +238,8 @@ pub struct App {
     events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
+    session_title: Option<String>,
+    show_session_header: bool,
     model: Option<String>,
     mode: Option<String>,
     pending_model: Option<String>,
@@ -293,6 +298,8 @@ impl App {
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
+            session_title: None,
+            show_session_header: false,
             model: None,
             mode: None,
             pending_model: None,
@@ -336,6 +343,8 @@ impl App {
             events_pane: EventsPaneState::new(),
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
+            session_title: None,
+            show_session_header: false,
             model: None,
             mode: None,
             pending_model: None,
@@ -403,6 +412,19 @@ impl App {
 
     pub fn chat_id(&self) -> &str {
         &self.chat_id
+    }
+
+    pub fn session_title(&self) -> Option<&str> {
+        self.session_title.as_deref()
+    }
+
+    pub fn session_header_subtitle(&self) -> String {
+        session_subtitle(
+            self.current_project().map(|project| project.slug.as_str()),
+            self.model(),
+            self.mode(),
+            self.chat_id(),
+        )
     }
 
     pub fn model(&self) -> Option<&str> {
@@ -622,6 +644,21 @@ impl App {
         self.composer_mode = ComposerMode::Chat;
     }
 
+    fn open_session_picker(&mut self, items: Vec<PickerItem>) {
+        if items.is_empty() {
+            self.add_notice("No recent chats for this project yet. Continue this new chat or press Ctrl-N for another fresh one.");
+            self.modal_picker = None;
+            self.composer_mode = ComposerMode::Chat;
+        } else {
+            self.modal_picker = Some(PickerState::new(PickerKind::Session, items));
+            self.composer_mode = ComposerMode::Chat;
+        }
+    }
+
+    fn open_session_picker_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
+        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
+        self.open_session_picker(items);
+    }
     fn open_permissions_picker(&mut self) {
         self.modal_picker = Some(PickerState::multi(
             PickerKind::MultiSelect,
@@ -629,17 +666,17 @@ impl App {
                 PickerItem {
                     id: "editing_tools".to_string(),
                     title: "Editing tools".to_string(),
-                    description: "Patch and text-edit tools".to_string(),
-                },
-                PickerItem {
-                    id: "dangerous_commands".to_string(),
-                    title: "Dangerous commands".to_string(),
-                    description: "Shell and external command approvals".to_string(),
+                    description: "Allow file edits and patch application".to_string(),
                 },
                 PickerItem {
                     id: "network_tools".to_string(),
                     title: "Network tools".to_string(),
                     description: "Browser, fetch, and integration calls".to_string(),
+                },
+                PickerItem {
+                    id: "dangerous_commands".to_string(),
+                    title: "Dangerous commands".to_string(),
+                    description: "Shell and destructive command approvals".to_string(),
                 },
             ],
         ));
@@ -658,10 +695,12 @@ impl App {
             .text()
             .strip_prefix('/')
             .unwrap_or_default()
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
             .to_string();
         picker.set_filter(filter);
     }
-
     fn start_file_mention_lookup(&mut self) -> AppAction {
         self.open_file_mention_picker(vec![PickerItem {
             id: String::new(),
@@ -672,6 +711,19 @@ impl App {
             query: self.composer.text().to_string(),
             cursor: self.composer.cursor_char_offset(),
         }
+    }
+
+    fn start_session_lookup(&mut self) -> AppAction {
+        self.modal_picker = Some(PickerState::new(
+            PickerKind::Session,
+            vec![PickerItem {
+                id: String::new(),
+                title: "Loading recent chats…".to_string(),
+                description: "via /v1/trajectories".to_string(),
+            }],
+        ));
+        self.composer_mode = ComposerMode::Chat;
+        AppAction::LoadSessions
     }
 
     fn submit_structured_prompt(&mut self, prompt: &str) -> AppAction {
@@ -713,7 +765,13 @@ impl App {
                 AppAction::None
             }
             (PickerKind::SlashCommand, PickerAccept::Single(Some(item))) => {
-                self.execute_command_name(&item.id)
+                let typed = self.composer.text().trim();
+                let command = if typed.contains(char::is_whitespace) {
+                    typed.to_string()
+                } else {
+                    item.id
+                };
+                self.execute_command_name(&command)
             }
             (PickerKind::FileMention, PickerAccept::Single(Some(item))) => {
                 if item.id.is_empty() {
@@ -723,6 +781,14 @@ impl App {
                         .replace_current_token('@', &format!("@{} ", item.id));
                 }
                 AppAction::None
+            }
+            (PickerKind::Session, PickerAccept::Single(Some(item))) => {
+                if item.id.is_empty() {
+                    self.add_notice("No session selected");
+                    AppAction::None
+                } else {
+                    self.resume_chat(item.id, item.title, Some(item.description))
+                }
             }
             (PickerKind::MultiSelect, PickerAccept::Multi(items)) => {
                 if items.is_empty() {
@@ -744,6 +810,7 @@ impl App {
     }
 
     fn execute_command_name(&mut self, name: &str) -> AppAction {
+        let (name, args) = split_command_name_and_args(name);
         let Some(command) = command_by_name(name) else {
             self.add_notice(format!("/{name} is not registered"));
             return AppAction::None;
@@ -766,7 +833,7 @@ impl App {
                 }
             }
             CommandAction::OpenPicker { picker } => self.execute_picker_command(picker),
-            CommandAction::LocalToggle { toggle } => self.execute_local_toggle(toggle),
+            CommandAction::LocalToggle { toggle } => self.execute_local_toggle(toggle, args),
             CommandAction::ShowInfo { topic } => {
                 self.show_info_topic(topic);
                 AppAction::None
@@ -807,6 +874,7 @@ impl App {
             CommandPicker::Model => AppAction::LoadModels,
             CommandPicker::Mode => AppAction::LoadModes,
             CommandPicker::FileMention => self.start_file_mention_lookup(),
+            CommandPicker::ResumeSession => self.start_session_lookup(),
             CommandPicker::Permissions => {
                 self.open_permissions_picker();
                 AppAction::None
@@ -814,14 +882,24 @@ impl App {
         }
     }
 
-    fn execute_local_toggle(&mut self, toggle: LocalToggle) -> AppAction {
-        self.composer.clear();
+    fn execute_local_toggle(&mut self, toggle: LocalToggle, args: &str) -> AppAction {
         match toggle {
             LocalToggle::NewChat => {
+                self.composer.clear();
                 self.new_chat();
                 AppAction::SubscribeCurrent
             }
+            LocalToggle::ForkChat => {
+                self.composer.clear();
+                self.fork_chat()
+            }
+            LocalToggle::RenameChat => self.rename_chat(args),
+            LocalToggle::ArchiveChat => {
+                self.composer.clear();
+                self.archive_chat()
+            }
             LocalToggle::ClearTranscript => {
+                self.composer.clear();
                 self.replace_with_notice("Transcript cleared".to_string());
                 AppAction::None
             }
@@ -861,6 +939,8 @@ impl App {
         self.server_queue_previews.clear();
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
+        self.session_title = None;
+        self.show_session_header = true;
         self.session_state = SessionState::Idle;
         self.replace_with_notice(format!(
             "Switched to project {} at {}",
@@ -882,10 +962,15 @@ impl App {
 
     fn new_chat(&mut self) {
         self.chat_id = uuid::Uuid::new_v4().to_string();
+        self.session_title = None;
+        self.show_session_header = true;
         self.input_queue.clear();
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
-        self.replace_with_session("New chat started".to_string(), None);
+        self.replace_with_session(
+            "New chat started".to_string(),
+            Some(self.session_header_subtitle()),
+        );
         self.session_state = SessionState::Idle;
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
@@ -894,6 +979,92 @@ impl App {
         self.selected_tool_index = None;
         self.usage = None;
         self.retry_hint = None;
+    }
+
+    fn resume_chat(
+        &mut self,
+        chat_id: String,
+        title: String,
+        subtitle: Option<String>,
+    ) -> AppAction {
+        self.chat_id = chat_id;
+        self.session_title = Some(title.clone());
+        self.show_session_header = true;
+        self.input_queue.clear();
+        self.server_queue_size = 0;
+        self.server_queue_previews.clear();
+        self.model = None;
+        self.mode = None;
+        self.pending_model = None;
+        self.pending_mode = None;
+        self.replace_with_session(format!("Resuming {title}"), subtitle);
+        self.session_state = SessionState::Idle;
+        self.stream_controller.clear();
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
+        self.clear_approvals();
+        self.selected_tool_index = None;
+        self.usage = None;
+        self.retry_hint = None;
+        AppAction::SubscribeCurrent
+    }
+
+    fn fork_chat(&mut self) -> AppAction {
+        let Some(up_to_message_id) = last_branch_message_id(self.transcript_state.messages())
+        else {
+            self.add_notice(
+                "/fork unavailable until the resumed chat snapshot contains message ids",
+            );
+            return AppAction::None;
+        };
+        let source_chat_id = self.chat_id.clone();
+        self.chat_id = uuid::Uuid::new_v4().to_string();
+        self.session_title = self
+            .session_title
+            .as_ref()
+            .map(|title| format!("Fork of {title}"));
+        self.show_session_header = true;
+        self.replace_with_session(
+            "Forking chat…".to_string(),
+            Some(self.session_header_subtitle()),
+        );
+        self.session_state = SessionState::Idle;
+        self.stream_controller.clear();
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
+        self.clear_approvals();
+        self.selected_tool_index = None;
+        self.usage = None;
+        self.retry_hint = None;
+        AppAction::ForkChat {
+            source_chat_id,
+            up_to_message_id,
+        }
+    }
+
+    fn rename_chat(&mut self, args: &str) -> AppAction {
+        if !args.is_empty() {
+            self.composer.set_text(args);
+        }
+        let title = self.composer.text().trim().to_string();
+        self.composer.clear();
+        if title.is_empty() {
+            self.add_notice("/rename needs the new title in the composer first");
+            return AppAction::None;
+        }
+        self.session_title = Some(title.clone());
+        self.show_session_header = true;
+        self.add_notice(format!("Renaming chat to {title}"));
+        AppAction::SetParams {
+            patch: json!({"title": title, "is_title_generated": false}),
+        }
+    }
+
+    fn archive_chat(&mut self) -> AppAction {
+        let chat_id = self.chat_id.clone();
+        self.add_notice("Archiving current chat from recent sessions");
+        self.new_chat();
+        AppAction::ArchiveChat { chat_id }
     }
 
     fn submit_composer(&mut self) -> Option<AppAction> {
@@ -1107,6 +1278,27 @@ impl App {
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.push_history_item(TranscriptItem::Session { title, subtitle });
+    }
+
+    fn session_header_title(&self) -> String {
+        self.session_title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "New chat".to_string())
+    }
+
+    fn push_session_header(&mut self) {
+        self.push_history_item(TranscriptItem::Session {
+            title: self.session_header_title(),
+            subtitle: Some(self.session_header_subtitle()),
+        });
+    }
+
+    fn session_header_item(&self) -> TranscriptItem {
+        TranscriptItem::Session {
+            title: self.session_header_title(),
+            subtitle: Some(self.session_header_subtitle()),
+        }
     }
 
     fn rebuild_render_transcript_from_state(&mut self) {
@@ -1333,6 +1525,13 @@ impl App {
 
     fn handle_snapshot(&mut self, raw: &Value) {
         if let Some(thread) = raw.get("thread") {
+            if let Some(title) = thread
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                self.session_title = Some(title.to_string());
+            }
             self.model = thread
                 .get("model")
                 .and_then(Value::as_str)
@@ -1346,10 +1545,14 @@ impl App {
         }
         if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
             self.transcript_state.reset_from_messages(messages);
+            let include_header = self.show_session_header || self.session_title.is_some();
             if self.native_scrollback {
                 self.rendered_state_cursor = 0;
                 let rendered_before = self.rendered_state_keys.len();
                 let messages = self.transcript_state.messages().to_vec();
+                if include_header && self.rendered_state_cursor == 0 {
+                    self.push_session_header();
+                }
                 for message in &messages {
                     self.append_render_message(message);
                 }
@@ -1357,9 +1560,15 @@ impl App {
                     .truncate(self.rendered_state_cursor);
                 if self.rendered_state_cursor < rendered_before {
                     self.rebuild_render_transcript_from_state();
+                    if include_header {
+                        self.transcript.insert(0, self.session_header_item());
+                    }
                 }
             } else {
                 self.rebuild_render_transcript_from_state();
+                if include_header {
+                    self.transcript.insert(0, self.session_header_item());
+                }
             }
         }
         if let Some(runtime) = raw.get("runtime") {
@@ -2281,6 +2490,7 @@ pub enum AppAction {
         query: String,
         cursor: i64,
     },
+    LoadSessions,
     RefreshWorkers,
     OpenProject(PathBuf),
     SubscribeCurrent,
@@ -2290,6 +2500,13 @@ pub enum AppAction {
     },
     SetParams {
         patch: Value,
+    },
+    ForkChat {
+        source_chat_id: String,
+        up_to_message_id: String,
+    },
+    ArchiveChat {
+        chat_id: String,
     },
     LoadDiff {
         root: PathBuf,
@@ -2345,6 +2562,7 @@ enum RuntimeEvent {
     ModelsLoaded(Result<Value, String>),
     ModesLoaded(Result<Value, String>),
     FileMentionsLoaded(Result<Vec<String>, String>),
+    SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
     DiffLoaded(Result<String, String>),
@@ -2586,6 +2804,14 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 app.add_notice(format!("Failed to load file mentions: {error}"));
                 app.open_file_mention_picker(Vec::new());
             }
+            RuntimeEvent::SessionsLoaded(Ok(trajectories)) => {
+                app.open_session_picker_from_trajectories(trajectories)
+            }
+            RuntimeEvent::SessionsLoaded(Err(error)) => {
+                app.retry_hint = retry_hint_from_message(&error);
+                app.add_notice(format!("Failed to load recent chats: {error}"));
+                app.open_session_picker(Vec::new());
+            }
             RuntimeEvent::WorkersLoaded(Ok(workers)) => app.set_workers(workers),
             RuntimeEvent::WorkersLoaded(Err(error)) => {
                 if app.events_pane.open {
@@ -2689,6 +2915,19 @@ async fn run_action(
                 });
             }
         }
+        AppAction::LoadSessions => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .list_trajectories(&project_id, 50)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::SessionsLoaded(result)).await;
+                });
+            }
+        }
         AppAction::RefreshWorkers => refresh_workers(client.clone(), tx.clone()),
         AppAction::OpenProject(root) => {
             let client = client.clone();
@@ -2742,6 +2981,56 @@ async fn run_action(
                 tokio::spawn(async move {
                     let result = client
                         .send_set_params(&project_id, &chat_id, patch)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                });
+            }
+        }
+        AppAction::ForkChat {
+            source_chat_id,
+            up_to_message_id,
+        } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let client = client.clone();
+                let tx = tx.clone();
+                app.begin_subscription_attempt();
+                subscriptions.subscribe(
+                    client.clone(),
+                    project_id.clone(),
+                    chat_id.clone(),
+                    tx.clone(),
+                );
+                tokio::spawn(async move {
+                    let result = client
+                        .send_branch_from_chat(
+                            &project_id,
+                            &chat_id,
+                            &source_chat_id,
+                            &up_to_message_id,
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                });
+            }
+        }
+        AppAction::ArchiveChat { chat_id } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let new_chat_id = app.chat_id().to_string();
+                let client = client.clone();
+                let tx = tx.clone();
+                app.begin_subscription_attempt();
+                subscriptions.subscribe(
+                    client.clone(),
+                    project_id.clone(),
+                    new_chat_id,
+                    tx.clone(),
+                );
+                tokio::spawn(async move {
+                    let result = client
+                        .delete_trajectory(&project_id, &chat_id)
                         .await
                         .map_err(|error| error.to_string());
                     let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
@@ -3082,6 +3371,17 @@ fn event_subkind(message: &TranscriptMessage) -> Option<&str> {
         .get("event")
         .and_then(|event| event.get("subkind"))
         .and_then(Value::as_str)
+}
+
+fn split_command_name_and_args(input: &str) -> (&str, &str) {
+    let input = input.trim().trim_start_matches('/').trim_start();
+    match input.find(char::is_whitespace) {
+        Some(index) => {
+            let (name, args) = input.split_at(index);
+            (name, args.trim())
+        }
+        None => (input, ""),
+    }
 }
 
 fn notice_transcript_state(text: String) -> TranscriptState {
@@ -3790,6 +4090,73 @@ mod tests {
             AppAction::LoadDiff {
                 root: PathBuf::from("/tmp/demo")
             }
+        );
+    }
+
+    #[test]
+    fn resume_picker_accept_switches_chat_and_requests_snapshot() {
+        let mut app = App::new(project());
+        let previous = app.chat_id().to_string();
+        app.open_session_picker(vec![PickerItem {
+            id: "chat-resume".to_string(),
+            title: "Saved chat".to_string(),
+            description: "1h ago · gpt-demo · agent".to_string(),
+        }]);
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SubscribeCurrent
+        );
+
+        assert_eq!(app.chat_id(), "chat-resume");
+        assert_ne!(app.chat_id(), previous);
+        assert_eq!(app.session_title(), Some("Saved chat"));
+        assert!(matches!(
+            app.visible_transcript().first(),
+            Some(TranscriptItem::Session { title, .. }) if title == "Resuming Saved chat"
+        ));
+    }
+
+    #[test]
+    fn fork_command_emits_branch_from_chat_action() {
+        let mut app = App::new(project());
+        let source = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(source.clone()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"id": source, "title": "Base", "model": "gpt-demo", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "hello"},
+                {"message_id": "a1", "role": "assistant", "content": "hi"}
+            ]}),
+        });
+
+        let action = app.execute_command_name("fork");
+
+        assert!(matches!(
+            action,
+            AppAction::ForkChat { source_chat_id, up_to_message_id }
+                if source_chat_id == source && up_to_message_id == "a1"
+        ));
+        assert_ne!(app.chat_id(), source);
+    }
+
+    #[test]
+    fn rename_and_archive_commands_emit_session_actions() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+
+        assert_eq!(
+            app.execute_command_name("rename Better title"),
+            AppAction::SetParams {
+                patch: json!({"title": "Better title", "is_title_generated": false})
+            }
+        );
+        assert_eq!(app.session_title(), Some("Better title"));
+
+        assert_eq!(
+            app.execute_command_name("archive"),
+            AppAction::ArchiveChat { chat_id }
         );
     }
 

@@ -432,7 +432,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let lines = vec![
         Line::from("Enter send · Shift-Enter newline · Esc cancel/close"),
         Line::from("During generation: Enter queues · empty Up selects queue · Enter edits · Delete removes"),
-        Line::from("Ctrl-N new chat · Ctrl-P projects · Ctrl-M models · Ctrl-O modes"),
+        Line::from("Ctrl-N new chat · /resume sessions · /fork branch · /rename title · /archive remove"),
+        Line::from("Ctrl-P projects · Ctrl-M models · Ctrl-O modes"),
         Line::from("F2 daemon events/workers · Tab select next tool · Enter/Space expand tool"),
         Line::from("Approvals: y approve once · a approve for chat · n reject · v details · Esc back"),
         Line::from("Ctrl-R toggle reasoning · PageUp/PageDown scroll · Ctrl-Q quit"),
