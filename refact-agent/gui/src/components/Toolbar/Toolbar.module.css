@@ -10,8 +10,8 @@
   overflow: hidden;
   color: var(--rf-color-fg);
   background: var(--rf-surface-glass);
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
-  box-shadow: var(--rf-elev-panel);
+  border-bottom: 0;
+  box-shadow: none;
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
