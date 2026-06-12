@@ -253,7 +253,7 @@ pub struct OpenRequest {
     #[serde(default)]
     pub client_kind: Option<String>,
     #[serde(default)]
-    settings: Option<ProjectSettings>,
+    pub settings: Option<ProjectSettings>,
 }
 
 #[derive(Deserialize)]
@@ -273,7 +273,10 @@ pub async fn open_project(
     };
     let entry = {
         let mut registry = state.projects.write().await;
-        match registry.open_with_settings(root, request.settings).await {
+        match registry
+            .open_with_settings(root, request.settings.clone())
+            .await
+        {
             Ok(entry) => entry,
             Err(error) => {
                 return (
@@ -585,38 +588,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_with_settings_updates_existing_entry() {
+    async fn open_with_settings_overrides_existing_entry() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("proj");
         std::fs::create_dir_all(&root).unwrap();
-
-        let mut reg = make_registry(&dir);
         let settings = ProjectSettings {
             ast: false,
-            vecdb: true,
-            ast_max_files: 12,
-            vecdb_max_files: 34,
-        };
-        let e1 = reg
-            .open_with_settings(root.clone(), Some(settings.clone()))
-            .await
-            .unwrap();
-        assert_eq!(e1.settings, settings);
-
-        let updated = ProjectSettings {
-            ast: true,
             vecdb: false,
-            ast_max_files: 56,
-            vecdb_max_files: 78,
+            ast_max_files: 7,
+            vecdb_max_files: 8,
         };
-        let e2 = reg
-            .open_with_settings(root.clone(), Some(updated.clone()))
+
+        let mut reg = make_registry(&dir);
+        let original = reg.open(root.clone()).await.unwrap();
+        assert_eq!(original.settings, ProjectSettings::default());
+        let updated = reg
+            .open_with_settings(root, Some(settings.clone()))
             .await
             .unwrap();
 
-        assert_eq!(e1.id, e2.id);
-        assert_eq!(e2.settings, updated);
-        assert_eq!(reg.list().len(), 1);
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.settings, settings);
+        assert_eq!(reg.list()[0].settings, settings);
     }
 
     #[tokio::test]
@@ -643,16 +636,8 @@ mod tests {
 
         let router = crate::daemon::server::make_router(state.clone(), 8488);
 
-        let body = serde_json::to_vec(&serde_json::json!({
-            "root": proj.to_str().unwrap(),
-            "settings": {
-                "ast": false,
-                "vecdb": true,
-                "ast_max_files": 123,
-                "vecdb_max_files": 456,
-            }
-        }))
-        .unwrap();
+        let body =
+            serde_json::to_vec(&serde_json::json!({"root": proj.to_str().unwrap()})).unwrap();
         let resp = router
             .clone()
             .oneshot(
@@ -686,10 +671,6 @@ mod tests {
         let bytes = hyper::body::to_bytes(list_resp.into_body()).await.unwrap();
         let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0]["settings"]["ast"], false);
-        assert_eq!(list[0]["settings"]["vecdb"], true);
-        assert_eq!(list[0]["settings"]["ast_max_files"], 123);
-        assert_eq!(list[0]["settings"]["vecdb_max_files"], 456);
 
         let get_resp = router
             .clone()

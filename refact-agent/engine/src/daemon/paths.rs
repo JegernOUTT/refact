@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub const DAEMON_DIR_ENV: &str = "REFACT_DAEMON_DIR";
+
 fn home_dir() -> PathBuf {
     home::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
@@ -20,8 +22,14 @@ fn daemon_config_root() -> PathBuf {
     home_dir().join(".config").join("refact")
 }
 
+fn daemon_dir_override() -> Option<PathBuf> {
+    std::env::var_os(DAEMON_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn daemon_dir() -> PathBuf {
-    daemon_cache_root().join("daemon")
+    daemon_dir_override().unwrap_or_else(|| daemon_cache_root().join("daemon"))
 }
 
 pub fn lock_path() -> PathBuf {
@@ -53,5 +61,7 @@ pub fn projects_json_path() -> PathBuf {
 }
 
 pub fn daemon_config_path() -> PathBuf {
-    daemon_config_root().join("daemon.yaml")
+    daemon_dir_override()
+        .map(|path| path.join("daemon.yaml"))
+        .unwrap_or_else(|| daemon_config_root().join("daemon.yaml"))
 }
