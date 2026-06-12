@@ -153,7 +153,7 @@
     visibility 0s linear;
 }
 
-.controlsSwapItem > span {
+:where(.controlsSwapItem > span) {
   display: inline-flex;
   min-width: 0;
   flex-shrink: 0;
@@ -277,17 +277,18 @@
   margin-left: auto;
 }
 
-.topStatusControls > span,
-.bottomActionControls > span,
-.bottomModelControl,
-.bottomModeControl,
-.bottomWorkspaceControl {
+:where(
+    .topStatusControls > span,
+    .bottomActionControls > span,
+    .bottomModelControl,
+    .bottomModeControl,
+    .bottomWorkspaceControl
+  ) {
   display: inline-flex;
   min-width: 0;
 }
 
-.topStatusControls > span,
-.bottomActionControls > span {
+:where(.topStatusControls > span, .bottomActionControls > span) {
   flex-shrink: 0;
 }
 

@@ -1,4 +1,6 @@
 import React from "react";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen } from "@testing-library/react";
@@ -495,6 +497,27 @@ describe("ChatForm", () => {
       );
     });
     expect(form.className).toContain("chatFormCollapsed");
+  });
+
+  test("control display rules stay zero-specificity so container-query hiding wins", async () => {
+    const css = await readFile(
+      resolve(process.cwd(), "src", "components/ChatForm/ChatForm.module.css"),
+      "utf8",
+    );
+
+    // Plain `.x > span { display: inline-flex }` (0,1,1) outranks the
+    // `@container ... .hideActionFirst { display: none }` (0,1,0) hide rules,
+    // which silently disables responsive hiding and crushes/overlaps the
+    // bottom controls on narrow hosts. The display rules must stay wrapped
+    // in :where() to keep zero specificity.
+    expect(css).toMatch(
+      /:where\(\s*\.topStatusControls > span,\s*\.bottomActionControls > span,\s*\.bottomModelControl,\s*\.bottomModeControl,\s*\.bottomWorkspaceControl\s*\)\s*\{\s*display: inline-flex;/,
+    );
+    expect(css).toMatch(
+      /:where\(\.controlsSwapItem > span\)\s*\{\s*display: inline-flex;/,
+    );
+    expect(css).not.toMatch(/^\s*\.controlsSwapItem > span\s*\{/m);
+    expect(css).not.toMatch(/^\.topStatusControls > span,/m);
   });
 
   test.each([
