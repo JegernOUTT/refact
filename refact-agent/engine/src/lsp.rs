@@ -436,10 +436,14 @@ impl LanguageServer for LspBackend {
         else {
             return;
         };
+        let Some(first_change) = params.content_changes.first() else {
+            info!("did_change ignored notification with empty content_changes");
+            return;
+        };
         on_did_change(
             self.gcx.clone(),
             &path,
-            &params.content_changes[0].text, // TODO: This text could be just a part of the whole file (if range is not none)
+            &first_change.text, // TODO: This text could be just a part of the whole file (if range is not none)
         )
         .await
     }

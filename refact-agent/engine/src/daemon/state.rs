@@ -488,12 +488,9 @@ pub async fn write_daemon_info_atomic(path: &Path, info: &DaemonInfo) -> Result<
     tokio::fs::write(&tmp, content)
         .await
         .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
-    #[cfg(windows)]
-    match tokio::fs::remove_file(path).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("failed to replace {}: {error}", path.display())),
-    }
+    // std::fs::rename replaces existing destinations on all supported platforms
+    // (Windows: MoveFileExW with MOVEFILE_REPLACE_EXISTING), so no pre-remove is
+    // needed and the daemon.json never has a missing-file window.
     tokio::fs::rename(&tmp, path)
         .await
         .map_err(|error| format!("failed to publish {}: {error}", path.display()))?;
