@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use refact_tui::client::{
     discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, DaemonClient,
-    ToolDecision,
+    ChatSeqDecision, ChatSeqTracker, ToolDecision,
 };
 use serde_json::{json, Value};
 
@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 struct State {
     commands: Arc<(Mutex<Vec<Value>>, Condvar)>,
     authorizations: Arc<(Mutex<Vec<Option<String>>>, Condvar)>,
+    chat_script: Arc<Mutex<Option<Vec<Value>>>>,
 }
 
 impl State {
@@ -27,6 +28,16 @@ impl State {
         let (lock, cond) = &*self.authorizations;
         lock.lock().unwrap().push(authorization);
         cond.notify_all();
+    }
+
+    fn with_chat_script(events: Vec<Value>) -> Self {
+        let state = Self::default();
+        *state.chat_script.lock().unwrap() = Some(events);
+        state
+    }
+
+    fn chat_script(&self) -> Option<Vec<Value>> {
+        self.chat_script.lock().unwrap().clone()
     }
 
     fn wait_for_tool_decisions(&self) -> bool {
@@ -209,6 +220,82 @@ async fn corrupt_daemon_info_surfaces_visible_notice() {
     assert!(notice.contains("expected ident"));
 }
 
+#[tokio::test]
+async fn fake_stream_seq_gap_triggers_recovery_without_applying_gap_delta() {
+    let state = State::with_chat_script(vec![
+        json!({"chat_id": "chat-1", "seq": "0", "type": "snapshot", "thread": {"id": "chat-1", "model": "", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        json!({"chat_id": "chat-1", "seq": "1", "type": "stream_started"}),
+        json!({"chat_id": "chat-1", "seq": "2", "type": "stream_delta", "ops": [{"op": "append_content", "text": "kept"}]}),
+        json!({"chat_id": "chat-1", "seq": "4", "type": "stream_delta", "ops": [{"op": "append_content", "text": "dropped"}]}),
+    ]);
+    let base_url = spawn_server(state).await;
+    let client = DaemonClient::new(base_url, None).unwrap();
+    let mut stream = client.subscribe_chat("p1", "chat-1").await.unwrap();
+    let mut tracker = ChatSeqTracker::new();
+    let mut content = String::new();
+    let mut recovery = None;
+
+    while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        let event = event.unwrap();
+        match tracker.observe(&event) {
+            ChatSeqDecision::Apply => {
+                if event.kind == "stream_delta" {
+                    for op in event.raw["ops"].as_array().unwrap() {
+                        if op["op"] == "append_content" {
+                            content.push_str(op["text"].as_str().unwrap());
+                        }
+                    }
+                }
+            }
+            ChatSeqDecision::Resubscribe(message) => {
+                recovery = Some(message);
+                break;
+            }
+        }
+    }
+
+    assert_eq!(content, "kept");
+    assert!(recovery.unwrap().contains("expected 3, got 4"));
+}
+
+#[tokio::test]
+async fn duplicate_seq_triggers_recovery_without_duplicate_content() {
+    let state = State::with_chat_script(vec![
+        json!({"chat_id": "chat-1", "seq": "0", "type": "snapshot", "thread": {"id": "chat-1", "model": "", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        json!({"chat_id": "chat-1", "seq": "1", "type": "stream_started"}),
+        json!({"chat_id": "chat-1", "seq": "2", "type": "stream_delta", "ops": [{"op": "append_content", "text": "once"}]}),
+        json!({"chat_id": "chat-1", "seq": "2", "type": "stream_delta", "ops": [{"op": "append_content", "text": "twice"}]}),
+    ]);
+    let base_url = spawn_server(state).await;
+    let client = DaemonClient::new(base_url, None).unwrap();
+    let mut stream = client.subscribe_chat("p1", "chat-1").await.unwrap();
+    let mut tracker = ChatSeqTracker::new();
+    let mut content = String::new();
+    let mut recovery = None;
+
+    while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        let event = event.unwrap();
+        match tracker.observe(&event) {
+            ChatSeqDecision::Apply => {
+                if event.kind == "stream_delta" {
+                    for op in event.raw["ops"].as_array().unwrap() {
+                        if op["op"] == "append_content" {
+                            content.push_str(op["text"].as_str().unwrap());
+                        }
+                    }
+                }
+            }
+            ChatSeqDecision::Resubscribe(message) => {
+                recovery = Some(message);
+                break;
+            }
+        }
+    }
+
+    assert_eq!(content, "once");
+    assert!(recovery.unwrap().contains("expected 3, got 2"));
+}
+
 async fn spawn_server(state: State) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -298,7 +385,11 @@ fn handle_connection(mut stream: TcpStream, state: State) {
         state.record_command(command);
         write_json(&mut stream, json!({"status": "accepted"}));
     } else if method == "GET" && path.contains("/chats/subscribe") {
-        write_chat_sse(&mut stream, &state);
+        if let Some(events) = state.chat_script() {
+            write_chat_script_sse(&mut stream, &events);
+        } else {
+            write_chat_sse(&mut stream, &state);
+        }
     } else if method == "GET" && path.ends_with("/v1/caps") {
         write_json(
             &mut stream,
@@ -350,6 +441,13 @@ fn write_sse_headers(stream: &mut TcpStream) {
 fn write_sse_event(stream: &mut TcpStream, value: &Value) {
     write_sse_headers(stream);
     write_sse_data(stream, value);
+}
+
+fn write_chat_script_sse(stream: &mut TcpStream, events: &[Value]) {
+    write_sse_headers(stream);
+    for event in events {
+        write_sse_data(stream, event);
+    }
 }
 
 fn write_chat_sse(stream: &mut TcpStream, state: &State) {

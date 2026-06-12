@@ -5,10 +5,12 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::approvals::{ApprovalKeyAction, ApprovalModalState};
 use crate::client::{
-    ChatEvent, DaemonClient, OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
+    ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ProjectEntry,
+    ToolDecision, WorkerInfo,
 };
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
@@ -28,6 +30,7 @@ const PATCH_LIKE_FUNCTIONS: &[&str] = &[
     "apply_patch",
     "undo_textdoc",
 ];
+const CHAT_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -1098,8 +1101,10 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
 enum RuntimeEvent {
     Input(Event),
     Tick,
-    Chat(ChatEvent),
-    ChatDisconnected(String),
+    Chat { generation: u64, event: ChatEvent },
+    ChatResubscribe { generation: u64, message: String },
+    ChatDisconnected { generation: u64, message: String },
+    InputError(String),
     DaemonEvent(DaemonEventRecord),
     DaemonEventsDisconnected(String),
     ProjectsLoaded(Result<Vec<ProjectEntry>, String>),
@@ -1108,6 +1113,103 @@ enum RuntimeEvent {
     ModesLoaded(Result<Value, String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
+}
+
+#[derive(Debug, Default)]
+struct SubscriptionManager {
+    generation: u64,
+    current: Option<SubscriptionTask>,
+}
+
+#[derive(Debug)]
+struct SubscriptionTask {
+    generation: u64,
+    project_id: String,
+    chat_id: String,
+    join: JoinHandle<()>,
+}
+
+impl SubscriptionManager {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn subscribe(
+        &mut self,
+        client: DaemonClient,
+        project_id: String,
+        chat_id: String,
+        tx: mpsc::Sender<RuntimeEvent>,
+    ) {
+        self.start(client, project_id, chat_id, tx, Duration::ZERO);
+    }
+
+    fn reconnect_current(&mut self, client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+        let Some(current) = &self.current else {
+            return;
+        };
+        self.start(
+            client,
+            current.project_id.clone(),
+            current.chat_id.clone(),
+            tx,
+            CHAT_RECONNECT_BACKOFF,
+        );
+    }
+
+    fn abort_current(&mut self) {
+        if let Some(current) = self.current.take() {
+            current.join.abort();
+        }
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|current| current.generation == generation)
+    }
+
+    fn apply_chat_event(&self, app: &mut App, generation: u64, event: ChatEvent) -> bool {
+        if self.is_current(generation) {
+            app.handle_chat_event(event);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn start(
+        &mut self,
+        client: DaemonClient,
+        project_id: String,
+        chat_id: String,
+        tx: mpsc::Sender<RuntimeEvent>,
+        initial_delay: Duration,
+    ) {
+        self.abort_current();
+        self.generation = self.generation.wrapping_add(1).max(1);
+        let generation = self.generation;
+        let join = spawn_subscription_task(
+            client,
+            project_id.clone(),
+            chat_id.clone(),
+            tx,
+            generation,
+            initial_delay,
+        );
+        self.current = Some(SubscriptionTask {
+            generation,
+            project_id,
+            chat_id,
+            join,
+        });
+    }
+}
+
+impl Drop for SubscriptionManager {
+    fn drop(&mut self) {
+        self.abort_current();
+    }
 }
 
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
@@ -1132,12 +1234,13 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let mut app = App::new(project);
     let mut terminal = TerminalSession::start()?;
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
+    let mut subscriptions = SubscriptionManager::new();
     spawn_input_task(tx.clone());
     spawn_tick_task(tx.clone());
     spawn_daemon_events_task(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
     if let Some(project_id) = app.current_project_id() {
-        spawn_subscription_task(
+        subscriptions.subscribe(
             client.clone(),
             project_id.to_string(),
             app.chat_id().to_string(),
@@ -1158,15 +1261,34 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         match event {
             RuntimeEvent::Input(Event::Key(key)) => {
                 let action = app.handle_key(key);
-                run_action(&mut app, action, &client, &tx);
+                run_action(&mut app, action, &client, &tx, &mut subscriptions);
             }
             RuntimeEvent::Input(Event::Resize(_, _)) | RuntimeEvent::Tick => {}
             RuntimeEvent::Input(_) => {}
-            RuntimeEvent::Chat(event) => app.handle_chat_event(event),
-            RuntimeEvent::ChatDisconnected(message) => {
+            RuntimeEvent::Chat { generation, event } => {
+                subscriptions.apply_chat_event(&mut app, generation, event);
+            }
+            RuntimeEvent::ChatResubscribe {
+                generation,
+                message,
+            } => {
+                if subscriptions.is_current(generation) {
+                    app.add_notice(format!("SSE resync: {message}"));
+                    subscriptions.reconnect_current(client.clone(), tx.clone());
+                }
+            }
+            RuntimeEvent::ChatDisconnected {
+                generation,
+                message,
+            } => {
+                if !subscriptions.is_current(generation) {
+                    continue;
+                }
                 app.daemon_online = false;
                 app.add_notice(format!("SSE disconnected: {message}; reconnecting…"));
+                subscriptions.reconnect_current(client.clone(), tx.clone());
             }
+            RuntimeEvent::InputError(message) => app.add_notice(format!("Input error: {message}")),
             RuntimeEvent::DaemonEvent(event) => app.push_daemon_event(event),
             RuntimeEvent::DaemonEventsDisconnected(message) => {
                 app.add_notice(format!(
@@ -1180,7 +1302,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::ProjectOpened(Ok(project)) => {
                 app.set_project(project);
                 if let Some(project_id) = app.current_project_id() {
-                    spawn_subscription_task(
+                    subscriptions.subscribe(
                         client.clone(),
                         project_id.to_string(),
                         app.chat_id().to_string(),
@@ -1219,6 +1341,7 @@ fn run_action(
     action: AppAction,
     client: &DaemonClient,
     tx: &mpsc::Sender<RuntimeEvent>,
+    subscriptions: &mut SubscriptionManager,
 ) {
     match action {
         AppAction::None => {}
@@ -1273,7 +1396,7 @@ fn run_action(
         }
         AppAction::SubscribeCurrent => {
             if let Some(project_id) = app.current_project_id() {
-                spawn_subscription_task(
+                subscriptions.subscribe(
                     client.clone(),
                     project_id.to_string(),
                     app.chat_id().to_string(),
@@ -1352,9 +1475,7 @@ fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) {
                 }
                 Err(error) => {
                     if tx
-                        .send(RuntimeEvent::ChatDisconnected(format!(
-                            "input error: {error}"
-                        )))
+                        .send(RuntimeEvent::InputError(error.to_string()))
                         .await
                         .is_err()
                     {
@@ -1446,44 +1567,66 @@ fn spawn_subscription_task(
     project_id: String,
     chat_id: String,
     tx: mpsc::Sender<RuntimeEvent>,
-) {
+    generation: u64,
+    initial_delay: Duration,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            match client.subscribe_chat(&project_id, &chat_id).await {
-                Ok(mut stream) => {
-                    while let Some(event) = stream.next().await {
-                        match event {
-                            Ok(event) => {
-                                if tx.send(RuntimeEvent::Chat(event)).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(error) => {
+        if !initial_delay.is_zero() {
+            tokio::time::sleep(initial_delay).await;
+        }
+        match client.subscribe_chat(&project_id, &chat_id).await {
+            Ok(mut stream) => {
+                let mut seq = ChatSeqTracker::new();
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Ok(event) => match seq.observe(&event) {
+                            ChatSeqDecision::Apply => {
                                 if tx
-                                    .send(RuntimeEvent::ChatDisconnected(error.to_string()))
+                                    .send(RuntimeEvent::Chat { generation, event })
                                     .await
                                     .is_err()
                                 {
                                     return;
                                 }
-                                break;
                             }
+                            ChatSeqDecision::Resubscribe(message) => {
+                                let _ = tx
+                                    .send(RuntimeEvent::ChatResubscribe {
+                                        generation,
+                                        message,
+                                    })
+                                    .await;
+                                return;
+                            }
+                        },
+                        Err(error) => {
+                            let _ = tx
+                                .send(RuntimeEvent::ChatDisconnected {
+                                    generation,
+                                    message: error.to_string(),
+                                })
+                                .await;
+                            return;
                         }
                     }
                 }
-                Err(error) => {
-                    if tx
-                        .send(RuntimeEvent::ChatDisconnected(error.to_string()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
+                let _ = tx
+                    .send(RuntimeEvent::ChatDisconnected {
+                        generation,
+                        message: "stream ended".to_string(),
+                    })
+                    .await;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(error) => {
+                let _ = tx
+                    .send(RuntimeEvent::ChatDisconnected {
+                        generation,
+                        message: error.to_string(),
+                    })
+                    .await;
+            }
         }
-    });
+    })
 }
 
 fn content_text(message: &Value) -> Option<String> {
@@ -1537,6 +1680,27 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    fn chat_event(app: &App, seq: u64, kind: &str, raw: Value) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: Some(seq),
+            kind: kind.to_string(),
+            raw,
+        }
+    }
+
+    fn apply_tracked(
+        app: &mut App,
+        tracker: &mut ChatSeqTracker,
+        event: ChatEvent,
+    ) -> ChatSeqDecision {
+        let decision = tracker.observe(&event);
+        if decision == ChatSeqDecision::Apply {
+            app.handle_chat_event(event);
+        }
+        decision
+    }
+
     #[test]
     fn app_submits_message_and_streams_answer() {
         let mut app = App::new(project());
@@ -1549,6 +1713,7 @@ mod tests {
         assert_eq!(app.session_state(), SessionState::Generating);
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
+            seq: None,
             kind: "stream_delta".to_string(),
             raw: json!({"ops": [{"op": "append_content", "text": "hi"}]}),
         });
@@ -1557,6 +1722,7 @@ mod tests {
         );
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
+            seq: None,
             kind: "stream_finished".to_string(),
             raw: json!({}),
         });
@@ -1614,6 +1780,7 @@ mod tests {
         let chat_id = app.chat_id().to_string();
         app.handle_chat_event(ChatEvent {
             chat_id: Some(chat_id),
+            seq: None,
             kind: "pause_required".to_string(),
             raw: json!({"reasons": [{"type": "confirmation", "tool_name": "shell", "command": "echo hi", "rule": "*", "tool_call_id": "call-1"}]}),
         });
@@ -1669,5 +1836,140 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn seq_gap_requests_resubscribe_before_gap_delta_applies() {
+        let mut app = App::new(project());
+        let mut tracker = ChatSeqTracker::new();
+        let snapshot = chat_event(
+            &app,
+            0,
+            "snapshot",
+            json!({"thread": {"model": "", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        );
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, snapshot),
+            ChatSeqDecision::Apply
+        );
+        let started = chat_event(&app, 1, "stream_started", json!({}));
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, started),
+            ChatSeqDecision::Apply
+        );
+        let kept = chat_event(
+            &app,
+            2,
+            "stream_delta",
+            json!({"ops": [{"op": "append_content", "text": "kept"}]}),
+        );
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, kept),
+            ChatSeqDecision::Apply
+        );
+        let dropped = chat_event(
+            &app,
+            4,
+            "stream_delta",
+            json!({"ops": [{"op": "append_content", "text": "dropped"}]}),
+        );
+        let decision = apply_tracked(&mut app, &mut tracker, dropped);
+        assert!(matches!(decision, ChatSeqDecision::Resubscribe(_)));
+        assert!(
+            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "kept")
+        );
+    }
+
+    #[test]
+    fn duplicate_seq_does_not_duplicate_transcript_content() {
+        let mut app = App::new(project());
+        let mut tracker = ChatSeqTracker::new();
+        let snapshot = chat_event(
+            &app,
+            0,
+            "snapshot",
+            json!({"thread": {"model": "", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        );
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, snapshot),
+            ChatSeqDecision::Apply
+        );
+        let started = chat_event(&app, 1, "stream_started", json!({}));
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, started),
+            ChatSeqDecision::Apply
+        );
+        let delta = json!({"ops": [{"op": "append_content", "text": "once"}]});
+        let first = chat_event(&app, 2, "stream_delta", delta.clone());
+        assert_eq!(
+            apply_tracked(&mut app, &mut tracker, first),
+            ChatSeqDecision::Apply
+        );
+        let duplicate = chat_event(&app, 2, "stream_delta", delta);
+        let decision = apply_tracked(&mut app, &mut tracker, duplicate);
+        assert!(matches!(decision, ChatSeqDecision::Resubscribe(_)));
+        assert!(
+            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "once")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_subscription_generation_is_ignored() {
+        let mut app = App::new(project());
+        let mut subscriptions = SubscriptionManager::new();
+        let join = tokio::spawn(async { futures::future::pending::<()>().await });
+        subscriptions.current = Some(SubscriptionTask {
+            generation: 2,
+            project_id: "p2".to_string(),
+            chat_id: app.chat_id().to_string(),
+            join,
+        });
+        let stale = chat_event(
+            &app,
+            1,
+            "stream_delta",
+            json!({"ops": [{"op": "append_content", "text": "stale"}]}),
+        );
+        assert!(!subscriptions.apply_chat_event(&mut app, 1, stale));
+        assert!(matches!(
+            app.visible_transcript(),
+            [TranscriptItem::Notice(_)]
+        ));
+        let fresh = chat_event(
+            &app,
+            1,
+            "stream_delta",
+            json!({"ops": [{"op": "append_content", "text": "fresh"}]}),
+        );
+        assert!(subscriptions.apply_chat_event(&mut app, 2, fresh));
+        assert!(
+            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "fresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_switch_aborts_prior_task() {
+        let mut subscriptions = SubscriptionManager::new();
+        subscriptions.generation = 1;
+        let join = tokio::spawn(async { futures::future::pending::<()>().await });
+        let abort = join.abort_handle();
+        subscriptions.current = Some(SubscriptionTask {
+            generation: 1,
+            project_id: "p1".to_string(),
+            chat_id: "c1".to_string(),
+            join,
+        });
+        let client = DaemonClient::new("http://127.0.0.1:1", None).unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        subscriptions.subscribe(client, "p2".to_string(), "c2".to_string(), tx);
+        for _ in 0..10 {
+            if abort.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(abort.is_finished());
+        assert!(subscriptions.is_current(2));
+        subscriptions.abort_current();
     }
 }

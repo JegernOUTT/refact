@@ -3,7 +3,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use eventsource_stream::Eventsource;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -118,8 +117,57 @@ pub struct WorkerInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatEvent {
     pub chat_id: Option<String>,
+    pub seq: Option<u64>,
     pub kind: String,
     pub raw: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSeqDecision {
+    Apply,
+    Resubscribe(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatSeqTracker {
+    last_seq: Option<u64>,
+}
+
+impl ChatSeqTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        self.last_seq = None;
+    }
+
+    pub fn observe(&mut self, event: &ChatEvent) -> ChatSeqDecision {
+        let Some(seq) = event.seq else {
+            return ChatSeqDecision::Resubscribe(format!(
+                "missing SSE seq for {} event",
+                event.kind
+            ));
+        };
+        if event.kind == "snapshot" {
+            self.last_seq = Some(seq);
+            return ChatSeqDecision::Apply;
+        }
+        match self.last_seq.and_then(|last| last.checked_add(1)) {
+            Some(expected) if seq == expected => {
+                self.last_seq = Some(seq);
+                ChatSeqDecision::Apply
+            }
+            Some(expected) => ChatSeqDecision::Resubscribe(format!(
+                "SSE seq mismatch: expected {expected}, got {seq} for {} event",
+                event.kind
+            )),
+            None => ChatSeqDecision::Resubscribe(format!(
+                "SSE stream started with {} event before snapshot",
+                event.kind
+            )),
+        }
+    }
 }
 
 pub type ChatEventStream = BoxStream<'static, Result<ChatEvent, ClientError>>;
@@ -242,19 +290,11 @@ impl DaemonClient {
         if !response.status().is_success() {
             return Err(status_error(response).await);
         }
-        Ok(response
-            .bytes_stream()
-            .map_err(|error| ClientError::Sse(error.to_string()))
-            .eventsource()
-            .filter_map(|event| async move {
-                match event {
-                    Ok(event) if event.data.trim().is_empty() => None,
-                    Ok(event) => Some(
-                        parse_daemon_event(&event.data)
-                            .map_err(|error| ClientError::Json(error.to_string())),
-                    ),
-                    Err(error) => Some(Err(ClientError::Sse(error.to_string()))),
-                }
+        Ok(sse_data_stream(response)
+            .map(|data| {
+                data.and_then(|data| {
+                    parse_daemon_event(&data).map_err(|error| ClientError::Json(error.to_string()))
+                })
             })
             .boxed())
     }
@@ -277,17 +317,8 @@ impl DaemonClient {
         if !response.status().is_success() {
             return Err(status_error(response).await);
         }
-        Ok(response
-            .bytes_stream()
-            .map_err(|error| ClientError::Sse(error.to_string()))
-            .eventsource()
-            .filter_map(|event| async move {
-                match event {
-                    Ok(event) if event.data.trim().is_empty() => None,
-                    Ok(event) => Some(parse_chat_event(&event.data)),
-                    Err(error) => Some(Err(ClientError::Sse(error.to_string()))),
-                }
-            })
+        Ok(sse_data_stream(response)
+            .map(|data| data.and_then(|data| parse_chat_event(&data)))
             .boxed())
     }
 
@@ -432,9 +463,32 @@ impl SseLineParser {
     }
 }
 
+fn sse_data_stream(response: reqwest::Response) -> BoxStream<'static, Result<String, ClientError>> {
+    response
+        .bytes_stream()
+        .map({
+            let mut parser = SseLineParser::default();
+            let mut pending_utf8 = Vec::new();
+            move |chunk| {
+                let chunk = chunk.map_err(|error| ClientError::Sse(error.to_string()))?;
+                let text = drain_utf8_chunk(&mut pending_utf8, &chunk)?;
+                let events = parser
+                    .push(&text)
+                    .into_iter()
+                    .filter(|data| !data.trim().is_empty())
+                    .map(Ok::<_, ClientError>)
+                    .collect::<Vec<_>>();
+                Ok(futures::stream::iter(events))
+            }
+        })
+        .try_flatten()
+        .boxed()
+}
+
 fn parse_chat_event(data: &str) -> Result<ChatEvent, ClientError> {
     let raw: Value =
         serde_json::from_str(data).map_err(|error| ClientError::Json(error.to_string()))?;
+    let seq = parse_seq(raw.get("seq"))?;
     let kind = raw
         .get("type")
         .and_then(Value::as_str)
@@ -444,7 +498,50 @@ fn parse_chat_event(data: &str) -> Result<ChatEvent, ClientError> {
         .get("chat_id")
         .and_then(Value::as_str)
         .map(str::to_string);
-    Ok(ChatEvent { chat_id, kind, raw })
+    Ok(ChatEvent {
+        chat_id,
+        seq,
+        kind,
+        raw,
+    })
+}
+
+fn parse_seq(value: Option<&Value>) -> Result<Option<u64>, ClientError> {
+    match value {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| ClientError::Json("invalid SSE seq number".to_string())),
+        Some(Value::String(value)) => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|error| ClientError::Json(format!("invalid SSE seq: {error}"))),
+        Some(_) => Err(ClientError::Json("invalid SSE seq type".to_string())),
+        None => Ok(None),
+    }
+}
+
+fn drain_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8]) -> Result<String, ClientError> {
+    pending.extend_from_slice(chunk);
+    match std::str::from_utf8(pending) {
+        Ok(text) => {
+            let text = text.to_string();
+            pending.clear();
+            Ok(text)
+        }
+        Err(error) if error.error_len().is_none() => {
+            let valid = error.valid_up_to();
+            let text = std::str::from_utf8(&pending[..valid])
+                .map_err(|error| ClientError::Sse(error.to_string()))?
+                .to_string();
+            let rest = pending.split_off(valid);
+            *pending = rest;
+            Ok(text)
+        }
+        Err(error) => Err(ClientError::Sse(format!(
+            "invalid UTF-8 in SSE stream: {error}"
+        ))),
+    }
 }
 
 async fn decode_response<T: for<'de> Deserialize<'de>>(
@@ -576,9 +673,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_event_parses_type_and_chat_id() {
-        let event = parse_chat_event(r#"{"chat_id":"c","type":"stream_started"}"#).unwrap();
+    fn chat_event_parses_type_chat_id_and_seq() {
+        let event =
+            parse_chat_event(r#"{"chat_id":"c","seq":"7","type":"stream_started"}"#).unwrap();
         assert_eq!(event.chat_id.as_deref(), Some("c"));
+        assert_eq!(event.seq, Some(7));
         assert_eq!(event.kind, "stream_started");
     }
 }
