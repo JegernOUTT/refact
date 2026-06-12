@@ -563,14 +563,18 @@
 }
 
 .virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller {
-  scrollbar-width: none;
   scrollbar-color: transparent transparent;
-  scrollbar-gutter: auto;
 }
 
-.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb,
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller:hover::-webkit-scrollbar-thumb,
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb:hover,
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar-thumb:active {
+  background-color: transparent;
+}
+
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller:hover {
+  scrollbar-color: transparent transparent;
 }
 
 .virtuosoScroller {
