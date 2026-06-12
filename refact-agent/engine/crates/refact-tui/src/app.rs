@@ -79,6 +79,40 @@ impl SessionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageSummary {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl UsageSummary {
+    fn from_value(value: &Value) -> Option<Self> {
+        let prompt_tokens = token_count(value, &["prompt_tokens", "input_tokens", "prompt"]);
+        let completion_tokens =
+            token_count(value, &["completion_tokens", "output_tokens", "completion"]);
+        let total_tokens = token_count(value, &["total_tokens", "total"])
+            .or_else(|| prompt_tokens.zip(completion_tokens).map(|(a, b)| a + b));
+        if prompt_tokens.is_none() && completion_tokens.is_none() && total_tokens.is_none() {
+            None
+        } else {
+            Some(Self {
+                prompt_tokens: prompt_tokens.unwrap_or_default(),
+                completion_tokens: completion_tokens.unwrap_or_default(),
+                total_tokens: total_tokens.unwrap_or_default(),
+            })
+        }
+    }
+
+    pub fn display(self) -> String {
+        if self.total_tokens > 0 {
+            format!("{} tok", self.total_tokens)
+        } else {
+            format!("{} in · {} out", self.prompt_tokens, self.completion_tokens)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerMode {
     Chat,
@@ -155,6 +189,7 @@ pub struct App {
     scroll_offset: usize,
     selected_tool_index: Option<usize>,
     help_open: bool,
+    usage: Option<UsageSummary>,
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
     stream_collector: MarkdownStreamCollector,
@@ -186,6 +221,7 @@ impl App {
             scroll_offset: 0,
             selected_tool_index: None,
             help_open: false,
+            usage: None,
             should_quit: false,
             last_ctrl_c: None,
             stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
@@ -213,6 +249,7 @@ impl App {
             scroll_offset: 0,
             selected_tool_index: None,
             help_open: false,
+            usage: None,
             should_quit: false,
             last_ctrl_c: None,
             stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
@@ -257,6 +294,10 @@ impl App {
 
     pub fn session_state(&self) -> SessionState {
         self.session_state
+    }
+
+    pub fn usage(&self) -> Option<UsageSummary> {
+        self.usage
     }
 
     pub fn daemon_online(&self) -> bool {
@@ -381,6 +422,7 @@ impl App {
             .push(TranscriptItem::Assistant(String::new()));
         self.session_state = SessionState::Generating;
         self.stream_collector.clear();
+        self.usage = None;
         let params = self.take_pending_params();
         Some((prompt, params))
     }
@@ -444,6 +486,21 @@ impl App {
         self.transcript.push(TranscriptItem::Notice(text.into()));
     }
 
+    fn add_event_summary(&mut self, label: &str, op: &Value) {
+        let summary = op
+            .get("text")
+            .or_else(|| op.get("content"))
+            .or_else(|| op.get("citation"))
+            .or_else(|| op.get("block"))
+            .map(value_to_compact_string)
+            .unwrap_or_default();
+        if summary.is_empty() {
+            self.add_notice(label.to_string());
+        } else {
+            self.add_notice(format!("{label}: {summary}"));
+        }
+    }
+
     fn approval_scope(&self, raw: &Value, event_seq: Option<u64>) -> String {
         let pause_id = raw
             .get("pause_id")
@@ -483,6 +540,10 @@ impl App {
         }
     }
 
+    pub fn apply_chat_event(&mut self, event: ChatEvent) {
+        self.handle_chat_event(event);
+    }
+
     fn handle_chat_event(&mut self, event: ChatEvent) {
         if event
             .chat_id
@@ -505,6 +566,7 @@ impl App {
             "stream_delta" => self.handle_stream_delta(&event.raw),
             "stream_finished" => {
                 self.finalize_assistant_stream();
+                self.update_usage(&event.raw);
                 if self.session_state != SessionState::Paused {
                     self.session_state = SessionState::Idle;
                 }
@@ -535,6 +597,7 @@ impl App {
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
+            self.update_usage(runtime);
             self.clear_approvals();
             if let Some(modal) =
                 ApprovalModalState::from_event_in_scope(self.approval_scope(runtime, None), runtime)
@@ -580,6 +643,17 @@ impl App {
         self.apply_runtime_state(raw);
     }
 
+    fn update_usage(&mut self, raw: &Value) {
+        let usage = raw
+            .get("usage")
+            .or_else(|| raw.get("last_usage"))
+            .or_else(|| raw.get("token_usage"))
+            .and_then(UsageSummary::from_value);
+        if usage.is_some() {
+            self.usage = usage;
+        }
+    }
+
     fn apply_runtime_state(&mut self, raw: &Value) {
         if raw
             .get("error")
@@ -622,6 +696,10 @@ impl App {
                         self.append_reasoning(text);
                     }
                 }
+                "set_usage" => self.update_usage(op),
+                "add_citation" => self.add_event_summary("citation", op),
+                "set_thinking_blocks" => self.add_event_summary("thinking", op),
+                "add_server_content_block" => self.add_event_summary("server content", op),
                 "set_tool_calls" => {
                     for tool in op
                         .get("tool_calls")
@@ -1765,6 +1843,10 @@ fn content_text(message: &Value) -> Option<String> {
         ),
         value => Some(value_to_compact_string(value)),
     }
+}
+
+fn token_count(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| value.get(*key)?.as_u64())
 }
 
 fn value_to_compact_string(value: &Value) -> String {

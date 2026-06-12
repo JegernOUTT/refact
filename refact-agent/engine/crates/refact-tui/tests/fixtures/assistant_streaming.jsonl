@@ -1,0 +1,6 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"idle"},"messages":[{"role":"user","content":"render a table"}]}
+{"chat_id":"chat-fixture","seq":"1","type":"stream_started","message_id":"assistant-1"}
+{"chat_id":"chat-fixture","seq":"2","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"append_content","text":"| A | B |\n|---|"}]}
+{"chat_id":"chat-fixture","seq":"3","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"append_content","text":"---|\n| one | two |\n\n```rust\nfn main() {"}]}
+{"chat_id":"chat-fixture","seq":"4","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"append_content","text":"}\n```\n"}]}
+{"chat_id":"chat-fixture","seq":"5","type":"stream_finished","message_id":"assistant-1","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}

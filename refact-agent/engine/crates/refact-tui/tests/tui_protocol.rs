@@ -4,10 +4,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use refact_tui::app::{App, SessionState, TranscriptItem};
 use refact_tui::client::{
-    discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, DaemonClient,
-    ChatSeqDecision, ChatSeqTracker, ToolDecision,
+    discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, ChatEvent,
+    ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ToolDecision,
 };
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
@@ -18,6 +21,17 @@ struct State {
 }
 
 impl State {
+    fn project() -> OpenProjectResponse {
+        OpenProjectResponse {
+            project_id: "p1".to_string(),
+            slug: "fixture".to_string(),
+            root: std::path::PathBuf::from("/tmp/fixture"),
+            pinned: false,
+            worker: None,
+            cron_pending: None,
+        }
+    }
+
     fn record_command(&self, command: Value) {
         let (lock, cond) = &*self.commands;
         lock.lock().unwrap().push(command);
@@ -86,6 +100,211 @@ impl State {
             }
         }
     }
+}
+
+struct FixtureRun {
+    app: App,
+    recovery: Option<String>,
+}
+
+fn fixture_events(name: &str) -> Vec<Value> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name);
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read fixture {}: {error}", path.display()));
+    content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(idx, line)| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|error| {
+                panic!(
+                    "invalid JSONL in {} line {}: {error}",
+                    path.display(),
+                    idx + 1
+                )
+            })
+        })
+        .collect()
+}
+
+fn chat_event_from_fixture(raw: Value, chat_id: &str) -> ChatEvent {
+    let seq = match raw.get("seq") {
+        Some(Value::Number(number)) => number.as_u64(),
+        Some(Value::String(value)) => Some(value.parse::<u64>().unwrap()),
+        _ => None,
+    };
+    let kind = raw
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    ChatEvent {
+        chat_id: Some(chat_id.to_string()),
+        seq,
+        kind,
+        raw,
+    }
+}
+
+fn run_fixture(name: &str) -> FixtureRun {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    for raw in fixture_events(name) {
+        let event = chat_event_from_fixture(raw, &chat_id);
+        match tracker.observe(&event) {
+            ChatSeqDecision::Apply => app.apply_chat_event(event),
+            ChatSeqDecision::Resubscribe(message) => {
+                return FixtureRun {
+                    app,
+                    recovery: Some(message),
+                };
+            }
+        }
+    }
+    FixtureRun {
+        app,
+        recovery: None,
+    }
+}
+
+fn transcript_text(app: &App) -> String {
+    app.visible_transcript()
+        .iter()
+        .map(|item| match item {
+            TranscriptItem::User(text) => format!("user:{text}"),
+            TranscriptItem::Assistant(text) => format!("assistant:{text}"),
+            TranscriptItem::Reasoning(text, _) => format!("reasoning:{text}"),
+            TranscriptItem::Tool(card) => format!("tool:{}:{}:{}", card.id, card.name, card.result),
+            TranscriptItem::Notice(text) => format!("notice:{text}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rendered_snapshot(app: &App, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| refact_tui::ui::render(frame, app))
+        .unwrap();
+    let cells = terminal.backend().buffer().content();
+    (0..height as usize)
+        .map(|row| {
+            let start = row * width as usize;
+            let end = start + width as usize;
+            cells[start..end]
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn fixture_directory_covers_required_protocol_cases() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    let mut names = std::fs::read_dir(&fixture_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "approvals.jsonl",
+            "assistant_streaming.jsonl",
+            "citations.jsonl",
+            "reasoning.jsonl",
+            "seq_gap.jsonl",
+            "server_content_blocks.jsonl",
+            "snapshot_resume.jsonl",
+            "thinking_blocks.jsonl",
+            "tool_calls.jsonl",
+            "usage_updates.jsonl",
+        ]
+    );
+}
+
+#[test]
+fn golden_fixtures_drive_app_state_machine_offline() {
+    let streaming = run_fixture("assistant_streaming.jsonl");
+    assert!(streaming.recovery.is_none());
+    let text = transcript_text(&streaming.app);
+    assert!(text.contains("user:render a table"));
+    assert!(text.contains("| one | two |"));
+    assert_eq!(streaming.app.usage().unwrap().total_tokens, 30);
+    assert_eq!(streaming.app.session_state(), SessionState::Idle);
+
+    let reasoning = run_fixture("reasoning.jsonl");
+    assert!(transcript_text(&reasoning.app).contains("reasoning:Plan: inspect files. Then edit."));
+
+    let tools = run_fixture("tool_calls.jsonl");
+    let tool_text = transcript_text(&tools.app);
+    assert!(tool_text.contains("tool:call-1:shell:+hi"));
+    assert!(tool_text.contains("-no"));
+
+    let approvals = run_fixture("approvals.jsonl");
+    assert_eq!(approvals.app.session_state(), SessionState::Paused);
+    assert_eq!(
+        approvals.app.approval_modal().unwrap().reasons()[0].tool_call_id,
+        "call-approve"
+    );
+
+    let usage = run_fixture("usage_updates.jsonl");
+    assert_eq!(usage.app.usage().unwrap().total_tokens, 27);
+
+    assert!(transcript_text(&run_fixture("citations.jsonl").app).contains("notice:citation"));
+    assert!(transcript_text(&run_fixture("thinking_blocks.jsonl").app).contains("notice:thinking"));
+    assert!(
+        transcript_text(&run_fixture("server_content_blocks.jsonl").app)
+            .contains("notice:server content")
+    );
+
+    let resumed = run_fixture("snapshot_resume.jsonl");
+    let resumed_text = transcript_text(&resumed.app);
+    assert!(resumed_text.contains("user:resume"));
+    assert!(resumed_text.contains("assistant:old answer"));
+    assert!(resumed_text.contains("tool:resume-call:cat:file body"));
+    assert_eq!(resumed.app.session_state(), SessionState::Idle);
+}
+
+#[test]
+fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
+    let run = run_fixture("seq_gap.jsonl");
+    assert!(run.recovery.unwrap().contains("expected 2, got 3"));
+    assert!(!transcript_text(&run.app).contains("must not apply"));
+}
+
+#[test]
+fn render_snapshot_for_assistant_streaming_fixture() {
+    let run = run_fixture("assistant_streaming.jsonl");
+    let snapshot = rendered_snapshot(&run.app, 72, 16);
+    let expected = r#"refact fixture  Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mod
+you
+render a table
+
+assistant
+ABonetwo
+code · rust
+  fn main() {}
+
+
+
+────────────────────────────────────────────────────────────────────────
+┌ message ─────────────────────────────────────────────────────────────┐
+│Ask Refact…                                                           │
+└──────────────────────────────────────────────────────────────────────┘
+ fixture · gpt-demo · agent · idle · daemon ● · worker unknown · usage …"#;
+    assert_eq!(snapshot, expected);
 }
 
 #[tokio::test]

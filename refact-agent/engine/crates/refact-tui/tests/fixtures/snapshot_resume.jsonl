@@ -1,0 +1,2 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"generating"},"messages":[{"role":"user","content":"resume"},{"role":"assistant","content":"old answer"},{"role":"assistant","tool_calls":[{"id":"resume-call","function":{"name":"cat","arguments":"{\"path\":\"README.md\"}"}}]},{"role":"tool","tool_call_id":"resume-call","content":"file body"}]}
+{"chat_id":"chat-fixture","seq":"1","type":"runtime_updated","state":"idle"}

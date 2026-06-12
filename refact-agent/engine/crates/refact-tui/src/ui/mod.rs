@@ -189,8 +189,13 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .current_worker()
         .map(|worker| worker_state_label(Some(worker)))
         .unwrap_or_else(|| "unknown".to_string());
-    let status =
-        format!(" {project} · {model} · {mode} · {state} · daemon {daemon_dot} · worker {worker} ");
+    let usage = app
+        .usage()
+        .map(|usage| format!(" · usage {}", usage.display()))
+        .unwrap_or_default();
+    let status = format!(
+        " {project} · {model} · {mode} · {state} · daemon {daemon_dot} · worker {worker}{usage} "
+    );
     let line = truncate_line_with_ellipsis_if_overflow(Line::from(status), area.width as usize);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().fg(Color::DarkGray)),
