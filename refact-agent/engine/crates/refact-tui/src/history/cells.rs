@@ -924,39 +924,6 @@ impl HistoryCell for SessionCell {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PlanCell {
-    text: String,
-}
-
-impl PlanCell {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-}
-
-impl HistoryCell for PlanCell {
-    fn kind(&self) -> HistoryCellKind {
-        HistoryCellKind::Plan
-    }
-
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
-        let renderer = MarkdownRenderer::new(Some(width));
-        let mut lines = vec![role_line(
-            "plan",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )];
-        lines.extend(renderer.render(&self.text));
-        finish(lines)
-    }
-
-    fn revision(&self) -> u64 {
-        revision(&("plan", &self.text))
-    }
-}
-
 pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<dyn HistoryCell> {
     match item {
         TranscriptItem::User(text) => Box::new(UserCell::new(text.clone())),
@@ -978,7 +945,6 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         TranscriptItem::Session { title, subtitle } => {
             Box::new(SessionCell::new(title.clone(), subtitle.clone()))
         }
-        TranscriptItem::Plan(text) => Box::new(PlanCell::new(text.clone())),
     }
 }
 
@@ -1430,9 +1396,9 @@ mod tests {
 
     #[test]
     fn plan_cell_renders_markdown_plan() {
-        let cell = PlanCell::new("## Plan\n- do it");
+        let cell = PlanCell::new(PlanCellData::new("## Plan\n- do it", "agent", 1, 0));
         let rendered = text(&cell.render(80));
-        assert!(rendered.contains("plan\n"));
+        assert!(rendered.contains("plan · agent · v1"));
         assert!(rendered.contains("Plan"));
         assert!(rendered.contains("do it"));
     }

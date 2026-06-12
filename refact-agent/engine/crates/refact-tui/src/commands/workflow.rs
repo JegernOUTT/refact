@@ -134,7 +134,16 @@ fn plan_version(message: &TranscriptMessage) -> u64 {
 }
 
 fn is_role(message: &TranscriptMessage, role: &str) -> bool {
-    matches!(&message.role, TranscriptRole::Other(value) if value == role)
+    match (&message.role, role) {
+        (TranscriptRole::User, "user")
+        | (TranscriptRole::Assistant, "assistant")
+        | (TranscriptRole::Tool, "tool")
+        | (TranscriptRole::Notice, "notice")
+        | (TranscriptRole::Plan, "plan")
+        | (TranscriptRole::Event, "event") => true,
+        (TranscriptRole::Other(value), _) => value == role,
+        _ => false,
+    }
 }
 
 fn is_plan_delta(message: &TranscriptMessage) -> bool {

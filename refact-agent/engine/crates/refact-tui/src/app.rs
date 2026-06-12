@@ -81,7 +81,6 @@ pub enum TranscriptItem {
         title: String,
         subtitle: Option<String>,
     },
-    Plan(String),
 }
 
 impl TranscriptItem {
@@ -682,7 +681,7 @@ impl App {
 
     fn show_current_plan(&mut self) -> AppAction {
         self.composer.clear();
-        match workflow::synthesize_current_plan(self.transcript_state.messages()) {
+        match current_plan_cell_data(self.transcript_state.messages()) {
             Some(plan) => self.push_history_item(TranscriptItem::Plan(plan)),
             None => self.add_notice("No current plan is installed for this chat"),
         }
@@ -3743,7 +3742,7 @@ mod tests {
 
         assert_eq!(app.execute_command_name("plan"), AppAction::None);
         assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Plan(text) if text.contains("base plan") && text.contains("delta one"))
+            matches!(item, TranscriptItem::Plan(data) if data.content.contains("base plan") && data.content.contains("delta one"))
         }));
     }
 
