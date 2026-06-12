@@ -397,6 +397,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const copyableOutput = useMemo(() => copyableOutputText(content), [content]);
   const isBusy = isBusyStatus(status);
   const livePreview = latestChunkPreview(metadata, content, toolCall);
+  const showLivePreview = isBusy && livePreview !== null;
   const nowMs = useRunningNowMs(isBusy);
   const duration = durationLabel(process, nowMs);
   const logPath = persistedOutputPath(metadata);
@@ -458,17 +459,14 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   return (
     <div data-testid="exec-tool-card" data-exec-process-id={process.processId}>
       <span data-testid={`exec-tool-${toolName}`} hidden />
-      {isBusy && (
+      {showLivePreview && (
         <Text
           size="1"
-          color={livePreview ? undefined : "gray"}
           className={styles.livePreview}
           data-testid="exec-live-preview"
-          title={livePreview ?? undefined}
+          title={livePreview}
         >
-          <span className="rf-text-shimmer">
-            {livePreview ?? "Waiting for output…"}
-          </span>
+          <span className="rf-text-shimmer">{livePreview}</span>
         </Text>
       )}
 

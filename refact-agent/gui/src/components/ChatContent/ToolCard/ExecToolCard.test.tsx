@@ -535,7 +535,7 @@ describe("ExecToolCard", () => {
     expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
     expect(screen.getByText("all tests passed")).toBeInTheDocument();
   });
-  test("running process with no chunks shows waiting preview", () => {
+  test("running process without output uses the card header instead of a duplicate waiting line", () => {
     renderExecTool({
       toolName: "process_start",
       args: { command: "npm run dev", mode: "background" },
@@ -554,9 +554,12 @@ describe("ExecToolCard", () => {
       },
     });
 
-    expect(screen.getByTestId("exec-live-preview")).toHaveTextContent(
-      "Waiting for output…",
-    );
+    expect(screen.queryByTestId("exec-live-preview")).not.toBeInTheDocument();
+    expect(document.querySelector(".rf-text-shimmer")).toBeNull();
+    expect(screen.getByText("Start dev server")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("exec-status-running_in_background"),
+    ).toHaveTextContent("background");
   });
 
   test("running process shows latest output chunk preview", () => {

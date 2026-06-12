@@ -54,6 +54,14 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
     preserveScrollAnchor(onToggle);
   }, [onToggle, preserveScrollAnchor]);
 
+  const summaryContent =
+    status === "running" &&
+    (typeof summary === "string" || typeof summary === "number") ? (
+      <span className="rf-text-shimmer">{summary}</span>
+    ) : (
+      summary
+    );
+
   const title = (
     <span className={styles.titleRow}>
       <span className={styles.iconWrapper}>
@@ -63,13 +71,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
           icon
         )}
       </span>
-      <span className={styles.summary}>
-        {status === "running" ? (
-          <span className="rf-text-shimmer">{summary}</span>
-        ) : (
-          summary
-        )}
-      </span>
+      <span className={styles.summary}>{summaryContent}</span>
       {meta && <span className={styles.meta}>{meta}</span>}
     </span>
   );
