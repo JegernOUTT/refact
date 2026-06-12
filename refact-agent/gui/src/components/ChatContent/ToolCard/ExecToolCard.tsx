@@ -432,9 +432,15 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
 
   const icon = toolName === "process_list" ? <Rows3 /> : <Code />;
 
+  const summaryText = isBusy ? (
+    <span className="rf-text-shimmer">{process.shortDescription}</span>
+  ) : (
+    process.shortDescription
+  );
+
   const summary = (
     <span className={styles.execTitle} title={process.shortDescription}>
-      <span className={styles.summary}>{process.shortDescription}</span>
+      <span className={styles.summary}>{summaryText}</span>
       <span className={styles.meta}>
         {meta && <span className={styles.metaText}>{meta}</span>}
         <ProcessStatusBadge status={status} />

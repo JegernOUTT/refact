@@ -555,7 +555,9 @@ describe("ExecToolCard", () => {
     });
 
     expect(screen.queryByTestId("exec-live-preview")).not.toBeInTheDocument();
-    expect(document.querySelector(".rf-text-shimmer")).toBeNull();
+    expect(document.querySelector(".rf-text-shimmer")).toHaveTextContent(
+      "Start dev server",
+    );
     expect(screen.getByText("Start dev server")).toBeInTheDocument();
     expect(
       screen.getByTestId("exec-status-running_in_background"),
