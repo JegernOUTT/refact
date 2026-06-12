@@ -1440,7 +1440,9 @@ function processToolCalls(
       <CompressReportTool
         key={`compress-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
-        toolType={headName}
+        toolType={
+          headName === "compress_chat_probe" ? "ctx_probe" : "ctx_apply"
+        }
       />
     );
     return processToolCalls(

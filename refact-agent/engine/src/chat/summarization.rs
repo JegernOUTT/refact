@@ -20,7 +20,7 @@ use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 use refact_chat_history::trajectory_ops::{
-    build_compression_report_message, insert_compression_report_at_boundary,
+    build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
     COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE, TOOLS_TO_PRESERVE,
 };
 
@@ -279,22 +279,7 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
     segments
 }
 
-fn canonical_source_value(message: &ChatMessage) -> Value {
-    let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("message_id");
-        obj.remove("id");
-    }
-    value
-}
-
-pub fn source_hash_for_messages(messages: &[ChatMessage]) -> String {
-    let canonical: Vec<Value> = messages.iter().map(canonical_source_value).collect();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
+pub use refact_chat_history::source_hash::source_hash_for_messages;
 
 fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -1028,9 +1013,10 @@ pub(crate) fn estimated_context_pressure(
     max_pressure(visible_pressure, provider_pressure)
 }
 
-pub(crate) fn estimated_provider_context_pressure(
+pub(crate) fn estimated_provider_context_pressure_with_usage(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
+    usage_stale: bool,
 ) -> ContextPressure {
     let provider_messages =
         crate::chat::linearize::apply_summarization_linearize(messages.to_vec());
@@ -1039,7 +1025,10 @@ pub(crate) fn estimated_provider_context_pressure(
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
         .collect();
     let provider_pressure = compute_context_budget(&provider_messages, effective_n_ctx).pressure;
-    let usage_pressure = recent_provider_usage_input_tokens(messages)
+    if usage_stale {
+        return provider_pressure;
+    }
+    let usage_pressure = recent_provider_usage_input_tokens(&provider_messages)
         .map(|used_tokens| pressure_for_used_tokens(used_tokens, effective_n_ctx))
         .unwrap_or(ContextPressure::Low);
     max_pressure(provider_pressure, usage_pressure)
@@ -1074,43 +1063,7 @@ fn bounded_redacted_tool_arguments(arguments: &str) -> String {
     }
 }
 
-fn is_redaction_boundary(ch: char) -> bool {
-    ch.is_whitespace()
-        || matches!(
-            ch,
-            ',' | ';' | ')' | ']' | '}' | '"' | '\'' | '`' | '<' | '>'
-        )
-}
-
-fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
-    if text.len() <= scan_cap {
-        return (text, false);
-    }
-
-    let prefix = refact_core::string_utils::safe_truncate(text, scan_cap);
-    if prefix
-        .chars()
-        .last()
-        .map(is_redaction_boundary)
-        .unwrap_or(true)
-        || text[prefix.len()..]
-            .chars()
-            .next()
-            .map(is_redaction_boundary)
-            .unwrap_or(false)
-    {
-        return (prefix, true);
-    }
-
-    let end = prefix
-        .char_indices()
-        .rev()
-        .find(|(_, ch)| is_redaction_boundary(*ch))
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .unwrap_or(0);
-
-    (&prefix[..end], true)
-}
+use refact_core::string_utils::bounded_redaction_window;
 
 fn omitted_long_token_marker(omitted_chars: usize) -> String {
     format!("[long token omitted chars={}]", omitted_chars)
@@ -1672,7 +1625,7 @@ fn structured_summary_from_raw(
 ) -> StructuredSummaryDecision {
     parse_structured_summary_decision(&raw_summary, source_messages).unwrap_or_else(|| {
         StructuredSummaryDecision {
-            summary: raw_summary,
+            summary: refact_core::string_utils::redact_sensitive(&raw_summary),
             ..Default::default()
         }
     })
@@ -2060,6 +2013,11 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     let Some(segment) = first_eligible_segment(messages) else {
         return Err(SegmentSummaryFailure::NoMessagesToSummarize);
     };
+    if estimated_tokens_for_ranges(messages, std::slice::from_ref(&segment))
+        < MIN_SOURCE_TOKENS_FOR_COMPRESSION
+    {
+        return Ok(false);
+    }
     ensure_source_message_ids(messages, segment);
     let goal_hint = messages[..segment.start]
         .iter()
@@ -2109,6 +2067,7 @@ fn emit_compression_status(
     session.runtime.compression_reason = reason;
     if !is_compressing {
         session.active_compression_attempt = None;
+        session.compression_attempt_started_at_ms = None;
     }
     let state = session.runtime.state;
     let error = session.runtime.error.clone();
@@ -2130,6 +2089,9 @@ fn set_compression_status_quiet(
         phase,
         CompressionPhase::Checking | CompressionPhase::Running
     ));
+    if compression_attempt_active(session) {
+        return;
+    }
     session.is_compressing = false;
     session.runtime.is_compressing = false;
     session.compression_phase = Some(phase);
@@ -2191,6 +2153,7 @@ fn reserve_compression_attempt(
     }
     session.compression_attempt_generation = next;
     session.active_compression_attempt = Some(next);
+    session.compression_attempt_started_at_ms = Some(epoch_ms_now());
     emit_compression_status(session, CompressionPhase::Checking, reason);
     next
 }
@@ -2258,8 +2221,17 @@ fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason)
     emit_compression_status(session, CompressionPhase::Failed, Some(reason));
 }
 
+const COMPRESSION_ATTEMPT_STALE_MS: u64 = 15 * 60 * 1000;
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn compression_attempt_active(session: &ChatSession) -> bool {
-    session.is_compressing
+    let flags_active = session.is_compressing
         || session.runtime.is_compressing
         || matches!(
             session.compression_phase,
@@ -2268,7 +2240,16 @@ fn compression_attempt_active(session: &ChatSession) -> bool {
         || matches!(
             session.runtime.compression_phase,
             Some(CompressionPhase::Checking | CompressionPhase::Running)
-        )
+        );
+    if !flags_active {
+        return false;
+    }
+    if let Some(started_at_ms) = session.compression_attempt_started_at_ms {
+        if epoch_ms_now().saturating_sub(started_at_ms) > COMPRESSION_ATTEMPT_STALE_MS {
+            return false;
+        }
+    }
+    true
 }
 
 fn compression_failure_reason(failure: &SegmentSummaryFailure) -> CompressionReason {
@@ -2401,6 +2382,7 @@ fn apply_resolved_segment_summary(
     session.tier1_compaction_disabled = false;
     session.thread.previous_response_id = None;
     session.cache_guard_force_next = true;
+    session.provider_usage_stale = true;
     emit_compression_applied(session);
     session.increment_version();
     session.touch();
@@ -2453,7 +2435,7 @@ async fn proactive_gate_quiet(
     session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     thread: &crate::chat::types::ThreadParams,
 ) -> Option<(String, usize)> {
-    let raw_messages = {
+    let (raw_messages, usage_stale) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
             return None;
@@ -2502,7 +2484,7 @@ async fn proactive_gate_quiet(
             );
             return None;
         }
-        session.messages.clone()
+        (session.messages.clone(), session.provider_usage_stale)
     };
 
     if compression_candidates(&raw_messages).is_empty() {
@@ -2536,7 +2518,8 @@ async fn proactive_gate_quiet(
     };
 
     let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
-    let pressure = estimated_provider_context_pressure(&raw_messages, effective_n_ctx);
+    let pressure =
+        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
     if !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
         let mut session = session_arc.lock().await;
         set_compression_status_quiet(
@@ -2559,7 +2542,7 @@ async fn run_reserved_segment_summarization(
     resolved_model: Option<(String, usize)>,
 ) -> bool {
     let forced_context_limit = force && reason == Some(CompressionReason::ContextLengthStop);
-    let (attempt, raw_messages, known_insufficient_hashes) = {
+    let (attempt, raw_messages, known_insufficient_hashes, usage_stale) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
             return false;
@@ -2597,6 +2580,7 @@ async fn run_reserved_segment_summarization(
             attempt,
             session.messages.clone(),
             session.compression_insufficient_hashes.clone(),
+            session.provider_usage_stale,
         )
     };
 
@@ -2630,7 +2614,8 @@ async fn run_reserved_segment_summarization(
         },
     };
     let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
-    let pressure = estimated_provider_context_pressure(&raw_messages, effective_n_ctx);
+    let pressure =
+        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
     if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
         let mut session = session_arc.lock().await;
         emit_compression_skipped_if_owned(&mut session, attempt, CompressionReason::PressureLow);
@@ -2667,7 +2652,11 @@ async fn run_reserved_segment_summarization(
 
         if applied_count > 0
             && !matches!(
-                estimated_provider_context_pressure(&pass_messages, effective_n_ctx),
+                estimated_provider_context_pressure_with_usage(
+                    &pass_messages,
+                    effective_n_ctx,
+                    usage_stale
+                ),
                 ContextPressure::High | ContextPressure::Critical
             )
         {
@@ -2805,6 +2794,7 @@ async fn run_reserved_segment_summarization(
             session.tier1_compaction_disabled = false;
             session.thread.previous_response_id = None;
             session.cache_guard_force_next = true;
+            session.provider_usage_stale = true;
             session.increment_version();
             session.touch();
             applied_count += 1;
@@ -2888,6 +2878,25 @@ fn deterministic_truncate_tool_output(content: &str) -> String {
     )
 }
 
+fn deterministic_truncation_eligible(
+    message: &ChatMessage,
+    tool_call_names: &std::collections::HashMap<String, String>,
+) -> bool {
+    if !matches!(message.role.as_str(), "tool" | "diff")
+        || message.preserve == Some(true)
+        || message.tool_call_id.starts_with("srvtoolu_")
+        || is_ui_only_message(message)
+    {
+        return false;
+    }
+    if let Some(name) = tool_call_names.get(&message.tool_call_id) {
+        if TOOLS_TO_PRESERVE.iter().any(|preserved| preserved == name) {
+            return false;
+        }
+    }
+    true
+}
+
 pub(crate) struct DeterministicCompactionOutcome {
     pub messages: Vec<ChatMessage>,
     pub context_files_deduped: usize,
@@ -2911,7 +2920,7 @@ pub(crate) fn deterministic_compaction(
     let mut protected_recent = HashSet::new();
     let mut recent_seen = 0usize;
     for idx in (0..updated.len()).rev() {
-        if matches!(updated[idx].role.as_str(), "tool" | "diff") {
+        if deterministic_truncation_eligible(&updated[idx], &tool_call_names) {
             protected_recent.insert(idx);
             recent_seen += 1;
             if recent_seen >= DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
@@ -2922,23 +2931,13 @@ pub(crate) fn deterministic_compaction(
 
     let mut tool_outputs_truncated = 0usize;
     for (idx, message) in updated.iter_mut().enumerate() {
-        if !matches!(message.role.as_str(), "tool" | "diff")
+        if !deterministic_truncation_eligible(message, &tool_call_names)
             || protected_recent.contains(&idx)
-            || message.preserve == Some(true)
-            || message.tool_call_id.starts_with("srvtoolu_")
-            || is_ui_only_message(message)
         {
             continue;
         }
-        if let Some(name) = tool_call_names.get(&message.tool_call_id) {
-            if TOOLS_TO_PRESERVE.iter().any(|preserved| preserved == name) {
-                continue;
-            }
-        }
         let content = message.content.content_text_only();
-        if content.len() <= DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS * 2
-            || content.starts_with(DETERMINISTIC_TOOL_OUTPUT_MARKER)
-        {
+        if content.len() <= DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS * 2 {
             continue;
         }
         message.content = ChatContent::SimpleText(deterministic_truncate_tool_output(&content));
@@ -2980,19 +2979,30 @@ pub async fn apply_deterministic_compaction_for_recovery(
     let Some(outcome) = deterministic_compaction(&session.messages) else {
         return false;
     };
-    let report = build_compression_report_message(
+    let mut messages = outcome.messages;
+    let mut fingerprint_hasher = Sha256::new();
+    fingerprint_hasher.update(b"deterministic_compaction");
+    for (before, after) in session.messages.iter().zip(messages.iter()) {
+        if serde_json::to_value(before).ok() != serde_json::to_value(after).ok() {
+            fingerprint_hasher.update(before.message_id.as_bytes());
+            fingerprint_hasher.update(b"\n");
+        }
+    }
+    let op_fingerprint = hex::encode(fingerprint_hasher.finalize());
+    let report = build_compression_report_message_with_fingerprint(
         outcome.context_files_deduped,
         0,
         outcome.tool_outputs_truncated,
         outcome.tokens_before,
         outcome.tokens_after,
+        &op_fingerprint,
     );
-    let mut messages = outcome.messages;
     let boundary = first_changed_index(&session.messages, &messages).unwrap_or(messages.len());
     insert_compression_report_at_boundary(&mut messages, report, boundary);
     session.messages = messages;
     session.thread.previous_response_id = None;
     session.cache_guard_force_next = true;
+    session.provider_usage_stale = true;
     session.tier1_compact_attempts = 0;
     session.compression_insufficient_hashes.clear();
     emit_compression_applied(&mut session);
@@ -6920,6 +6930,137 @@ mod tests {
         }
 
         assert!(deterministic_compaction(&messages).is_none());
+    }
+
+    #[test]
+    fn deterministic_compaction_recent_window_ignores_preserved_outputs() {
+        let big = "tool output line ".repeat(400);
+        let mut messages = vec![user("start")];
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_eligible_{idx}"),
+                "shell",
+                &big,
+            ));
+        }
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("srvtoolu_{idx}"),
+                "shell",
+                &big,
+            ));
+        }
+
+        // Server-executed results may not consume the recent-window slots: the four
+        // eligible outputs are the four most recent eligible ones, so nothing is left
+        // to truncate.
+        assert!(deterministic_compaction(&messages).is_none());
+    }
+
+    #[test]
+    fn deterministic_compaction_truncates_spoofed_marker_content() {
+        let spoofed = format!(
+            "{} {}",
+            DETERMINISTIC_TOOL_OUTPUT_MARKER,
+            "raw tool output that merely begins with the marker ".repeat(200)
+        );
+        let mut messages = vec![user("start")];
+        messages.extend(tool_with_id_and_name("call_spoofed", "shell", &spoofed));
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_recent_{idx}"),
+                "shell",
+                &"tool output line ".repeat(400),
+            ));
+        }
+
+        let outcome = deterministic_compaction(&messages).expect("spoofed content must compact");
+        assert_eq!(outcome.tool_outputs_truncated, 1);
+        let truncated = outcome
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id == "call_spoofed")
+            .expect("spoofed message still present");
+        assert!(
+            truncated.content.content_text_only().len()
+                < DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS * 2 + DETERMINISTIC_TOOL_OUTPUT_MARKER.len()
+        );
+    }
+
+    #[test]
+    fn provider_pressure_ignores_usage_hidden_by_summarization() {
+        let mut source = assistant("old heavy answer");
+        source.message_id = "hidden-src-1".to_string();
+        source.usage = Some(usage(95_000, 10, 95_010, None, None));
+        let summary = make_segment_summary_message(
+            "compact continuation summary".to_string(),
+            std::slice::from_ref(&source),
+            "test-model",
+        );
+        let with_summary = vec![user("start"), source.clone(), summary, user("next")];
+        let without_summary = vec![user("start"), source, user("next")];
+
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&with_summary, 100_000, false),
+            ContextPressure::Low
+        );
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&without_summary, 100_000, false),
+            ContextPressure::Critical
+        );
+    }
+
+    #[test]
+    fn provider_pressure_with_stale_usage_uses_estimate_only() {
+        let messages = vec![
+            user("start"),
+            assistant_with_usage(usage(95_000, 10, 95_010, None, None)),
+            user("next"),
+        ];
+
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&messages, 100_000, true),
+            ContextPressure::Low
+        );
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&messages, 100_000, false),
+            ContextPressure::Critical
+        );
+    }
+
+    #[test]
+    fn quiet_status_does_not_clobber_active_attempt() {
+        let mut session = ChatSession::new("quiet-guard".to_string());
+        let attempt = reserve_compression_attempt(&mut session, None);
+
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+
+        assert!(owns_compression_attempt(&session, attempt));
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+        assert!(session.is_compressing);
+    }
+
+    #[test]
+    fn compression_attempt_active_expires_after_staleness_window() {
+        let mut session = ChatSession::new("stale-attempt".to_string());
+        let _attempt = reserve_compression_attempt(&mut session, None);
+        assert!(compression_attempt_active(&session));
+
+        session.compression_attempt_started_at_ms =
+            Some(epoch_ms_now().saturating_sub(COMPRESSION_ATTEMPT_STALE_MS + 1));
+        assert!(!compression_attempt_active(&session));
+
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert!(!session.is_compressing);
     }
 
     #[test]

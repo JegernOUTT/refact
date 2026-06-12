@@ -5,6 +5,8 @@ use uuid::Uuid;
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile};
 use refact_core::string_utils::redact_sensitive;
 
+use crate::compression_exemption::{exemption_for, CompressionExemption};
+
 const UI_ONLY_MARKER: &str = "_ui_only";
 const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
 
@@ -79,10 +81,119 @@ fn preserve_extra_key(
 }
 
 pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
-    msgs.iter()
+    let mut sanitized: Vec<ChatMessage> = msgs
+        .iter()
         .filter(|msg| !is_ui_only_message(msg))
         .map(sanitize_message_for_new_thread)
-        .collect()
+        .collect();
+    refresh_summary_source_hashes(&mut sanitized);
+    sanitized
+}
+
+fn is_llm_segment_summary_message(msg: &ChatMessage) -> bool {
+    msg.role == "assistant"
+        && msg
+            .extra
+            .get("compression")
+            .and_then(|compression| compression.get("kind"))
+            .and_then(|kind| kind.as_str())
+            == Some(LLM_SEGMENT_SUMMARY_KIND)
+}
+
+fn message_compression_source_hash(msg: &ChatMessage) -> Option<String> {
+    let key = if msg.role == COMPRESSION_REPORT_ROLE {
+        COMPRESSION_REPORT_EXTRA_KEY
+    } else {
+        "compression"
+    };
+    msg.extra
+        .get(key)?
+        .get("source_hash")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
+fn set_message_compression_source_hash(msg: &mut ChatMessage, new_hash: &str) {
+    let key = if msg.role == COMPRESSION_REPORT_ROLE {
+        COMPRESSION_REPORT_EXTRA_KEY
+    } else {
+        "compression"
+    };
+    if let Some(metadata) = msg.extra.get_mut(key) {
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "source_hash".to_string(),
+                serde_json::Value::String(new_hash.to_string()),
+            );
+        }
+    }
+}
+
+/// Sanitization rewrites message fields that participate in summary source hashes.
+/// Recompute every segment summary's `source_hash` over the sanitized sources so
+/// suppression metadata stays valid. Summaries whose sources are not fully present
+/// (handoff/branch flows carry summaries without their sources on purpose) keep
+/// their hash untouched: it never validates, so they suppress nothing and remain
+/// visible as carried context.
+pub fn refresh_summary_source_hashes(messages: &mut Vec<ChatMessage>) {
+    let snapshot = messages.clone();
+    // Keyed by old hash: two summaries can only share an old hash when their source
+    // sets have identical canonical content (ids are excluded from the hash), in
+    // which case their recomputed hashes are identical too, so a rename collision
+    // always writes an equal value.
+    let mut hash_renames: HashMap<String, String> = HashMap::new();
+    for msg in snapshot
+        .iter()
+        .filter(|msg| is_llm_segment_summary_message(msg))
+    {
+        let Some(compression) = msg.extra.get("compression") else {
+            continue;
+        };
+        let Some(old_hash) = compression
+            .get("source_hash")
+            .and_then(|hash| hash.as_str())
+        else {
+            continue;
+        };
+        let source_ids: HashSet<String> = compression
+            .get("summarized_source_message_ids")
+            .and_then(|ids| ids.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str())
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if source_ids.is_empty() {
+            continue;
+        }
+        let sources: Vec<ChatMessage> = snapshot
+            .iter()
+            .filter(|source| {
+                !source.message_id.is_empty() && source_ids.contains(&source.message_id)
+            })
+            .cloned()
+            .collect();
+        if sources.len() == source_ids.len() {
+            hash_renames.insert(
+                old_hash.to_string(),
+                crate::source_hash::source_hash_for_messages(&sources),
+            );
+        }
+    }
+    if hash_renames.is_empty() {
+        return;
+    }
+    for msg in messages.iter_mut() {
+        let Some(old_hash) = message_compression_source_hash(msg) else {
+            continue;
+        };
+        if let Some(new_hash) = hash_renames.get(&old_hash) {
+            set_message_compression_source_hash(msg, new_hash);
+        }
+    }
 }
 
 fn is_valid_tool_id(id: &str) -> bool {
@@ -142,6 +253,8 @@ pub fn sanitize_messages_for_model_switch(msgs: &mut Vec<ChatMessage>) {
             msg.tool_call_id = new_id.clone();
         }
     }
+
+    refresh_summary_source_hashes(msgs);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -220,19 +333,44 @@ fn compression_report_metadata_key(message: &ChatMessage) -> Option<CompressionR
     })
 }
 
+fn compression_report_op_fingerprint(message: &ChatMessage) -> Option<String> {
+    if message.role != COMPRESSION_REPORT_ROLE {
+        return None;
+    }
+    message
+        .extra
+        .get(COMPRESSION_REPORT_EXTRA_KEY)?
+        .get("op_fingerprint")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
 fn remove_equivalent_compression_reports(
     messages: &mut Vec<ChatMessage>,
     report: &ChatMessage,
     affected_boundary: usize,
 ) -> usize {
-    let Some(report_key) = compression_report_metadata_key(report) else {
+    let report_fingerprint = compression_report_op_fingerprint(report);
+    let report_key = compression_report_metadata_key(report);
+    if report_fingerprint.is_none() && report_key.is_none() {
         return affected_boundary;
-    };
+    }
 
     let mut idx = 0usize;
     let mut removed_before_boundary = 0usize;
     messages.retain(|message| {
-        let remove = compression_report_metadata_key(message) == Some(report_key.clone());
+        // Reports are equivalent only when they describe the same operation: matching
+        // stable fingerprints, or — for legacy fingerprint-less pairs — matching metrics.
+        let remove = match (
+            &report_fingerprint,
+            compression_report_op_fingerprint(message),
+        ) {
+            (Some(new_fingerprint), Some(old_fingerprint)) => *new_fingerprint == old_fingerprint,
+            (None, None) => {
+                report_key.is_some() && compression_report_metadata_key(message) == report_key
+            }
+            _ => false,
+        };
         if remove && idx < affected_boundary {
             removed_before_boundary += 1;
         }
@@ -302,26 +440,69 @@ pub fn build_compression_report_message(
     }
 }
 
+pub fn build_compression_report_message_with_fingerprint(
+    context_files_removed: usize,
+    context_messages_dropped: usize,
+    tool_results_truncated: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+    op_fingerprint: &str,
+) -> ChatMessage {
+    let mut message = build_compression_report_message(
+        context_files_removed,
+        context_messages_dropped,
+        tool_results_truncated,
+        tokens_before,
+        tokens_after,
+    );
+    if let Some(metadata) = message.extra.get_mut(COMPRESSION_REPORT_EXTRA_KEY) {
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "op_fingerprint".to_string(),
+                serde_json::Value::String(op_fingerprint.to_string()),
+            );
+        }
+    }
+    message
+}
+
+fn answers_earlier_tool_call(messages: &[ChatMessage], idx: usize) -> bool {
+    let message = &messages[idx];
+    if !matches!(message.role.as_str(), "tool" | "diff" | "context_file")
+        || message.tool_call_id.is_empty()
+    {
+        return false;
+    }
+    messages[..idx].iter().any(|earlier| {
+        earlier
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.id == message.tool_call_id))
+    })
+}
+
 fn compression_report_insert_index(messages: &[ChatMessage], affected_boundary: usize) -> usize {
     let mut insert_idx = affected_boundary.min(messages.len());
-    let leading_system_prefix_len = messages
+    // Keep the report after the entire leading control prefix (system prompts plus
+    // hidden event/plan messages), never inside it.
+    let leading_control_prefix_len = messages
         .iter()
-        .take_while(|message| message.role == "system")
+        .take_while(|message| matches!(message.role.as_str(), "system" | "event" | "plan"))
         .count();
-    insert_idx = insert_idx.max(leading_system_prefix_len);
+    insert_idx = insert_idx.max(leading_control_prefix_len);
 
     if let Some(first_user_idx) = messages.iter().position(|message| message.role == "user") {
         insert_idx = insert_idx.max(first_user_idx + 1);
-    } else if insert_idx == 0 {
-        if let Some(first_anchor_idx) = messages
-            .iter()
-            .position(|message| matches!(message.role.as_str(), "system" | "event" | "plan"))
-        {
-            insert_idx = first_anchor_idx + 1;
-        }
     }
 
-    insert_idx.min(messages.len())
+    insert_idx = insert_idx.min(messages.len());
+
+    // Never split an assistant's tool calls from their results.
+    while insert_idx < messages.len() && answers_earlier_tool_call(messages, insert_idx) {
+        insert_idx += 1;
+    }
+
+    insert_idx
 }
 
 fn note_affected_boundary(boundary: &mut Option<usize>, candidate: usize) {
@@ -343,13 +524,21 @@ const TOOL_PREVIEW_CHARS: usize = 200;
 const TOOL_PREVIEW_REDACTION_EXTRA_CHARS: usize = 256;
 
 fn compressed_tool_preview(content_text: &str) -> String {
-    let scan_chars = TOOL_PREVIEW_CHARS + TOOL_PREVIEW_REDACTION_EXTRA_CHARS;
-    let scan_window = match content_text.char_indices().nth(scan_chars) {
-        Some((end, _)) => &content_text[..end],
-        None => content_text,
-    };
+    let scan_cap = TOOL_PREVIEW_CHARS + TOOL_PREVIEW_REDACTION_EXTRA_CHARS;
+    // Back the scan window off to a token boundary so a secret spanning the window
+    // edge is excluded whole instead of being split past the redactor's reach.
+    let (scan_window, _truncated) =
+        refact_core::string_utils::bounded_redaction_window(content_text, scan_cap);
+    if scan_window.is_empty() {
+        // The content starts with one unbroken token longer than the scan window; a
+        // partial slice of it could be an unrecognizable secret, so omit it whole.
+        return format!(
+            "[long unbroken token omitted: {} chars]",
+            content_text.chars().count()
+        );
+    }
     let redacted = redact_sensitive(scan_window);
-    redacted.chars().take(TOOL_PREVIEW_CHARS).collect()
+    refact_core::string_utils::safe_truncate(&redacted, TOOL_PREVIEW_CHARS).to_string()
 }
 
 fn should_preserve_tool(name: &str) -> bool {
@@ -548,19 +737,47 @@ pub fn compress_in_place(
     let mut context_messages_dropped = 0;
     let mut tool_modified = 0;
     let mut affected_boundary = None;
+    let mut affected_ids: Vec<String> = Vec::new();
 
     if opts.drop_all_context {
         let mut kept_before = 0usize;
-        messages.retain(|m| {
-            if m.role == "context_file" {
-                context_modified += context_file_count(&m.content);
-                context_messages_dropped += 1;
-                note_affected_boundary(&mut affected_boundary, kept_before);
-                false
-            } else {
+        let mut to_drop: Vec<usize> = Vec::new();
+        for idx in 0..messages.len() {
+            let (is_droppable_context, answers_tool_call, file_count) = {
+                let msg = &messages[idx];
+                (
+                    msg.role == "context_file" && exemption_for(msg) != CompressionExemption::Never,
+                    !msg.tool_call_id.is_empty(),
+                    context_file_count(&msg.content),
+                )
+            };
+            if !is_droppable_context {
                 kept_before += 1;
-                true
+                continue;
             }
+            context_modified += file_count;
+            context_messages_dropped += 1;
+            note_affected_boundary(&mut affected_boundary, kept_before);
+            affected_ids.push(messages[idx].message_id.clone());
+            if answers_tool_call {
+                // Keep the message so the assistant tool-call pair stays valid.
+                messages[idx].content = ChatContent::SimpleText(
+                    "Context files dropped by chat compression".to_string(),
+                );
+                kept_before += 1;
+            } else {
+                to_drop.push(idx);
+            }
+        }
+        let mut drop_iter = to_drop.into_iter().peekable();
+        let mut idx = 0usize;
+        messages.retain(|_| {
+            let drop = drop_iter.peek() == Some(&idx);
+            if drop {
+                drop_iter.next();
+            }
+            idx += 1;
+            !drop
         });
     } else if opts.dedup_and_compress_context {
         let before_dedup = messages.clone();
@@ -570,6 +787,11 @@ pub fn compress_in_place(
             if count > 0 {
                 if let Some(boundary) = first_changed_boundary(&before_dedup, messages) {
                     note_affected_boundary(&mut affected_boundary, boundary);
+                }
+                for (before, after) in before_dedup.iter().zip(messages.iter()) {
+                    if serde_json::to_value(before).ok() != serde_json::to_value(after).ok() {
+                        affected_ids.push(before.message_id.clone());
+                    }
                 }
             }
         }
@@ -586,6 +808,7 @@ pub fn compress_in_place(
                     if removed > 0 {
                         context_modified += removed;
                         note_affected_boundary(&mut affected_boundary, idx);
+                        affected_ids.push(msg.message_id.clone());
                         msg.content = ChatContent::ContextFiles(remaining);
                     }
                 }
@@ -595,6 +818,7 @@ pub fn compress_in_place(
                         if removed > 0 {
                             context_modified += removed;
                             note_affected_boundary(&mut affected_boundary, idx);
+                            affected_ids.push(msg.message_id.clone());
                             msg.content = ChatContent::SimpleText(
                                 serde_json::to_string(&remaining).map_err(|e| {
                                     format!("Failed to serialize context files: {}", e)
@@ -606,9 +830,46 @@ pub fn compress_in_place(
                 _ => {}
             }
         }
+        // Pair-preserving pass: emptied context_file messages that answer a tool call
+        // keep their slot as a stub instead of being dropped.
+        for (idx, msg) in messages.iter_mut().enumerate() {
+            if msg.role != "context_file"
+                || msg.tool_call_id.is_empty()
+                || exemption_for(msg) == CompressionExemption::Never
+            {
+                continue;
+            }
+            let (emptied, was_memory_text) = match &msg.content {
+                ChatContent::ContextFiles(files) => (files.is_empty(), false),
+                ChatContent::SimpleText(text) => {
+                    if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
+                        (files.is_empty(), false)
+                    } else if simple_text_contains_memory_context_path(text) {
+                        (true, true)
+                    } else {
+                        (false, false)
+                    }
+                }
+                _ => (false, false),
+            };
+            if emptied {
+                if was_memory_text {
+                    context_modified += 1;
+                }
+                context_messages_dropped += 1;
+                note_affected_boundary(&mut affected_boundary, idx);
+                affected_ids.push(msg.message_id.clone());
+                msg.content = ChatContent::SimpleText(
+                    "Memory context dropped by chat compression".to_string(),
+                );
+            }
+        }
         let mut kept_before = 0usize;
         messages.retain(|m| {
-            if m.role != "context_file" {
+            if m.role != "context_file"
+                || !m.tool_call_id.is_empty()
+                || exemption_for(m) == CompressionExemption::Never
+            {
                 kept_before += 1;
                 return true;
             }
@@ -617,6 +878,7 @@ pub fn compress_in_place(
                     if files.is_empty() {
                         context_messages_dropped += 1;
                         note_affected_boundary(&mut affected_boundary, kept_before);
+                        affected_ids.push(m.message_id.clone());
                         false
                     } else {
                         kept_before += 1;
@@ -628,6 +890,7 @@ pub fn compress_in_place(
                         if files.is_empty() {
                             context_messages_dropped += 1;
                             note_affected_boundary(&mut affected_boundary, kept_before);
+                            affected_ids.push(m.message_id.clone());
                             false
                         } else {
                             kept_before += 1;
@@ -637,6 +900,7 @@ pub fn compress_in_place(
                         context_modified += 1;
                         context_messages_dropped += 1;
                         note_affected_boundary(&mut affected_boundary, kept_before);
+                        affected_ids.push(m.message_id.clone());
                         false
                     } else {
                         kept_before += 1;
@@ -664,6 +928,7 @@ pub fn compress_in_place(
                 if text.contains("project") || text.contains("workspace") {
                     context_modified += 1;
                     note_affected_boundary(&mut affected_boundary, kept_before);
+                    affected_ids.push(msg.message_id.clone());
                     false
                 } else {
                     true
@@ -697,6 +962,7 @@ pub fn compress_in_place(
                         ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                     tool_modified += 1;
                     note_affected_boundary(&mut affected_boundary, idx);
+                    affected_ids.push(msg.message_id.clone());
                 }
             }
         }
@@ -715,12 +981,28 @@ pub fn compress_in_place(
     let after_tokens_pre = approx_token_count(messages);
 
     if let Some(boundary) = affected_boundary {
-        let report = build_compression_report_message(
+        // Deterministic per-operation identity: replaying the same options against the
+        // same affected messages dedupes the report instead of duplicating it.
+        let mut seen_affected = HashSet::new();
+        let affected_ids: Vec<String> = affected_ids
+            .into_iter()
+            .filter(|id| seen_affected.insert(id.clone()))
+            .collect();
+        let fingerprint_payload = serde_json::json!({
+            "opts": opts,
+            "affected_message_ids": affected_ids,
+        });
+        let op_fingerprint = format!(
+            "{:x}",
+            md5::compute(serde_json::to_vec(&fingerprint_payload).unwrap_or_default())
+        );
+        let report = build_compression_report_message_with_fingerprint(
             context_modified,
             context_messages_dropped,
             tool_modified,
             before_tokens,
             after_tokens_pre,
+            &op_fingerprint,
         );
         insert_compression_report_at_boundary(messages, report, boundary);
     }
@@ -786,6 +1068,222 @@ mod tests {
             content: ChatContent::ContextFiles(vec![make_context_file(filename, content)]),
             ..Default::default()
         }
+    }
+
+    fn assistant_declaring_call(call_id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("calling".to_string()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: call_id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn make_event_message() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({ "subkind": "system_notice", "source": "test", "payload": {} }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText("event".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_plan_message() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "plan".to_string(),
+            serde_json::json!({ "mode": "agent", "version": 1 }),
+        );
+        ChatMessage {
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText("plan body".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn report_insert_respects_leading_control_prefix() {
+        let messages = vec![
+            make_event_message(),
+            make_plan_message(),
+            make_assistant_msg("hello"),
+        ];
+
+        assert_eq!(compression_report_insert_index(&messages, 0), 2);
+    }
+
+    #[test]
+    fn report_insert_does_not_split_tool_pairs() {
+        let messages = vec![
+            make_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            make_tool_msg("tc-1", "result one"),
+            make_tool_msg("tc-1", "result two"),
+            make_assistant_msg("done"),
+        ];
+
+        // Boundary points between the assistant's calls and its results; the report
+        // must land after the whole results block.
+        assert_eq!(compression_report_insert_index(&messages, 2), 4);
+    }
+
+    #[test]
+    fn equivalent_reports_dedupe_by_fingerprint_only() {
+        let mut messages = vec![make_user_msg("q"), make_assistant_msg("a")];
+        let first = build_compression_report_message_with_fingerprint(1, 0, 0, 100, 50, "op-1");
+        insert_compression_report_at_boundary(&mut messages, first, 2);
+        let retry = build_compression_report_message_with_fingerprint(2, 1, 1, 90, 40, "op-1");
+        insert_compression_report_at_boundary(&mut messages, retry, 2);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                .count(),
+            1
+        );
+
+        let distinct_op =
+            build_compression_report_message_with_fingerprint(2, 1, 1, 90, 40, "op-2");
+        insert_compression_report_at_boundary(&mut messages, distinct_op, 2);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn drop_all_context_keeps_tool_answering_stub() {
+        let mut answering = make_context_file_msg("src/a.rs", "context content a");
+        answering.tool_call_id = "tc-1".to_string();
+        let mut messages = vec![
+            make_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            answering,
+            make_context_file_msg("src/b.rs", "context content b"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).expect("compress must succeed");
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.role == "assistant" && message.tool_calls.is_some()),
+            "assistant with tool calls must survive"
+        );
+        let stub = messages
+            .iter()
+            .find(|message| message.role == "context_file" && message.tool_call_id == "tc-1")
+            .expect("tool-answering context_file must keep its slot");
+        assert!(stub
+            .content
+            .content_text_only()
+            .contains("dropped by chat compression"));
+        assert!(!messages
+            .iter()
+            .any(|message| message.role == "context_file" && message.tool_call_id.is_empty()));
+    }
+
+    #[test]
+    fn sanitize_new_thread_refreshes_summary_hashes() {
+        let mut source = make_assistant_msg("heavy answer");
+        source.message_id = "src-1".to_string();
+        source.usage = Some(ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            ..Default::default()
+        });
+        let pre_sanitize_hash =
+            crate::source_hash::source_hash_for_messages(std::slice::from_ref(&source));
+        let mut summary = make_assistant_msg("summary");
+        summary.message_id = "sum-1".to_string();
+        summary.extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "kind": LLM_SEGMENT_SUMMARY_KIND,
+                "insert_mode": "source_preserving",
+                "source_hash": pre_sanitize_hash,
+                "summarized_source_message_ids": ["src-1"],
+            }),
+        );
+        let messages = vec![make_user_msg("q"), source, summary];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        let sanitized_source = sanitized
+            .iter()
+            .find(|message| message.message_id == "src-1")
+            .expect("source survives sanitize");
+        assert!(sanitized_source.usage.is_none());
+        let sanitized_summary = sanitized
+            .iter()
+            .find(|message| message.message_id == "sum-1")
+            .expect("summary survives sanitize");
+        let stored_hash = sanitized_summary
+            .extra
+            .get("compression")
+            .and_then(|c| c.get("source_hash"))
+            .and_then(|h| h.as_str())
+            .expect("summary keeps a source hash");
+        let expected_hash =
+            crate::source_hash::source_hash_for_messages(std::slice::from_ref(sanitized_source));
+        assert_eq!(stored_hash, expected_hash);
+        assert_ne!(stored_hash, pre_sanitize_hash);
+    }
+
+    #[test]
+    fn sanitize_new_thread_keeps_summaries_carried_without_sources() {
+        let mut summary = make_assistant_msg("carried summary");
+        summary.message_id = "sum-1".to_string();
+        summary.extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "kind": LLM_SEGMENT_SUMMARY_KIND,
+                "insert_mode": "source_preserving",
+                "source_hash": "old-hash",
+                "summarized_source_message_ids": ["gone-src"],
+            }),
+        );
+        let messages = vec![make_user_msg("q"), summary, make_assistant_msg("tail")];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        // Handoff/branch flows carry summaries without their sources on purpose: the
+        // summary survives with its hash untouched and acts as carried context.
+        let carried = sanitized
+            .iter()
+            .find(|message| message.message_id == "sum-1")
+            .expect("carried summary must survive sanitize");
+        assert_eq!(
+            carried
+                .extra
+                .get("compression")
+                .and_then(|c| c.get("source_hash"))
+                .and_then(|h| h.as_str()),
+            Some("old-hash")
+        );
     }
 
     fn make_context_file_simple_text_msg(files: Vec<ContextFile>) -> ChatMessage {
@@ -907,6 +1405,14 @@ mod tests {
             extra,
             ..Default::default()
         }
+    }
+
+    fn make_v3_source_messages() -> Vec<ChatMessage> {
+        let mut assistant_source = make_assistant_msg("source answer");
+        assistant_source.message_id = "assistant-source".to_string();
+        let mut context_source = make_context_file_msg("src/ctx.rs", "ctx content");
+        context_source.message_id = "context-source".to_string();
+        vec![assistant_source, context_source]
     }
 
     fn make_v3_source_preserving_segment_summary_msg() -> ChatMessage {
@@ -1093,26 +1599,22 @@ mod tests {
     }
 
     fn stable_existing_report_for_drop_all_context() -> ChatMessage {
-        let mut report = build_compression_report_message(1, 1, 0, 0, 0);
-        for _ in 0..10 {
-            let before = approx_token_count(&[
-                make_user_msg("hello"),
-                report.clone(),
-                make_context_file_msg("test.rs", "fn main() {}"),
-                make_assistant_msg("response"),
-            ]);
-            let after = approx_token_count(&[
-                make_user_msg("hello"),
-                report.clone(),
-                make_assistant_msg("response"),
-            ]);
-            let next = build_compression_report_message(1, 1, 0, before, after);
-            if compression_report_metadata_key(&next) == compression_report_metadata_key(&report) {
-                return report;
-            }
-            report = next;
-        }
-        report
+        // Derive the report by actually running the same operation on the same
+        // pre-state: replays dedupe by the deterministic operation fingerprint.
+        let mut probe_messages = vec![
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+        compress_in_place(&mut probe_messages, &opts).unwrap();
+        probe_messages
+            .into_iter()
+            .find(|message| message.role == COMPRESSION_REPORT_ROLE)
+            .expect("probe run must produce a compression report")
     }
 
     #[test]
@@ -1192,16 +1694,15 @@ mod tests {
 
     #[test]
     fn sanitize_messages_for_new_thread_preserves_v3_source_preserving_metadata() {
-        let messages = vec![
-            make_v3_source_preserving_segment_summary_msg(),
-            make_v3_source_preserving_compression_report_msg(),
-        ];
+        let mut messages = make_v3_source_messages();
+        messages.push(make_v3_source_preserving_segment_summary_msg());
+        messages.push(make_v3_source_preserving_compression_report_msg());
 
         let sanitized = sanitize_messages_for_new_thread(&messages);
 
-        assert_eq!(sanitized.len(), 2);
-        assert_v3_source_preserving_summary_metadata(&sanitized[0]);
-        assert_v3_source_preserving_report_metadata(&sanitized[1]);
+        assert_eq!(sanitized.len(), 4);
+        assert_v3_source_preserving_summary_metadata(&sanitized[2]);
+        assert_v3_source_preserving_report_metadata(&sanitized[3]);
     }
 
     #[test]
@@ -1233,16 +1734,15 @@ mod tests {
 
     #[test]
     fn sanitize_messages_for_model_switch_preserves_v3_source_preserving_metadata() {
-        let mut messages = vec![
-            make_v3_source_preserving_segment_summary_msg(),
-            make_v3_source_preserving_compression_report_msg(),
-        ];
+        let mut messages = make_v3_source_messages();
+        messages.push(make_v3_source_preserving_segment_summary_msg());
+        messages.push(make_v3_source_preserving_compression_report_msg());
 
         sanitize_messages_for_model_switch(&mut messages);
 
-        assert_eq!(messages.len(), 2);
-        assert_v3_source_preserving_summary_metadata(&messages[0]);
-        assert_v3_source_preserving_report_metadata(&messages[1]);
+        assert_eq!(messages.len(), 4);
+        assert_v3_source_preserving_summary_metadata(&messages[2]);
+        assert_v3_source_preserving_report_metadata(&messages[3]);
     }
 
     #[test]
@@ -1501,7 +2001,7 @@ mod tests {
 
     #[test]
     fn test_compress_non_agentic_tool_preview_remains_bounded() {
-        let long_content = "x".repeat(1000);
+        let long_content = "tool output word ".repeat(60);
         let mut messages = vec![
             make_user_msg("hello"),
             make_assistant_with_tool_call("tc1", "cat"),
@@ -1520,8 +2020,30 @@ mod tests {
             .strip_prefix("Tool result compressed: ")
             .and_then(|text| text.strip_suffix("..."))
             .unwrap();
-        assert_eq!(preview.chars().count(), TOOL_PREVIEW_CHARS);
-        assert!(preview.chars().all(|c| c == 'x'));
+        assert!(!preview.is_empty());
+        assert!(preview.len() <= TOOL_PREVIEW_CHARS);
+        assert!(preview.starts_with("tool output word"));
+    }
+
+    #[test]
+    fn test_compress_non_agentic_tool_omits_unbroken_long_token() {
+        let long_content = "x".repeat(1000);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        assert!(text.contains("[long unbroken token omitted: 1000 chars]"));
+        assert!(!text.contains("xxxxxxxxxx"));
     }
 
     #[test]
@@ -1745,7 +2267,8 @@ mod tests {
     #[test]
     fn test_compression_report_repeated_equivalent_compression_dedupes() {
         let existing_report = stable_existing_report_for_drop_all_context();
-        let existing_key = compression_report_metadata_key(&existing_report);
+        let existing_fingerprint = compression_report_op_fingerprint(&existing_report);
+        assert!(existing_fingerprint.is_some());
         let mut messages = vec![
             make_user_msg("hello"),
             existing_report,
@@ -1761,8 +2284,8 @@ mod tests {
 
         assert_eq!(compression_report_count(&messages), 1);
         assert_eq!(
-            compression_report_metadata_key(compression_report(&messages)),
-            existing_key
+            compression_report_op_fingerprint(compression_report(&messages)),
+            existing_fingerprint
         );
     }
 

@@ -190,6 +190,7 @@ impl ChatSession {
             compression_reason: None,
             compression_attempt_generation: 0,
             active_compression_attempt: None,
+            compression_attempt_started_at_ms: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -223,6 +224,7 @@ impl ChatSession {
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
+            provider_usage_stale: false,
             task_agent_error: None,
             pending_browser_message: None,
             post_tool_side_effects: VecDeque::new(),
@@ -263,6 +265,7 @@ impl ChatSession {
             compression_reason: None,
             compression_attempt_generation: 0,
             active_compression_attempt: None,
+            compression_attempt_started_at_ms: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -296,6 +299,7 @@ impl ChatSession {
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
+            provider_usage_stale: false,
             task_agent_error: None,
             pending_browser_message: None,
             post_tool_side_effects: VecDeque::new(),
@@ -330,6 +334,7 @@ impl ChatSession {
         self.thread.reactive_compact_attempts = None;
         self.thread.previous_response_id = None;
         self.cache_guard_force_next = true;
+        self.provider_usage_stale = true;
         self.is_compressing = false;
         self.runtime.is_compressing = false;
         self.compression_phase = None;
@@ -337,6 +342,7 @@ impl ChatSession {
         self.compression_reason = None;
         self.runtime.compression_reason = None;
         self.active_compression_attempt = None;
+        self.compression_attempt_started_at_ms = None;
     }
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
@@ -814,6 +820,46 @@ impl ChatSession {
                 (message.message_id.clone(), source_hash)
             })
             .collect();
+        self.remove_stale_summaries(stale);
+    }
+
+    fn invalidate_orphaned_summaries(&mut self) {
+        let existing_ids: HashSet<String> = self
+            .messages
+            .iter()
+            .filter(|message| !message.message_id.is_empty())
+            .map(|message| message.message_id.clone())
+            .collect();
+        let stale: Vec<(String, Option<String>)> = self
+            .messages
+            .iter()
+            .filter(|message| crate::chat::summarization::is_segment_summary(message))
+            .filter(|message| {
+                message
+                    .extra
+                    .get("compression")
+                    .and_then(|c| c.get("summarized_source_message_ids"))
+                    .and_then(|ids| ids.as_array())
+                    .is_some_and(|ids| {
+                        ids.iter()
+                            .filter_map(|id| id.as_str())
+                            .any(|id| !id.is_empty() && !existing_ids.contains(id))
+                    })
+            })
+            .map(|message| {
+                let source_hash = message
+                    .extra
+                    .get("compression")
+                    .and_then(|c| c.get("source_hash"))
+                    .and_then(|h| h.as_str())
+                    .map(ToString::to_string);
+                (message.message_id.clone(), source_hash)
+            })
+            .collect();
+        self.remove_stale_summaries(stale);
+    }
+
+    fn remove_stale_summaries(&mut self, stale: Vec<(String, Option<String>)>) {
         for (summary_id, source_hash) in stale {
             let report_ids: Vec<String> = self
                 .messages
@@ -881,6 +927,7 @@ impl ChatSession {
                 }
             }
 
+            self.invalidate_orphaned_summaries();
             self.increment_version();
             self.touch();
             return Some(idx);
@@ -896,6 +943,7 @@ impl ChatSession {
             self.compression_insufficient_hashes.clear();
             self.thread.previous_response_id = None;
             self.emit(ChatEvent::MessagesTruncated { from_index });
+            self.invalidate_orphaned_summaries();
             self.increment_version();
             self.touch();
         }
@@ -4978,6 +5026,94 @@ mod tests {
             session.messages[1].content.content_text_only(),
             "edited answer"
         );
+    }
+
+    fn summary_fixture_messages() -> Vec<ChatMessage> {
+        let mut source = ChatMessage::new("assistant".to_string(), "original answer".to_string());
+        source.message_id = "source-id".to_string();
+        let mut summary = ChatMessage::new("assistant".to_string(), "summary".to_string());
+        summary.message_id = "summary-id".to_string();
+        summary.summarization_tier = Some("llm_segment_summary".to_string());
+        summary.extra.insert(
+            "compression".to_string(),
+            json!({
+                "kind": "llm_segment_summary",
+                "insert_mode": "source_preserving",
+                "source_hash": "hash-1",
+                "summarized_source_message_ids": ["source-id"],
+            }),
+        );
+        let mut report = ChatMessage::new("compression_report".to_string(), "report".to_string());
+        report.message_id = "report-id".to_string();
+        report.extra.insert(
+            "compression_report".to_string(),
+            json!({ "kind": "chat_compression_report", "source_hash": "hash-1" }),
+        );
+        let mut unrelated_summary =
+            ChatMessage::new("assistant".to_string(), "other summary".to_string());
+        unrelated_summary.message_id = "other-summary-id".to_string();
+        unrelated_summary.summarization_tier = Some("llm_segment_summary".to_string());
+        unrelated_summary.extra.insert(
+            "compression".to_string(),
+            json!({
+                "kind": "llm_segment_summary",
+                "source_hash": "hash-2",
+                "summarized_source_message_ids": ["other-source-id"],
+            }),
+        );
+        let mut other_source =
+            ChatMessage::new("assistant".to_string(), "other answer".to_string());
+        other_source.message_id = "other-source-id".to_string();
+        let mut user_msg = ChatMessage::new("user".to_string(), "question".to_string());
+        user_msg.message_id = "user-id".to_string();
+        vec![
+            user_msg,
+            other_source,
+            unrelated_summary,
+            report,
+            summary,
+            source,
+        ]
+    }
+
+    #[test]
+    fn remove_message_drops_summaries_referencing_removed_source() {
+        let mut session = make_session();
+        session.messages = summary_fixture_messages();
+
+        session.remove_message("source-id");
+
+        let ids: Vec<&str> = session
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"source-id"));
+        assert!(!ids.contains(&"summary-id"));
+        assert!(!ids.contains(&"report-id"));
+        assert!(ids.contains(&"other-summary-id"));
+        assert!(ids.contains(&"other-source-id"));
+    }
+
+    #[test]
+    fn truncate_messages_drops_summaries_referencing_truncated_sources() {
+        let mut session = make_session();
+        session.messages = summary_fixture_messages();
+
+        // Truncate away only the trailing source; its summary and report sit earlier
+        // in the transcript and must be invalidated.
+        session.truncate_messages(5);
+
+        let ids: Vec<&str> = session
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"source-id"));
+        assert!(!ids.contains(&"summary-id"));
+        assert!(!ids.contains(&"report-id"));
+        assert!(ids.contains(&"other-summary-id"));
+        assert!(ids.contains(&"other-source-id"));
     }
 
     #[test]

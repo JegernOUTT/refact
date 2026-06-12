@@ -162,6 +162,16 @@ describe("ChatContent compression progress", () => {
     );
   });
 
+  it("does not render compression progress for stale running phase when not compressing", () => {
+    renderChatContent(
+      makeChatState({ isCompressing: false, compressionPhase: "running" }),
+    );
+
+    expect(
+      screen.queryByTestId("compression-progress"),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders provider limit compression status", async () => {
     renderChatContent(
       makeChatState({

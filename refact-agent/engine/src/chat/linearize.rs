@@ -41,22 +41,52 @@ fn is_source_preserving_summary(msg: &ChatMessage) -> bool {
 
 fn source_preserving_summary_id_sets(
     messages: &[ChatMessage],
-) -> (HashSet<String>, HashSet<String>) {
+) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
     let mut suppressed = HashSet::new();
     let mut preserved = HashSet::new();
-    for compression in messages
+    let mut invalid_summaries = HashSet::new();
+    for message in messages
         .iter()
         .filter(|message| is_source_preserving_summary(message))
-        .filter_map(|message| message.extra.get("compression"))
     {
+        let Some(compression) = message.extra.get("compression") else {
+            continue;
+        };
+        let mut summary_source_ids = HashSet::new();
         collect_compression_ids(
             compression,
             "summarized_source_message_ids",
-            &mut suppressed,
+            &mut summary_source_ids,
         );
+        if let Some(stored_hash) = compression
+            .get("source_hash")
+            .and_then(|hash| hash.as_str())
+        {
+            let sources: Vec<ChatMessage> = messages
+                .iter()
+                .filter(|source| {
+                    !source.message_id.is_empty() && summary_source_ids.contains(&source.message_id)
+                })
+                .cloned()
+                .collect();
+            if sources.len() != summary_source_ids.len() {
+                // Sources are not fully present (handoff/branch carried the summary
+                // without them): keep the summary visible and suppress nothing.
+                continue;
+            }
+            if crate::chat::summarization::source_hash_for_messages(&sources) != stored_hash {
+                // Sources are present but changed since summarization: the summary is
+                // stale, so drop it from the provider wire and show the sources.
+                if !message.message_id.is_empty() {
+                    invalid_summaries.insert(message.message_id.clone());
+                }
+                continue;
+            }
+        }
+        suppressed.extend(summary_source_ids);
         collect_compression_ids(compression, "preserved_source_message_ids", &mut preserved);
     }
-    (suppressed, preserved)
+    (suppressed, preserved, invalid_summaries)
 }
 
 fn collect_compression_ids(
@@ -111,12 +141,15 @@ fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)
 
 pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let summaries = legacy_summary_ranges(&messages);
-    let (source_preserving_suppressed_ids, source_preserving_preserved_ids) =
+    let (source_preserving_suppressed_ids, source_preserving_preserved_ids, invalid_summary_ids) =
         source_preserving_summary_id_sets(&messages);
     if summaries.is_empty() {
         return messages
             .into_iter()
             .filter(|message| !is_linearization_only_message(message))
+            .filter(|message| {
+                message.message_id.is_empty() || !invalid_summary_ids.contains(&message.message_id)
+            })
             .filter(|message| {
                 !can_suppress_source_preserving_source(
                     message,
@@ -178,6 +211,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         }
         if is_linearization_only_message(msg)
             || suppressed.contains(&i)
+            || (!msg.message_id.is_empty() && invalid_summary_ids.contains(&msg.message_id))
             || can_suppress_source_preserving_source(
                 msg,
                 &source_preserving_suppressed_ids,
@@ -257,6 +291,8 @@ mod tests {
         summarized_ids: &[&str],
         preserved_ids: &[&str],
     ) -> ChatMessage {
+        // No `source_hash` on purpose: hash-less summaries follow the legacy
+        // trust-the-ids suppression path. Hash validation cases set it explicitly.
         let mut summary = summarization(content, None);
         summary.extra.insert(
             "compression".to_string(),
@@ -264,7 +300,6 @@ mod tests {
                 "schema_version": 3,
                 "kind": "llm_segment_summary",
                 "insert_mode": "source_preserving",
-                "source_hash": "hash",
                 "source_message_ids": summarized_ids,
                 "summarized_source_message_ids": summarized_ids,
                 "preserved_source_message_ids": preserved_ids,
@@ -273,6 +308,102 @@ mod tests {
             }),
         );
         summary
+    }
+
+    fn with_source_hash(mut summary: ChatMessage, source_hash: &str) -> ChatMessage {
+        if let Some(compression) = summary.extra.get_mut("compression") {
+            if let Some(obj) = compression.as_object_mut() {
+                obj.insert(
+                    "source_hash".to_string(),
+                    serde_json::Value::String(source_hash.to_string()),
+                );
+            }
+        }
+        summary
+    }
+
+    #[test]
+    fn keeps_summary_and_suppresses_sources_when_hash_matches() {
+        let source = with_id(assistant("heavy old answer"), "src-1");
+        let valid_hash =
+            crate::chat::summarization::source_hash_for_messages(std::slice::from_ref(&source));
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("compact summary", &["src-1"], &[]),
+                &valid_hash,
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"src-1"));
+        assert!(ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn drops_summary_and_keeps_sources_when_hash_is_stale() {
+        let source = with_id(assistant("edited answer"), "src-1");
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("stale summary", &["src-1"], &[]),
+                "definitely-not-the-current-hash",
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(ids.contains(&"src-1"));
+        assert!(!ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn keeps_summary_visible_when_sources_are_missing() {
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("carried summary", &["gone-src"], &[]),
+                "some-hash",
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        // A summary carried without its sources (handoff/branch) stays on the wire
+        // as context; it simply suppresses nothing.
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(ids.contains(&"summary-1"));
+        assert!(ids.contains(&"u-1"));
+        assert!(ids.contains(&"u-2"));
     }
 
     fn with_id(mut message: ChatMessage, id: &str) -> ChatMessage {

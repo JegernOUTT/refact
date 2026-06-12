@@ -134,10 +134,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const compressionPulseSeq = useAppSelector((s) =>
     selectCompressionPulseSeqById(s, renderChatId),
   );
-  const compressionActive =
-    isCompressing ||
-    compressionPhase === "checking" ||
-    compressionPhase === "running";
+  const compressionActive = isCompressing;
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
   );

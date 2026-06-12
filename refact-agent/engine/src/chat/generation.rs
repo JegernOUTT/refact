@@ -791,6 +791,7 @@ pub(crate) fn is_high_pressure_length_stop(
     message: &ChatMessage,
     messages: &[ChatMessage],
     effective_n_ctx: usize,
+    usage_stale: bool,
 ) -> bool {
     if message.role != "assistant"
         || message
@@ -804,7 +805,11 @@ pub(crate) fn is_high_pressure_length_stop(
     }
 
     matches!(
-        crate::chat::summarization::estimated_provider_context_pressure(messages, effective_n_ctx),
+        crate::chat::summarization::estimated_provider_context_pressure_with_usage(
+            messages,
+            effective_n_ctx,
+            usage_stale,
+        ),
         ContextPressure::High | ContextPressure::Critical
     )
 }
@@ -853,7 +858,12 @@ async fn maybe_compact_after_high_pressure_length_stop(
         let Some(message) = session.messages.last() else {
             return false;
         };
-        if !is_high_pressure_length_stop(message, &session.messages, effective_n_ctx) {
+        if !is_high_pressure_length_stop(
+            message,
+            &session.messages,
+            effective_n_ctx,
+            session.provider_usage_stale,
+        ) {
             return false;
         }
         let reason = length_like_finish_reason(message.finish_reason.as_deref())
@@ -982,6 +992,14 @@ async fn maybe_recover_after_length_stop(
         )
     };
 
+    if attempts >= MAX_LENGTH_STOP_RECOVERY_ATTEMPTS {
+        let mut session = session_arc.lock().await;
+        session.add_message(make_ui_only_error_message(
+            "Generation stopped by the output token limit repeatedly; automatic retries exhausted. Send a message to continue.",
+        ));
+        return false;
+    }
+
     let compacted = maybe_compact_after_high_pressure_length_stop(
         gcx.clone(),
         session_arc,
@@ -990,18 +1008,19 @@ async fn maybe_recover_after_length_stop(
     )
     .await;
 
-    if attempts >= MAX_LENGTH_STOP_RECOVERY_ATTEMPTS {
-        if compacted {
-            return true;
+    if thread.max_tokens.is_some() && kind == LengthStopKind::PartialOutput {
+        if !compacted {
+            return false;
         }
         let mut session = session_arc.lock().await;
-        session.add_message(make_ui_only_error_message(
-            "Generation stopped by the output token limit repeatedly; automatic retries exhausted. Send a message to continue.",
-        ));
-        return false;
-    }
-    if thread.max_tokens.is_some() && kind == LengthStopKind::PartialOutput {
-        return compacted;
+        session.add_message(length_stop_continue_instruction(kind));
+        warn!(
+            "Recovering from {:?} length stop after compaction (attempt {}/{})",
+            kind,
+            attempts + 1,
+            MAX_LENGTH_STOP_RECOVERY_ATTEMPTS,
+        );
+        return true;
     }
 
     let mut session = session_arc.lock().await;
@@ -1491,6 +1510,7 @@ pub fn start_generation(
 
             {
                 let mut session = session_arc.lock().await;
+                session.provider_usage_stale = false;
                 if session.thread.reactive_compact_attempts.take().is_some() {
                     session.increment_version();
                     session.touch();
@@ -3208,7 +3228,9 @@ mod tests {
         let message = make_high_pressure_length_stop();
         let messages = vec![make_user_msg("continue"), message.clone()];
 
-        assert!(is_high_pressure_length_stop(&message, &messages, 100_000));
+        assert!(is_high_pressure_length_stop(
+            &message, &messages, 100_000, false
+        ));
     }
 
     #[test]
@@ -3216,7 +3238,9 @@ mod tests {
         let message = make_low_pressure_length_stop();
         let messages = vec![make_user_msg("continue"), message.clone()];
 
-        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+        assert!(!is_high_pressure_length_stop(
+            &message, &messages, 100_000, false
+        ));
     }
 
     #[tokio::test]
@@ -3276,7 +3300,9 @@ mod tests {
         });
         let messages = vec![make_user_msg("continue"), message.clone()];
 
-        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+        assert!(!is_high_pressure_length_stop(
+            &message, &messages, 100_000, false
+        ));
     }
 
     #[test]
@@ -3285,7 +3311,9 @@ mod tests {
         message.tool_calls = make_assistant_with_tool_call("call_123", "cat").tool_calls;
         let messages = vec![make_user_msg("continue"), message.clone()];
 
-        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+        assert!(!is_high_pressure_length_stop(
+            &message, &messages, 100_000, false
+        ));
     }
 
     #[test]
@@ -3294,7 +3322,9 @@ mod tests {
         message.finish_reason = Some("max_output_tokens".to_string());
         let messages = vec![make_user_msg("continue"), message.clone()];
 
-        assert!(is_high_pressure_length_stop(&message, &messages, 100_000));
+        assert!(is_high_pressure_length_stop(
+            &message, &messages, 100_000, false
+        ));
     }
 
     #[tokio::test]

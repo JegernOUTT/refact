@@ -14,9 +14,10 @@ use crate::tools::tools_description::{
 };
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
 use refact_chat_history::trajectory_ops::{
-    build_compression_report_message, insert_compression_report_at_boundary, is_memory_path,
-    TOOLS_TO_PRESERVE,
+    build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
+    is_memory_path, TOOLS_TO_PRESERVE,
 };
+use sha2::{Digest, Sha256};
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
 
@@ -398,12 +399,37 @@ fn compress_chat_apply_head_output(
     let report = if stats.has_meaningful_mutation() {
         let after_tokens_pre_report =
             tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
-        Some(build_compression_report_message(
+        let sorted = |set: &HashSet<String>| -> Vec<String> {
+            let mut items: Vec<String> = set.iter().cloned().collect();
+            items.sort();
+            items
+        };
+        // Canonical operation identity over every mutation-driving request field so
+        // distinct manual operations never share a fingerprint.
+        let fingerprint_payload = json!({
+            "op": "ctx_apply",
+            "drop_context_files": sorted(request.drop_context_files),
+            "drop_context_messages": sorted(request.drop_context_messages),
+            "drop_tool_outputs": sorted(request.drop_tool_outputs),
+            "truncate_tool_outputs": sorted(request.truncate_tool_outputs),
+            "drop_memories": sorted(request.drop_memories),
+            "drop_all_memories": request.drop_all_memories,
+            "dedup_context_files": request.dedup_context_files,
+            "drop_project_information": request.drop_project_information,
+            "strength": request.strength,
+            "preserve_last_turns": request.preserve_last_turns,
+            "target_tokens": request.target_tokens,
+        });
+        let mut fingerprint_hasher = Sha256::new();
+        fingerprint_hasher.update(serde_json::to_vec(&fingerprint_payload).unwrap_or_default());
+        let op_fingerprint = hex::encode(fingerprint_hasher.finalize());
+        Some(build_compression_report_message_with_fingerprint(
             stats.context_files_removed(),
             stats.context_messages_dropped,
             stats.tool_truncated + stats.tool_dropped,
             before_tokens,
             after_tokens_pre_report,
+            &op_fingerprint,
         ))
     } else {
         None
@@ -441,6 +467,7 @@ fn compress_chat_apply_head_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_chat_history::trajectory_ops::build_compression_report_message;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
 
     fn user_message(text: &str) -> ChatMessage {
@@ -682,32 +709,43 @@ mod tests {
     }
 
     fn stable_existing_report_for_manual_context_drop() -> ChatMessage {
-        let mut report = build_compression_report_message(1, 1, 0, 0, 0);
-        for _ in 0..10 {
-            let before = vec![
-                user_message("old user"),
-                report.clone(),
-                context_file_message("old_context", "old.rs", "old context"),
-                assistant_message("old assistant"),
-            ];
-            let after = vec![
-                user_message("old user"),
-                report.clone(),
-                assistant_message("old assistant"),
-            ];
-            let next = build_compression_report_message(
-                1,
-                1,
-                0,
-                before.iter().map(approx_tokens_for_message).sum(),
-                after.iter().map(approx_tokens_for_message).sum(),
-            );
-            if compression_report_metadata(&next) == compression_report_metadata(&report) {
-                return report;
-            }
-            report = next;
-        }
-        report
+        // Derive the report by running the same manual compression on the same
+        // pre-state: replays dedupe by the deterministic operation fingerprint.
+        let messages = vec![
+            user_message("old user"),
+            context_file_message("old_context", "old.rs", "old context"),
+            assistant_message("old assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, _, _) = compress_chat_apply_head_messages(messages, &[], &request);
+        after
+            .into_iter()
+            .find(|message| message.role == "compression_report")
+            .expect("probe run must produce a compression report")
+    }
+
+    fn report_op_fingerprint(message: &ChatMessage) -> Option<String> {
+        message
+            .extra
+            .get("compression_report")?
+            .get("op_fingerprint")?
+            .as_str()
+            .map(ToString::to_string)
     }
 
     #[test]
@@ -1375,7 +1413,8 @@ mod tests {
     #[test]
     fn apply_repeated_equivalent_manual_compression_dedupes() {
         let existing_report = stable_existing_report_for_manual_context_drop();
-        let existing_metadata = compression_report_metadata(&existing_report);
+        let existing_fingerprint = report_op_fingerprint(&existing_report);
+        assert!(existing_fingerprint.is_some());
         let messages = vec![
             user_message("old user"),
             existing_report,
@@ -1402,10 +1441,53 @@ mod tests {
 
         assert_eq!(stats.context_messages_dropped, 1);
         assert_eq!(compression_report_count(&after), 1);
-        assert_eq!(
-            compression_report_metadatas(&after),
-            vec![existing_metadata]
+        let surviving = after
+            .iter()
+            .find(|message| message.role == "compression_report")
+            .expect("a compression report must remain");
+        assert_eq!(report_op_fingerprint(surviving), existing_fingerprint);
+    }
+
+    #[test]
+    fn apply_same_sets_with_different_options_keeps_both_reports() {
+        let existing_report = stable_existing_report_for_manual_context_drop();
+        let existing_fingerprint = report_op_fingerprint(&existing_report);
+        assert!(existing_fingerprint.is_some());
+        let messages = vec![
+            user_message("old user"),
+            existing_report,
+            context_file_message("old_context", "old.rs", "old context"),
+            assistant_message("old assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
         );
+        request.preserve_last_turns = Some(0);
+        // Same explicit id sets, but a different mutation-driving option: this is a
+        // distinct operation and must not dedupe the earlier report.
+        request.drop_project_information = true;
+
+        let (after, _, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(compression_report_count(&after), 2);
+        let fingerprints: Vec<Option<String>> = after
+            .iter()
+            .filter(|message| message.role == "compression_report")
+            .map(report_op_fingerprint)
+            .collect();
+        assert!(fingerprints.contains(&existing_fingerprint));
+        assert!(fingerprints.iter().any(|fp| fp != &existing_fingerprint));
     }
 
     #[test]
