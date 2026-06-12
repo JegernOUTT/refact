@@ -141,6 +141,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::THEME_COMMAND,
             misc::VIM_COMMAND,
             misc::DEBUG_CONFIG_COMMAND,
+            misc::COPY_COMMAND,
             misc::RAW_COMMAND,
             CommandDef {
                 name: "stop",
@@ -216,7 +217,7 @@ mod tests {
     fn misc_command_group_is_visible_in_popup() {
         let items = command_picker_items(CommandContext { active_turn: false });
         for title in [
-            "/theme", "/help", "/events", "/quit", "/keymap", "/vim", "/raw",
+            "/theme", "/help", "/events", "/quit", "/keymap", "/vim", "/copy", "/raw",
         ] {
             assert!(
                 items.iter().any(|item| item.title == title),
@@ -258,7 +259,13 @@ mod tests {
     fn registry_has_handler_or_explicit_unavailable_reason() {
         for command in command_registry() {
             match command.action {
-                CommandAction::BackendCommand { command } => assert_eq!(command, "stop"),
+                CommandAction::BackendCommand { command: "stop" } => {}
+                CommandAction::BackendCommand { command: other } => {
+                    panic!(
+                        "/{} maps to unexpected backend command /{other}",
+                        command.name
+                    );
+                }
                 CommandAction::Unavailable { reason } => assert!(!reason.trim().is_empty()),
                 CommandAction::OpenPicker { .. }
                 | CommandAction::LocalToggle { .. }

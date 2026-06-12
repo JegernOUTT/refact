@@ -60,6 +60,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(picker) = app.modal_picker() {
         render_modal_picker(frame, picker, area, composer_area);
     }
+    if app.transcript_overlay().is_some() {
+        let overlay_height = area.height.saturating_sub(4).max(8);
+        app.set_transcript_overlay_visible_height(overlay_height.saturating_sub(3) as usize);
+    }
     if let Some(overlay) = app.transcript_overlay() {
         render_transcript_overlay(frame, overlay, area);
     }

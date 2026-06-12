@@ -9,6 +9,7 @@ pub enum PagerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerAction {
     None,
+    Yank,
     Close,
 }
 
@@ -103,6 +104,15 @@ impl PagerOverlay {
         lines[start..end].to_vec()
     }
 
+    pub fn visible_raw_text(&self, height: usize) -> String {
+        if height == 0 {
+            return String::new();
+        }
+        let start = self.scroll.min(self.raw_lines.len());
+        let end = start.saturating_add(height).min(self.raw_lines.len());
+        self.raw_lines[start..end].join("\n")
+    }
+
     pub fn status(&self) -> String {
         let mode = match self.mode {
             PagerMode::Rendered => "rendered",
@@ -122,7 +132,7 @@ impl PagerOverlay {
                 self.matches.len()
             )
         };
-        format!("{mode} · {search} · c copy mode · q/Esc close")
+        format!("{mode} · {search} · c copy mode · y yank · q/Esc close")
     }
 
     pub fn handle_dispatch(&mut self, dispatch: KeyDispatch) -> PagerAction {
@@ -139,6 +149,7 @@ impl PagerOverlay {
                 self.toggle_mode();
                 PagerAction::None
             }
+            Some(KeyAction::OverlayYank) => PagerAction::Yank,
             Some(KeyAction::OverlayNextMatch) => {
                 self.next_match();
                 PagerAction::None

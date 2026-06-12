@@ -72,6 +72,17 @@ impl TerminalSession {
         &mut self.terminal
     }
 
+    pub fn write_clipboard(
+        &mut self,
+        text: &str,
+    ) -> io::Result<crate::clipboard::ClipboardCopyReport> {
+        crate::clipboard::write_osc52_copy(
+            self.terminal.backend_mut(),
+            text,
+            crate::clipboard::tmux_passthrough_enabled_from_env(),
+        )
+    }
+
     pub fn mode(&self) -> TerminalMode {
         self.guard.mode
     }

@@ -7,6 +7,7 @@ pub enum MiscCommand {
     Theme,
     ToggleVim,
     DebugConfig,
+    CopyLastAssistant,
     RawTranscript,
 }
 
@@ -98,6 +99,17 @@ pub const DEBUG_CONFIG_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const COPY_COMMAND: CommandDef = CommandDef {
+    name: "copy",
+    aliases: &[],
+    description: "terminal clipboard: copy the last assistant message via OSC52",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::CopyLastAssistant,
+    },
+};
+
 pub const RAW_COMMAND: CommandDef = CommandDef {
     name: "raw",
     aliases: &[],
@@ -110,11 +122,6 @@ pub const RAW_COMMAND: CommandDef = CommandDef {
 };
 
 pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
-    unavailable(
-        "copy",
-        &[],
-        "terminal clipboard copy is not wired; use /raw and terminal selection",
-    ),
     unavailable(
         "subagents",
         &["multi-agents"],

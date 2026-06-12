@@ -141,6 +141,12 @@ pub struct UsageSummary {
     pub total_tokens: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardCopySource {
+    LastAssistant,
+    OverlayVisible,
+}
+
 impl UsageSummary {
     fn from_value(value: &Value) -> Option<Self> {
         let prompt_tokens = token_count(value, &["prompt_tokens", "input_tokens", "prompt"]);
@@ -290,6 +296,7 @@ pub struct App {
     backtrack_pending: Option<BacktrackTarget>,
     last_escape_at: Option<Instant>,
     transcript_overlay: Option<PagerOverlay>,
+    transcript_overlay_visible_height: Option<usize>,
     help_open: bool,
     usage: Option<UsageSummary>,
     should_quit: bool,
@@ -363,6 +370,7 @@ impl App {
             backtrack_pending: None,
             last_escape_at: None,
             transcript_overlay: None,
+            transcript_overlay_visible_height: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -419,6 +427,7 @@ impl App {
             backtrack_pending: None,
             last_escape_at: None,
             transcript_overlay: None,
+            transcript_overlay_visible_height: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -697,6 +706,10 @@ impl App {
         self.transcript_overlay.as_ref()
     }
 
+    pub fn set_transcript_overlay_visible_height(&mut self, height: usize) {
+        self.transcript_overlay_visible_height = Some(height);
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -942,7 +955,9 @@ impl App {
                     AppAction::Abort
                 } else {
                     self.composer.clear();
-                    self.add_notice(format!("/{command} is not yet implemented in the TUI"));
+                    self.add_notice(format!(
+                        "/{command} is only available while a response is running"
+                    ));
                     AppAction::None
                 }
             }
@@ -1058,6 +1073,7 @@ impl App {
                 self.show_debug_config_card();
                 AppAction::None
             }
+            misc::MiscCommand::CopyLastAssistant => self.copy_last_assistant_message(),
             misc::MiscCommand::RawTranscript => {
                 self.composer.clear();
                 self.open_raw_transcript_overlay()
@@ -1580,6 +1596,79 @@ impl App {
             self.transcript_raw_text_lines(),
         ));
         AppAction::None
+    }
+
+    fn copy_last_assistant_message(&mut self) -> AppAction {
+        self.composer.clear();
+        let Some(text) = self.last_assistant_rendered_plain_text(100) else {
+            self.add_notice("No assistant message to copy");
+            return AppAction::None;
+        };
+        AppAction::CopyToClipboard {
+            text,
+            source: ClipboardCopySource::LastAssistant,
+        }
+    }
+
+    fn copy_visible_overlay_text(&mut self, height: usize) -> AppAction {
+        let Some(overlay) = self.transcript_overlay.as_ref() else {
+            return AppAction::None;
+        };
+        let text = overlay.visible_raw_text(height);
+        if text.is_empty() {
+            self.add_notice("No overlay text to copy");
+            return AppAction::None;
+        }
+        AppAction::CopyToClipboard {
+            text,
+            source: ClipboardCopySource::OverlayVisible,
+        }
+    }
+
+    fn last_assistant_rendered_plain_text(&self, width: usize) -> Option<String> {
+        let message = self
+            .transcript_state
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == TranscriptRole::Assistant && !message.content.is_empty()
+            })?;
+        let lines = crate::render::MarkdownRenderer::plain(Some(width)).render(&message.content);
+        Some(
+            lines
+                .into_iter()
+                .map(|line| line_to_plain_string(&line))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn record_clipboard_result(
+        &mut self,
+        source: ClipboardCopySource,
+        result: std::io::Result<crate::clipboard::ClipboardCopyReport>,
+    ) {
+        match result {
+            Ok(report) => {
+                let label = match source {
+                    ClipboardCopySource::LastAssistant => "assistant message",
+                    ClipboardCopySource::OverlayVisible => "visible overlay text",
+                };
+                if report.truncated {
+                    self.add_notice(format!(
+                        "Copied {label} to terminal clipboard via OSC52 (truncated to {} of {} bytes)",
+                        report.copied_bytes, report.original_bytes
+                    ));
+                } else {
+                    self.add_notice(format!(
+                        "Copied {label} to terminal clipboard via OSC52 ({} bytes)",
+                        report.copied_bytes
+                    ));
+                }
+            }
+            Err(error) => self.add_notice(format!("Clipboard copy failed: {error}")),
+        }
     }
 
     fn transcript_rendered_text_lines(&self, width: usize) -> Vec<String> {
@@ -2890,10 +2979,17 @@ impl App {
             KeyContext::Overlay
         };
         let dispatch = self.keymap.dispatch(context, key);
-        if overlay.handle_dispatch(dispatch) == PagerAction::Close {
-            self.transcript_overlay = None;
+        match overlay.handle_dispatch(dispatch) {
+            PagerAction::None => AppAction::None,
+            PagerAction::Close => {
+                self.transcript_overlay = None;
+                AppAction::None
+            }
+            PagerAction::Yank => {
+                let height = self.transcript_overlay_visible_height.unwrap_or(100);
+                self.copy_visible_overlay_text(height)
+            }
         }
-        AppAction::None
     }
 
     fn handle_approval_key(&mut self, key: KeyEvent) -> AppAction {
@@ -3196,6 +3292,10 @@ pub enum AppAction {
     LoadDiff {
         root: PathBuf,
     },
+    CopyToClipboard {
+        text: String,
+        source: ClipboardCopySource,
+    },
     OpenExternalEditor {
         draft: String,
     },
@@ -3409,16 +3509,21 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         match event {
             RuntimeEvent::Input(Event::Key(key)) => {
                 let action = app.handle_key(key);
-                if let AppAction::OpenExternalEditor { draft } = action {
-                    input_task.abort();
-                    let result = edit_composer_in_external_editor(&mut terminal, draft).await;
-                    match result {
-                        Ok(content) => app.composer.set_text(content),
-                        Err(message) => app.add_notice(message),
+                match action {
+                    AppAction::OpenExternalEditor { draft } => {
+                        input_task.abort();
+                        let result = edit_composer_in_external_editor(&mut terminal, draft).await;
+                        match result {
+                            Ok(content) => app.composer.set_text(content),
+                            Err(message) => app.add_notice(message),
+                        }
+                        input_task = spawn_input_task(tx.clone());
                     }
-                    input_task = spawn_input_task(tx.clone());
-                } else {
-                    run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+                    AppAction::CopyToClipboard { text, source } => {
+                        let result = terminal.write_clipboard(&text);
+                        app.record_clipboard_result(source, result);
+                    }
+                    action => run_action(&mut app, action, &client, &tx, &mut subscriptions).await,
                 }
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
@@ -3782,6 +3887,7 @@ async fn run_action(
                 let _ = tx.send(RuntimeEvent::DiffLoaded(result)).await;
             });
         }
+        AppAction::CopyToClipboard { .. } => {}
         AppAction::OpenExternalEditor { .. } => {}
         AppAction::SendToolDecisions { decisions, patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
@@ -5160,6 +5266,58 @@ new-chat = "ctrl-x"
         assert!(app
             .transcript_overlay()
             .is_some_and(|overlay| overlay.is_copy_mode()));
+    }
+
+    #[test]
+    fn copy_command_emits_last_assistant_as_osc52_payload() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "hello"},
+                {"message_id": "a1", "role": "assistant", "content": "old"},
+                {"message_id": "a2", "role": "assistant", "content": "new"}
+            ]}),
+        });
+
+        let action = app.execute_command_name("copy");
+
+        let AppAction::CopyToClipboard { text, source } = action else {
+            panic!("expected copy action");
+        };
+        assert_eq!(source, ClipboardCopySource::LastAssistant);
+        assert_eq!(text, "new");
+        let mut output = Vec::new();
+        let report = crate::clipboard::write_osc52_copy(&mut output, &text, false).unwrap();
+        assert_eq!(output, b"\x1b]52;c;bmV3\x07");
+        assert_eq!(report.copied_bytes, 3);
+        assert!(!report.truncated);
+    }
+
+    #[test]
+    fn overlay_y_yanks_visible_raw_text() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "hello"},
+                {"message_id": "a1", "role": "assistant", "content": "hi"}
+            ]}),
+        });
+        app.execute_command_name("raw");
+        app.set_transcript_overlay_visible_height(2);
+
+        let action = app.handle_key(key(KeyCode::Char('y')));
+
+        assert!(matches!(
+            action,
+            AppAction::CopyToClipboard { text, source }
+                if source == ClipboardCopySource::OverlayVisible && text == "## user u1\nhello"
+        ));
     }
 
     #[test]
