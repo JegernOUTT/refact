@@ -694,17 +694,15 @@ async fn follow_events(
         )));
     }
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             next = stream.next() => {
                 let Some(chunk) = next else { return Ok(()); };
                 let chunk = chunk.map_err(|error| CliError::runtime(format!("daemon event stream failed: {error}")))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(index) = buffer.find("\n\n") {
-                    let block = buffer[..index].to_string();
-                    buffer = buffer[index + 2..].to_string();
+                buffer.extend_from_slice(&chunk);
+                for block in drain_complete_sse_frames(&mut buffer)? {
                     for event in parse_sse_events(&(block + "\n\n")) {
                         if kind.map(|kind| event.kind == kind).unwrap_or(true) {
                             write_event(out, &event, json_output)?;
@@ -1268,6 +1266,21 @@ fn write_error(error: io::Error) -> CliError {
     CliError::runtime(format!("failed to write output: {error}"))
 }
 
+fn drain_complete_sse_frames(buffer: &mut Vec<u8>) -> Result<Vec<String>, CliError> {
+    let mut frames = Vec::new();
+    loop {
+        let Some(index) = buffer.windows(2).position(|window| window == b"\n\n") else {
+            break;
+        };
+        let frame_bytes: Vec<u8> = buffer.drain(..index + 2).collect();
+        let frame = std::str::from_utf8(&frame_bytes[..frame_bytes.len() - 2])
+            .map_err(|error| CliError::runtime(format!("invalid UTF-8 in event stream: {error}")))?
+            .to_string();
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
 fn parse_sse_events(text: &str) -> Vec<DaemonEvent> {
     text.split("\n\n")
         .filter_map(|block| {
@@ -1428,6 +1441,70 @@ mod tests {
         let events = parse_sse_events(text);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "worker_ready");
+    }
+
+    #[test]
+    fn sse_frame_drain_preserves_split_multibyte() {
+        let text = "data: {\"ts_ms\":1,\"kind\":\"worker_ready\",\"project_id\":\"p\",\"payload\":{\"name\":\"项目💡\"}}\n\n";
+        let bytes = text.as_bytes();
+        let glyph_index = bytes
+            .windows("💡".len())
+            .position(|window| window == "💡".as_bytes())
+            .unwrap();
+        let split_index = glyph_index + 2;
+        let mut buffer = Vec::new();
+
+        buffer.extend_from_slice(&bytes[..split_index]);
+        assert!(drain_complete_sse_frames(&mut buffer).unwrap().is_empty());
+        assert_eq!(buffer, bytes[..split_index]);
+
+        buffer.extend_from_slice(&bytes[split_index..]);
+        let frames = drain_complete_sse_frames(&mut buffer).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0], text.trim_end_matches("\n\n"));
+        assert!(!frames[0].contains('�'));
+
+        let events = parse_sse_events(&(frames[0].clone() + "\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["name"], json!("项目💡"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn sse_frame_drain_errors_on_invalid_utf8() {
+        let mut buffer = b"data: ".to_vec();
+        buffer.push(0xff);
+        buffer.extend_from_slice(b"\n\n");
+
+        let error = drain_complete_sse_frames(&mut buffer).unwrap_err();
+        assert!(error.message.contains("invalid UTF-8 in event stream"));
+    }
+
+    #[test]
+    fn sse_frame_drain_keeps_incomplete_trailing_data() {
+        let mut buffer = b"data: {\"ts_ms\":1,\"kind\":\"one\",\"project_id\":null,\"payload\":{}}\n\ndata: partial".to_vec();
+
+        let frames = drain_complete_sse_frames(&mut buffer).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0],
+            "data: {\"ts_ms\":1,\"kind\":\"one\",\"project_id\":null,\"payload\":{}}"
+        );
+        assert_eq!(buffer, b"data: partial");
+    }
+
+    #[test]
+    fn sse_frame_drain_extracts_multiple_frames() {
+        let mut buffer = b"data: {\"ts_ms\":1,\"kind\":\"one\",\"project_id\":null,\"payload\":{}}\n\ndata: {\"ts_ms\":2,\"kind\":\"two\",\"project_id\":null,\"payload\":{}}\n\n".to_vec();
+
+        let frames = drain_complete_sse_frames(&mut buffer).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(buffer.is_empty());
+
+        let events = parse_sse_events(&(frames.join("\n\n") + "\n\n"));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "one");
+        assert_eq!(events[1].kind, "two");
     }
 
     #[tokio::test]
