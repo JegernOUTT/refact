@@ -14,6 +14,9 @@ use crate::client::{
 };
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
+use crate::protocol::{
+    content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
+};
 use crate::terminal::TerminalSession;
 use crate::tools::{now_ms, ToolCard, ToolStatus};
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
@@ -55,6 +58,8 @@ pub enum TranscriptItem {
     Assistant(String),
     Reasoning(String, bool),
     Tool(ToolCard),
+    Citation(String),
+    ServerContentBlock(String),
     Notice(String),
 }
 
@@ -171,6 +176,7 @@ impl ProjectPickerState {
 #[derive(Debug, Clone)]
 pub struct App {
     transcript: Vec<TranscriptItem>,
+    transcript_state: TranscriptState,
     composer: String,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
@@ -203,6 +209,11 @@ impl App {
                 project.slug,
                 project.root.display()
             ))],
+            transcript_state: notice_transcript_state(format!(
+                "Opened project {} at {}",
+                project.slug,
+                project.root.display()
+            )),
             composer: String::new(),
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
@@ -229,8 +240,10 @@ impl App {
     }
 
     fn notice_only(notice: impl Into<String>) -> Self {
+        let notice = notice.into();
         Self {
-            transcript: vec![TranscriptItem::Notice(notice.into())],
+            transcript: vec![TranscriptItem::Notice(notice.clone())],
+            transcript_state: notice_transcript_state(notice),
             composer: String::new(),
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
@@ -312,6 +325,10 @@ impl App {
         &self.transcript
     }
 
+    pub fn transcript_state(&self) -> &TranscriptState {
+        &self.transcript_state
+    }
+
     pub fn project_picker(&self) -> &ProjectPickerState {
         &self.picker
     }
@@ -387,12 +404,11 @@ impl App {
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_state = SessionState::Idle;
-        self.transcript.clear();
-        self.transcript.push(TranscriptItem::Notice(format!(
+        self.replace_with_notice(format!(
             "Switched to project {} at {}",
             project.slug,
             project.root.display()
-        )));
+        ));
         self.stream_collector.clear();
         self.composer_mode = ComposerMode::Chat;
         self.modal_picker = None;
@@ -402,9 +418,7 @@ impl App {
 
     fn new_chat(&mut self) {
         self.chat_id = uuid::Uuid::new_v4().to_string();
-        self.transcript.clear();
-        self.transcript
-            .push(TranscriptItem::Notice("New chat started".to_string()));
+        self.replace_with_notice("New chat started".to_string());
         self.session_state = SessionState::Idle;
         self.stream_collector.clear();
         self.clear_approvals();
@@ -417,9 +431,9 @@ impl App {
             return None;
         }
         self.composer.clear();
-        self.transcript.push(TranscriptItem::User(prompt.clone()));
-        self.transcript
-            .push(TranscriptItem::Assistant(String::new()));
+        self.transcript_state.push_user_message(prompt.clone());
+        self.transcript_state.start_assistant(None);
+        self.rebuild_render_transcript_from_state();
         self.session_state = SessionState::Generating;
         self.stream_collector.clear();
         self.usage = None;
@@ -483,21 +497,70 @@ impl App {
     }
 
     fn add_notice(&mut self, text: impl Into<String>) {
-        self.transcript.push(TranscriptItem::Notice(text.into()));
+        let text = text.into();
+        self.transcript_state.push_notice(text.clone());
+        self.transcript.push(TranscriptItem::Notice(text));
     }
 
-    fn add_event_summary(&mut self, label: &str, op: &Value) {
-        let summary = op
-            .get("text")
-            .or_else(|| op.get("content"))
-            .or_else(|| op.get("citation"))
-            .or_else(|| op.get("block"))
-            .map(value_to_compact_string)
-            .unwrap_or_default();
-        if summary.is_empty() {
-            self.add_notice(label.to_string());
-        } else {
-            self.add_notice(format!("{label}: {summary}"));
+    fn replace_with_notice(&mut self, text: String) {
+        self.transcript_state = notice_transcript_state(text.clone());
+        self.transcript = vec![TranscriptItem::Notice(text)];
+    }
+
+    fn rebuild_render_transcript_from_state(&mut self) {
+        self.transcript.clear();
+        self.selected_tool_index = None;
+        let messages = self.transcript_state.messages().to_vec();
+        for message in &messages {
+            self.append_render_message(message);
+        }
+    }
+
+    fn append_render_message(&mut self, message: &TranscriptMessage) {
+        match &message.role {
+            TranscriptRole::User => {
+                if !message.content.is_empty() {
+                    self.transcript
+                        .push(TranscriptItem::User(message.content.clone()));
+                }
+            }
+            TranscriptRole::Assistant => {
+                if !message.reasoning.is_empty() {
+                    self.transcript
+                        .push(TranscriptItem::Reasoning(message.reasoning.clone(), true));
+                }
+                if !message.content.is_empty() || message.tool_calls.is_empty() {
+                    self.transcript
+                        .push(TranscriptItem::Assistant(message.content.clone()));
+                }
+                for citation in &message.citations {
+                    self.transcript
+                        .push(TranscriptItem::Citation(value_to_compact_string(citation)));
+                }
+                for block in &message.server_content_blocks {
+                    self.transcript.push(TranscriptItem::ServerContentBlock(
+                        value_to_compact_string(block),
+                    ));
+                }
+                for tool in &message.tool_calls {
+                    self.push_tool_call(tool);
+                }
+            }
+            TranscriptRole::Tool => self.complete_tool(
+                message.tool_call_id.as_deref().unwrap_or_default(),
+                message.content.clone(),
+                if message.tool_failed {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Success
+                },
+                now_ms(),
+            ),
+            TranscriptRole::Notice => {
+                self.transcript
+                    .push(TranscriptItem::Notice(message.content.clone()));
+            }
+            TranscriptRole::Other(_) => {}
         }
     }
 
@@ -553,29 +616,41 @@ impl App {
             return;
         }
         self.daemon_online = true;
-        match event.kind.as_str() {
-            "snapshot" => self.handle_snapshot(&event.raw),
-            "stream_started" => {
+        let protocol_event = event.protocol_event();
+        let raw = event.raw;
+        match protocol_event {
+            SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
+            SseEvent::StreamStarted { message_id } => {
                 self.session_state = SessionState::Generating;
                 self.stream_collector.clear();
-                if !matches!(self.transcript.last(), Some(TranscriptItem::Assistant(_))) {
-                    self.transcript
-                        .push(TranscriptItem::Assistant(String::new()));
-                }
+                self.transcript_state.start_assistant(message_id.as_deref());
+                self.rebuild_render_transcript_from_state();
             }
-            "stream_delta" => self.handle_stream_delta(&event.raw),
-            "stream_finished" => {
+            SseEvent::StreamDelta { message_id, ops } => {
+                self.handle_stream_delta(message_id.as_deref(), &ops)
+            }
+            SseEvent::StreamFinished {
+                message_id, usage, ..
+            } => {
                 self.finalize_assistant_stream();
-                self.update_usage(&event.raw);
+                self.transcript_state
+                    .finish_assistant(message_id.as_deref(), usage.clone());
+                if let Some(usage) = usage {
+                    self.update_usage_value(&usage);
+                } else {
+                    self.update_usage(&raw);
+                }
                 if self.session_state != SessionState::Paused {
                     self.session_state = SessionState::Idle;
                 }
             }
-            "runtime_updated" => self.handle_runtime_updated(&event.raw),
-            "pause_required" => self.handle_pause_required(&event.raw, event.seq),
-            "pause_cleared" => self.handle_pause_cleared(),
-            "message_added" => self.handle_message_added(&event.raw),
-            _ => {}
+            SseEvent::RuntimeUpdated => self.handle_runtime_updated(&raw),
+            SseEvent::PauseRequired => self.handle_pause_required(&raw, event.seq),
+            SseEvent::PauseCleared => self.handle_pause_cleared(),
+            SseEvent::MessageAdded { message } => {
+                self.handle_message_added_payload(message.as_ref())
+            }
+            SseEvent::Unknown { .. } => {}
         }
     }
 
@@ -593,7 +668,8 @@ impl App {
                 .map(str::to_string);
         }
         if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
-            self.rebuild_transcript(messages);
+            self.transcript_state.reset_from_messages(messages);
+            self.rebuild_render_transcript_from_state();
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
@@ -607,50 +683,24 @@ impl App {
         }
     }
 
-    fn rebuild_transcript(&mut self, messages: &[Value]) {
-        self.transcript.clear();
-        self.selected_tool_index = None;
-        for message in messages {
-            match message
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-            {
-                "user" => {
-                    if let Some(text) = content_text(message) {
-                        self.transcript.push(TranscriptItem::User(text));
-                    }
-                }
-                "assistant" => {
-                    if let Some(text) = content_text(message) {
-                        if !text.is_empty() {
-                            self.transcript.push(TranscriptItem::Assistant(text));
-                        }
-                    }
-                    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-                        for call in calls {
-                            self.push_tool_call(call);
-                        }
-                    }
-                }
-                "tool" => self.handle_tool_message(message),
-                _ => {}
-            }
-        }
-    }
-
     fn handle_runtime_updated(&mut self, raw: &Value) {
         self.apply_runtime_state(raw);
     }
 
     fn update_usage(&mut self, raw: &Value) {
-        let usage = raw
+        if let Some(usage) = raw
             .get("usage")
             .or_else(|| raw.get("last_usage"))
             .or_else(|| raw.get("token_usage"))
-            .and_then(UsageSummary::from_value);
-        if usage.is_some() {
-            self.usage = usage;
+        {
+            self.update_usage_value(usage);
+        }
+    }
+
+    fn update_usage_value(&mut self, usage: &Value) {
+        self.transcript_state.set_usage(usage.clone());
+        if let Some(summary) = UsageSummary::from_value(usage) {
+            self.usage = Some(summary);
         }
     }
 
@@ -680,60 +730,48 @@ impl App {
         }
     }
 
-    fn handle_stream_delta(&mut self, raw: &Value) {
-        let Some(ops) = raw.get("ops").and_then(Value::as_array) else {
-            return;
-        };
+    fn handle_stream_delta(&mut self, message_id: Option<&str>, ops: &[DeltaOp]) {
+        self.transcript_state.apply_delta_ops(message_id, ops);
         for op in ops {
-            match op.get("op").and_then(Value::as_str).unwrap_or_default() {
-                "append_content" => {
-                    if let Some(text) = op.get("text").and_then(Value::as_str) {
-                        self.append_assistant(text);
-                    }
+            match op {
+                DeltaOp::AppendContent { text } => self.append_assistant(text),
+                DeltaOp::AppendReasoning { text } => self.append_reasoning(text),
+                DeltaOp::SetUsage { usage } => self.update_usage_value(usage),
+                DeltaOp::AddCitation { citation } => {
+                    self.transcript
+                        .push(TranscriptItem::Citation(value_to_compact_string(citation)));
                 }
-                "append_reasoning" => {
-                    if let Some(text) = op.get("text").and_then(Value::as_str) {
-                        self.append_reasoning(text);
-                    }
+                DeltaOp::AddServerContentBlock { block } => {
+                    self.transcript.push(TranscriptItem::ServerContentBlock(
+                        value_to_compact_string(block),
+                    ));
                 }
-                "set_usage" => self.update_usage(op),
-                "add_citation" => self.add_event_summary("citation", op),
-                "set_thinking_blocks" => self.add_event_summary("thinking", op),
-                "add_server_content_block" => self.add_event_summary("server content", op),
-                "set_tool_calls" => {
-                    for tool in op
-                        .get("tool_calls")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
+                DeltaOp::SetToolCalls { tool_calls } => {
+                    for tool in tool_calls {
                         self.push_tool_call(tool);
                     }
                 }
-                _ => {}
+                DeltaOp::SetThinkingBlocks { .. }
+                | DeltaOp::MergeExtra { .. }
+                | DeltaOp::Unknown(_) => {}
             }
         }
     }
 
-    fn handle_message_added(&mut self, raw: &Value) {
-        let Some(message) = raw.get("message").or_else(|| raw.get("msg")) else {
+    fn handle_message_added_payload(&mut self, message: Option<&Value>) {
+        let Some(message) = message else {
             return;
         };
+        self.transcript_state.add_message(message);
         match message
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
             "tool" => self.handle_tool_message(message),
-            "assistant" => {
-                if let Some(text) = content_text(message) {
-                    self.transcript.push(TranscriptItem::Assistant(text));
-                }
-            }
-            "user" => {
-                if let Some(text) = content_text(message) {
-                    self.transcript.push(TranscriptItem::User(text));
-                }
+            "assistant" | "user" => {
+                let message = TranscriptMessage::from_wire(message);
+                self.append_render_message(&message);
             }
             _ => {}
         }
@@ -1831,18 +1869,10 @@ fn spawn_subscription_task(
     })
 }
 
-fn content_text(message: &Value) -> Option<String> {
-    match message.get("content")? {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(parts) => Some(
-            parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        value => Some(value_to_compact_string(value)),
-    }
+fn notice_transcript_state(text: String) -> TranscriptState {
+    let mut state = TranscriptState::new();
+    state.push_notice(text);
+    state
 }
 
 fn token_count(value: &Value, keys: &[&str]) -> Option<u64> {

@@ -56,10 +56,12 @@ Fixture coverage:
 | `approvals.jsonl` | `pause_required` and approval modal state |
 | `usage_updates.jsonl` | `runtime.usage`, `set_usage`, and final usage update |
 | `citations.jsonl` | `add_citation` delta visibility |
+| `extra_updates.jsonl` | `merge_extra` updates preserved on the transcript model |
 | `thinking_blocks.jsonl` | `set_thinking_blocks` delta visibility |
 | `server_content_blocks.jsonl` | `add_server_content_block` delta visibility |
 | `snapshot_resume.jsonl` | snapshot/resume rebuild from persisted user/assistant/tool messages |
 | `seq_gap.jsonl` | sequence gap recovery without applying the gap delta |
+| `unknown_delta_ops.jsonl` | unknown delta ops preserved and tolerated without stopping later deltas |
 
 ## Render snapshot strategy
 

@@ -126,6 +126,20 @@ fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 )));
                 lines.extend(card.render_lines(area.width.saturating_sub(2) as usize));
             }
+            TranscriptItem::Citation(text) => {
+                lines.push(Line::from(Span::styled(
+                    "citation",
+                    Style::default().fg(Color::Cyan),
+                )));
+                lines.extend(renderer.render(text));
+            }
+            TranscriptItem::ServerContentBlock(text) => {
+                lines.push(Line::from(Span::styled(
+                    "server content",
+                    Style::default().fg(Color::Magenta),
+                )));
+                lines.extend(renderer.render(text));
+            }
             TranscriptItem::Notice(text) => lines.push(Line::from(Span::styled(
                 text.clone(),
                 Style::default().fg(Color::DarkGray),

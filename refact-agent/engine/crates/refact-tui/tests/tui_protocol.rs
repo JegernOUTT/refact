@@ -179,6 +179,8 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Assistant(text) => format!("assistant:{text}"),
             TranscriptItem::Reasoning(text, _) => format!("reasoning:{text}"),
             TranscriptItem::Tool(card) => format!("tool:{}:{}:{}", card.id, card.name, card.result),
+            TranscriptItem::Citation(text) => format!("citation:{text}"),
+            TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
         })
         .collect::<Vec<_>>()
@@ -223,12 +225,14 @@ fn fixture_directory_covers_required_protocol_cases() {
             "approvals.jsonl",
             "assistant_streaming.jsonl",
             "citations.jsonl",
+            "extra_updates.jsonl",
             "reasoning.jsonl",
             "seq_gap.jsonl",
             "server_content_blocks.jsonl",
             "snapshot_resume.jsonl",
             "thinking_blocks.jsonl",
             "tool_calls.jsonl",
+            "unknown_delta_ops.jsonl",
             "usage_updates.jsonl",
         ]
     );
@@ -261,12 +265,46 @@ fn golden_fixtures_drive_app_state_machine_offline() {
 
     let usage = run_fixture("usage_updates.jsonl");
     assert_eq!(usage.app.usage().unwrap().total_tokens, 27);
+    assert_eq!(
+        usage.app.transcript_state().usage().unwrap()["total_tokens"],
+        27
+    );
 
-    assert!(transcript_text(&run_fixture("citations.jsonl").app).contains("notice:citation"));
-    assert!(transcript_text(&run_fixture("thinking_blocks.jsonl").app).contains("notice:thinking"));
-    assert!(
-        transcript_text(&run_fixture("server_content_blocks.jsonl").app)
-            .contains("notice:server content")
+    let citations = run_fixture("citations.jsonl");
+    let citations_state = citations.app.transcript_state();
+    assert!(transcript_text(&citations.app).contains("citation:"));
+    assert_eq!(
+        citations_state.messages()[0].citations[0]["title"],
+        "README"
+    );
+
+    let thinking = run_fixture("thinking_blocks.jsonl");
+    let thinking_blocks = &thinking.app.transcript_state().messages()[0].thinking_blocks;
+    assert_eq!(thinking_blocks[0]["signature"], "sig-demo");
+
+    let server = run_fixture("server_content_blocks.jsonl");
+    assert!(transcript_text(&server.app).contains("server:"));
+    assert_eq!(
+        server.app.transcript_state().messages()[0].server_content_blocks[0]["type"],
+        "web_search_call"
+    );
+
+    let extra = run_fixture("extra_updates.jsonl");
+    let extra_message = &extra.app.transcript_state().messages()[0];
+    assert_eq!(extra_message.extra["metering_a"], 2);
+    assert_eq!(extra_message.extra["metering_b"], "kept");
+    assert_eq!(extra_message.extra["nested"]["ok"], true);
+
+    let unknown = run_fixture("unknown_delta_ops.jsonl");
+    assert!(unknown.recovery.is_none());
+    assert!(transcript_text(&unknown.app).contains("before unknown"));
+    assert!(transcript_text(&unknown.app).contains("after unknown"));
+    assert_eq!(unknown.app.transcript_state().unknown_delta_ops().len(), 2);
+    assert_eq!(
+        unknown.app.transcript_state().unknown_delta_ops()[0]
+            .op
+            .as_deref(),
+        Some("future_delta")
     );
 
     let resumed = run_fixture("snapshot_resume.jsonl");

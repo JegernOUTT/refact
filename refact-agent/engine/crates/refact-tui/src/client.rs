@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::events_pane::{parse_daemon_event, DaemonEventRecord};
+use crate::protocol::SseEvent;
 
 const DEFAULT_DAEMON_PORT: u16 = 8488;
 const PLAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -120,6 +121,18 @@ pub struct ChatEvent {
     pub seq: Option<u64>,
     pub kind: String,
     pub raw: Value,
+}
+
+impl ChatEvent {
+    pub fn protocol_event(&self) -> SseEvent {
+        let mut raw = self.raw.clone();
+        if raw.get("type").is_none() {
+            if let Value::Object(map) = &mut raw {
+                map.insert("type".to_string(), Value::String(self.kind.clone()));
+            }
+        }
+        SseEvent::from_raw(&raw)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
