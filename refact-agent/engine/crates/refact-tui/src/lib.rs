@@ -2,6 +2,7 @@ pub mod app;
 pub mod approvals;
 pub mod client;
 pub mod events_pane;
+pub mod history;
 pub mod pickers;
 pub mod protocol;
 pub mod render;

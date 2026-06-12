@@ -13,6 +13,7 @@ use crate::client::{
     ToolDecision, WorkerInfo,
 };
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
+use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
 use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
 use crate::protocol::{
     content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
@@ -61,6 +62,12 @@ pub enum TranscriptItem {
     Citation(String),
     ServerContentBlock(String),
     Notice(String),
+}
+
+impl TranscriptItem {
+    fn keeps_live(&self) -> bool {
+        matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +206,11 @@ pub struct App {
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
     stream_controller: StreamController,
+    history: HistoryBuffer,
+    native_scrollback: bool,
+    rendered_message_count: usize,
+    rendered_state_cursor: usize,
+    rendered_state_keys: Vec<String>,
 }
 
 impl App {
@@ -236,6 +248,11 @@ impl App {
             should_quit: false,
             last_ctrl_c: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            history: HistoryBuffer::new(),
+            native_scrollback: false,
+            rendered_message_count: 0,
+            rendered_state_cursor: 0,
+            rendered_state_keys: Vec::new(),
         }
     }
 
@@ -266,6 +283,11 @@ impl App {
             should_quit: false,
             last_ctrl_c: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            history: HistoryBuffer::new(),
+            native_scrollback: false,
+            rendered_message_count: 0,
+            rendered_state_cursor: 0,
+            rendered_state_keys: Vec::new(),
         }
     }
 
@@ -323,6 +345,50 @@ impl App {
 
     pub fn visible_transcript(&self) -> &[TranscriptItem] {
         &self.transcript
+    }
+
+    pub fn pending_history_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
+        self.history.drain_pending(width)
+    }
+
+    pub fn history_pending_count(&self) -> usize {
+        self.history.pending_cell_count()
+    }
+
+    pub fn set_native_scrollback(&mut self, enabled: bool) {
+        if enabled && !self.native_scrollback {
+            let old_selected = self.selected_tool_index;
+            let old_items = std::mem::take(&mut self.transcript);
+            self.selected_tool_index = None;
+            for (old_idx, item) in old_items.into_iter().enumerate() {
+                if item.keeps_live() {
+                    let new_idx = self.transcript.len();
+                    self.transcript.push(item);
+                    if old_selected == Some(old_idx) {
+                        self.selected_tool_index = Some(new_idx);
+                    }
+                } else {
+                    self.history.enqueue(item);
+                }
+            }
+        }
+        self.native_scrollback = enabled;
+    }
+
+    pub fn native_scrollback(&self) -> bool {
+        self.native_scrollback
+    }
+
+    pub fn begin_frame_render(&mut self) {
+        self.rendered_message_count = 0;
+    }
+
+    pub fn note_rendered_messages(&mut self, count: usize) {
+        self.rendered_message_count = self.rendered_message_count.saturating_add(count);
+    }
+
+    pub fn rendered_message_count(&self) -> usize {
+        self.rendered_message_count
     }
 
     pub fn transcript_state(&self) -> &TranscriptState {
@@ -422,6 +488,8 @@ impl App {
             project.root.display()
         ));
         self.stream_controller.clear();
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
         self.composer_mode = ComposerMode::Chat;
         self.modal_picker = None;
         self.clear_approvals();
@@ -433,6 +501,8 @@ impl App {
         self.replace_with_notice("New chat started".to_string());
         self.session_state = SessionState::Idle;
         self.stream_controller.clear();
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
         self.clear_approvals();
         self.selected_tool_index = None;
     }
@@ -488,6 +558,40 @@ impl App {
         }
     }
 
+    fn push_state_history_item(&mut self, key: String, item: TranscriptItem) {
+        if self
+            .rendered_state_keys
+            .get(self.rendered_state_cursor)
+            .is_some_and(|existing| existing == &key)
+        {
+            self.rendered_state_cursor += 1;
+            return;
+        }
+        self.rendered_state_keys
+            .truncate(self.rendered_state_cursor);
+        self.rendered_state_keys.push(key);
+        self.rendered_state_cursor += 1;
+        self.push_history_item(item);
+    }
+
+    fn push_history_item(&mut self, item: TranscriptItem) {
+        if self.native_scrollback && !item.keeps_live() {
+            self.history.enqueue(item);
+        } else {
+            self.transcript.push(item);
+        }
+    }
+
+    fn flush_live_assistant_to_history(&mut self) {
+        let Some(last) = self.transcript.last() else {
+            return;
+        };
+        if matches!(last, TranscriptItem::Assistant(_)) {
+            let item = self.transcript.pop().expect("last checked");
+            self.history.enqueue(item);
+        }
+    }
+
     fn run_stream_commit_tick(&mut self) {
         if run_commit_tick(&mut self.stream_controller).is_some() {
             self.sync_assistant_stream_item();
@@ -504,6 +608,9 @@ impl App {
                     .push(TranscriptItem::Assistant(final_content)),
             }
         }
+        if self.native_scrollback {
+            self.flush_live_assistant_to_history();
+        }
     }
 
     fn append_reasoning(&mut self, text: &str) {
@@ -518,17 +625,26 @@ impl App {
     fn add_notice(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.transcript_state.push_notice(text.clone());
-        self.transcript.push(TranscriptItem::Notice(text));
+        self.push_history_item(TranscriptItem::Notice(text));
     }
 
     fn replace_with_notice(&mut self, text: String) {
-        self.transcript_state = notice_transcript_state(text.clone());
-        self.transcript = vec![TranscriptItem::Notice(text)];
+        self.transcript_state.reset();
+        self.transcript_state.push_notice(text.clone());
+        self.transcript.clear();
+        self.history.clear_pending();
+        self.selected_tool_index = None;
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
+        self.push_history_item(TranscriptItem::Notice(text));
     }
 
     fn rebuild_render_transcript_from_state(&mut self) {
         self.transcript.clear();
+        self.history.clear_pending();
         self.selected_tool_index = None;
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             self.append_render_message(message);
@@ -539,27 +655,41 @@ impl App {
         match &message.role {
             TranscriptRole::User => {
                 if !message.content.is_empty() {
-                    self.transcript
-                        .push(TranscriptItem::User(message.content.clone()));
+                    self.push_state_history_item(
+                        render_message_key(message, "user", 0),
+                        TranscriptItem::User(message.content.clone()),
+                    );
                 }
             }
             TranscriptRole::Assistant => {
+                let mut part = 0usize;
                 if !message.reasoning.is_empty() {
-                    self.transcript
-                        .push(TranscriptItem::Reasoning(message.reasoning.clone(), true));
+                    self.push_state_history_item(
+                        render_message_key(message, "reasoning", part),
+                        TranscriptItem::Reasoning(message.reasoning.clone(), true),
+                    );
+                    part += 1;
                 }
                 if !message.content.is_empty() || message.tool_calls.is_empty() {
-                    self.transcript
-                        .push(TranscriptItem::Assistant(message.content.clone()));
+                    self.push_state_history_item(
+                        render_message_key(message, "assistant", part),
+                        TranscriptItem::Assistant(message.content.clone()),
+                    );
+                    part += 1;
                 }
                 for citation in &message.citations {
-                    self.transcript
-                        .push(TranscriptItem::Citation(value_to_compact_string(citation)));
+                    self.push_state_history_item(
+                        render_message_key(message, "citation", part),
+                        TranscriptItem::Citation(value_to_compact_string(citation)),
+                    );
+                    part += 1;
                 }
                 for block in &message.server_content_blocks {
-                    self.transcript.push(TranscriptItem::ServerContentBlock(
-                        value_to_compact_string(block),
-                    ));
+                    self.push_state_history_item(
+                        render_message_key(message, "server", part),
+                        TranscriptItem::ServerContentBlock(value_to_compact_string(block)),
+                    );
+                    part += 1;
                 }
                 for tool in &message.tool_calls {
                     self.push_tool_call(tool);
@@ -576,8 +706,10 @@ impl App {
                 now_ms(),
             ),
             TranscriptRole::Notice => {
-                self.transcript
-                    .push(TranscriptItem::Notice(message.content.clone()));
+                self.push_state_history_item(
+                    render_message_key(message, "notice", 0),
+                    TranscriptItem::Notice(message.content.clone()),
+                );
             }
             TranscriptRole::Other(_) => {}
         }
@@ -692,7 +824,21 @@ impl App {
         }
         if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
             self.transcript_state.reset_from_messages(messages);
-            self.rebuild_render_transcript_from_state();
+            if self.native_scrollback {
+                self.rendered_state_cursor = 0;
+                let rendered_before = self.rendered_state_keys.len();
+                let messages = self.transcript_state.messages().to_vec();
+                for message in &messages {
+                    self.append_render_message(message);
+                }
+                self.rendered_state_keys
+                    .truncate(self.rendered_state_cursor);
+                if self.rendered_state_cursor < rendered_before {
+                    self.rebuild_render_transcript_from_state();
+                }
+            } else {
+                self.rebuild_render_transcript_from_state();
+            }
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
@@ -761,11 +907,12 @@ impl App {
                 DeltaOp::AppendReasoning { text } => self.append_reasoning(text),
                 DeltaOp::SetUsage { usage } => self.update_usage_value(usage),
                 DeltaOp::AddCitation { citation } => {
-                    self.transcript
-                        .push(TranscriptItem::Citation(value_to_compact_string(citation)));
+                    self.push_history_item(TranscriptItem::Citation(value_to_compact_string(
+                        citation,
+                    )));
                 }
                 DeltaOp::AddServerContentBlock { block } => {
-                    self.transcript.push(TranscriptItem::ServerContentBlock(
+                    self.push_history_item(TranscriptItem::ServerContentBlock(
                         value_to_compact_string(block),
                     ));
                 }
@@ -857,7 +1004,7 @@ impl App {
         for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
             if let TranscriptItem::Tool(card) = item {
                 if card.id == id || id.is_empty() {
-                    card.result = result;
+                    card.result = result.clone();
                     card.status = status;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
                     self.selected_tool_index = Some(idx);
@@ -1283,6 +1430,16 @@ impl App {
         self.transcript.push(TranscriptItem::Tool(card));
         self.selected_tool_index = Some(self.transcript.len() - 1);
     }
+
+    #[cfg(test)]
+    pub fn test_push_history_item(&mut self, item: TranscriptItem) {
+        self.push_history_item(item);
+    }
+
+    #[cfg(test)]
+    pub fn test_history_render_count(&self) -> usize {
+        self.history.render_count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1311,9 +1468,8 @@ pub enum AppAction {
 async fn show_startup_notice(message: String) -> Result<(), TuiError> {
     let mut app = App::notice_only(message);
     let mut terminal = TerminalSession::start()?;
-    terminal
-        .terminal_mut()
-        .draw(|frame| crate::ui::render(frame, &app))?;
+    apply_terminal_mode(&mut app, &terminal);
+    render_frame(terminal.terminal_mut(), &mut app)?;
     let mut reader = EventStream::new();
     let started = Instant::now();
     loop {
@@ -1326,9 +1482,7 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
                 break;
             }
             Ok(Some(Ok(Event::Resize(_, _)))) => {
-                terminal
-                    .terminal_mut()
-                    .draw(|frame| crate::ui::render(frame, &app))?;
+                render_frame(terminal.terminal_mut(), &mut app)?;
             }
             Ok(Some(Ok(_))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {}
         }
@@ -1472,6 +1626,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let project = client.open_project(&root).await?;
     let mut app = App::new(project);
     let mut terminal = TerminalSession::start()?;
+    apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     let mut subscriptions = SubscriptionManager::new();
     spawn_input_task(tx.clone());
@@ -1488,9 +1643,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     }
 
     loop {
-        terminal
-            .terminal_mut()
-            .draw(|frame| crate::ui::render(frame, &app))?;
+        render_frame(terminal.terminal_mut(), &mut app)?;
         if app.should_quit() {
             break;
         }
@@ -1574,6 +1727,10 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         }
     }
     Ok(())
+}
+
+fn apply_terminal_mode(app: &mut App, terminal: &TerminalSession) {
+    app.set_native_scrollback(terminal.mode() == crate::terminal::TerminalMode::Inline);
 }
 
 async fn run_action(
@@ -1907,6 +2064,39 @@ fn value_to_compact_string(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
+fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> String {
+    let id = message
+        .message_id
+        .as_deref()
+        .or(message.tool_call_id.as_deref())
+        .unwrap_or_default();
+    if id.is_empty() {
+        format!(
+            "{}:{}:{}:{}",
+            message.role.as_str(),
+            part,
+            index,
+            message.content.len()
+        )
+    } else {
+        format!("{}:{}:{}", id, part, index)
+    }
+}
+
+fn render_frame(
+    terminal: &mut crate::terminal::RefactTerminal,
+    app: &mut App,
+) -> Result<(), TuiError> {
+    if app.native_scrollback() {
+        let width = terminal.size()?.width;
+        for insertion in app.pending_history_insertions(width) {
+            insert_history(terminal, insertion)?;
+        }
+    }
+    terminal.draw(|frame| crate::ui::render(frame, app))?;
+    Ok(())
+}
+
 fn approval_patch(modal: &ApprovalModalState) -> Value {
     let all_patch_like = modal.reasons().iter().all(|reason| {
         PATCH_LIKE_FUNCTIONS
@@ -2085,6 +2275,24 @@ mod tests {
         }
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"status\":\"accepted\"}";
         let _ = stream.write_all(response);
+    }
+
+    #[test]
+    fn alternate_screen_mode_keeps_legacy_transcript_live() {
+        let mut app = App::new(project());
+        assert!(!app.native_scrollback());
+        app.test_push_history_item(TranscriptItem::Notice("legacy".to_string()));
+        assert_eq!(app.visible_transcript().len(), 2);
+        assert_eq!(app.history_pending_count(), 0);
+    }
+
+    #[test]
+    fn native_scrollback_queues_finalized_history() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.test_push_history_item(TranscriptItem::Notice("native".to_string()));
+        assert_eq!(app.visible_transcript().len(), 0);
+        assert_eq!(app.history_pending_count(), 2);
     }
 
     #[test]

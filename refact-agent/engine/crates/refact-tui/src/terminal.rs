@@ -9,9 +9,35 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 
 pub type RefactTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+
+const INLINE_VIEWPORT_HEIGHT: u16 = 12;
+const FALLBACK_ENV: &str = "REFACT_TUI_ALT_SCREEN";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalMode {
+    Inline,
+    AlternateScreen,
+}
+
+impl TerminalMode {
+    pub fn from_env() -> Self {
+        if std::env::var(FALLBACK_ENV).is_ok_and(|value| is_truthy(&value)) {
+            Self::AlternateScreen
+        } else {
+            Self::Inline
+        }
+    }
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 pub struct TerminalSession {
     terminal: RefactTerminal,
@@ -20,27 +46,66 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn start() -> io::Result<Self> {
-        let mut guard = TerminalRestoreGuard::new(CrosstermTerminalOps::new(io::stdout()));
+        Self::start_with_mode(TerminalMode::from_env())
+    }
+
+    pub fn start_with_mode(mode: TerminalMode) -> io::Result<Self> {
+        let mut guard = TerminalRestoreGuard::new(CrosstermTerminalOps::new(io::stdout()), mode);
         guard.initialize()?;
-        let previous_hook = panic::take_hook();
-        panic::set_hook(Box::new(move |panic_info| {
-            let mut ops = CrosstermTerminalOps::new(io::stdout());
-            restore_terminal_state(&mut ops, true, true, true, true);
-            previous_hook(panic_info);
-        }));
+        install_panic_restore_hook(mode);
         let backend = CrosstermBackend::new(io::stdout());
-        let terminal = Terminal::new(backend)?;
+        let terminal = match mode {
+            TerminalMode::Inline => Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+                },
+            )?,
+            TerminalMode::AlternateScreen => Terminal::new(backend)?,
+        };
         Ok(Self { terminal, guard })
     }
 
     pub fn terminal_mut(&mut self) -> &mut RefactTerminal {
         &mut self.terminal
     }
+
+    pub fn mode(&self) -> TerminalMode {
+        self.guard.mode
+    }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.guard.restore();
+    }
+}
+
+fn install_panic_restore_hook(mode: TerminalMode) {
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        let mut ops = CrosstermTerminalOps::new(io::stdout());
+        restore_terminal_state(&mut ops, RestoreState::started(mode));
+        previous_hook(panic_info);
+    }));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RestoreState {
+    raw_mode: bool,
+    alternate_screen: bool,
+    mouse_capture: bool,
+    cursor_hidden: bool,
+}
+
+impl RestoreState {
+    fn started(mode: TerminalMode) -> Self {
+        Self {
+            raw_mode: true,
+            alternate_screen: mode == TerminalMode::AlternateScreen,
+            mouse_capture: true,
+            cursor_hidden: true,
+        }
     }
 }
 
@@ -87,28 +152,26 @@ impl<W: Write> TerminalOps for CrosstermTerminalOps<W> {
 
 struct TerminalRestoreGuard<O: TerminalOps> {
     ops: O,
+    mode: TerminalMode,
     active: bool,
-    raw_mode: bool,
-    alternate_screen: bool,
-    mouse_capture: bool,
-    cursor_hidden: bool,
+    state: RestoreState,
 }
 
 impl<O: TerminalOps> TerminalRestoreGuard<O> {
-    fn new(ops: O) -> Self {
+    fn new(ops: O, mode: TerminalMode) -> Self {
         Self {
             ops,
+            mode,
             active: true,
-            raw_mode: false,
-            alternate_screen: false,
-            mouse_capture: false,
-            cursor_hidden: false,
+            state: RestoreState::default(),
         }
     }
 
     fn initialize(&mut self) -> io::Result<()> {
         self.apply_start_step(TerminalStep::EnableRawMode)?;
-        self.apply_start_step(TerminalStep::EnterAlternateScreen)?;
+        if self.mode == TerminalMode::AlternateScreen {
+            self.apply_start_step(TerminalStep::EnterAlternateScreen)?;
+        }
         self.apply_start_step(TerminalStep::EnableMouseCapture)?;
         self.apply_start_step(TerminalStep::HideCursor)
     }
@@ -116,10 +179,10 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
     fn apply_start_step(&mut self, step: TerminalStep) -> io::Result<()> {
         self.ops.apply(step)?;
         match step {
-            TerminalStep::EnableRawMode => self.raw_mode = true,
-            TerminalStep::EnterAlternateScreen => self.alternate_screen = true,
-            TerminalStep::EnableMouseCapture => self.mouse_capture = true,
-            TerminalStep::HideCursor => self.cursor_hidden = true,
+            TerminalStep::EnableRawMode => self.state.raw_mode = true,
+            TerminalStep::EnterAlternateScreen => self.state.alternate_screen = true,
+            TerminalStep::EnableMouseCapture => self.state.mouse_capture = true,
+            TerminalStep::HideCursor => self.state.cursor_hidden = true,
             TerminalStep::ShowCursor
             | TerminalStep::DisableMouseCapture
             | TerminalStep::LeaveAlternateScreen
@@ -133,17 +196,8 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             return;
         }
         self.active = false;
-        restore_terminal_state(
-            &mut self.ops,
-            self.raw_mode,
-            self.alternate_screen,
-            self.mouse_capture,
-            self.cursor_hidden,
-        );
-        self.raw_mode = false;
-        self.alternate_screen = false;
-        self.mouse_capture = false;
-        self.cursor_hidden = false;
+        restore_terminal_state(&mut self.ops, self.state);
+        self.state = RestoreState::default();
     }
 }
 
@@ -153,23 +207,17 @@ impl<O: TerminalOps> Drop for TerminalRestoreGuard<O> {
     }
 }
 
-fn restore_terminal_state<O: TerminalOps>(
-    ops: &mut O,
-    raw_mode: bool,
-    alternate_screen: bool,
-    mouse_capture: bool,
-    cursor_hidden: bool,
-) {
-    if cursor_hidden {
+fn restore_terminal_state<O: TerminalOps>(ops: &mut O, state: RestoreState) {
+    if state.cursor_hidden {
         let _ = ops.apply(TerminalStep::ShowCursor);
     }
-    if mouse_capture {
+    if state.mouse_capture {
         let _ = ops.apply(TerminalStep::DisableMouseCapture);
     }
-    if alternate_screen {
+    if state.alternate_screen {
         let _ = ops.apply(TerminalStep::LeaveAlternateScreen);
     }
-    if raw_mode {
+    if state.raw_mode {
         let _ = ops.apply(TerminalStep::DisableRawMode);
     }
 }
@@ -234,7 +282,7 @@ mod tests {
                 calls: calls.clone(),
                 fail_on: Some(TerminalStep::EnterAlternateScreen),
             };
-            let mut guard = TerminalRestoreGuard::new(ops);
+            let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::AlternateScreen);
             assert!(guard.initialize().is_err());
         }
         assert_eq!(
@@ -245,5 +293,54 @@ mod tests {
                 TerminalStep::DisableRawMode,
             ]
         );
+    }
+
+    #[test]
+    fn alternate_mode_enters_and_leaves_alt_screen() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let ops = FakeTerminalOps {
+                calls: calls.clone(),
+                fail_on: None,
+            };
+            let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::AlternateScreen);
+            guard.initialize().unwrap();
+        }
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.contains(&TerminalStep::EnterAlternateScreen));
+        assert!(calls.contains(&TerminalStep::LeaveAlternateScreen));
+    }
+
+    #[test]
+    fn inline_mode_does_not_enter_or_leave_alternate_screen() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let ops = FakeTerminalOps {
+                calls: calls.clone(),
+                fail_on: None,
+            };
+            let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::Inline);
+            guard.initialize().unwrap();
+        }
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                TerminalStep::EnableRawMode,
+                TerminalStep::EnableMouseCapture,
+                TerminalStep::HideCursor,
+                TerminalStep::ShowCursor,
+                TerminalStep::DisableMouseCapture,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_mode_env_fallback_is_truthy_only() {
+        assert!(is_truthy("1"));
+        assert!(is_truthy("true"));
+        assert!(!is_truthy("0"));
+        assert!(!is_truthy("false"));
     }
 }

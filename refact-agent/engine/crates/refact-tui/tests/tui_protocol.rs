@@ -190,10 +190,12 @@ fn transcript_text(app: &App) -> String {
 }
 
 fn rendered_snapshot(app: &App, width: u16, height: u16) -> String {
+    let mut app = app.clone();
+    app.set_native_scrollback(false);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| refact_tui::ui::render(frame, app))
+        .draw(|frame| refact_tui::ui::render(frame, &mut app))
         .unwrap();
     let cells = terminal.backend().buffer().content();
     (0..height as usize)

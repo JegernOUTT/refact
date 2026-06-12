@@ -71,6 +71,14 @@ Fixture coverage:
 
 Rendered output snapshots use `ratatui::backend::TestBackend` in plain `cargo test`. The test harness renders the real `ui::render` into an in-memory buffer, normalizes rows with trailing spaces trimmed, and compares a deterministic string snapshot. This starts with one assistant-streaming snapshot and can later move to `insta` if the crate adopts snapshot files.
 
+## Native scrollback
+
+C-3 uses `ratatui::Viewport::Inline` by default. Finalized transcript cells are rendered once, queued through `history::HistoryBuffer`, and inserted with `Terminal::insert_before`, so the transcript lives in the terminal's native scrollback and mouse copy works on real terminal text. The frame render path only redraws the inline live region: active stream tail, running tools, approvals, composer, and footer.
+
+Set `REFACT_TUI_ALT_SCREEN=1` to use the previous alternate-screen/full-transcript fallback for terminals or CI environments where inline viewport behavior is not usable. In fallback mode, the flat transcript remains in the frame buffer and PageUp/PageDown keep the legacy local scroll behavior.
+
+Resize policy matches Codex: pending finalized cells re-render at the current width before insertion, while content already inserted into native scrollback keeps the width it had when inserted.
+
 ## Manual smoke
 
 ```bash

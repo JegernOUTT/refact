@@ -12,7 +12,8 @@ use crate::pickers::{PickerKind, PickerState};
 use crate::render::MarkdownRenderer;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
-pub fn render(frame: &mut Frame<'_>, app: &App) {
+pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    app.begin_frame_render();
     let area = frame.area();
     let main_constraints = if app.events_pane().open {
         vec![
@@ -80,7 +81,39 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if app.native_scrollback() {
+        render_live_transcript(frame, app, area);
+    } else {
+        render_full_transcript(frame, app, area);
+    }
+}
+
+fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let mut lines = Vec::new();
+    for (idx, item) in app.visible_transcript().iter().enumerate() {
+        lines.extend(crate::history::render_transcript_item_lines(
+            item,
+            area.width.saturating_sub(2) as usize,
+            app.selected_tool_index() == Some(idx),
+        ));
+    }
+    app.note_rendered_messages(app.visible_transcript().len());
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "History is in native scrollback. Start typing below.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::BOTTOM))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let renderer = MarkdownRenderer::new(Some(area.width.saturating_sub(2) as usize));
     let mut lines = Vec::new();
     for (idx, item) in app.visible_transcript().iter().enumerate() {
@@ -147,6 +180,7 @@ fn render_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         lines.push(Line::default());
     }
+    app.note_rendered_messages(app.visible_transcript().len());
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "Start typing. Enter sends, Shift-Enter inserts a newline.",
@@ -393,10 +427,11 @@ mod tests {
 
     #[test]
     fn render_smoke_draws_header_and_composer() {
-        let app = App::new(project());
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
         let backend = TestBackend::new(64, 12);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let text = terminal
             .backend()
             .buffer()
@@ -410,8 +445,25 @@ mod tests {
     }
 
     #[test]
+    fn native_scrollback_frame_renders_only_live_tail() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        for idx in 0..5_000 {
+            app.test_push_history_item(TranscriptItem::Notice(format!("history {idx}")));
+        }
+        app.test_push_tool(ToolCard::from_tool_call(
+            &serde_json::json!({"id": "call-1", "name": "shell"}),
+        ));
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(app.rendered_message_count(), 1);
+    }
+
+    #[test]
     fn render_smoke_draws_modal_and_tool_card() {
         let mut app = App::new(project());
+        app.set_native_scrollback(false);
         app.test_push_tool(
             ToolCard::from_tool_call(&serde_json::json!({"id": "call-1", "name": "shell"}))
                 .with_result("+ok", ToolStatus::Success),
@@ -426,7 +478,7 @@ mod tests {
         }]));
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let text = terminal
             .backend()
             .buffer()
