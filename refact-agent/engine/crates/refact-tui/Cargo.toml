@@ -5,7 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-crossterm = { version = "0.28.1", features = ["event-stream"] }
+crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
 futures = "0.3"
 pulldown-cmark = "0.10"
 ratatui = { version = "0.29.0", features = ["unstable-widget-ref"] }

@@ -12,6 +12,7 @@ use crate::client::{
     ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ProjectEntry,
     ToolDecision, WorkerInfo,
 };
+use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
 use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
@@ -184,7 +185,8 @@ impl ProjectPickerState {
 pub struct App {
     transcript: Vec<TranscriptItem>,
     transcript_state: TranscriptState,
-    composer: String,
+    composer: ComposerState,
+    history_path: Option<PathBuf>,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
@@ -215,6 +217,14 @@ pub struct App {
 
 impl App {
     pub fn new(project: OpenProjectResponse) -> Self {
+        Self::with_history_path(project, None)
+    }
+
+    pub fn with_history_path(project: OpenProjectResponse, history_path: Option<PathBuf>) -> Self {
+        let history_entries = history_path
+            .as_deref()
+            .map(load_history)
+            .unwrap_or_default();
         Self {
             transcript: vec![TranscriptItem::Notice(format!(
                 "Opened project {} at {}",
@@ -226,7 +236,8 @@ impl App {
                 project.slug,
                 project.root.display()
             )),
-            composer: String::new(),
+            composer: ComposerState::new(history_entries),
+            history_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
@@ -261,7 +272,8 @@ impl App {
         Self {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
-            composer: String::new(),
+            composer: ComposerState::new(Vec::new()),
+            history_path: None,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
@@ -292,6 +304,10 @@ impl App {
     }
 
     pub fn composer(&self) -> &str {
+        self.composer.text()
+    }
+
+    pub fn composer_state(&self) -> &ComposerState {
         &self.composer
     }
 
@@ -353,6 +369,10 @@ impl App {
 
     pub fn history_pending_count(&self) -> usize {
         self.history.pending_cell_count()
+    }
+
+    pub fn flush_pending_paste(&mut self) -> bool {
+        self.composer.flush_pending_paste(Instant::now())
     }
 
     pub fn set_native_scrollback(&mut self, enabled: bool) {
@@ -441,15 +461,7 @@ impl App {
     }
 
     pub fn composer_height(&self, width: u16) -> u16 {
-        let width = width.saturating_sub(2).max(1) as usize;
-        let lines = self
-            .composer
-            .lines()
-            .map(|line| (unicode_width::UnicodeWidthStr::width(line) / width) + 1)
-            .sum::<usize>()
-            .max(1)
-            .min(5);
-        lines as u16 + 2
+        self.composer.height(width.saturating_sub(2).max(1), 8)
     }
 
     fn open_project_picker(&mut self, projects: Vec<ProjectEntry>) {
@@ -479,6 +491,13 @@ impl App {
     }
 
     fn set_project(&mut self, project: OpenProjectResponse) {
+        self.history_path = Some(history_path_for_root(&project.root));
+        let history_entries = self
+            .history_path
+            .as_deref()
+            .map(load_history)
+            .unwrap_or_default();
+        self.composer = ComposerState::new(history_entries);
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_state = SessionState::Idle;
@@ -508,11 +527,11 @@ impl App {
     }
 
     fn submit_composer(&mut self) -> Option<(String, Value)> {
-        let prompt = self.composer.trim().to_string();
-        if prompt.is_empty() || self.current_project.is_none() {
+        if self.current_project.is_none() {
             return None;
         }
-        self.composer.clear();
+        let prompt = self.composer.submit_text()?;
+        self.persist_history();
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
@@ -521,6 +540,12 @@ impl App {
         self.usage = None;
         let params = self.take_pending_params();
         Some((prompt, params))
+    }
+
+    fn persist_history(&self) {
+        if let Some(path) = &self.history_path {
+            let _ = save_history(path, self.composer.history_entries());
+        }
     }
 
     fn take_pending_params(&mut self) -> Value {
@@ -1190,11 +1215,21 @@ impl App {
                 AppAction::None
             }
             KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::SHIFT,
                 ..
+            }
+            | KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::ALT,
+                ..
             } => {
-                self.composer.push('\n');
+                self.composer.insert_explicit_newline(Instant::now());
                 AppAction::None
             }
             KeyEvent {
@@ -1204,15 +1239,79 @@ impl App {
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
-            } => self
-                .submit_composer()
-                .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
-                .unwrap_or(AppAction::None),
+            } => match self.composer.enter(Instant::now()) {
+                EnterDecision::InsertedNewline => AppAction::None,
+                EnterDecision::Submit => self
+                    .submit_composer()
+                    .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
+                    .unwrap_or(AppAction::None),
+            },
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             } => {
-                self.composer.pop();
+                self.composer.backspace();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Delete,
+                ..
+            } => {
+                self.composer.delete();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Left,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_left(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Right,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_right(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Home,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_home(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::End,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_end(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_up_or_history(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } => {
+                self.composer
+                    .move_down_or_history(modifiers.contains(KeyModifiers::SHIFT));
                 AppAction::None
             }
             KeyEvent {
@@ -1234,7 +1333,7 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                self.composer.push(ch);
+                self.composer.insert_char(ch, Instant::now());
                 AppAction::None
             }
             _ => AppAction::None,
@@ -1624,7 +1723,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         None => std::env::current_dir().map_err(|error| TuiError::Message(error.to_string()))?,
     };
     let project = client.open_project(&root).await?;
-    let mut app = App::new(project);
+    let history_path = history_path_for_root(&project.root);
+    let mut app = App::with_history_path(project, Some(history_path));
     let mut terminal = TerminalSession::start()?;
     apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
@@ -1655,8 +1755,12 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 let action = app.handle_key(key);
                 run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
             }
+            RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
             RuntimeEvent::Input(Event::Resize(_, _)) => {}
-            RuntimeEvent::Tick => app.run_stream_commit_tick(),
+            RuntimeEvent::Tick => {
+                app.run_stream_commit_tick();
+                app.flush_pending_paste();
+            }
             RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
                 subscriptions.apply_chat_event(&mut app, generation, event);
@@ -1731,6 +1835,26 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
 
 fn apply_terminal_mode(app: &mut App, terminal: &TerminalSession) {
     app.set_native_scrollback(terminal.mode() == crate::terminal::TerminalMode::Inline);
+}
+
+fn history_path_for_root(root: &std::path::Path) -> PathBuf {
+    let hash = stable_path_hash(root);
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+        .join("refact")
+        .join("tui_history")
+        .join(format!("{hash}.json"))
+}
+
+fn stable_path_hash(path: &std::path::Path) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 async fn run_action(
@@ -2298,7 +2422,7 @@ mod tests {
     #[test]
     fn app_submits_message_and_streams_answer() {
         let mut app = App::new(project());
-        app.composer = "hello".to_string();
+        app.composer.set_text("hello");
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(
             action,
@@ -2321,6 +2445,54 @@ mod tests {
         });
         assert_eq!(assistant_text(&app), "hi\n");
         assert_eq!(app.session_state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn app_newline_keys_insert_and_enter_submits() {
+        let mut app = App::new(project());
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        assert_eq!(app.composer(), "a\nb");
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "a\nb"
+        ));
+    }
+
+    #[test]
+    fn app_paste_burst_does_not_submit_on_embedded_enters() {
+        let mut app = App::new(project());
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, AppAction::None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, AppAction::None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        app.composer
+            .flush_pending_paste(Instant::now() + Duration::from_millis(100));
+        assert_eq!(app.composer(), "ab\nc\nd");
+    }
+
+    #[test]
+    fn app_history_persists_and_restores_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let mut app = App::with_history_path(project(), Some(path.clone()));
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        let mut app = App::with_history_path(project(), Some(path));
+        app.composer.set_text("draft");
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.composer(), "first");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.composer(), "draft");
     }
 
     #[test]
@@ -2578,7 +2750,7 @@ mod tests {
         let mut app = App::new(project());
         app.open_model_picker(json!({"chat_models": {"m1": {"name": "Model One"}}}));
         assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
-        app.composer = "hello".to_string();
+        app.composer.set_text("hello");
         let action = app.handle_key(key(KeyCode::Enter));
         match action {
             AppAction::SendMessage { params, .. } => {

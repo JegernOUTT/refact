@@ -208,20 +208,34 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         SessionState::Paused => " approval pending ",
         _ => " message ",
     };
-    let text = if app.composer().is_empty() {
-        Line::from(Span::styled(
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let max_rows = area.height.saturating_sub(2).max(1);
+    let view = app.composer_state().view(inner_width, max_rows);
+    let lines = if app.composer().is_empty() {
+        vec![Line::from(Span::styled(
             "Ask Refact…",
             Style::default().fg(Color::DarkGray),
-        ))
+        ))]
     } else {
-        Line::from(app.composer().to_string())
+        view.lines.into_iter().map(Line::from).collect()
     };
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false }),
         area,
     );
+    if !app.composer().is_empty() {
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(view.cursor_col.min(inner_width.saturating_sub(1)));
+        let y = area
+            .y
+            .saturating_add(1)
+            .saturating_add(view.cursor_row.min(max_rows.saturating_sub(1)));
+        frame.set_cursor_position((x, y));
+    }
 }
 
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
