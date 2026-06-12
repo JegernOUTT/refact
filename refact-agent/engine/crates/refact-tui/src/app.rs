@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::approvals::{ApprovalKeyAction, ApprovalModalState};
+use crate::approvals::{ApprovalKeyAction, ApprovalModalState, ApprovalQueue};
 use crate::client::{
     ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ProjectEntry,
     ToolDecision, WorkerInfo,
@@ -141,7 +141,8 @@ pub struct App {
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
-    approval_modal: Option<ApprovalModalState>,
+    approval_queue: ApprovalQueue,
+    pending_approval_clears: usize,
     events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
@@ -171,7 +172,8 @@ impl App {
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
-            approval_modal: None,
+            approval_queue: ApprovalQueue::new(),
+            pending_approval_clears: 0,
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
@@ -197,7 +199,8 @@ impl App {
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
-            approval_modal: None,
+            approval_queue: ApprovalQueue::new(),
+            pending_approval_clears: 0,
             events_pane: EventsPaneState::new(),
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
@@ -277,7 +280,12 @@ impl App {
     }
 
     pub fn approval_modal(&self) -> Option<&ApprovalModalState> {
-        self.approval_modal.as_ref()
+        self.approval_queue.front()
+    }
+
+    #[cfg(test)]
+    fn approval_pending_clear_count(&self) -> usize {
+        self.pending_approval_clears
     }
 
     pub fn events_pane(&self) -> &EventsPaneState {
@@ -347,7 +355,7 @@ impl App {
         self.stream_collector.clear();
         self.composer_mode = ComposerMode::Chat;
         self.modal_picker = None;
-        self.approval_modal = None;
+        self.clear_approvals();
         self.selected_tool_index = None;
     }
 
@@ -358,7 +366,7 @@ impl App {
             .push(TranscriptItem::Notice("New chat started".to_string()));
         self.session_state = SessionState::Idle;
         self.stream_collector.clear();
-        self.approval_modal = None;
+        self.clear_approvals();
         self.selected_tool_index = None;
     }
 
@@ -397,6 +405,16 @@ impl App {
     }
 
     fn append_assistant(&mut self, text: &str) {
+        self.stream_collector.push_delta(text);
+        if let Some(committed) = self.stream_collector.commit_complete_source() {
+            self.append_assistant_text(&committed);
+        }
+    }
+
+    fn append_assistant_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         if !matches!(self.transcript.last(), Some(TranscriptItem::Assistant(_))) {
             self.transcript
                 .push(TranscriptItem::Assistant(String::new()));
@@ -404,8 +422,13 @@ impl App {
         if let Some(TranscriptItem::Assistant(value)) = self.transcript.last_mut() {
             value.push_str(text);
         }
-        self.stream_collector.push_delta(text);
-        let _ = self.stream_collector.commit_complete_source();
+    }
+
+    fn finalize_assistant_stream(&mut self) {
+        let tail = self.stream_collector.finalize_and_drain_source();
+        if !tail.is_empty() {
+            self.append_assistant_text(&tail);
+        }
     }
 
     fn append_reasoning(&mut self, text: &str) {
@@ -421,6 +444,45 @@ impl App {
         self.transcript.push(TranscriptItem::Notice(text.into()));
     }
 
+    fn approval_scope(&self, raw: &Value, event_seq: Option<u64>) -> String {
+        let pause_id = raw
+            .get("pause_id")
+            .or_else(|| raw.get("id"))
+            .or_else(|| raw.get("message_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| event_seq.map(|seq| seq.to_string()));
+        match pause_id {
+            Some(pause_id) if !pause_id.is_empty() => format!("{}:{pause_id}", self.chat_id),
+            _ => self.chat_id.clone(),
+        }
+    }
+
+    fn clear_approvals(&mut self) {
+        self.approval_queue.clear();
+        self.pending_approval_clears = 0;
+    }
+
+    fn enqueue_approval(&mut self, modal: ApprovalModalState) {
+        self.approval_queue.push(modal);
+    }
+
+    fn pop_current_approval(&mut self) -> Option<ApprovalModalState> {
+        let modal = self.approval_queue.pop_front();
+        if modal.is_some() {
+            self.pending_approval_clears = self.pending_approval_clears.saturating_add(1);
+        }
+        modal
+    }
+
+    fn handle_pause_cleared(&mut self) {
+        if self.pending_approval_clears > 0 {
+            self.pending_approval_clears -= 1;
+        } else {
+            self.approval_queue.pop_front();
+        }
+    }
+
     fn handle_chat_event(&mut self, event: ChatEvent) {
         if event
             .chat_id
@@ -434,6 +496,7 @@ impl App {
             "snapshot" => self.handle_snapshot(&event.raw),
             "stream_started" => {
                 self.session_state = SessionState::Generating;
+                self.stream_collector.clear();
                 if !matches!(self.transcript.last(), Some(TranscriptItem::Assistant(_))) {
                     self.transcript
                         .push(TranscriptItem::Assistant(String::new()));
@@ -441,15 +504,14 @@ impl App {
             }
             "stream_delta" => self.handle_stream_delta(&event.raw),
             "stream_finished" => {
-                let tail = self.stream_collector.finalize_and_drain_source();
-                let _ = tail;
+                self.finalize_assistant_stream();
                 if self.session_state != SessionState::Paused {
                     self.session_state = SessionState::Idle;
                 }
             }
             "runtime_updated" => self.handle_runtime_updated(&event.raw),
-            "pause_required" => self.handle_pause_required(&event.raw),
-            "pause_cleared" => self.approval_modal = None,
+            "pause_required" => self.handle_pause_required(&event.raw, event.seq),
+            "pause_cleared" => self.handle_pause_cleared(),
             "message_added" => self.handle_message_added(&event.raw),
             _ => {}
         }
@@ -473,8 +535,11 @@ impl App {
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
-            if let Some(modal) = ApprovalModalState::from_event(runtime) {
-                self.approval_modal = Some(modal);
+            self.clear_approvals();
+            if let Some(modal) =
+                ApprovalModalState::from_event_in_scope(self.approval_scope(runtime, None), runtime)
+            {
+                self.enqueue_approval(modal);
             }
         }
     }
@@ -533,11 +598,11 @@ impl App {
         };
     }
 
-    fn handle_pause_required(&mut self, raw: &Value) {
+    fn handle_pause_required(&mut self, raw: &Value, event_seq: Option<u64>) {
         self.session_state = SessionState::Paused;
-        self.approval_modal = ApprovalModalState::from_event(raw);
-        if self.approval_modal.is_none() {
-            self.add_notice("Approval required but no tool metadata was provided");
+        match ApprovalModalState::from_event_in_scope(self.approval_scope(raw, event_seq), raw) {
+            Some(modal) => self.enqueue_approval(modal),
+            None => self.add_notice("Approval required but no tool metadata was provided"),
         }
     }
 
@@ -622,6 +687,23 @@ impl App {
 
     fn push_tool_call(&mut self, tool: &Value) {
         let card = ToolCard::from_tool_call(tool);
+        if !card.id.is_empty() {
+            if let Some((idx, existing)) =
+                self.transcript
+                    .iter_mut()
+                    .enumerate()
+                    .find_map(|(idx, item)| match item {
+                        TranscriptItem::Tool(existing) if existing.id == card.id => {
+                            Some((idx, existing))
+                        }
+                        _ => None,
+                    })
+            {
+                existing.update_from_tool_call(card);
+                self.selected_tool_index = Some(idx);
+                return;
+            }
+        }
         self.transcript.push(TranscriptItem::Tool(card));
         self.selected_tool_index = Some(self.transcript.len() - 1);
     }
@@ -705,7 +787,7 @@ impl App {
         let abort_active = self.is_chat_active();
         if abort_active {
             self.session_state = SessionState::Idle;
-            self.approval_modal = None;
+            self.clear_approvals();
         }
         self.should_quit = true;
         AppAction::Quit { abort_active }
@@ -874,33 +956,32 @@ impl App {
     }
 
     fn handle_approval_key(&mut self, key: KeyEvent) -> Option<AppAction> {
-        let modal = self.approval_modal.as_mut()?;
-        match modal.handle_key(key) {
+        let action = {
+            let modal = self.approval_queue.front_mut()?;
+            modal.handle_key(key)
+        };
+        match action {
             ApprovalKeyAction::None | ApprovalKeyAction::ToggleFullArgs => Some(AppAction::None),
             ApprovalKeyAction::ApproveOnce => {
-                let decisions = modal.decisions(true);
-                self.approval_modal = None;
-                Some(AppAction::SendToolDecisions {
-                    decisions,
-                    patch: None,
-                })
+                self.pop_current_approval()
+                    .map(|modal| AppAction::SendToolDecisions {
+                        decisions: modal.decisions(true),
+                        patch: None,
+                    })
             }
             ApprovalKeyAction::ApproveForChat => {
-                let patch = approval_patch(modal);
-                let decisions = modal.decisions(true);
-                self.approval_modal = None;
-                Some(AppAction::SendToolDecisions {
-                    decisions,
-                    patch: Some(patch),
-                })
+                self.pop_current_approval()
+                    .map(|modal| AppAction::SendToolDecisions {
+                        patch: Some(approval_patch(&modal)),
+                        decisions: modal.decisions(true),
+                    })
             }
             ApprovalKeyAction::Deny => {
-                let decisions = modal.decisions(false);
-                self.approval_modal = None;
-                Some(AppAction::SendToolDecisions {
-                    decisions,
-                    patch: None,
-                })
+                self.pop_current_approval()
+                    .map(|modal| AppAction::SendToolDecisions {
+                        decisions: modal.decisions(false),
+                        patch: None,
+                    })
             }
         }
     }
@@ -911,7 +992,7 @@ impl App {
             SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
         ) {
             self.session_state = SessionState::Idle;
-            self.approval_modal = None;
+            self.clear_approvals();
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
             return AppAction::Abort;
@@ -1053,7 +1134,8 @@ impl App {
 
     #[cfg(test)]
     pub fn test_set_approval(&mut self, modal: ApprovalModalState) {
-        self.approval_modal = Some(modal);
+        self.clear_approvals();
+        self.enqueue_approval(modal);
         self.session_state = SessionState::Paused;
     }
 
@@ -1747,6 +1829,35 @@ mod tests {
         decision
     }
 
+    fn pause_event(app: &App, tool_call_id: &str, tool_name: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_required".to_string(),
+            raw: json!({"reasons": [{"type": "confirmation", "tool_name": tool_name, "command": format!("{tool_name}({tool_call_id})"), "rule": "*", "tool_call_id": tool_call_id}]}),
+        }
+    }
+
+    fn assistant_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Assistant(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
+    fn tool_cards(app: &App) -> Vec<&ToolCard> {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Tool(card) => Some(card),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[derive(Clone, Default)]
     struct CommandState(Arc<(Mutex<Vec<Value>>, Condvar)>);
 
@@ -1856,15 +1967,14 @@ mod tests {
             kind: "stream_delta".to_string(),
             raw: json!({"ops": [{"op": "append_content", "text": "hi"}]}),
         });
-        assert!(
-            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "hi")
-        );
+        assert_eq!(assistant_text(&app), "");
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
             kind: "stream_finished".to_string(),
             raw: json!({}),
         });
+        assert_eq!(assistant_text(&app), "hi\n");
         assert_eq!(app.session_state(), SessionState::Idle);
     }
 
@@ -1977,6 +2087,122 @@ mod tests {
     }
 
     #[test]
+    fn two_approvals_before_first_resolved_preserve_fifo() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-2", "cat"));
+
+        let first = app.approval_modal().unwrap();
+        assert_eq!(first.reasons()[0].tool_call_id, "call-1");
+        assert_eq!(first.pending_after(), 1);
+
+        let first_action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            first_action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-1".to_string(),
+                    accepted: true,
+                }],
+                patch: None,
+            }
+        );
+        assert_eq!(app.approval_pending_clear_count(), 1);
+        let second = app.approval_modal().unwrap();
+        assert_eq!(second.reasons()[0].tool_call_id, "call-2");
+        assert_eq!(second.pending_after(), 0);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_cleared".to_string(),
+            raw: json!({}),
+        });
+        assert!(app.approval_modal().is_some());
+        assert_eq!(app.approval_pending_clear_count(), 0);
+
+        let second_action = app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            second_action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-2".to_string(),
+                    accepted: false,
+                }],
+                patch: None,
+            }
+        );
+        assert!(app.approval_modal().is_none());
+    }
+
+    #[test]
+    fn markdown_collector_commits_complete_lines_to_transcript() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "append_content", "text": "# Title\npartial"}]}),
+        });
+        assert_eq!(assistant_text(&app), "# Title\n");
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "append_content", "text": " tail"}]}),
+        });
+        assert_eq!(assistant_text(&app), "# Title\n");
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        assert_eq!(assistant_text(&app), "# Title\npartial tail\n");
+    }
+
+    #[test]
+    fn set_tool_calls_updates_existing_card_by_id() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}}]}]}),
+        });
+        assert_eq!(tool_cards(&app).len(), 1);
+        app.complete_tool("call-1", "done".to_string(), ToolStatus::Success, now_ms());
+        if let [card] = tool_cards(&app).as_slice() {
+            assert_eq!(card.status, ToolStatus::Success);
+            assert_eq!(card.result, "done");
+        } else {
+            panic!("expected one card");
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 2\"}"}}]}]}),
+        });
+        let cards = tool_cards(&app);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].status, ToolStatus::Success);
+        assert_eq!(cards[0].result, "done");
+        assert!(cards[0].expanded);
+        assert!(cards[0].args_preview.contains("echo 2"));
+    }
+
+    #[test]
     fn approve_for_chat_sets_patch_scope() {
         let mut app = App::new(project());
         app.test_set_approval(ApprovalModalState::new(vec![PauseReason {
@@ -2038,7 +2264,7 @@ mod tests {
             &app,
             2,
             "stream_delta",
-            json!({"ops": [{"op": "append_content", "text": "kept"}]}),
+            json!({"ops": [{"op": "append_content", "text": "kept\n"}]}),
         );
         assert_eq!(
             apply_tracked(&mut app, &mut tracker, kept),
@@ -2052,9 +2278,7 @@ mod tests {
         );
         let decision = apply_tracked(&mut app, &mut tracker, dropped);
         assert!(matches!(decision, ChatSeqDecision::Resubscribe(_)));
-        assert!(
-            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "kept")
-        );
+        assert_eq!(assistant_text(&app), "kept\n");
     }
 
     #[test]
@@ -2076,7 +2300,7 @@ mod tests {
             apply_tracked(&mut app, &mut tracker, started),
             ChatSeqDecision::Apply
         );
-        let delta = json!({"ops": [{"op": "append_content", "text": "once"}]});
+        let delta = json!({"ops": [{"op": "append_content", "text": "once\n"}]});
         let first = chat_event(&app, 2, "stream_delta", delta.clone());
         assert_eq!(
             apply_tracked(&mut app, &mut tracker, first),
@@ -2085,9 +2309,7 @@ mod tests {
         let duplicate = chat_event(&app, 2, "stream_delta", delta);
         let decision = apply_tracked(&mut app, &mut tracker, duplicate);
         assert!(matches!(decision, ChatSeqDecision::Resubscribe(_)));
-        assert!(
-            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "once")
-        );
+        assert_eq!(assistant_text(&app), "once\n");
     }
 
     #[tokio::test]
@@ -2116,14 +2338,11 @@ mod tests {
             &app,
             1,
             "stream_delta",
-            json!({"ops": [{"op": "append_content", "text": "fresh"}]}),
+            json!({"ops": [{"op": "append_content", "text": "fresh\n"}]}),
         );
         assert!(subscriptions.apply_chat_event(&mut app, 2, fresh));
-        assert!(
-            matches!(app.visible_transcript().last(), Some(TranscriptItem::Assistant(text)) if text == "fresh")
-        );
+        assert_eq!(assistant_text(&app), "fresh\n");
     }
-
     #[tokio::test]
     async fn subscription_switch_aborts_prior_task() {
         let mut subscriptions = SubscriptionManager::new();

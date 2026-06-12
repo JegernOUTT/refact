@@ -39,7 +39,7 @@ impl ToolCard {
             .get("id")
             .or_else(|| value.get("tool_call_id"))
             .and_then(Value::as_str)
-            .unwrap_or("tool")
+            .unwrap_or_default()
             .to_string();
         let name = value
             .get("function")
@@ -72,6 +72,11 @@ impl ToolCard {
         self.result = result.into();
         self.status = status;
         self
+    }
+
+    pub fn update_from_tool_call(&mut self, update: ToolCard) {
+        self.name = update.name;
+        self.args_preview = update.args_preview;
     }
 
     pub fn toggle(&mut self) {

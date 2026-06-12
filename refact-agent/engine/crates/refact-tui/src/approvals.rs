@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -62,20 +64,59 @@ pub enum ApprovalKeyAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalQueueKey {
+    scope: String,
+    tool_call_ids: Vec<String>,
+}
+
+impl ApprovalQueueKey {
+    fn from_reasons(scope: impl Into<String>, reasons: &[PauseReason]) -> Self {
+        let mut tool_call_ids = reasons
+            .iter()
+            .filter(|reason| !reason.tool_call_id.is_empty())
+            .map(|reason| reason.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        if tool_call_ids.is_empty() {
+            tool_call_ids = reasons
+                .iter()
+                .map(|reason| format!("{}:{}:{}", reason.tool_name, reason.command, reason.rule))
+                .collect();
+        }
+        Self {
+            scope: scope.into(),
+            tool_call_ids,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalModalState {
+    key: ApprovalQueueKey,
     reasons: Vec<PauseReason>,
     full_args: bool,
+    pending_after: usize,
 }
 
 impl ApprovalModalState {
     pub fn new(reasons: Vec<PauseReason>) -> Self {
+        Self::with_scope(String::new(), reasons)
+    }
+
+    pub fn with_scope(scope: impl Into<String>, reasons: Vec<PauseReason>) -> Self {
+        let scope = scope.into();
         Self {
+            key: ApprovalQueueKey::from_reasons(scope, &reasons),
             reasons,
             full_args: false,
+            pending_after: 0,
         }
     }
 
     pub fn from_event(raw: &Value) -> Option<Self> {
+        Self::from_event_in_scope(String::new(), raw)
+    }
+
+    pub fn from_event_in_scope(scope: impl Into<String>, raw: &Value) -> Option<Self> {
         let reasons = raw
             .get("reasons")
             .or_else(|| raw.get("pause_reasons"))
@@ -86,7 +127,7 @@ impl ApprovalModalState {
         if reasons.is_empty() {
             None
         } else {
-            Some(Self::new(reasons))
+            Some(Self::with_scope(scope, reasons))
         }
     }
 
@@ -96,6 +137,10 @@ impl ApprovalModalState {
 
     pub fn full_args(&self) -> bool {
         self.full_args
+    }
+
+    pub fn pending_after(&self) -> usize {
+        self.pending_after
     }
 
     pub fn is_empty(&self) -> bool {
@@ -126,6 +171,65 @@ impl ApprovalModalState {
             _ => ApprovalKeyAction::None,
         }
     }
+
+    fn set_pending_after(&mut self, pending_after: usize) {
+        self.pending_after = pending_after;
+    }
+
+    fn same_key(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalQueue {
+    pending: VecDeque<ApprovalModalState>,
+}
+
+impl ApprovalQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn front(&self) -> Option<&ApprovalModalState> {
+        self.pending.front()
+    }
+
+    pub fn front_mut(&mut self) -> Option<&mut ApprovalModalState> {
+        self.pending.front_mut()
+    }
+
+    pub fn push(&mut self, mut modal: ApprovalModalState) -> bool {
+        if self.pending.iter().any(|queued| queued.same_key(&modal)) {
+            self.refresh_pending_counts();
+            return false;
+        }
+        modal.set_pending_after(0);
+        self.pending.push_back(modal);
+        self.refresh_pending_counts();
+        true
+    }
+
+    pub fn pop_front(&mut self) -> Option<ApprovalModalState> {
+        let modal = self.pending.pop_front();
+        self.refresh_pending_counts();
+        modal
+    }
+
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    fn refresh_pending_counts(&mut self) {
+        let len = self.pending.len();
+        for (idx, modal) in self.pending.iter_mut().enumerate() {
+            modal.set_pending_after(len.saturating_sub(idx + 1));
+        }
+    }
 }
 
 pub fn preview_command(command: &str, max_chars: usize) -> String {
@@ -151,6 +255,12 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
             Style::default().fg(Color::DarkGray),
         )),
     ];
+    if state.pending_after() > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("{} more pending", state.pending_after()),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     for reason in state.reasons() {
         let command = if state.full_args() {
             reason.command.clone()
@@ -185,6 +295,17 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    fn reason(id: &str) -> PauseReason {
+        PauseReason {
+            reason_type: "confirmation".to_string(),
+            tool_name: "shell".to_string(),
+            command: format!("echo {id}"),
+            rule: "*".to_string(),
+            tool_call_id: id.to_string(),
+            integr_config_path: None,
+        }
+    }
+
     #[test]
     fn approval_keymap_maps_decisions_without_enter_default() {
         let mut modal = ApprovalModalState::new(vec![]);
@@ -214,14 +335,7 @@ mod tests {
 
     #[test]
     fn approval_decisions_preserve_tool_ids() {
-        let modal = ApprovalModalState::new(vec![PauseReason {
-            reason_type: "confirmation".to_string(),
-            tool_name: "shell".to_string(),
-            command: "echo hi".to_string(),
-            rule: "*".to_string(),
-            tool_call_id: "call-1".to_string(),
-            integr_config_path: None,
-        }]);
+        let modal = ApprovalModalState::new(vec![reason("call-1")]);
         assert_eq!(
             modal.decisions(true),
             vec![ToolDecision {
@@ -229,5 +343,53 @@ mod tests {
                 accepted: true,
             }]
         );
+    }
+
+    #[test]
+    fn approval_queue_preserves_fifo_and_pending_count() {
+        let mut queue = ApprovalQueue::new();
+        assert!(queue.push(ApprovalModalState::with_scope(
+            "chat-1",
+            vec![reason("call-1")]
+        )));
+        assert!(queue.push(ApprovalModalState::with_scope(
+            "chat-1",
+            vec![reason("call-2")]
+        )));
+        assert!(!queue.push(ApprovalModalState::with_scope(
+            "chat-1",
+            vec![reason("call-2")]
+        )));
+
+        let first = queue.front().unwrap();
+        assert_eq!(first.reasons()[0].tool_call_id, "call-1");
+        assert_eq!(first.pending_after(), 1);
+        assert_eq!(
+            queue.pop_front().unwrap().reasons()[0].tool_call_id,
+            "call-1"
+        );
+        let second = queue.front().unwrap();
+        assert_eq!(second.reasons()[0].tool_call_id, "call-2");
+        assert_eq!(second.pending_after(), 0);
+    }
+
+    #[test]
+    fn render_modal_lines_reports_more_pending() {
+        let mut queue = ApprovalQueue::new();
+        queue.push(ApprovalModalState::with_scope(
+            "chat-1",
+            vec![reason("call-1")],
+        ));
+        queue.push(ApprovalModalState::with_scope(
+            "chat-1",
+            vec![reason("call-2")],
+        ));
+
+        let text = render_modal_lines(queue.front().unwrap(), 80)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("1 more pending"));
     }
 }
