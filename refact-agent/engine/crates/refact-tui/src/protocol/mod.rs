@@ -357,6 +357,15 @@ impl TranscriptState {
     pub fn reset_from_messages(&mut self, messages: &[Value]) {
         self.reset();
         self.messages = messages.iter().map(TranscriptMessage::from_wire).collect();
+        self.refresh_cached_indexes();
+    }
+
+    pub fn truncate_messages(&mut self, from_index: usize) {
+        self.messages.truncate(from_index.min(self.messages.len()));
+        self.refresh_cached_indexes();
+    }
+
+    fn refresh_cached_indexes(&mut self) {
         self.usage = self
             .messages
             .iter()

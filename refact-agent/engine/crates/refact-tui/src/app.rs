@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,7 @@ use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
+use crate::overlay::{PagerAction, PagerOverlay};
 use crate::pickers::{
     file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
     PickerAccept, PickerItem, PickerKind, PickerState,
@@ -173,6 +176,23 @@ pub enum ComposerMode {
     ProjectPicker,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BacktrackTarget {
+    index: usize,
+    message_id: Option<String>,
+    content: String,
+}
+
+impl BacktrackTarget {
+    fn matches(&self, message: &TranscriptMessage) -> bool {
+        if let Some(message_id) = self.message_id.as_deref() {
+            message.message_id.as_deref() == Some(message_id)
+        } else {
+            message.role == TranscriptRole::User && message.content == self.content
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectPickerState {
     projects: Vec<ProjectEntry>,
@@ -256,6 +276,11 @@ pub struct App {
     default_context_window_tokens: Option<u64>,
     scroll_offset: usize,
     selected_tool_index: Option<usize>,
+    selected_backtrack_index: Option<usize>,
+    backtrack_target: Option<BacktrackTarget>,
+    backtrack_pending: Option<BacktrackTarget>,
+    last_escape_at: Option<Instant>,
+    transcript_overlay: Option<PagerOverlay>,
     help_open: bool,
     usage: Option<UsageSummary>,
     should_quit: bool,
@@ -319,6 +344,11 @@ impl App {
             default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
+            selected_backtrack_index: None,
+            backtrack_target: None,
+            backtrack_pending: None,
+            last_escape_at: None,
+            transcript_overlay: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -367,6 +397,11 @@ impl App {
             default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
+            selected_backtrack_index: None,
+            backtrack_target: None,
+            backtrack_pending: None,
+            last_escape_at: None,
+            transcript_overlay: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -589,6 +624,14 @@ impl App {
 
     pub fn selected_tool_index(&self) -> Option<usize> {
         self.selected_tool_index
+    }
+
+    pub fn selected_backtrack_index(&self) -> Option<usize> {
+        self.selected_backtrack_index
+    }
+
+    pub fn transcript_overlay(&self) -> Option<&PagerOverlay> {
+        self.transcript_overlay.as_ref()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -990,6 +1033,8 @@ impl App {
     }
 
     fn set_project(&mut self, project: OpenProjectResponse) {
+        self.cancel_backtrack();
+        self.transcript_overlay = None;
         self.history_path = Some(history_path_for_root(&project.root));
         let history_entries = self
             .history_path
@@ -1024,6 +1069,8 @@ impl App {
     }
 
     fn new_chat(&mut self) {
+        self.cancel_backtrack();
+        self.transcript_overlay = None;
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_title = None;
         self.show_session_header = true;
@@ -1050,6 +1097,8 @@ impl App {
         title: String,
         subtitle: Option<String>,
     ) -> AppAction {
+        self.cancel_backtrack();
+        self.transcript_overlay = None;
         self.chat_id = chat_id;
         self.session_title = Some(title.clone());
         self.show_session_header = true;
@@ -1073,6 +1122,8 @@ impl App {
     }
 
     fn fork_chat(&mut self) -> AppAction {
+        self.cancel_backtrack();
+        self.transcript_overlay = None;
         let Some(up_to_message_id) = last_branch_message_id(self.transcript_state.messages())
         else {
             self.add_notice(
@@ -1139,6 +1190,9 @@ impl App {
         }
         let prompt = self.composer.submit_text()?;
         self.persist_history();
+        if self.backtrack_pending.is_some() {
+            return Some(self.start_backtrack_turn(prompt));
+        }
         let params = self.take_pending_params();
         if self.is_chat_active() {
             self.input_queue.enqueue(prompt, params);
@@ -1149,7 +1203,36 @@ impl App {
         }
     }
 
+    fn start_backtrack_turn(&mut self, prompt: String) -> AppAction {
+        let Some(target) = self.backtrack_pending.take() else {
+            return AppAction::None;
+        };
+        if !self
+            .transcript_state
+            .messages()
+            .get(target.index)
+            .is_some_and(|message| target.matches(message))
+        {
+            self.add_notice("Backtrack target changed; open backtrack again");
+            return AppAction::None;
+        }
+        self.transcript_state.truncate_messages(target.index);
+        self.transcript_state.push_user_message(prompt.clone());
+        self.transcript_state.start_assistant(None);
+        self.rebuild_render_transcript_from_state();
+        self.session_state = SessionState::Generating;
+        self.stream_controller.clear();
+        self.usage = None;
+        self.retry_hint = None;
+        self.clear_backtrack_selection();
+        AppAction::RetryFromIndex {
+            index: target.index,
+            content: Value::String(prompt),
+        }
+    }
+
     fn start_prompt_turn(&mut self, prompt: String, params: Value) -> AppAction {
+        self.cancel_backtrack();
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
@@ -1200,6 +1283,233 @@ impl App {
     fn remove_selected_queue_item(&mut self) -> AppAction {
         self.input_queue.remove_selected();
         AppAction::None
+    }
+
+    fn handle_idle_escape(&mut self) -> AppAction {
+        if !self.composer.is_empty() {
+            return AppAction::None;
+        }
+        if self.selected_backtrack_index.is_some() {
+            self.select_previous_user_message();
+            return AppAction::None;
+        }
+        let now = Instant::now();
+        if self
+            .last_escape_at
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(900))
+        {
+            self.select_previous_user_message();
+            self.last_escape_at = None;
+        } else {
+            self.last_escape_at = Some(now);
+        }
+        AppAction::None
+    }
+
+    fn select_previous_user_message(&mut self) {
+        let indexes = self.user_message_indexes();
+        if indexes.is_empty() {
+            self.add_notice("No previous user message to backtrack");
+            self.clear_backtrack_selection();
+            return;
+        }
+        let next = match self.selected_backtrack_index {
+            Some(current) => indexes
+                .iter()
+                .copied()
+                .rev()
+                .find(|idx| *idx < current)
+                .unwrap_or(current),
+            None => *indexes.last().expect("indexes checked"),
+        };
+        self.selected_backtrack_index = Some(next);
+        self.backtrack_target = self.backtrack_target_at(next);
+        self.input_queue.clear_selection();
+        self.selected_tool_index = None;
+    }
+
+    fn accept_backtrack_selection(&mut self) -> AppAction {
+        let Some(index) = self.selected_backtrack_index else {
+            return AppAction::None;
+        };
+        let Some(target) = self.backtrack_target_at(index) else {
+            self.clear_backtrack_selection();
+            self.add_notice("Backtrack target is no longer available");
+            return AppAction::None;
+        };
+        self.composer.set_text(target.content.clone());
+        self.backtrack_target = Some(target.clone());
+        self.backtrack_pending = Some(target);
+        AppAction::None
+    }
+
+    fn user_message_indexes(&self) -> Vec<usize> {
+        self.transcript_state
+            .messages()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, message)| {
+                (message.role == TranscriptRole::User && !message.content.trim().is_empty())
+                    .then_some(idx)
+            })
+            .collect()
+    }
+
+    fn backtrack_target_at(&self, index: usize) -> Option<BacktrackTarget> {
+        let message = self.transcript_state.messages().get(index)?;
+        if message.role != TranscriptRole::User || message.content.trim().is_empty() {
+            return None;
+        }
+        Some(BacktrackTarget {
+            index,
+            message_id: message.message_id.clone(),
+            content: message.content.clone(),
+        })
+    }
+
+    fn clear_backtrack_selection(&mut self) {
+        self.selected_backtrack_index = None;
+        self.backtrack_target = None;
+        self.last_escape_at = None;
+    }
+
+    fn cancel_backtrack(&mut self) {
+        self.clear_backtrack_selection();
+        self.backtrack_pending = None;
+    }
+
+    pub fn transcript_item_selected(&self, visible_index: usize, item: &TranscriptItem) -> bool {
+        if self.selected_tool_index == Some(visible_index) {
+            return true;
+        }
+        if !matches!(item, TranscriptItem::User(_)) {
+            return false;
+        }
+        let Some(selected_index) = self.selected_backtrack_index else {
+            return false;
+        };
+        let target_ordinal = self
+            .transcript_state
+            .messages()
+            .iter()
+            .take(selected_index.saturating_add(1))
+            .filter(|message| message.role == TranscriptRole::User)
+            .count();
+        if target_ordinal == 0 {
+            return false;
+        }
+        self.transcript
+            .iter()
+            .take(visible_index.saturating_add(1))
+            .filter(|item| matches!(item, TranscriptItem::User(_)))
+            .count()
+            == target_ordinal
+    }
+
+    fn open_transcript_overlay(&mut self) -> AppAction {
+        self.transcript_overlay = Some(PagerOverlay::new(
+            "Transcript",
+            self.transcript_rendered_text_lines(100),
+            self.transcript_raw_text_lines(),
+        ));
+        AppAction::None
+    }
+
+    fn transcript_rendered_text_lines(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        for item in self.overlay_transcript_items() {
+            lines.extend(
+                crate::history::render_transcript_item_lines(&item, width, false)
+                    .iter()
+                    .map(line_to_plain_string),
+            );
+        }
+        lines
+    }
+
+    fn transcript_raw_text_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for message in self.transcript_state.messages() {
+            let id = message
+                .message_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!(" {value}"))
+                .unwrap_or_default();
+            lines.push(format!("## {}{id}", message.role.as_str()));
+            if !message.reasoning.is_empty() {
+                lines.push("[reasoning]".to_string());
+                lines.extend(message.reasoning.lines().map(str::to_string));
+            }
+            if !message.content.is_empty() {
+                lines.extend(message.content.lines().map(str::to_string));
+            }
+            for tool in &message.tool_calls {
+                lines.push(format!("[tool_call] {}", value_to_compact_string(tool)));
+            }
+            for citation in &message.citations {
+                lines.push(format!("[citation] {}", value_to_compact_string(citation)));
+            }
+            for block in &message.server_content_blocks {
+                lines.push(format!("[server] {}", value_to_compact_string(block)));
+            }
+            lines.push(String::new());
+        }
+        lines
+    }
+
+    fn overlay_transcript_items(&self) -> Vec<TranscriptItem> {
+        let mut items = Vec::new();
+        if self.show_session_header || self.session_title.is_some() {
+            items.push(self.session_header_item());
+        }
+        for message in self.transcript_state.messages() {
+            match &message.role {
+                TranscriptRole::User => {
+                    if !message.content.is_empty() {
+                        items.push(TranscriptItem::User(message.content.clone()));
+                    }
+                }
+                TranscriptRole::Assistant => {
+                    if !message.reasoning.is_empty() {
+                        items.push(TranscriptItem::Reasoning(message.reasoning.clone(), false));
+                    }
+                    if !message.content.is_empty() || message.tool_calls.is_empty() {
+                        items.push(TranscriptItem::Assistant(message.content.clone()));
+                    }
+                    for tool in &message.tool_calls {
+                        items.push(TranscriptItem::Tool(ToolCard::from_tool_call(tool)));
+                    }
+                    for citation in &message.citations {
+                        items.push(TranscriptItem::Citation(value_to_compact_string(citation)));
+                    }
+                    for block in &message.server_content_blocks {
+                        items.push(TranscriptItem::ServerContentBlock(value_to_compact_string(
+                            block,
+                        )));
+                    }
+                }
+                TranscriptRole::Tool => items.push(TranscriptItem::Tool(
+                    ToolCard::from_tool_call(&json!({
+                        "id": message.tool_call_id.clone().unwrap_or_default(),
+                        "name": "tool"
+                    }))
+                    .with_result(
+                        message.content.clone(),
+                        if message.tool_failed {
+                            ToolStatus::Error
+                        } else {
+                            ToolStatus::Success
+                        },
+                    ),
+                )),
+                TranscriptRole::Notice => {
+                    items.push(TranscriptItem::Notice(message.content.clone()))
+                }
+                TranscriptRole::Plan | TranscriptRole::Event | TranscriptRole::Other(_) => {}
+            }
+        }
+        items
     }
 
     fn persist_history(&self) {
@@ -1322,6 +1632,7 @@ impl App {
     }
 
     fn replace_with_notice(&mut self, text: String) {
+        self.cancel_backtrack();
         self.transcript_state.reset();
         self.transcript_state.push_notice(text.clone());
         self.transcript.clear();
@@ -1333,6 +1644,7 @@ impl App {
     }
 
     fn replace_with_session(&mut self, title: String, subtitle: Option<String>) {
+        self.cancel_backtrack();
         self.transcript_state.reset();
         self.transcript_state.push_notice(title.clone());
         self.transcript.clear();
@@ -1374,6 +1686,7 @@ impl App {
         for message in &messages {
             self.append_render_message(message);
         }
+        self.sync_backtrack_selection_after_rebuild();
     }
 
     fn append_render_message(&mut self, message: &TranscriptMessage) {
@@ -1447,6 +1760,22 @@ impl App {
                 }
             }
             TranscriptRole::Other(_) => {}
+        }
+    }
+
+    fn sync_backtrack_selection_after_rebuild(&mut self) {
+        let Some(target) = self.backtrack_target.clone() else {
+            return;
+        };
+        if self
+            .transcript_state
+            .messages()
+            .get(target.index)
+            .is_some_and(|message| target.matches(message))
+        {
+            self.selected_backtrack_index = Some(target.index);
+        } else {
+            self.clear_backtrack_selection();
         }
     }
 
@@ -2019,6 +2348,12 @@ impl App {
             self.help_open = false;
             return AppAction::None;
         }
+        if let Some(overlay) = self.transcript_overlay.as_mut() {
+            if overlay.handle_key(key) == PagerAction::Close {
+                self.transcript_overlay = None;
+            }
+            return AppAction::None;
+        }
         if let Some(action) = self.handle_approval_key(key) {
             return action;
         }
@@ -2072,6 +2407,18 @@ impl App {
                 ..
             } => AppAction::LoadModes,
             KeyEvent {
+                code: KeyCode::Char('t'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => self.open_transcript_overlay(),
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => AppAction::OpenExternalEditor {
+                draft: self.composer.text().to_string(),
+            },
+            KeyEvent {
                 code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -2093,6 +2440,9 @@ impl App {
             } => {
                 if self.cancel_queue_edit() {
                     AppAction::None
+                } else if self.backtrack_pending.is_some() {
+                    self.cancel_backtrack();
+                    AppAction::None
                 } else if self.events_pane.open {
                     self.events_pane.open = false;
                     AppAction::None
@@ -2108,7 +2458,7 @@ impl App {
                     self.add_notice("Cancel requested");
                     AppAction::Abort
                 } else {
-                    AppAction::None
+                    self.handle_idle_escape()
                 }
             }
             KeyEvent {
@@ -2165,6 +2515,12 @@ impl App {
             } => {
                 self.composer.insert_explicit_newline(Instant::now());
                 AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } if self.selected_backtrack_index.is_some() && self.composer.is_empty() => {
+                self.accept_backtrack_selection()
             }
             KeyEvent {
                 code: KeyCode::Enter,
@@ -2308,6 +2664,9 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                if self.selected_backtrack_index.is_some() && self.composer.is_empty() {
+                    self.clear_backtrack_selection();
+                }
                 self.input_queue.clear_selection();
                 self.composer.insert_char(ch, Instant::now());
                 AppAction::None
@@ -2579,6 +2938,10 @@ pub enum AppAction {
         prompt: String,
         params: Value,
     },
+    RetryFromIndex {
+        index: usize,
+        content: Value,
+    },
     SetParams {
         patch: Value,
     },
@@ -2591,6 +2954,9 @@ pub enum AppAction {
     },
     LoadDiff {
         root: PathBuf,
+    },
+    OpenExternalEditor {
+        draft: String,
     },
     SendToolDecisions {
         decisions: Vec<ToolDecision>,
@@ -2773,7 +3139,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     let mut subscriptions = SubscriptionManager::new();
-    spawn_input_task(tx.clone());
+    let mut input_task = spawn_input_task(tx.clone());
     spawn_tick_task(tx.clone());
     spawn_daemon_events_task(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
@@ -2799,7 +3165,17 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         match event {
             RuntimeEvent::Input(Event::Key(key)) => {
                 let action = app.handle_key(key);
-                run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+                if let AppAction::OpenExternalEditor { draft } = action {
+                    input_task.abort();
+                    let result = edit_composer_in_external_editor(&mut terminal, draft).await;
+                    match result {
+                        Ok(content) => app.composer.set_text(content),
+                        Err(message) => app.add_notice(message),
+                    }
+                    input_task = spawn_input_task(tx.clone());
+                } else {
+                    run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+                }
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
             RuntimeEvent::Input(Event::FocusGained | Event::FocusLost) => {}
@@ -3072,6 +3448,20 @@ async fn run_action(
                 });
             }
         }
+        AppAction::RetryFromIndex { index, content } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .send_retry_from_index(&project_id, &chat_id, index, content)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                });
+            }
+        }
         AppAction::SetParams { patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
@@ -3143,6 +3533,7 @@ async fn run_action(
                 let _ = tx.send(RuntimeEvent::DiffLoaded(result)).await;
             });
         }
+        AppAction::OpenExternalEditor { .. } => {}
         AppAction::SendToolDecisions { decisions, patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
@@ -3213,6 +3604,78 @@ fn git_diff(root: &std::path::Path) -> Result<String, String> {
     }
 }
 
+async fn edit_composer_in_external_editor(
+    terminal: &mut TerminalSession,
+    draft: String,
+) -> Result<String, String> {
+    let editor = external_editor_command()?;
+    terminal.suspend();
+    let edit_result = edit_text_with_editor_command(&editor, draft);
+    let resume_result = terminal.resume();
+    resume_result.map_err(|error| format!("Failed to restore terminal after editor: {error}"))?;
+    edit_result
+}
+
+fn edit_text_with_editor_command(editor: &str, draft: String) -> Result<String, String> {
+    let path = temp_editor_path();
+    fs::write(&path, draft)
+        .map_err(|error| format!("Failed to write editor temp file: {error}"))?;
+    let edit_result = run_editor_command(&editor, &path);
+    let read_result = edit_result.and_then(|_| {
+        fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read editor temp file: {error}"))
+    });
+    let _ = fs::remove_file(&path);
+    read_result
+}
+
+fn external_editor_command() -> Result<String, String> {
+    for key in ["EDITOR", "VISUAL"] {
+        if let Ok(value) = env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+    if command_in_path("vi") {
+        Ok("vi".to_string())
+    } else {
+        Err("No $EDITOR/$VISUAL set and fallback vi was not found".to_string())
+    }
+}
+
+fn temp_editor_path() -> PathBuf {
+    env::temp_dir().join(format!(
+        "refact-tui-{}-{}.md",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
+fn run_editor_command(editor: &str, path: &Path) -> Result<(), String> {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} \"$1\"", editor))
+        .arg("refact-tui-editor")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("Failed to launch editor `{editor}`: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Editor `{editor}` exited with {status}"))
+    }
+}
+
+fn command_in_path(command: &str) -> bool {
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        return Path::new(command).is_file();
+    }
+    env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
+}
+
 async fn send_abort_for_current_chat(app: &App, client: &DaemonClient) -> Result<(), String> {
     let Some(project_id) = app.current_project_id().map(str::to_string) else {
         return Ok(());
@@ -3230,7 +3693,7 @@ async fn send_abort_for_current_chat(app: &App, client: &DaemonClient) -> Result
     }
 }
 
-fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) {
+fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = EventStream::new();
         while let Some(event) = reader.next().await {
@@ -3251,7 +3714,7 @@ fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) {
                 }
             }
         }
-    });
+    })
 }
 
 fn spawn_tick_task(tx: mpsc::Sender<RuntimeEvent>) {
@@ -3673,6 +4136,13 @@ fn retry_value_after(message: &str, needle: &str) -> Option<String> {
 
 fn value_to_compact_string(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
 }
 
 fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> String {
@@ -4478,6 +4948,97 @@ mod tests {
         assert!(diff.contains("+++ b/file.txt"));
         assert!(diff.contains("-old"));
         assert!(diff.contains("+new"));
+    }
+
+    #[test]
+    fn esc_esc_backtrack_loads_user_message_and_retries_from_index() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "first"},
+                {"message_id": "a1", "role": "assistant", "content": "one"},
+                {"message_id": "u2", "role": "user", "content": "second"},
+                {"message_id": "a2", "role": "assistant", "content": "two"}
+            ]}),
+        });
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        assert_eq!(app.selected_backtrack_index(), None);
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        assert_eq!(app.selected_backtrack_index(), Some(2));
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        assert_eq!(app.selected_backtrack_index(), Some(0));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.composer(), "first");
+        app.composer.set_text("edited first");
+
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            AppAction::RetryFromIndex { index: 0, content }
+                if content == json!("edited first")
+        ));
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(matches!(
+            app.transcript_state().messages().get(0),
+            Some(message) if message.role == TranscriptRole::User && message.content == "edited first"
+        ));
+        assert_eq!(app.transcript_state().messages().len(), 2);
+    }
+
+    #[test]
+    fn ctrl_t_overlay_opens_searches_and_enters_copy_mode() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "find the thing"},
+                {"message_id": "a1", "role": "assistant", "content": "the thing is here"}
+            ]}),
+        });
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.transcript_overlay().is_some());
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.transcript_overlay().unwrap().query(), "th");
+        assert!(app.transcript_overlay().unwrap().match_count() > 0);
+        app.handle_key(key(KeyCode::Char('c')));
+        assert!(app.transcript_overlay().unwrap().is_copy_mode());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.transcript_overlay().is_none());
+    }
+
+    #[test]
+    fn editor_round_trip_appends_with_fake_editor_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        std::fs::write(&script, "#!/bin/sh\necho extra >> \"$1\"\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let text =
+            edit_text_with_editor_command(script.to_str().unwrap(), "base\n".to_string()).unwrap();
+
+        assert_eq!(text, "base\nextra\n");
     }
 
     #[test]

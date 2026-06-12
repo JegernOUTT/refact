@@ -75,6 +75,15 @@ impl TerminalSession {
     pub fn mode(&self) -> TerminalMode {
         self.guard.mode
     }
+
+    pub fn suspend(&mut self) {
+        self.guard.restore();
+    }
+
+    pub fn resume(&mut self) -> io::Result<()> {
+        self.guard.resume()?;
+        self.terminal.clear()
+    }
 }
 
 impl Drop for TerminalSession {
@@ -209,6 +218,14 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
         self.active = false;
         restore_terminal_state(&mut self.ops, self.state);
         self.state = RestoreState::default();
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        if self.active {
+            return Ok(());
+        }
+        self.active = true;
+        self.initialize()
     }
 }
 

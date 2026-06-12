@@ -461,6 +461,27 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn send_retry_from_index(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        index: usize,
+        content: Value,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": request_id("retry-from-index"),
+                "type": "retry_from_index",
+                "index": index,
+                "content": content,
+                "attachments": [],
+            }),
+        )
+        .await
+    }
+
     pub async fn send_abort(&self, project_id: &str, chat_id: &str) -> Result<(), ClientError> {
         self.send_command(
             project_id,

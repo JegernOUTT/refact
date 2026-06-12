@@ -75,11 +75,15 @@ impl Clone for Box<dyn HistoryCell> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserCell {
     text: String,
+    selected: bool,
 }
 
 impl UserCell {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+    pub fn new(text: impl Into<String>, selected: bool) -> Self {
+        Self {
+            text: text.into(),
+            selected,
+        }
     }
 }
 
@@ -91,9 +95,13 @@ impl HistoryCell for UserCell {
     fn render(&self, width: usize) -> Vec<Line<'static>> {
         let renderer = MarkdownRenderer::new(Some(width));
         let mut lines = vec![role_line(
-            "you",
+            if self.selected { "you selected" } else { "you" },
             Style::default()
-                .fg(Color::Blue)
+                .fg(if self.selected {
+                    Color::Cyan
+                } else {
+                    Color::Blue
+                })
                 .add_modifier(Modifier::BOLD),
         )];
         lines.extend(renderer.render(&self.text));
@@ -101,7 +109,7 @@ impl HistoryCell for UserCell {
     }
 
     fn revision(&self) -> u64 {
-        revision(&(self.kind(), &self.text))
+        revision(&(self.kind(), &self.text, self.selected))
     }
 }
 
@@ -963,7 +971,7 @@ impl HistoryCell for SessionCell {
 
 pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<dyn HistoryCell> {
     match item {
-        TranscriptItem::User(text) => Box::new(UserCell::new(text.clone())),
+        TranscriptItem::User(text) => Box::new(UserCell::new(text.clone(), selected)),
         TranscriptItem::Assistant(text) => Box::new(AssistantCell::new(text.clone())),
         TranscriptItem::Reasoning(text, collapsed) => {
             Box::new(ReasoningCell::new(text.clone(), *collapsed))
@@ -1384,7 +1392,7 @@ mod tests {
 
     #[test]
     fn user_cell_snapshot() {
-        let cell = UserCell::new("hello **there**");
+        let cell = UserCell::new("hello **there**", false);
         assert_eq!(text(&cell.render(40)), "you\nhello there\n");
     }
 

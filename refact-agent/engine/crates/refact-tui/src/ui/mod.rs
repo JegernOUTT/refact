@@ -7,6 +7,7 @@ use ratatui::Frame;
 use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
 use crate::events_pane::{render_event_lines, render_worker_lines};
+use crate::overlay::PagerMode;
 use crate::pickers::PickerState;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
@@ -57,12 +58,58 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(picker) = app.modal_picker() {
         render_modal_picker(frame, picker, area, composer_area);
     }
+    if let Some(overlay) = app.transcript_overlay() {
+        render_transcript_overlay(frame, overlay, area);
+    }
     if let Some(modal) = app.approval_modal() {
         render_approval_modal(frame, modal, area);
     }
     if app.help_open() {
         render_help(frame, area);
     }
+}
+
+fn render_transcript_overlay(
+    frame: &mut Frame<'_>,
+    overlay: &crate::overlay::PagerOverlay,
+    area: Rect,
+) {
+    let width = area.width.saturating_sub(6).max(24);
+    let height = area.height.saturating_sub(4).max(8);
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let mode = match overlay.mode() {
+        PagerMode::Rendered => "rendered",
+        PagerMode::Raw => "copy/raw",
+    };
+    let block =
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} · {} ", overlay.title(), mode));
+    let inner_height = popup.height.saturating_sub(3) as usize;
+    let body = overlay
+        .visible_lines(inner_height)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
+        popup,
+    );
+    let status_area = Rect {
+        x: popup.x.saturating_add(1),
+        y: popup.y + popup.height.saturating_sub(2),
+        width: popup.width.saturating_sub(2),
+        height: 1,
+    };
+    let status = truncate_line_with_ellipsis_if_overflow(
+        Line::from(Span::styled(
+            overlay.status(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        status_area.width as usize,
+    );
+    frame.render_widget(Paragraph::new(status), status_area);
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -100,7 +147,7 @@ fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.extend(crate::history::render_transcript_item_lines(
             item,
             area.width.saturating_sub(2) as usize,
-            app.selected_tool_index() == Some(idx),
+            app.transcript_item_selected(idx, item),
         ));
     }
     app.note_rendered_messages(app.visible_transcript().len());
@@ -124,7 +171,7 @@ fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.extend(crate::history::render_transcript_item_lines(
             item,
             area.width.saturating_sub(2) as usize,
-            app.selected_tool_index() == Some(idx),
+            app.transcript_item_selected(idx, item),
         ));
     }
     app.note_rendered_messages(app.visible_transcript().len());

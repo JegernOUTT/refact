@@ -5,6 +5,7 @@ pub mod commands;
 pub mod composer;
 pub mod events_pane;
 pub mod history;
+pub mod overlay;
 pub mod pickers;
 pub mod protocol;
 pub mod render;
