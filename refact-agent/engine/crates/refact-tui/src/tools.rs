@@ -6,7 +6,7 @@ use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff
 
 const MAX_RESULT_LINES: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolStatus {
     Running,
     Success,
@@ -23,7 +23,7 @@ impl ToolStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolCard {
     pub id: String,
     pub name: String,

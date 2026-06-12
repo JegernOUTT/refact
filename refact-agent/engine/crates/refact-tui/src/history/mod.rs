@@ -2,20 +2,20 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 
 use ratatui::backend::Backend;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 
 use crate::app::TranscriptItem;
-use crate::render::MarkdownRenderer;
+
+pub mod cells;
 
 const MAX_INSERTION_LINES: usize = 2048;
 
 #[derive(Debug, Clone)]
-struct HistoryCell {
+struct HistoryEntry {
     id: u64,
-    item: TranscriptItem,
+    cell: Box<dyn cells::HistoryCell>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,8 +33,8 @@ impl HistoryInsertion {
 #[derive(Debug, Default, Clone)]
 pub struct HistoryBuffer {
     next_id: u64,
-    pending: VecDeque<HistoryCell>,
-    cache: HashMap<(u64, u16), Vec<Line<'static>>>,
+    pending: VecDeque<HistoryEntry>,
+    cache: HashMap<(u64, u16, u64), Vec<Line<'static>>>,
     render_count: usize,
     inserted_cell_count: usize,
 }
@@ -49,9 +49,13 @@ impl HistoryBuffer {
     }
 
     pub fn enqueue(&mut self, item: TranscriptItem) -> u64 {
+        self.enqueue_cell(cells::cell_from_transcript_item(&item, false))
+    }
+
+    pub fn enqueue_cell(&mut self, cell: Box<dyn cells::HistoryCell>) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.pending.push_back(HistoryCell { id, item });
+        self.pending.push_back(HistoryEntry { id, cell });
         id
     }
 
@@ -69,9 +73,9 @@ impl HistoryBuffer {
         let mut insertions = Vec::new();
         let mut current_ids = Vec::new();
         let mut current_lines = Vec::new();
-        let cells = self.pending.iter().cloned().collect::<Vec<_>>();
-        for cell in cells {
-            let lines = self.render_cell(&cell, width);
+        let entries = self.pending.iter().cloned().collect::<Vec<_>>();
+        for entry in entries {
+            let lines = self.render_entry(&entry, width);
             if !current_lines.is_empty() && current_lines.len() + lines.len() > MAX_INSERTION_LINES
             {
                 insertions.push(HistoryInsertion {
@@ -79,7 +83,7 @@ impl HistoryBuffer {
                     lines: std::mem::take(&mut current_lines),
                 });
             }
-            current_ids.push(cell.id);
+            current_ids.push(entry.id);
             current_lines.extend(lines);
         }
         if !current_lines.is_empty() {
@@ -103,15 +107,22 @@ impl HistoryBuffer {
         self.inserted_cell_count
     }
 
-    fn render_cell(&mut self, cell: &HistoryCell, width: u16) -> Vec<Line<'static>> {
-        let key = (cell.id, width);
+    fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<Line<'static>> {
+        let key = (entry.id, width, entry.cell.revision());
         if let Some(lines) = self.cache.get(&key) {
             return lines.clone();
         }
-        let lines = render_transcript_item_lines(&cell.item, width as usize, false);
+        let lines = entry.cell.render(width as usize);
         self.cache.insert(key, lines.clone());
         self.render_count += 1;
         lines
+    }
+
+    #[cfg(test)]
+    fn replace_pending_cell(&mut self, id: u64, cell: Box<dyn cells::HistoryCell>) {
+        if let Some(entry) = self.pending.iter_mut().find(|entry| entry.id == id) {
+            entry.cell = cell;
+        }
     }
 }
 
@@ -134,75 +145,13 @@ pub fn render_transcript_item_lines(
     width: usize,
     selected: bool,
 ) -> Vec<Line<'static>> {
-    let renderer = MarkdownRenderer::new(Some(width));
-    let mut lines = Vec::new();
-    match item {
-        TranscriptItem::User(text) => {
-            lines.push(Line::from(Span::styled(
-                "you",
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(renderer.render(text));
-        }
-        TranscriptItem::Assistant(text) => {
-            lines.push(Line::from(Span::styled(
-                "assistant",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(renderer.render(text));
-        }
-        TranscriptItem::Reasoning(text, collapsed) => {
-            let label = if *collapsed {
-                "reasoning collapsed"
-            } else {
-                "reasoning"
-            };
-            lines.push(Line::from(Span::styled(
-                label,
-                Style::default().fg(Color::DarkGray),
-            )));
-            if !collapsed {
-                lines.extend(renderer.render(text));
-            }
-        }
-        TranscriptItem::Tool(card) => {
-            let label = if selected { "tool selected" } else { "tool" };
-            lines.push(Line::from(Span::styled(
-                label,
-                Style::default().fg(if selected { Color::Cyan } else { Color::Yellow }),
-            )));
-            lines.extend(card.render_lines(width));
-        }
-        TranscriptItem::Citation(text) => {
-            lines.push(Line::from(Span::styled(
-                "citation",
-                Style::default().fg(Color::Cyan),
-            )));
-            lines.extend(renderer.render(text));
-        }
-        TranscriptItem::ServerContentBlock(text) => {
-            lines.push(Line::from(Span::styled(
-                "server content",
-                Style::default().fg(Color::Magenta),
-            )));
-            lines.extend(renderer.render(text));
-        }
-        TranscriptItem::Notice(text) => lines.push(Line::from(Span::styled(
-            text.clone(),
-            Style::default().fg(Color::DarkGray),
-        ))),
-    }
-    lines.push(Line::default());
-    lines
+    cells::render_transcript_item_lines(item, width, selected)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::cells::NoticeCell;
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
 
@@ -265,5 +214,17 @@ mod tests {
         let wide_again = history.drain_pending(40);
         assert_eq!(history.render_count(), 2);
         assert_eq!(wide_again, wide);
+    }
+
+    #[test]
+    fn cache_key_includes_revision() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue_cell(Box::new(NoticeCell::new("first")));
+        let first = history.pending_insertions(40);
+        assert_eq!(history.render_count(), 1);
+        history.replace_pending_cell(id, Box::new(NoticeCell::new("second")));
+        let second = history.pending_insertions(40);
+        assert_eq!(history.render_count(), 2);
+        assert_ne!(first, second);
     }
 }

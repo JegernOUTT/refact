@@ -14,6 +14,7 @@ use crate::client::{
 };
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
+use crate::history::cells::ApprovalOutcome;
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
 use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
 use crate::protocol::{
@@ -63,11 +64,17 @@ pub enum TranscriptItem {
     Citation(String),
     ServerContentBlock(String),
     Notice(String),
+    Approval(ApprovalModalState, Option<ApprovalOutcome>),
+    Session {
+        title: String,
+        subtitle: Option<String>,
+    },
 }
 
 impl TranscriptItem {
     fn keeps_live(&self) -> bool {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
+            || matches!(self, Self::Approval(_, None))
     }
 }
 
@@ -517,7 +524,7 @@ impl App {
 
     fn new_chat(&mut self) {
         self.chat_id = uuid::Uuid::new_v4().to_string();
-        self.replace_with_notice("New chat started".to_string());
+        self.replace_with_session("New chat started".to_string(), None);
         self.session_state = SessionState::Idle;
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
@@ -662,6 +669,17 @@ impl App {
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.push_history_item(TranscriptItem::Notice(text));
+    }
+
+    fn replace_with_session(&mut self, title: String, subtitle: Option<String>) {
+        self.transcript_state.reset();
+        self.transcript_state.push_notice(title.clone());
+        self.transcript.clear();
+        self.history.clear_pending();
+        self.selected_tool_index = None;
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
+        self.push_history_item(TranscriptItem::Session { title, subtitle });
     }
 
     fn rebuild_render_transcript_from_state(&mut self) {
@@ -1347,27 +1365,37 @@ impl App {
         };
         match action {
             ApprovalKeyAction::None | ApprovalKeyAction::ToggleFullArgs => Some(AppAction::None),
-            ApprovalKeyAction::ApproveOnce => {
-                self.pop_current_approval()
-                    .map(|modal| AppAction::SendToolDecisions {
-                        decisions: modal.decisions(true),
-                        patch: None,
-                    })
-            }
-            ApprovalKeyAction::ApproveForChat => {
-                self.pop_current_approval()
-                    .map(|modal| AppAction::SendToolDecisions {
-                        patch: Some(approval_patch(&modal)),
-                        decisions: modal.decisions(true),
-                    })
-            }
-            ApprovalKeyAction::Deny => {
-                self.pop_current_approval()
-                    .map(|modal| AppAction::SendToolDecisions {
-                        decisions: modal.decisions(false),
-                        patch: None,
-                    })
-            }
+            ApprovalKeyAction::ApproveOnce => self.pop_current_approval().map(|modal| {
+                self.push_history_item(TranscriptItem::Approval(
+                    modal.clone(),
+                    Some(ApprovalOutcome::ApprovedOnce),
+                ));
+                AppAction::SendToolDecisions {
+                    decisions: modal.decisions(true),
+                    patch: None,
+                }
+            }),
+            ApprovalKeyAction::ApproveForChat => self.pop_current_approval().map(|modal| {
+                let patch = approval_patch(&modal);
+                self.push_history_item(TranscriptItem::Approval(
+                    modal.clone(),
+                    Some(ApprovalOutcome::ApprovedForChat),
+                ));
+                AppAction::SendToolDecisions {
+                    patch: Some(patch),
+                    decisions: modal.decisions(true),
+                }
+            }),
+            ApprovalKeyAction::Deny => self.pop_current_approval().map(|modal| {
+                self.push_history_item(TranscriptItem::Approval(
+                    modal.clone(),
+                    Some(ApprovalOutcome::Denied),
+                ));
+                AppAction::SendToolDecisions {
+                    decisions: modal.decisions(false),
+                    patch: None,
+                }
+            }),
         }
     }
 
@@ -2719,6 +2747,74 @@ mod tests {
         assert_eq!(cards[0].result, "done");
         assert!(cards[0].expanded);
         assert!(cards[0].args_preview.contains("echo 2"));
+    }
+
+    #[test]
+    fn reasoning_toggle_survives_append_updates() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "append_reasoning", "text": "first"}]}),
+        });
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Reasoning(_, true))
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Reasoning(_, false))
+        ));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "append_reasoning", "text": " second"}]}),
+        });
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Reasoning(text, false)) if text == "first second"
+        ));
+    }
+
+    #[test]
+    fn tool_expand_survives_result_update() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo hi\"}"}}]}]}),
+        });
+        assert!(app.toggle_selected_tool());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "tool", "tool_call_id": "call-1", "content": "done", "tool_failed": false}}),
+        });
+        let cards = tool_cards(&app);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].status, ToolStatus::Success);
+        assert_eq!(cards[0].result, "done");
+        assert!(cards[0].expanded);
+    }
+
+    #[test]
+    fn approval_decision_appends_record_cell() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(action, AppAction::SendToolDecisions { .. }));
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Approval(
+                _,
+                Some(ApprovalOutcome::ApprovedOnce)
+            ))
+        ));
     }
 
     #[test]

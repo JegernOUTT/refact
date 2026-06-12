@@ -184,6 +184,13 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Citation(text) => format!("citation:{text}"),
             TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
+            TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
+            TranscriptItem::Session { title, subtitle } => {
+                format!(
+                    "session:{title}:{}",
+                    subtitle.as_deref().unwrap_or_default()
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

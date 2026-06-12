@@ -4,12 +4,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ComposerMode, ProjectPickerState, SessionState, TranscriptItem};
+use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
 use crate::client::worker_state_label;
 use crate::events_pane::{render_event_lines, render_worker_lines};
 use crate::pickers::{PickerKind, PickerState};
-use crate::render::MarkdownRenderer;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -114,71 +113,13 @@ fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let renderer = MarkdownRenderer::new(Some(area.width.saturating_sub(2) as usize));
     let mut lines = Vec::new();
     for (idx, item) in app.visible_transcript().iter().enumerate() {
-        match item {
-            TranscriptItem::User(text) => {
-                lines.push(Line::from(Span::styled(
-                    "you",
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.extend(renderer.render(text));
-            }
-            TranscriptItem::Assistant(text) => {
-                lines.push(Line::from(Span::styled(
-                    "assistant",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.extend(renderer.render(text));
-            }
-            TranscriptItem::Reasoning(text, collapsed) => {
-                let label = if *collapsed {
-                    "reasoning collapsed"
-                } else {
-                    "reasoning"
-                };
-                lines.push(Line::from(Span::styled(
-                    label,
-                    Style::default().fg(Color::DarkGray),
-                )));
-                if !collapsed {
-                    lines.extend(renderer.render(text));
-                }
-            }
-            TranscriptItem::Tool(card) => {
-                let selected = app.selected_tool_index() == Some(idx);
-                let label = if selected { "tool selected" } else { "tool" };
-                lines.push(Line::from(Span::styled(
-                    label,
-                    Style::default().fg(if selected { Color::Cyan } else { Color::Yellow }),
-                )));
-                lines.extend(card.render_lines(area.width.saturating_sub(2) as usize));
-            }
-            TranscriptItem::Citation(text) => {
-                lines.push(Line::from(Span::styled(
-                    "citation",
-                    Style::default().fg(Color::Cyan),
-                )));
-                lines.extend(renderer.render(text));
-            }
-            TranscriptItem::ServerContentBlock(text) => {
-                lines.push(Line::from(Span::styled(
-                    "server content",
-                    Style::default().fg(Color::Magenta),
-                )));
-                lines.extend(renderer.render(text));
-            }
-            TranscriptItem::Notice(text) => lines.push(Line::from(Span::styled(
-                text.clone(),
-                Style::default().fg(Color::DarkGray),
-            ))),
-        }
-        lines.push(Line::default());
+        lines.extend(crate::history::render_transcript_item_lines(
+            item,
+            area.width.saturating_sub(2) as usize,
+            app.selected_tool_index() == Some(idx),
+        ));
     }
     app.note_rendered_messages(app.visible_transcript().len());
     if lines.is_empty() {
@@ -421,6 +362,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::app::TranscriptItem;
     use crate::approvals::{ApprovalModalState, PauseReason};
     use crate::client::OpenProjectResponse;
     use crate::tools::{ToolCard, ToolStatus};
