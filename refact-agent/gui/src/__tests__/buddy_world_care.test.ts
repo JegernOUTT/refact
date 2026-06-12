@@ -22,7 +22,9 @@ describe("buddy world care activities", () => {
       expect(def).toBeDefined();
       expect(def.performMs).toBeGreaterThanOrEqual(4_000);
       expect(def.startLines.length).toBeGreaterThanOrEqual(2);
+      expect(def.midLines.length).toBeGreaterThanOrEqual(2);
       expect(def.finishLines.length).toBeGreaterThanOrEqual(2);
+      expect(def.midStyle.length).toBeGreaterThan(0);
     }
   });
 

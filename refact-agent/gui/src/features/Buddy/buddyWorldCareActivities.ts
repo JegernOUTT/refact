@@ -1,4 +1,8 @@
-import type { BuddyCareAction, BuddyScenePose } from "./types";
+import type {
+  BuddyCareAction,
+  BuddyScenePose,
+  BuddySpeechStyle,
+} from "./types";
 
 export interface BuddyCareActivityDef {
   spot: { x: number; y: number };
@@ -6,6 +10,8 @@ export interface BuddyCareActivityDef {
   pose: BuddyScenePose;
   performMs: number;
   startLines: readonly ((name: string) => string)[];
+  midLines: readonly ((name: string) => string)[];
+  midStyle: BuddySpeechStyle;
   finishLines: readonly ((name: string) => string)[];
 }
 
@@ -31,6 +37,12 @@ export const BUDDY_CARE_ACTIVITY_DEFS: Record<
       (name) => `${name} smelled dinner from across the meadow.`,
       (name) => `Snack time! ${name} is already drooling a little.`,
     ],
+    midLines: [
+      (name) => `${name}: nom nom nom…`,
+      (name) => `${name} makes happy chewing noises.`,
+      (name) => `${name} whispers: the broth… the BROTH…`,
+    ],
+    midStyle: "whisper",
     finishLines: [
       (name) => `${name} licks the bowl clean. Five stars.`,
       (name) => `Burp. ${name} regrets nothing.`,
@@ -47,6 +59,12 @@ export const BUDDY_CARE_ACTIVITY_DEFS: Record<
       (name) => `${name} drops everything for playtime.`,
       (name) => `Play mode engaged. ${name} is unstoppable now.`,
     ],
+    midLines: [
+      (name) => `${name}: wiggle… wiggle… POUNCE.`,
+      (name) => `${name} stalks the ball. It suspects nothing.`,
+      (name) => `${name} plots round two. Sneakier this time.`,
+    ],
+    midStyle: "whisper",
     finishLines: [
       (name) => `${name} flops over, victorious and breathless.`,
       (name) => `Final score: ${name} 1, ball 0.`,
@@ -63,6 +81,12 @@ export const BUDDY_CARE_ACTIVITY_DEFS: Record<
       (name) => `${name} eyes the water suspiciously, then dives in.`,
       (name) => `Operation Sparkle: ${name} reporting for scrub duty.`,
     ],
+    midLines: [
+      (name) => `${name}: scrub scrub scrub, behind the ears too.`,
+      (name) => `${name} acquires a bubble beard.`,
+      (name) => `${name}'s sparkle is coming back…`,
+    ],
+    midStyle: "whisper",
     finishLines: [
       (name) => `${name} shakes dry in a cloud of sparkles. So fluffy!`,
       (name) => `Squeaky clean! ${name} gleams like a river stone.`,
@@ -79,6 +103,12 @@ export const BUDDY_CARE_ACTIVITY_DEFS: Record<
       (name) => `Yawn... ${name} found the softest moss patch.`,
       (name) => `${name} tucks in under the leaves. Shhh.`,
     ],
+    midLines: [
+      (name) => `${name}: zzz… giant acorns…`,
+      (name) => `${name}: zzz… flying over soft hills…`,
+      (name) => `${name}: zzz… Brick swimming through stars…`,
+    ],
+    midStyle: "think",
     finishLines: [
       (name) => `${name} wakes up recharged and ready!`,
       (name) => `*stretch* ${name} dreamed of giant acorns.`,
@@ -95,6 +125,12 @@ export const BUDDY_CARE_ACTIVITY_DEFS: Record<
       (name) => `${name} melts. Affection levels rising.`,
       (name) => `Pats detected! ${name} wiggles closer.`,
     ],
+    midLines: [
+      (name) => `${name}: purrrr… more please.`,
+      (name) => `${name} is melting. Officially melting.`,
+      (name) => `${name} found the best spot. Right there.`,
+    ],
+    midStyle: "whisper",
     finishLines: [
       (name) => `${name} glows with cozy warmth.`,
       (name) => `${name} files this moment under "best ever".`,

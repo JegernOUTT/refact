@@ -821,11 +821,21 @@ export function drawPond(args: DrawBuddyWorldBaseArgs): void {
   }
 }
 
-export function drawLanterns(args: DrawBuddyWorldBaseArgs): void {
+export function drawLanterns(
+  args: DrawBuddyWorldBaseArgs,
+  litCountOverride?: number | null,
+): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const lit = hasWorldLayer(args.world, "lanterns");
+  const layerLit = hasWorldLayer(args.world, "lanterns");
+  const hasOverride =
+    typeof litCountOverride === "number" && Number.isFinite(litCountOverride);
+  const litCount = hasOverride
+    ? Math.max(0, Math.min(3, Math.floor(litCountOverride)))
+    : layerLit
+      ? 3
+      : 0;
   const posts = [
     { x: width * 0.36, y: height * 0.79 },
     { x: width * 0.43, y: height * 0.815 },
@@ -836,7 +846,7 @@ export function drawLanterns(args: DrawBuddyWorldBaseArgs): void {
     const post = posts[index];
     fillPixelRect(args.ctx, post.x, post.y - 12, 2, 14, "#52525B", 0.9);
     fillPixelRect(args.ctx, post.x - 2, post.y - 17, 6, 6, "#1E293B", 0.92);
-    if (lit) {
+    if (index < litCount) {
       const flicker = wave(
         frame,
         22 + index * 3,
@@ -855,6 +865,93 @@ export function drawLanterns(args: DrawBuddyWorldBaseArgs): void {
       );
     } else {
       fillPixelRect(args.ctx, post.x - 1, post.y - 16, 4, 4, "#475569", 0.85);
+    }
+  }
+}
+
+export function drawPondReflection(args: DrawBuddyWorldBaseArgs): void {
+  if (
+    typeof args.actorXPercent !== "number" ||
+    !Number.isFinite(args.actorXPercent)
+  ) {
+    return;
+  }
+  if (Math.abs(args.actorXPercent - 38) > 9) return;
+  if (args.world.season === "winter") return;
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const x = pctX(width, args.actorXPercent);
+  const y = pctY(height, 88.5);
+  const ripple = wave(frame, 9, 0, 1.3, args.reducedMotion);
+
+  fillEllipse(args.ctx, x, y, 9 + ripple, 3.1, "#1F2937", 0.16);
+  fillEllipse(args.ctx, x, y - 1, 6 + ripple * 0.6, 2, "#CBD5E1", 0.12);
+  strokeEllipse(args.ctx, x, y, 11.5 + ripple, 3.9, "#E0F2FE", 0.7, 0.1);
+  fillEllipse(
+    args.ctx,
+    x - 7 + wave(frame, 40, 2, 2.2, args.reducedMotion),
+    y + 2.4,
+    3.4,
+    1,
+    "#F8FAFC",
+    0.08,
+  );
+}
+
+export function drawLanternGlowPools(
+  args: DrawBuddyWorldBaseArgs,
+  litCountOverride?: number | null,
+): void {
+  if (args.world.phase !== "evening" && args.world.phase !== "night") return;
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const layerLit = hasWorldLayer(args.world, "lanterns");
+  const hasOverride =
+    typeof litCountOverride === "number" && Number.isFinite(litCountOverride);
+  const litCount = hasOverride
+    ? Math.max(0, Math.min(3, Math.floor(litCountOverride)))
+    : layerLit
+      ? 3
+      : 0;
+  if (litCount <= 0) return;
+  const posts = [
+    { x: width * 0.36, y: height * 0.79 },
+    { x: width * 0.43, y: height * 0.815 },
+    { x: width * 0.5, y: height * 0.84 },
+  ];
+
+  for (let index = 0; index < litCount && index < posts.length; index += 1) {
+    const post = posts[index];
+    const flicker = wave(
+      frame,
+      26 + index * 4,
+      index,
+      0.02,
+      args.reducedMotion,
+    );
+    fillEllipse(
+      args.ctx,
+      post.x + 1,
+      post.y + 3,
+      13,
+      3.6,
+      "#FBBF24",
+      alphaForMotion(0.07 + flicker, args.reducedMotion),
+    );
+    if (args.world.phase === "night" && !args.reducedMotion) {
+      for (let moth = 0; moth < 2; moth += 1) {
+        const angle = frame / (14 + moth * 5) + index * 2.1 + moth * Math.PI;
+        fillCircle(
+          args.ctx,
+          post.x + 1 + Math.cos(angle) * (5 + moth * 2.4),
+          post.y - 14 + Math.sin(angle) * (3.4 + moth),
+          0.8,
+          "#FDE68A",
+          0.6,
+        );
+      }
     }
   }
 }

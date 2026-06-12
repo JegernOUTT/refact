@@ -7,6 +7,7 @@ import type {
   BuddyEvent,
   BuddyScenePose,
   BuddySemanticState,
+  BuddySpeechStyle,
   BubblePosition,
   Palette,
   Stage,
@@ -33,6 +34,8 @@ interface BuddyCharacterProps {
   spritePointer?: boolean;
   cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   speechText?: string | null;
+  speechStyle?: BuddySpeechStyle;
+  speechMedia?: React.ReactNode;
   speechControls?: BuddyControl[];
   speechIntent?: string;
   onCanvasEvent: (event: BuddyEvent) => void;
@@ -83,6 +86,8 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   spritePointer = false,
   cursorBridgeRef,
   speechText,
+  speechStyle,
+  speechMedia,
   speechControls,
   speechIntent,
   onCanvasEvent,
@@ -119,6 +124,8 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
         spritePointer={spritePointer}
         cursorBridgeRef={cursorBridgeRef}
         speechOverride={speechText}
+        speechStyle={speechStyle}
+        speechMedia={speechMedia}
         speechControls={speechControls}
         speechIntent={speechIntent}
         onSpeechControlClick={onSpeechControl}

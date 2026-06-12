@@ -672,8 +672,17 @@ function drawButterflies(args: DrawBuddyWorldBaseArgs): void {
 function drawOwl(args: DrawBuddyWorldBaseArgs): void {
   const anchor = objectAnchor(args, "providers", { x: 72, y: 67 });
   const frame = safeFrame(args.frame);
+  const width = safeDimension(args.width, 720);
   const x = anchor.x + 27;
   const y = anchor.y - 38 + wave(frame, 110, 0, 1, args.reducedMotion);
+  const gazeOffset =
+    typeof args.actorXPercent === "number" &&
+    Number.isFinite(args.actorXPercent)
+      ? Math.max(
+          -1,
+          Math.min(1, Math.sign(pctX(width, args.actorXPercent) - x)),
+        )
+      : 0;
 
   fillPixelRect(args.ctx, x - 4, y, 8, 9, "#475569", 0.92);
   fillPixelRect(args.ctx, x - 2, y + 4, 4, 5, "#94A3B8", 0.8);
@@ -685,8 +694,8 @@ function drawOwl(args: DrawBuddyWorldBaseArgs): void {
     fillPixelRect(args.ctx, x - 3, y + 2, 2, 1, "#1E293B", 0.9);
     fillPixelRect(args.ctx, x + 1, y + 2, 2, 1, "#1E293B", 0.9);
   } else {
-    fillPixelRect(args.ctx, x - 3, y + 1, 2, 2, "#FDE047", 0.95);
-    fillPixelRect(args.ctx, x + 1, y + 1, 2, 2, "#FDE047", 0.95);
+    fillPixelRect(args.ctx, x - 3 + gazeOffset, y + 1, 2, 2, "#FDE047", 0.95);
+    fillPixelRect(args.ctx, x + 1 + gazeOffset, y + 1, 2, 2, "#FDE047", 0.95);
   }
 }
 

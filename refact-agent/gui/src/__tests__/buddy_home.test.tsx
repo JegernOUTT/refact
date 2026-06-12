@@ -1862,11 +1862,11 @@ describe("BuddyWorld_dynamic_environment", () => {
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-source",
-        "reaction",
+        "care",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-priority",
-        "backend-care-showcase-director-local",
+        "backend-care-session-arc-showcase-director-local",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-text",

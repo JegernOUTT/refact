@@ -6,6 +6,7 @@ import {
   drawStarField,
   shouldDrawStarField,
 } from "../features/Buddy/buddyWorldDrawAtmosphere";
+import { drawLanterns } from "../features/Buddy/buddyWorldDrawDiorama";
 import {
   buildBuddyWorldState,
   type BuddyWorldState,
@@ -1333,5 +1334,43 @@ describe("drawBuddyWorld", () => {
     });
 
     expectHealthyDraw(ctx);
+  });
+
+  it("lights lanterns per the world override count", () => {
+    const world = makeWorld();
+    const baseArgs = {
+      world,
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+    };
+
+    const litHeads = (ctx: RecordedCanvasContext): number =>
+      ctx.fillRectStyles.filter((style) => style === "#FDE68A").length;
+    const unlitHeads = (ctx: RecordedCanvasContext): number =>
+      ctx.fillRectStyles.filter((style) => style === "#475569").length;
+
+    const dayCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: dayCtx });
+    expect(litHeads(dayCtx)).toBe(0);
+    expect(unlitHeads(dayCtx)).toBe(3);
+
+    const overrideCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: overrideCtx }, 2);
+    expect(litHeads(overrideCtx)).toBe(2);
+    expect(unlitHeads(overrideCtx)).toBe(1);
+
+    const dousedCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: dousedCtx }, 0);
+    expect(litHeads(dousedCtx)).toBe(0);
+    expect(unlitHeads(dousedCtx)).toBe(3);
+
+    const hostileCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: hostileCtx }, Number.NaN);
+    expect(litHeads(hostileCtx)).toBe(0);
+    expect(unlitHeads(hostileCtx)).toBe(3);
   });
 });

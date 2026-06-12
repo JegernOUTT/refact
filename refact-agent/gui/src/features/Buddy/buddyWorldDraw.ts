@@ -16,10 +16,12 @@ import {
   drawForegroundCozyDetails,
   drawGround,
   drawHomePath,
+  drawLanternGlowPools,
   drawLanterns,
   drawMailbox,
   drawMidgroundGarden,
   drawPond,
+  drawPondReflection,
   drawVitality,
   drawWinterGroundDust,
   drawWorkshopZones,
@@ -43,6 +45,11 @@ import {
 import { drawBuddyHomeDoor, drawWorldObjects } from "./buddyWorldDrawObjects";
 import { drawBuddyWorldActor } from "./buddyWorldDrawActor";
 import {
+  drawBuddyWorldCompanions,
+  drawHomeWindowGlow,
+} from "./buddyWorldDrawCompanions";
+import type { BuddyWorldCompanion } from "./buddyCompanions";
+import {
   finiteOrZero,
   safeDimension,
   safeFrame,
@@ -50,6 +57,10 @@ import {
   type BuddyWorldTokenPalette,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
+
+export interface BuddyWorldDrawOverrides {
+  lanternLitCount?: number | null;
+}
 
 export interface DrawBuddyWorldArgs {
   ctx: CanvasRenderingContext2D;
@@ -62,6 +73,8 @@ export interface DrawBuddyWorldArgs {
   compact: boolean;
   reducedMotion: boolean;
   actor?: BuddyWorldActor | null;
+  worldOverrides?: BuddyWorldDrawOverrides | null;
+  companions?: readonly BuddyWorldCompanion[] | null;
 }
 
 interface CameraDrift {
@@ -109,6 +122,7 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
     height,
     compact: args.compact,
     reducedMotion: args.reducedMotion,
+    actorXPercent: args.actor?.xPercent,
   };
 
   const { ctx } = args;
@@ -150,10 +164,13 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
   drawWinterGroundDust(drawArgs);
   drawStream(drawArgs);
   drawPond(drawArgs);
+  drawPondReflection(drawArgs);
   drawRainPuddles(drawArgs);
   drawHomePath(drawArgs);
-  drawLanterns(drawArgs);
+  drawLanterns(drawArgs, args.worldOverrides?.lanternLitCount);
+  drawLanternGlowPools(drawArgs, args.worldOverrides?.lanternLitCount);
   drawBuddyHomeDoor(drawArgs);
+  drawHomeWindowGlow(drawArgs);
   drawMailbox(drawArgs);
   drawVitality(drawArgs);
   drawKodama(drawArgs);
@@ -161,6 +178,9 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
   drawSootSprites(drawArgs);
   drawCampfire(drawArgs);
   if (args.actor) drawBuddyWorldActor(drawArgs, args.actor);
+  if (args.companions && args.companions.length > 0) {
+    drawBuddyWorldCompanions(drawArgs, args.companions, args.actor?.nowMs ?? 0);
+  }
   withParallaxBand(ctx, camera.pan * 0.32, 0, () => {
     drawForegroundCozyDetails(drawArgs);
     drawWindStreaks(drawArgs);

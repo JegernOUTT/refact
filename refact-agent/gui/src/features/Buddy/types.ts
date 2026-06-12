@@ -494,6 +494,14 @@ export type BuddyEvent =
 
 export type BubblePosition = "top" | "left" | "right";
 
+export type BuddySpeechStyle =
+  | "say"
+  | "think"
+  | "sing"
+  | "whisper"
+  | "excite"
+  | "alert";
+
 export type BuddyScenePose =
   | "idle"
   | "spin"
@@ -571,6 +579,10 @@ export interface BuddyCanvasProps {
   cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   /** Override speech bubble text (from runtime/backend), takes priority over canvas statusText */
   speechOverride?: string | null;
+  /** Visual style for the override speech bubble */
+  speechStyle?: BuddySpeechStyle;
+  /** Optional media node rendered inside the bubble below the text */
+  speechMedia?: React.ReactNode;
   /** Buttons rendered inside the speech bubble */
   speechControls?: BuddyControl[];
   speechIntent?: string;

@@ -43,6 +43,7 @@ export interface DrawBuddyWorldBaseArgs {
   height: number;
   compact: boolean;
   reducedMotion: boolean;
+  actorXPercent?: number;
 }
 export interface BuddyWorldActorTravel {
   fromXPercent: number;

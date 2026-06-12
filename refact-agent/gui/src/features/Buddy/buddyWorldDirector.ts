@@ -40,7 +40,8 @@ export type BuddyWorldIntentKind =
   | "leaf_umbrella_rain"
   | "play_ocarina"
   | "seed_ritual"
-  | "spin_top";
+  | "spin_top"
+  | "peek_bush";
 
 export interface BuddyWorldIntent {
   id: string;
@@ -929,6 +930,25 @@ export function chooseBuddyWorldIntent(
       reducedMotion: args.reducedMotion,
     }),
   ];
+
+  if (
+    (args.world.phase === "day" || args.world.phase === "evening") &&
+    args.world.weather === "clear" &&
+    args.world.season !== "winter"
+  ) {
+    lowPriorityCandidates.push(
+      makeIntent({
+        kind: "peek_bush",
+        target: { targetX: 33, targetY: 77, depthScale: 0.96 },
+        pose: "look",
+        speech: null,
+        durationMs: 9_000,
+        priority: 7,
+        nowMs: args.nowMs,
+        reducedMotion: args.reducedMotion,
+      }),
+    );
+  }
 
   return pickIntent(
     [
