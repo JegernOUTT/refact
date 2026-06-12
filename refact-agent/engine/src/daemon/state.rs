@@ -80,6 +80,7 @@ pub struct DaemonState {
     pub proxy_activity: SyncRwLock<HashMap<String, ProxyActivity>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
+    pub proxy_stream_client: reqwest::Client,
     pub events: EventBus,
     pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
@@ -117,10 +118,17 @@ impl DaemonState {
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
             .expect("failed to build daemon proxy http client");
+        let proxy_stream_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("failed to build daemon proxy stream http client");
         Arc::new(Self {
             config,
             auth_token,
@@ -133,6 +141,7 @@ impl DaemonState {
             proxy_activity: SyncRwLock::new(HashMap::new()),
             supervisor,
             proxy_client,
+            proxy_stream_client,
             events,
             daemon_dir,
             cron_pending,

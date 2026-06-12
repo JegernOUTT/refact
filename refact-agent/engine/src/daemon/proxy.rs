@@ -70,6 +70,7 @@ async fn proxy_to_worker(
         Err(response) => return response,
     };
 
+    let use_stream_client = is_sse_request(request.headers(), &worker_path);
     let (parts, body) = request.into_parts();
     let body = match limited_body_bytes(body).await {
         Ok(body) => body,
@@ -87,8 +88,12 @@ async fn proxy_to_worker(
         }
     };
     let headers = request_headers(&parts.headers, &project_id);
-    let response = state
-        .proxy_client
+    let client = if use_stream_client {
+        &state.proxy_stream_client
+    } else {
+        &state.proxy_client
+    };
+    let response = client
         .request(method, url)
         .headers(headers)
         .body(body.to_vec())
@@ -97,6 +102,10 @@ async fn proxy_to_worker(
 
     match response {
         Ok(response) => worker_response(state, entry, response).await,
+        Err(error) if error.is_timeout() => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({"error": "worker request timed out"}),
+        ),
         Err(error) => worker_unreachable(state, entry, error.to_string()).await,
     }
 }
@@ -249,6 +258,15 @@ fn is_upgrade_request<B>(request: &Request<B>) -> bool {
                     .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
             })
             .unwrap_or(false)
+}
+
+fn is_sse_request(headers: &HeaderMap, path: &str) -> bool {
+    headers
+        .get("accept")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.contains("text/event-stream"))
+        .unwrap_or(false)
+        || path.contains("/chats/subscribe")
 }
 
 fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::HeaderMap {
@@ -480,6 +498,28 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert!(is_upgrade_request(&request));
+    }
+
+    #[test]
+    fn sse_request_detected_from_accept_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", HeaderValue::from_static("text/event-stream"));
+
+        assert!(is_sse_request(&headers, "/v1/chats"));
+    }
+
+    #[test]
+    fn sse_request_detected_from_subscribe_path() {
+        let headers = HeaderMap::new();
+
+        assert!(is_sse_request(&headers, "/v1/chats/subscribe"));
+    }
+
+    #[test]
+    fn sse_request_false_for_regular_api_path() {
+        let headers = HeaderMap::new();
+
+        assert!(!is_sse_request(&headers, "/v1/chat/completions"));
     }
 
     #[test]
