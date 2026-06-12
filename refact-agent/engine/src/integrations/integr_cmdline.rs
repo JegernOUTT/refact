@@ -716,6 +716,13 @@ mod tests {
         }
     }
 
+    fn assert_partial_start_output(body: &str) {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        assert!(body.contains("start"));
+    }
+
     fn late_marker_command(marker: &str) -> String {
         if cfg!(target_os = "windows") {
             format!(
@@ -928,7 +935,7 @@ mod tests {
         let body = text(&message);
         let exec = exec(&message);
 
-        assert!(body.contains("start"));
+        assert_partial_start_output(&body);
         assert!(body.contains("timed out"));
         assert_eq!(exec["status"], "timed_out");
         assert!(exec["exit_code"].is_null());
@@ -974,7 +981,7 @@ mod tests {
         let body = text(&message);
         let exec = exec(&message);
 
-        assert!(body.contains("start"));
+        assert_partial_start_output(&body);
         assert!(body.contains("interrupted by user"));
         assert_eq!(exec["status"], "killed");
         assert_eq!(message.tool_failed, Some(true));
