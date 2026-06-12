@@ -54,11 +54,6 @@ const Meter: React.FC<{
   </div>
 );
 
-/**
- * Compact personality card: archetype + vibe pinned on top, needs/traits
- * as two slim meter columns inside a scrollable body, skills as chips,
- * quest card when active, and the persona actions pinned at the bottom.
- */
 export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   personality,
   needRows,
@@ -181,44 +176,44 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           </div>
         </div>
       )}
-    </div>
 
-    <div className={styles.actionRow}>
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        leftIcon={RefreshCw}
-        onClick={onReroll}
-      >
-        Reroll personality
-      </Button>
-      <Button
-        type="button"
-        size="sm"
-        variant={settings?.proactive_enabled ? "primary" : "ghost"}
-        leftIcon={Zap}
-        onClick={onToggleProactive}
-        disabled={isSavingSettings}
-        aria-pressed={settings?.proactive_enabled}
-      >
-        Proactive {settings?.proactive_enabled ? "on" : "off"}
-      </Button>
-      <Button
-        type="button"
-        size="sm"
-        variant={settings?.personality_prompt ? "primary" : "ghost"}
-        leftIcon={Pin}
-        onClick={() =>
-          onPromptChange(
-            settings?.personality_prompt ? null : personality?.prompt ?? null,
-          )
-        }
-        disabled={isSavingSettings}
-        aria-pressed={!!settings?.personality_prompt}
-      >
-        Pin current vibe
-      </Button>
+      <div className={styles.actionRow}>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          leftIcon={RefreshCw}
+          onClick={onReroll}
+        >
+          Reroll personality
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={settings?.proactive_enabled ? "primary" : "ghost"}
+          leftIcon={Zap}
+          onClick={onToggleProactive}
+          disabled={isSavingSettings}
+          aria-pressed={settings?.proactive_enabled}
+        >
+          Proactive {settings?.proactive_enabled ? "on" : "off"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={settings?.personality_prompt ? "primary" : "ghost"}
+          leftIcon={Pin}
+          onClick={() =>
+            onPromptChange(
+              settings?.personality_prompt ? null : personality?.prompt ?? null,
+            )
+          }
+          disabled={isSavingSettings}
+          aria-pressed={!!settings?.personality_prompt}
+        >
+          Pin current vibe
+        </Button>
+      </div>
     </div>
   </Surface>
 );

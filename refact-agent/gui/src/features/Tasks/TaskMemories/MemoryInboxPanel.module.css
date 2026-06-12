@@ -139,6 +139,10 @@
   padding-right: var(--rf-space-1);
 }
 
+.list > * {
+  flex-shrink: 0;
+}
+
 .loadingState {
   display: flex;
   justify-content: center;

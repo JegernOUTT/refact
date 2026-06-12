@@ -4,17 +4,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { delay, http, HttpResponse } from "msw";
 import {
   cleanup,
-  fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "../../utils/test-utils";
 import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
 import { resolveCardWorktree } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { taskSseEventReceived } from "./tasksSlice";
 import {
-  loadTaskWorkspaceLayout,
+  loadTaskWorkspaceTab,
   setProjectStorageNamespace,
 } from "../../utils/chatUiPersistence";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
@@ -428,7 +428,13 @@ async function openCardDetail(card: BoardCard) {
   await waitFor(() =>
     expect(screen.getAllByText(card.id).length).toBeGreaterThan(0),
   );
-  return titles[0];
+  const kanbanTitle = titles.find((title) =>
+    title.closest("[class*='kanbanCard']"),
+  );
+  if (!kanbanTitle) {
+    throw new Error(`Kanban card title not found for ${card.title}`);
+  }
+  return kanbanTitle;
 }
 
 function openedIds(props: MockWorktreePanelProps[]): string[] {
@@ -905,7 +911,7 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     clearWorkspaceStorage();
   });
 
-  it("persists_chat_panels_and_board_height_layout_round_trip", async () => {
+  it("persists_workspace_tab_choice_round_trip", async () => {
     setProjectStorageNamespace("ds-204-layout");
     const card = makeCard();
     server.use(...taskWorkspaceHandlers(card, []));
@@ -915,46 +921,9 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     });
 
     await screen.findAllByText(card.title);
-    await user.click(screen.getByRole("button", { name: "Expand chat" }));
-    await user.click(
-      screen.getByRole("button", { name: "Expand planners and agents" }),
-    );
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
 
-    const separator = screen.getByRole("separator", {
-      name: "",
-    });
-    const workspace = separator.closest("[class*='taskWorkspace']");
-    expect(workspace).not.toBeNull();
-    vi.spyOn(workspace as HTMLElement, "getBoundingClientRect").mockReturnValue(
-      {
-        x: 0,
-        y: 0,
-        top: 10,
-        left: 0,
-        bottom: 610,
-        right: 800,
-        width: 800,
-        height: 600,
-        toJSON: () => ({}),
-      },
-    );
-    fireEvent.mouseDown(separator, { clientY: 180 });
-    fireEvent.mouseMove(window, { clientY: 250 });
-    fireEvent.mouseUp(window);
-
-    await waitFor(() =>
-      expect(
-        loadTaskWorkspaceLayout(TASK_ID, {
-          chatExpanded: false,
-          panelsExpanded: false,
-          boardHeightPx: 180,
-        }),
-      ).toMatchObject({
-        chatExpanded: true,
-        panelsExpanded: true,
-        boardHeightPx: 240,
-      }),
-    );
+    await waitFor(() => expect(loadTaskWorkspaceTab(TASK_ID)).toBe("memories"));
 
     unmount();
     server.resetHandlers();
@@ -963,52 +932,94 @@ describe("TaskWorkspace layout and chat surfaces", () => {
       preloadedState: workspacePreloadedState(PLANNER_ID),
     });
 
-    await screen.findAllByText(card.title);
-    expect(
-      screen.getByRole("button", { name: "Collapse chat" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.getByRole("button", { name: "Collapse planners and agents" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Planners / Agents")).toBeInTheDocument();
-    expect(screen.getByText("Task")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Memories" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
   });
 
-  it("double_clicking_resize_divider_resets_persisted_board_height", async () => {
-    setProjectStorageNamespace("ds-204-layout-reset");
+  it("defaults_to_board_tab_for_fresh_tasks_without_planners", async () => {
     const card = makeCard();
     server.use(...taskWorkspaceHandlers(card, []));
+
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    expect(screen.getByRole("tab", { name: /^Board/ })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(screen.getByRole("button", { name: "New planner" })).toBeVisible();
+  });
+
+  it("defaults_to_chat_tab_when_saved_planners_exist", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Saved planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+    );
 
     render(<TaskWorkspace taskId={TASK_ID} />, {
       preloadedState: workspacePreloadedState(PLANNER_ID),
     });
 
-    await screen.findAllByText(card.title);
-    const separator = screen.getByRole("separator", { name: "" });
-    fireEvent.mouseDown(separator, { clientY: 100 });
-    fireEvent.mouseMove(window, { clientY: 320 });
-    fireEvent.mouseUp(window);
-
     await waitFor(() =>
-      expect(
-        loadTaskWorkspaceLayout(TASK_ID, {
-          chatExpanded: false,
-          panelsExpanded: false,
-          boardHeightPx: 180,
-        }).boardHeightPx,
-      ).not.toBe(180),
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(card.title)).not.toBeInTheDocument();
+  });
+
+  it("board_tab_shows_running_and_waiting_badges", async () => {
+    const card = makeCard({ column: "doing", agent_chat_id: "agent-T-1" });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Waiting planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+            session_state: "waiting_user_input",
+            waiting_for_card_ids: [CARD_ID],
+          },
+        ]),
+      ),
     );
 
-    fireEvent.doubleClick(separator);
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
 
+    const boardTab = await screen.findByRole("tab", { name: /^Board/ });
+    await waitFor(() =>
+      expect(within(boardTab).getByTitle(/running agent/)).toHaveTextContent(
+        "1",
+      ),
+    );
     await waitFor(() =>
       expect(
-        loadTaskWorkspaceLayout(TASK_ID, {
-          chatExpanded: false,
-          panelsExpanded: false,
-          boardHeightPx: 0,
-        }).boardHeightPx,
-      ).toBe(180),
+        within(boardTab).getByTitle(/waiting for input/),
+      ).toHaveTextContent("1"),
     );
   });
 
@@ -1046,14 +1057,13 @@ describe("TaskWorkspace layout and chat surfaces", () => {
       },
     );
 
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
     await screen.findByText("Overflow planner 1");
     await waitFor(() =>
       expect(screen.getAllByText("Overflow agent 23").length).toBeGreaterThan(
         1,
       ),
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Expand planners and agents" }),
     );
 
     const plannerScrollOwners = screen.getAllByTestId(
@@ -1074,13 +1084,13 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     expect(agentsScrollOwners[0].querySelector("div")).not.toBeNull();
 
     const css = await readGuiSource("features/Tasks/Tasks.module.css");
-    const panelsSection = readCssBlock(css, ".panelsSection");
+    const boardRail = readCssBlock(css, ".boardRail");
     const panelList = readCssBlock(css, ".panelList");
     const panelContent = readCssBlock(css, ".panelContent");
     const panelScrollArea = readCssBlock(css, ".panelScrollArea");
 
-    expect(panelsSection).toContain("min-height: 120px");
-    expect(panelsSection).toContain("max-height: 240px");
+    expect(boardRail).toContain("min-height: 0");
+    expect(boardRail).toContain("min-width: 0");
     expect(panelList).toContain("min-height: 0");
     expect(panelContent).toContain("min-height: 0");
     expect(panelScrollArea).toContain("flex: 1 1 0");
@@ -1132,18 +1142,19 @@ describe("TaskWorkspace layout and chat surfaces", () => {
       },
     });
 
-    await screen.findAllByText(card.title);
     await waitFor(() =>
-      expect(screen.getAllByText("Chat").length).toBeGreaterThan(0),
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
     );
-    expect(screen.getAllByText("Memories").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Documents").length).toBeGreaterThan(0);
-    expect(screen.getByText("Task")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^Board/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Memories" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Documents" })).toBeInTheDocument();
     expect(screen.getByText("Planner")).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "Expand planners and agents" }),
-    );
+    await user.click(screen.getByRole("tab", { name: /^Board/ }));
+    await screen.findAllByText(card.title);
     await user.click(screen.getByRole("button", { name: "Agent" }));
 
     await waitFor(() =>
@@ -1152,10 +1163,17 @@ describe("TaskWorkspace layout and chat surfaces", () => {
           ?.activeChat,
       ).toEqual({ type: "agent", cardId: CARD_ID, chatId: "agent-T-1" }),
     );
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
     expect(
       screen.getByText(/Agent: T-1 Agent selectable card/),
     ).toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: "Switch chat" }));
     await user.click(screen.getByRole("button", { name: /Open planner chat/ }));
 
     await waitFor(() =>
@@ -1164,10 +1182,11 @@ describe("TaskWorkspace layout and chat surfaces", () => {
           ?.activeChat,
       ).toEqual({ type: "planner", chatId: PLANNER_ID }),
     );
+    expect(screen.getByText("Planner")).toBeInTheDocument();
 
-    await user.click(screen.getAllByText("Memories")[0]);
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
     await screen.findByText(/memories shown/i);
-    await user.click(screen.getAllByText("Documents")[0]);
+    await user.click(screen.getByRole("tab", { name: "Documents" }));
     await screen.findByText(/No documents yet/);
   });
 });
@@ -1362,6 +1381,8 @@ describe("TaskWorkspace planner CRUD", () => {
       preloadedState: workspacePreloadedState(),
     });
 
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
     const deleteBtn = await screen.findByRole("button", {
       name: "Delete planner chat",
       hidden: true,
@@ -1396,6 +1417,8 @@ describe("TaskWorkspace planner CRUD", () => {
     const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
       preloadedState: workspacePreloadedState(),
     });
+
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
 
     const deleteBtn = await screen.findByRole("button", {
       name: "Delete planner chat",
@@ -1585,7 +1608,7 @@ describe("TaskWorkspace planner restore race", () => {
       ),
     );
 
-    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
       preloadedState: {
         ...workspacePreloadedState("unrelated-chat"),
         tasksUI: { openTasks: [] },
@@ -1597,6 +1620,7 @@ describe("TaskWorkspace planner restore race", () => {
     ).toBeUndefined();
     expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
 
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
     await screen.findByText("Fast saved planner");
 
     await waitFor(() =>

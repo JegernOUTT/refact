@@ -9,8 +9,8 @@
 }
 
 .kanbanColumn {
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 1 1 176px;
+  min-width: 176px;
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-3);
@@ -173,13 +173,6 @@
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-}
-
-.boardSection {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 0 0 auto;
-  min-height: 80px;
-  overflow: auto;
 }
 
 .emptyState {
@@ -377,22 +370,7 @@
   box-shadow: var(--rf-elev-overlay);
 }
 
-.workspaceChromeCollapse {
-  flex: 0 1 auto;
-  min-height: 0;
-}
-
-.panelsWrapper {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 0;
-  padding: 0;
-  overflow: hidden;
-}
-
-.panelsHeader,
-.chatHeader {
+.workspaceHeader {
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -405,19 +383,11 @@
   padding: var(--rf-space-2) var(--rf-space-3);
 }
 
-.panelsSection {
-  display: flex;
-  min-height: 120px;
-  max-height: 240px;
+.tabTriggerContent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
   min-width: 0;
-  gap: var(--rf-space-3);
-  padding: var(--rf-panel-pad);
-  overflow: hidden;
-}
-
-.panelsCollapse {
-  flex: 0 1 auto;
-  min-height: 0;
 }
 
 .panelList {
@@ -469,14 +439,6 @@
   overflow: hidden;
 }
 
-.chatSection {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .workspaceTabs {
   flex: 1;
   min-height: 0;
@@ -485,7 +447,7 @@
 }
 
 .workspaceTabList {
-  flex: 0 1 min(360px, 46vw);
+  flex: 0 1 min(460px, 64vw);
 }
 
 .workspaceTabContent {
@@ -504,43 +466,6 @@
   overflow: auto;
 }
 
-.chevron {
-  transition: transform 0.3s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.chevron.chevronExpanded {
-  transform: rotate(180deg);
-}
-
-.sectionHeaderToggle {
-  appearance: none;
-  display: flex;
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: var(--rf-radius-ctl);
-  color: var(--rf-color-muted);
-  cursor: pointer;
-  font: inherit;
-  padding: 0;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  flex: 1;
-  text-align: left;
-}
-
-.chatHeaderToggle {
-  align-self: stretch;
-}
-
-.sectionHeaderToggle:focus-visible {
-  outline: 2px solid var(--rf-focus-ring);
-  outline-offset: 1px;
-}
-
 .sectionHeaderLabel {
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -554,13 +479,108 @@
   flex-shrink: 0;
 }
 
-.chatHeaderLabel {
-  min-width: 0;
+.boardTabLayout {
+  display: flex;
   flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.boardRail {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 clamp(232px, 26vw, 320px);
+  min-width: 0;
+  min-height: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2) var(--rf-space-2) var(--rf-space-2)
+    var(--rf-space-3);
+  border-right: var(--rf-hairline) solid var(--rf-border);
+}
+
+.railGroupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  flex-shrink: 0;
+  min-height: 24px;
+  padding: var(--rf-space-1) var(--rf-space-1) 0;
+}
+
+.boardArea {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.boardArea .kanbanBoard {
+  flex: 1;
+  min-height: 0;
+}
+
+.boardArea .kanbanColumn {
+  min-height: 0;
+}
+
+.boardArea .kanbanColumnContent {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chatSwitcherTrigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: min(320px, 44vw);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.chatSwitcherTrigger:hover,
+.chatSwitcherTrigger:focus-visible {
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
+  border-color: var(--rf-border-strong);
+}
+
+.chatSwitcherTrigger:focus-visible {
+  outline: 2px solid var(--rf-focus-ring);
+  outline-offset: 1px;
+}
+
+.chatSwitcherLabel {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
+}
+
+.chatSwitcherChevron {
+  flex-shrink: 0;
+}
+
+.chatSwitcherContent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: min(280px, calc(100vw - 2 * var(--rf-space-3)));
+}
+
+.chatSwitcherFooter {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: var(--rf-space-1);
 }
 
 .panelItem {
@@ -610,8 +630,15 @@
 
 .panelItemTitle {
   display: block;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentItemBadge {
+  flex-shrink: 0;
   white-space: nowrap;
 }
 
@@ -745,13 +772,7 @@
 }
 
 @media (max-width: 680px) {
-  .panelsSection {
-    flex-direction: column;
-    max-height: min(360px, 40dvh);
-  }
-
-  .panelsHeader,
-  .chatHeader {
+  .workspaceHeader {
     padding-inline: var(--rf-space-2);
   }
 
@@ -760,7 +781,19 @@
   }
 
   .workspaceTabList {
-    flex-basis: min(100%, 320px);
+    flex-basis: min(100%, 380px);
+  }
+
+  .boardTabLayout {
+    flex-direction: column;
+  }
+
+  .boardRail {
+    flex: 0 0 auto;
+    max-height: 40dvh;
+    border-right: 0;
+    border-bottom: var(--rf-hairline) solid var(--rf-border);
+    padding: var(--rf-space-2) var(--rf-space-3);
   }
 
   .cardDetailHeader {
@@ -775,6 +808,7 @@
 .plannerWaitingChips {
   min-width: 0;
   flex-shrink: 1;
+  margin-top: var(--rf-space-2xs);
   overflow: hidden;
 }
 

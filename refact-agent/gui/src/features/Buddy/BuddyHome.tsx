@@ -15,7 +15,6 @@ import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
 import { BuddyRecentChats } from "./BuddyRecentChats";
 import { BuddyPulseCard } from "./BuddyPulseCard";
 import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
-import { BuddyWorkshop } from "./BuddyWorkshop";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddySummaryStrip } from "./BuddySummaryStrip";
@@ -883,36 +882,69 @@ export const BuddyHome: React.FC = () => {
         )}
 
         <section className={classNames(styles.mainGrid, "rf-stagger")}>
-          <BuddyOpportunitiesFeed />
-          <BuddyRecentChats title="Recent chats" />
-          <BuddyPulseCard />
-          <BuddyPersonalityPanel
-            personality={personality}
-            needRows={needRows}
-            unlockedSkills={unlockedSkills}
-            activeQuest={activeQuest}
-            name={name}
-            settings={settings}
-            isSavingSettings={isSavingSettings}
-            onQuestControl={(control) => void handleQuestControl(control)}
-            onReroll={() => void handleReroll()}
-            onToggleProactive={handleSettings}
-            onPromptChange={(prompt) => void handlePromptChange(prompt)}
-          />
-          <BuddyActivityPanel
-            activities={activities}
-            onOpenChat={handleOpenActivityChat}
-          />
-          <BuddyRecentErrorsPanel
-            recentErrors={recentErrors}
-            onInvestigate={handleInvestigateError}
-            onDismiss={handleDismissError}
-          />
+          <div className={styles.panelColumn}>
+            <div
+              className={classNames(
+                styles.panelSlot,
+                styles.panelSlotOpportunities,
+              )}
+            >
+              <BuddyOpportunitiesFeed />
+            </div>
+            <div
+              className={classNames(
+                styles.panelSlot,
+                styles.panelSlotPersonality,
+              )}
+            >
+              <BuddyPersonalityPanel
+                personality={personality}
+                needRows={needRows}
+                unlockedSkills={unlockedSkills}
+                activeQuest={activeQuest}
+                name={name}
+                settings={settings}
+                isSavingSettings={isSavingSettings}
+                onQuestControl={(control) => void handleQuestControl(control)}
+                onReroll={() => void handleReroll()}
+                onToggleProactive={handleSettings}
+                onPromptChange={(prompt) => void handlePromptChange(prompt)}
+              />
+            </div>
+          </div>
+          <div className={styles.panelColumn}>
+            <div
+              className={classNames(styles.panelSlot, styles.panelSlotChats)}
+            >
+              <BuddyRecentChats title="Recent chats" />
+            </div>
+            <div
+              className={classNames(styles.panelSlot, styles.panelSlotActivity)}
+            >
+              <BuddyActivityPanel
+                activities={activities}
+                onOpenChat={handleOpenActivityChat}
+              />
+            </div>
+          </div>
+          <div className={styles.panelColumn}>
+            <div
+              className={classNames(styles.panelSlot, styles.panelSlotPulse)}
+            >
+              <BuddyPulseCard />
+            </div>
+            <div
+              className={classNames(styles.panelSlot, styles.panelSlotErrors)}
+            >
+              <BuddyRecentErrorsPanel
+                recentErrors={recentErrors}
+                onInvestigate={handleInvestigateError}
+                onDismiss={handleDismissError}
+              />
+            </div>
+          </div>
         </section>
 
-        <div className={classNames(styles.workshopDock, "rf-enter-rise")}>
-          <BuddyWorkshop />
-        </div>
       </main>
     </div>
   );

@@ -4,8 +4,7 @@ const CHAT_TABS_STORAGE_KEY = "refact:chat-ui:tabs:v1";
 const ACTIVE_TAB_STORAGE_KEY = "refact:chat-ui:active-tab:v1";
 const TASKS_UI_STORAGE_KEY = "refact:chat-ui:tasks-ui:v1";
 const ASK_QUESTIONS_STORAGE_KEY = "refact:chat-ui:ask-questions:v1";
-const TASK_WORKSPACE_LAYOUT_STORAGE_KEY =
-  "refact:chat-ui:task-workspace-layouts:v1";
+const TASK_WORKSPACE_TABS_STORAGE_KEY = "refact:chat-ui:task-workspace-tabs:v1";
 const PROJECT_STORAGE_NAMESPACE_SESSION_KEY =
   "refact:chat-ui:project-storage-namespace:v1";
 
@@ -71,11 +70,9 @@ export type AskQuestionsDraft = {
   updatedAt: number;
 };
 
-export type TaskWorkspaceLayout = {
-  chatExpanded: boolean;
-  panelsExpanded: boolean;
-  boardHeightPx: number;
-};
+export type TaskWorkspaceTab = "board" | "chat" | "memories" | "documents";
+
+const TASK_WORKSPACE_TABS = ["board", "chat", "memories", "documents"] as const;
 
 function getStorage(): Storage | null {
   try {
@@ -558,55 +555,52 @@ export function clearAskQuestionsDraft(toolCallId: string | undefined): void {
   saveAskQuestionsDrafts(rest);
 }
 
-function loadTaskWorkspaceLayouts(): Record<string, TaskWorkspaceLayout> {
+function normalizeTaskWorkspaceTab(value: unknown): TaskWorkspaceTab | null {
+  return typeof value === "string" &&
+    (TASK_WORKSPACE_TABS as readonly string[]).includes(value)
+    ? (value as TaskWorkspaceTab)
+    : null;
+}
+
+function loadTaskWorkspaceTabs(): Record<string, TaskWorkspaceTab> {
   const trustedKey = trustedProjectScopedStorageKey(
-    TASK_WORKSPACE_LAYOUT_STORAGE_KEY,
+    TASK_WORKSPACE_TABS_STORAGE_KEY,
   );
   const record = trustedKey ? readRecord(trustedKey) : null;
-  const layoutsRecord = isRecord(record?.layouts) ? record.layouts : {};
-  const result: Record<string, TaskWorkspaceLayout> = {};
+  const tabsRecord = isRecord(record?.tabs) ? record.tabs : {};
+  const result: Record<string, TaskWorkspaceTab> = {};
 
-  for (const [taskId, value] of Object.entries(layoutsRecord)) {
-    if (!isRecord(value)) continue;
-    const boardHeightPx = numberOrUndefined(value.boardHeightPx);
-    if (boardHeightPx === undefined) continue;
-    result[taskId] = {
-      chatExpanded: booleanOrUndefined(value.chatExpanded) ?? false,
-      panelsExpanded: booleanOrUndefined(value.panelsExpanded) ?? false,
-      boardHeightPx,
-    };
+  for (const [taskId, value] of Object.entries(tabsRecord)) {
+    const tab = normalizeTaskWorkspaceTab(value);
+    if (tab) result[taskId] = tab;
   }
 
   return result;
 }
 
-export function loadTaskWorkspaceLayout(
-  taskId: string,
-  defaults: TaskWorkspaceLayout,
-): TaskWorkspaceLayout {
-  const layouts = loadTaskWorkspaceLayouts() as Record<
+export function loadTaskWorkspaceTab(taskId: string): TaskWorkspaceTab | null {
+  const tabs = loadTaskWorkspaceTabs() as Record<
     string,
-    TaskWorkspaceLayout | undefined
+    TaskWorkspaceTab | undefined
   >;
-  const layout = layouts[taskId];
-  return layout ? { ...defaults, ...layout } : defaults;
+  return tabs[taskId] ?? null;
 }
 
-export function saveTaskWorkspaceLayout(
+export function saveTaskWorkspaceTab(
   taskId: string,
-  layout: TaskWorkspaceLayout,
+  tab: TaskWorkspaceTab,
 ): void {
   if (!taskId.trim()) return;
   const storageKey = trustedProjectScopedStorageKey(
-    TASK_WORKSPACE_LAYOUT_STORAGE_KEY,
+    TASK_WORKSPACE_TABS_STORAGE_KEY,
   );
   if (!storageKey) return;
 
-  const layouts = loadTaskWorkspaceLayouts();
-  layouts[taskId] = layout;
+  const tabs = loadTaskWorkspaceTabs();
+  tabs[taskId] = tab;
   writeRecord(storageKey, {
     version: 1,
-    layouts,
+    tabs,
     updatedAt: Date.now(),
   });
 }

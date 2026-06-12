@@ -9,8 +9,15 @@
 .quotaGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  align-items: stretch;
   gap: var(--rf-space-3);
   min-width: 0;
+}
+
+.cardsRow > *,
+.quotaGrid > * {
+  min-width: 0;
+  min-height: 0;
 }
 
 .quotaGrid {

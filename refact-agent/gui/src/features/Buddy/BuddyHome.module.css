@@ -97,23 +97,44 @@
   white-space: nowrap;
 }
 
-/* Main grid — every card lives in one bounded grid so rows stay aligned and
- * nothing gets squished: fixed comfortable row height on wide layouts,
- * content-capped rows when stacked. Panels scroll internally. */
 .mainGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: clamp(300px, 36vh, 420px);
-  align-items: stretch;
+  align-items: start;
   gap: var(--rf-space-3);
   min-width: 0;
 }
 
-.mainGrid > * {
-  height: 100%;
+.panelColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  min-height: 0;
+}
+
+.panelSlot {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.panelSlotOpportunities,
+.panelSlotChats,
+.panelSlotActivity {
+  height: clamp(300px, 34vh, 360px);
+}
+
+.panelSlotPersonality {
+  height: clamp(300px, 34vh, 360px);
+}
+
+.panelSlotPulse {
+  height: clamp(230px, 27vh, 290px);
+}
+
+.panelSlotErrors {
+  height: clamp(270px, 31vh, 330px);
 }
 
 .settingsSection {
@@ -206,11 +227,6 @@
   padding: var(--rf-panel-pad);
 }
 
-.workshopDock {
-  min-width: 0;
-  margin-top: var(--rf-space-1);
-}
-
 @media (max-width: 1100px) {
   .mainGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -230,7 +246,10 @@
 
   .mainGrid {
     grid-template-columns: minmax(0, 1fr);
-    grid-auto-rows: minmax(0, 420px);
+  }
+
+  .panelSlot {
+    height: min(420px, 70vh);
   }
 
   .draftMeta {
