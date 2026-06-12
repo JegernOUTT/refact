@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock as SyncRwLock;
@@ -73,13 +74,14 @@ pub struct DaemonState {
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
-    pub proxy_activity: RwLock<HashMap<String, ProxyActivity>>,
+    pub proxy_activity: SyncRwLock<HashMap<String, ProxyActivity>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
     pub events: EventBus,
     pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     shutdown_tx: broadcast::Sender<String>,
+    shutdown_requested: AtomicBool,
 }
 
 impl DaemonState {
@@ -121,16 +123,17 @@ impl DaemonState {
             started_at_ms: now_ms(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             projects: RwLock::new(crate::daemon::projects::ProjectRegistry::empty(
-                crate::daemon::paths::projects_json_path(),
+                daemon_dir.join("projects.json"),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
-            proxy_activity: RwLock::new(HashMap::new()),
+            proxy_activity: SyncRwLock::new(HashMap::new()),
             supervisor,
             proxy_client,
             events,
             daemon_dir,
             cron_pending,
             shutdown_tx,
+            shutdown_requested: AtomicBool::new(false),
         })
     }
 
@@ -139,7 +142,12 @@ impl DaemonState {
     }
 
     pub fn request_shutdown(&self, reason: String) {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
         let _ = self.shutdown_tx.send(reason);
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_requested.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn set_cron_pending(&self, project_id: &str, next_fire_ms: Option<u64>) {
@@ -224,7 +232,7 @@ impl DaemonState {
         self.supervisor
             .set_project_liveness(&entry.id, entry.pinned, entry.last_active_ms)
             .await;
-        let mut activity = self.proxy_activity.write().await;
+        let mut activity = self.proxy_activity.write();
         let activity = activity.entry(entry.id.clone()).or_default();
         activity.last_proxy_activity_ms = activity.last_proxy_activity_ms.max(entry.last_active_ms);
     }
@@ -232,7 +240,7 @@ impl DaemonState {
     pub async fn update_proxy_activity(&self, project_id: &str) {
         let now = now_ms();
         self.supervisor.note_project_activity(project_id, now).await;
-        let mut activity = self.proxy_activity.write().await;
+        let mut activity = self.proxy_activity.write();
         activity
             .entry(project_id.to_string())
             .or_default()
@@ -240,14 +248,14 @@ impl DaemonState {
     }
 
     pub async fn increment_live_proxy_stream(&self, project_id: &str) {
-        let mut activity = self.proxy_activity.write().await;
+        let mut activity = self.proxy_activity.write();
         let activity = activity.entry(project_id.to_string()).or_default();
         activity.last_proxy_activity_ms = now_ms();
         activity.live_proxy_streams = activity.live_proxy_streams.saturating_add(1);
     }
 
-    pub async fn decrement_live_proxy_stream(&self, project_id: &str) {
-        let mut activity = self.proxy_activity.write().await;
+    pub fn decrement_live_proxy_stream(&self, project_id: &str) {
+        let mut activity = self.proxy_activity.write();
         let activity = activity.entry(project_id.to_string()).or_default();
         activity.live_proxy_streams = activity.live_proxy_streams.saturating_sub(1);
     }
@@ -258,7 +266,7 @@ impl DaemonState {
             registry.list()
         };
         let statuses = self.worker_statuses.read().await.clone();
-        let activity = self.proxy_activity.read().await.clone();
+        let activity = self.proxy_activity.read().clone();
         let cron_pending = self.cron_pending_snapshot().await;
         let mut snapshots = Vec::new();
         for entry in projects {
@@ -296,7 +304,6 @@ impl DaemonState {
     pub async fn proxy_activity(&self, project_id: &str) -> ProxyActivity {
         self.proxy_activity
             .read()
-            .await
             .get(project_id)
             .cloned()
             .unwrap_or_default()
@@ -308,7 +315,7 @@ impl DaemonState {
             registry.list()
         };
         let statuses = self.worker_statuses.read().await.clone();
-        let activity = self.proxy_activity.read().await.clone();
+        let activity = self.proxy_activity.read().clone();
         let cron_pending = self.cron_pending_snapshot().await;
         let now = now_ms();
         let mut rows = Vec::new();
@@ -563,6 +570,23 @@ mod tests {
 
         state.set_cron_pending("project-a", None).await;
         assert_eq!(state.cron_pending("project-a").await, None);
+    }
+
+    #[tokio::test]
+    async fn new_with_daemon_dir_uses_daemon_dir_projects_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon_dir = dir.path().join("custom-daemon");
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("e.jsonl")),
+            None,
+            daemon_dir.clone(),
+            0,
+        );
+
+        let projects_path = state.projects.read().await.path().to_path_buf();
+        assert_eq!(state.daemon_dir, daemon_dir);
+        assert_eq!(projects_path, daemon_dir.join("projects.json"));
     }
 
     #[tokio::test]

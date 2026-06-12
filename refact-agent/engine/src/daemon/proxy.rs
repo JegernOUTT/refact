@@ -194,7 +194,10 @@ async fn worker_response(
                         Some(stream_entry.id.clone()),
                         json!({"error": message}),
                     ).await;
-                    stream_state.supervisor.notify_proxy_unreachable(stream_entry.clone());
+                    stream_state
+                        .supervisor
+                        .notify_proxy_unreachable(stream_entry.clone(), stream_state.is_shutting_down())
+                        .await;
                     yield Err(io::Error::new(io::ErrorKind::Other, message));
                     break;
                 }
@@ -220,7 +223,10 @@ async fn worker_unreachable(
             json!({"error": error}),
         )
         .await;
-    state.supervisor.notify_proxy_unreachable(entry.clone());
+    state
+        .supervisor
+        .notify_proxy_unreachable(entry.clone(), state.is_shutting_down())
+        .await;
     json_response(
         StatusCode::BAD_GATEWAY,
         json!({"error": "worker unavailable", "project_id": entry.id}),
@@ -347,11 +353,7 @@ impl ProxyStreamGuard {
 
 impl Drop for ProxyStreamGuard {
     fn drop(&mut self) {
-        let state = self.state.clone();
-        let project_id = self.project_id.clone();
-        tokio::spawn(async move {
-            state.decrement_live_proxy_stream(&project_id).await;
-        });
+        self.state.decrement_live_proxy_stream(&self.project_id);
     }
 }
 
@@ -413,5 +415,37 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert!(is_upgrade_request(&request));
+    }
+
+    #[test]
+    fn proxy_stream_guard_decrements_live_streams_inline_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            crate::daemon::config::DaemonConfig::default(),
+            crate::daemon::events::EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        {
+            let mut activity = state.proxy_activity.write();
+            activity.insert(
+                "project".to_string(),
+                crate::daemon::state::ProxyActivity {
+                    last_proxy_activity_ms: 0,
+                    live_proxy_streams: 1,
+                },
+            );
+        }
+
+        drop(ProxyStreamGuard::new(state.clone(), "project".to_string()));
+
+        assert_eq!(
+            state
+                .proxy_activity
+                .read()
+                .get("project")
+                .unwrap()
+                .live_proxy_streams,
+            0
+        );
     }
 }

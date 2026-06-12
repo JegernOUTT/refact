@@ -212,6 +212,11 @@ def main():
     parser.add_argument("--vecdb-max-files")
     args, _ = parser.parse_known_args()
 
+    port_busy_exit = os.environ.get("FAKE_WORKER_PORT_BUSY_EXIT")
+    if port_busy_exit:
+        print("PORT_BUSY", file=sys.stderr)
+        sys.exit(int(port_busy_exit))
+
     if os.environ.get("FAKE_WORKER_CRASH") == "1":
         sys.exit(1)
 

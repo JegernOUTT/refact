@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::daemon::events::EventBus;
 use crate::daemon::ports::PortPair;
@@ -96,6 +96,7 @@ pub struct Supervisor {
     daemon_port: RwLock<u16>,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
+    proxy_restart_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
     client: reqwest::Client,
 }
@@ -125,6 +126,7 @@ impl Supervisor {
             daemon_port: RwLock::new(daemon_port),
             cron_pending,
             project_liveness: RwLock::new(HashMap::new()),
+            proxy_restart_tasks: Mutex::new(JoinSet::new()),
             idle_timeout_secs,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
@@ -181,6 +183,7 @@ impl Supervisor {
     }
 
     pub async fn stop_all(&self) {
+        self.abort_proxy_restart_tasks().await;
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
         for id in ids {
             let _ = self.stop_worker(&id).await;
@@ -193,10 +196,22 @@ impl Supervisor {
         Some(info)
     }
 
-    pub fn notify_proxy_unreachable(self: &Arc<Self>, entry: ProjectEntry) {
+    pub async fn notify_proxy_unreachable(
+        self: &Arc<Self>,
+        entry: ProjectEntry,
+        shutting_down: bool,
+    ) {
+        if shutting_down {
+            return;
+        }
+        let project_id = entry.id.clone();
         let supervisor = self.clone();
-        tokio::spawn(async move {
-            supervisor.restart_worker(&entry).await.ok();
+        let mut tasks = self.proxy_restart_tasks.lock().await;
+        drain_proxy_restart_tasks(&mut tasks);
+        tasks.spawn(async move {
+            if let Err(error) = supervisor.restart_worker(&entry).await {
+                tracing::warn!("proxy-triggered restart failed for {project_id}: {error}");
+            }
         });
     }
 
@@ -214,6 +229,18 @@ impl Supervisor {
 
     pub fn cron_pending(&self, project_id: &str) -> Option<u64> {
         self.cron_pending.read().get(project_id).copied()
+    }
+
+    async fn abort_proxy_restart_tasks(&self) {
+        let mut tasks = self.proxy_restart_tasks.lock().await;
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::warn!("proxy restart task failed during shutdown: {error}");
+                }
+            }
+        }
     }
 
     pub(crate) async fn set_project_liveness(
@@ -371,9 +398,8 @@ impl Supervisor {
                         .await;
                     return Ok(info);
                 }
-                ReadinessOutcome::Exited(exit_code)
-                    if is_port_busy_exit(exit_code) && attempt < MAX_PORT_BUSY_RETRIES =>
-                {
+                ReadinessOutcome::Exited(exit_code) if is_port_busy_exit(exit_code) => {
+                    let retrying_ports = attempt < MAX_PORT_BUSY_RETRIES;
                     let _ = self
                         .events
                         .emit(
@@ -382,12 +408,22 @@ impl Supervisor {
                             json!({
                                 "exit_code": exit_code,
                                 "during_startup": true,
-                                "retrying_ports": true,
+                                "retrying_ports": retrying_ports,
                                 "attempt": attempt,
                             }),
                         )
                         .await;
-                    continue;
+                    if retrying_ports {
+                        continue;
+                    }
+                    let info = self
+                        .mark_failed(
+                            &slot,
+                            &spec.project_id,
+                            "worker port allocation retry limit reached".to_string(),
+                        )
+                        .await;
+                    return Ok(info);
                 }
                 ReadinessOutcome::Exited(exit_code) => {
                     let (info, delay) = self
@@ -961,8 +997,16 @@ fn abort_task(task: &mut Option<JoinHandle<()>>) {
     }
 }
 
+fn drain_proxy_restart_tasks(tasks: &mut JoinSet<()>) {
+    while let Some(result) = tasks.try_join_next() {
+        if let Err(error) = result {
+            tracing::warn!("proxy restart task failed: {error}");
+        }
+    }
+}
+
 fn is_port_busy_exit(exit_code: Option<i32>) -> bool {
-    matches!(exit_code, Some(0) | Some(48) | Some(98) | Some(10048))
+    matches!(exit_code, Some(48) | Some(98) | Some(10048))
 }
 
 fn push_crash(history: &mut VecDeque<u64>, now: u64) {
@@ -1044,5 +1088,37 @@ mod tests {
         let mut history = VecDeque::from(vec![1, 2]);
         push_crash(&mut history, CRASH_WINDOW_MS + 2);
         assert_eq!(history, VecDeque::from(vec![2, CRASH_WINDOW_MS + 2]));
+    }
+
+    #[test]
+    fn port_busy_exit_matrix_excludes_clean_exit() {
+        assert!(!is_port_busy_exit(Some(0)));
+        assert!(!is_port_busy_exit(Some(1)));
+        assert!(!is_port_busy_exit(None));
+        assert!(is_port_busy_exit(Some(48)));
+        assert!(is_port_busy_exit(Some(98)));
+        assert!(is_port_busy_exit(Some(10048)));
+    }
+
+    #[tokio::test]
+    async fn proxy_unreachable_restart_skips_when_shutting_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let entry = ProjectEntry {
+            id: "project".to_string(),
+            slug: "project".to_string(),
+            root: dir.path().to_path_buf(),
+            pinned: false,
+            last_active_ms: 0,
+            settings: ProjectSettings::default(),
+        };
+
+        supervisor.notify_proxy_unreachable(entry, true).await;
+
+        assert_eq!(supervisor.proxy_restart_tasks.lock().await.len(), 0);
     }
 }

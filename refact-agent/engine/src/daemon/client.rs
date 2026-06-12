@@ -1,4 +1,6 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
@@ -7,14 +9,22 @@ use serde_json::Value;
 
 use crate::daemon::state::DaemonInfo;
 
-const PING_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn read_daemon_json() -> Option<DaemonInfo> {
-    crate::daemon::state::read_daemon_info(&crate::daemon::paths::daemon_json_path())
-        .await
-        .ok()
-        .flatten()
+    read_daemon_json_path(&crate::daemon::paths::daemon_json_path()).await
+}
+
+async fn read_daemon_json_path(path: &Path) -> Option<DaemonInfo> {
+    match crate::daemon::state::read_daemon_info(path).await {
+        Ok(info) => info,
+        Err(error) => {
+            tracing::warn!("{error}");
+            None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,11 +54,7 @@ pub async fn ping_daemon(info: &DaemonInfo) -> bool {
         connect_host(&info.bind),
         info.port
     );
-    let client = match reqwest::Client::builder().timeout(PING_TIMEOUT).build() {
-        Ok(client) => client,
-        Err(_) => return false,
-    };
-    match client.get(url).send().await {
+    match control_client().get(url).send().await {
         Ok(response) if response.status().is_success() => true,
         _ => false,
     }
@@ -144,12 +150,23 @@ fn daemon_request(
         crate::daemon::chat_client::daemon_base_url(info),
         path
     );
-    let client = reqwest::Client::new();
-    let request = client.request(method, url);
+    let request = control_client().request(method, url);
     match &info.auth_token {
         Some(token) => request.bearer_auth(token),
         None => request,
     }
+}
+
+fn control_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| build_control_client().expect("failed to build daemon control client"))
+}
+
+fn build_control_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(CONTROL_CONNECT_TIMEOUT)
+        .timeout(CONTROL_TOTAL_TIMEOUT)
+        .build()
 }
 
 async fn decode_json_response<T: DeserializeOwned>(
@@ -269,11 +286,7 @@ async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
         connect_host(&info.bind),
         info.port
     );
-    let client = reqwest::Client::builder()
-        .timeout(PING_TIMEOUT)
-        .build()
-        .map_err(|error| format!("failed to create daemon client: {error}"))?;
-    let request = client
+    let request = control_client()
         .post(url)
         .json(&serde_json::json!({"reason": reason}));
     let request = match &info.auth_token {
@@ -362,6 +375,22 @@ mod tests {
         assert!(version_is_older("1.2.3", "1.2.4"));
         assert!(version_is_older("1.2.3", "1.3.0"));
         assert!(!version_is_older("2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn control_client_builds_with_bounded_timeouts() {
+        assert_eq!(CONTROL_CONNECT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(CONTROL_TOTAL_TIMEOUT, Duration::from_secs(10));
+        let _ = build_control_client().unwrap();
+        assert!(std::ptr::eq(control_client(), control_client()));
+    }
+
+    #[tokio::test]
+    async fn read_daemon_json_path_returns_none_for_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        tokio::fs::write(&path, b"not json").await.unwrap();
+        assert!(read_daemon_json_path(&path).await.is_none());
     }
 
     #[tokio::test]

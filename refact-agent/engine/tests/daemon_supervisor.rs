@@ -13,6 +13,10 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn set(fake_crash: bool) -> Option<Self> {
+        Self::set_with_port_busy(fake_crash, None)
+    }
+
+    fn set_with_port_busy(fake_crash: bool, port_busy_exit: Option<&str>) -> Option<Self> {
         let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
         if std::process::Command::new(&python)
             .arg("--version")
@@ -34,6 +38,10 @@ impl EnvGuard {
                 std::env::var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS").ok(),
             ),
             ("FAKE_WORKER_CRASH", std::env::var("FAKE_WORKER_CRASH").ok()),
+            (
+                "FAKE_WORKER_PORT_BUSY_EXIT",
+                std::env::var("FAKE_WORKER_PORT_BUSY_EXIT").ok(),
+            ),
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
@@ -44,6 +52,10 @@ impl EnvGuard {
             std::env::set_var("FAKE_WORKER_CRASH", "1");
         } else {
             std::env::remove_var("FAKE_WORKER_CRASH");
+        }
+        match port_busy_exit {
+            Some(code) => std::env::set_var("FAKE_WORKER_PORT_BUSY_EXIT", code),
+            None => std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT"),
         }
         Some(Self { keys: previous })
     }
@@ -219,6 +231,35 @@ async fn crash_loop_reaches_crashed() {
     let _ = supervisor.ensure_worker(&entry).await.unwrap();
     let crashed = wait_for_state(&supervisor, &entry.id, WorkerState::Crashed).await;
     assert_eq!(crashed.state, WorkerState::Crashed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn port_busy_exit_retries_ports_until_limit() {
+    let Some(_env) = EnvGuard::set_with_port_busy(false, Some("98")) else {
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "port-busy-project");
+    let events = EventBus::new(dir.path().join("events.jsonl"));
+    let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 8488);
+
+    let info = supervisor.ensure_worker(&entry).await.unwrap();
+    assert!(matches!(
+        info.state,
+        WorkerState::Failed { ref reason } if reason == "worker port allocation retry limit reached"
+    ));
+    let events = events.snapshot().await;
+    let port_busy_events = events
+        .iter()
+        .filter(|event| event.kind == "worker_exited" && event.payload["exit_code"] == 98)
+        .collect::<Vec<_>>();
+    assert_eq!(port_busy_events.len(), 3);
+    assert_eq!(port_busy_events[0].payload["retrying_ports"], true);
+    assert_eq!(port_busy_events[1].payload["retrying_ports"], true);
+    assert_eq!(port_busy_events[2].payload["retrying_ports"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

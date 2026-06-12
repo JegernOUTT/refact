@@ -158,6 +158,11 @@ impl ProjectRegistry {
         self.entries.get(id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub async fn forget(&mut self, id: &str) -> Result<bool, String> {
         if self.entries.remove(id).is_some() {
             self.save().await?;
