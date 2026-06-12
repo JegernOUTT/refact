@@ -463,9 +463,30 @@ impl Supervisor {
             self.daemon_dir.clone(),
         ));
         command.current_dir(&spec.root);
+        let log_path = self
+            .daemon_dir
+            .join("logs")
+            .join(format!("worker-{}.log", spec.slug));
+        let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(&self.daemon_dir));
+        if let Ok(stdout_log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            command.stdout(Stdio::from(stdout_log));
+        } else {
+            command.stdout(Stdio::null());
+        }
+        if let Ok(stderr_log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            command.stderr(Stdio::from(stderr_log));
+        } else {
+            command.stderr(Stdio::null());
+        }
         command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
         command.kill_on_drop(true);
         command
             .spawn()

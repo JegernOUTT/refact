@@ -12,7 +12,7 @@ pub enum RefactCliCommand {
     Daemon { foreground: bool },
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
-    Version,
+    Control(crate::daemon::cli::CliOptions),
     Help,
 }
 
@@ -34,6 +34,7 @@ pub enum DispatchResult {
     Daemon { foreground: bool },
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
+    Control(crate::daemon::cli::CliOptions),
     Exit(i32),
 }
 
@@ -66,7 +67,9 @@ where
         "daemon" => parse_daemon(&args),
         "run" => parse_run(&args),
         "tui" => parse_tui(&args),
-        "version" | "--version" | "-V" => Ok(RefactCliCommand::Version),
+        "ps" | "projects" | "restart" | "stop" | "logs" | "events" | "status" | "doctor"
+        | "version" => parse_control(&args),
+        "--version" | "-V" => parse_control(&[OsString::from("refact"), OsString::from("version")]),
         "help" | "--help" | "-h" => Ok(RefactCliCommand::Help),
         other => Err(usage_error(format!("unknown subcommand `{}`", other))),
     }
@@ -78,10 +81,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
         RefactCliCommand::Daemon { foreground } => DispatchResult::Daemon { foreground },
         RefactCliCommand::Run(options) => DispatchResult::Run(options),
         RefactCliCommand::Tui(options) => DispatchResult::Tui(options),
-        RefactCliCommand::Version => {
-            println!("{}", version_text());
-            DispatchResult::Exit(0)
-        }
+        RefactCliCommand::Control(options) => DispatchResult::Control(options),
         RefactCliCommand::Help => {
             println!("{}", help_text());
             DispatchResult::Exit(0)
@@ -90,7 +90,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]       Open the full-screen TUI\n    worker [engine flags...]     Run the refact worker engine\n    daemon [--foreground]        Run the refact daemon\n    run [OPTIONS] <prompt>       Run one headless chat turn through the daemon\n    version                      Print version and build information\n\nTUI OPTIONS:\n    --project <path>             Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>             Project root (default: cwd)\n    --mode agent|explore         Chat mode (default: agent)\n    --model <model>              Model id\n    --approve deny|ask|auto      Tool approval policy (default: deny)\n    --json                       Emit final JSON instead of streaming text\n    --timeout-secs <N>           Timeout in seconds (default: 600)\n\nRun `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
 }
 
 pub fn version_text() -> String {
@@ -156,6 +156,12 @@ fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
     Ok(RefactCliCommand::Tui(TuiOptions { project }))
 }
 
+fn parse_control(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    crate::daemon::cli::parse_cli_args(&args.iter().skip(1).cloned().collect::<Vec<_>>())
+        .map(RefactCliCommand::Control)
+        .map_err(usage_error)
+}
+
 fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
     let exit_code = match error.kind {
         ErrorKind::HelpDisplayed | ErrorKind::VersionDisplayed => 0,
@@ -209,12 +215,16 @@ mod tests {
 
     #[test]
     fn parse_version() {
-        assert!(matches!(
-            parse_from(["refact", "version"]).unwrap(),
-            RefactCliCommand::Version
-        ));
+        match parse_from(["refact", "version"]).unwrap() {
+            RefactCliCommand::Control(options) => {
+                assert!(matches!(
+                    options.command,
+                    crate::daemon::cli::CliCommand::Version { .. }
+                ));
+            }
+            _ => panic!("expected version control command"),
+        }
     }
-
     #[test]
     fn parse_daemon_foreground() {
         assert!(matches!(

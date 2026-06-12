@@ -1,15 +1,17 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use futures::Stream;
-use hyper::Server;
+use hyper::{Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -37,6 +39,17 @@ struct ShutdownRequest {
 struct EventsQuery {
     #[serde(default)]
     follow: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    project_id: Option<String>,
+    #[serde(default = "default_log_tail")]
+    tail: usize,
+}
+
+fn default_log_tail() -> usize {
+    200
 }
 
 pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
@@ -69,6 +82,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
         .route("/daemon/v1/workers", get(workers))
+        .route("/daemon/v1/logs", get(logs))
         .route("/daemon/v1/worker-status", post(worker_status))
         .route(
             "/daemon/v1/projects/open",
@@ -156,6 +170,30 @@ async fn shutdown(
     Json(json!({"success": true}))
 }
 
+async fn workers(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+) -> Json<Vec<crate::daemon::state::WorkerRow>> {
+    Json(state.worker_rows().await)
+}
+
+async fn logs(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    let path = match log_path(&state, query.project_id.as_deref()).await {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match tail_file(&path, query.tail.clamp(1, 10_000)).await {
+        Ok(text) => ([("content-type", "text/plain; charset=utf-8")], text).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
 async fn worker_status(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     Json(report): Json<crate::daemon_link::WorkerStatusReport>,
@@ -191,18 +229,49 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn workers(
-    State((state, _)): State<(Arc<DaemonState>, u16)>,
-) -> Json<Vec<crate::daemon::supervisor::WorkerInfo>> {
-    let entries = state.projects.read().await.list();
-    let mut workers = Vec::new();
-    for entry in entries {
-        if let Some(worker) = state.supervisor.worker_info(&entry.id).await {
-            workers.push(worker);
-        }
+async fn log_path(state: &Arc<DaemonState>, project_id: Option<&str>) -> Result<PathBuf, Response> {
+    let Some(project_id) = project_id.filter(|value| !value.is_empty()) else {
+        return Ok(state.daemon_dir.join("logs").join("daemon.log"));
+    };
+    let registry = state.projects.read().await;
+    match registry.get(project_id) {
+        Some(entry) => Ok(state
+            .daemon_dir
+            .join("logs")
+            .join(format!("worker-{}.log", entry.slug))),
+        None => Err((StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()),
     }
-    workers.sort_by(|a, b| a.project_id.cmp(&b.project_id));
-    Json(workers)
+}
+
+async fn tail_file(path: &std::path::Path, tail: usize) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(format!("failed to open {}: {error}", path.display())),
+    };
+    let len = file
+        .metadata()
+        .await
+        .map_err(|error| format!("failed to stat {}: {error}", path.display()))?
+        .len();
+    let start = len.saturating_sub(1024 * 1024);
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| format!("failed to seek {}: {error}", path.display()))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .await
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let text = String::from_utf8_lossy(&buf);
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(tail);
+    let mut out = lines[start..].join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {

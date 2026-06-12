@@ -6,6 +6,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 pub mod auth;
 pub mod chat_client;
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod cron_clock;
@@ -46,7 +47,7 @@ impl RuntimePaths {
     }
 
     #[cfg(test)]
-    fn in_dir(path: &Path) -> Self {
+    pub(crate) fn in_dir(path: &Path) -> Self {
         Self {
             lock_path: path.join("daemon.lock"),
             daemon_json_path: path.join("daemon.json"),

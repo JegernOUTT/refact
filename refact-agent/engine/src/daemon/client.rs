@@ -1,6 +1,10 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::Value;
+
 use crate::daemon::state::DaemonInfo;
 
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
@@ -12,6 +16,27 @@ pub async fn read_daemon_json() -> Option<DaemonInfo> {
         .ok()
         .flatten()
 }
+
+#[derive(Debug)]
+pub enum DaemonClientError {
+    Http(String),
+    Status { status: u16, body: String },
+    Json(String),
+}
+
+impl std::fmt::Display for DaemonClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonClientError::Http(message) => write!(f, "{message}"),
+            DaemonClientError::Status { status, body } => {
+                write!(f, "daemon request failed with status {status}: {body}")
+            }
+            DaemonClientError::Json(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonClientError {}
 
 pub async fn ping_daemon(info: &DaemonInfo) -> bool {
     let url = format!(
@@ -30,6 +55,9 @@ pub async fn ping_daemon(info: &DaemonInfo) -> bool {
 }
 
 pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
+    if let Some(info) = shutdown_for_upgrade_if_older(env!("CARGO_PKG_VERSION")).await? {
+        return Ok(info);
+    }
     ensure_daemon_running_with_starter(spawn_detached_daemon).await
 }
 
@@ -40,10 +68,118 @@ pub async fn shutdown_for_upgrade_if_older(my_version: &str) -> Result<Option<Da
     if !version_is_older(&info.version, my_version) {
         return Ok(None);
     }
-    post_shutdown(&info, "upgrade").await?;
-    wait_until_dead(&info, STARTUP_TIMEOUT).await?;
-    let upgraded = ensure_daemon_running().await?;
+    if ping_daemon(&info).await {
+        post_shutdown(&info, "upgrade").await?;
+        wait_until_dead(&info, STARTUP_TIMEOUT).await?;
+    }
+    let upgraded = ensure_daemon_running_with_starter(spawn_detached_daemon).await?;
     Ok(Some(upgraded))
+}
+
+pub async fn get_json<T: DeserializeOwned>(
+    info: &DaemonInfo,
+    path: &str,
+) -> Result<T, DaemonClientError> {
+    let response = daemon_request(info, reqwest::Method::GET, path)
+        .send()
+        .await
+        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+    decode_json_response(response).await
+}
+
+pub async fn get_text(info: &DaemonInfo, path: &str) -> Result<String, DaemonClientError> {
+    let response = daemon_request(info, reqwest::Method::GET, path)
+        .send()
+        .await
+        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+    decode_text_response(response).await
+}
+
+pub async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+    info: &DaemonInfo,
+    path: &str,
+    body: &B,
+) -> Result<T, DaemonClientError> {
+    let response = daemon_request(info, reqwest::Method::POST, path)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+    decode_json_response(response).await
+}
+
+pub async fn post_empty_json<T: DeserializeOwned>(
+    info: &DaemonInfo,
+    path: &str,
+) -> Result<T, DaemonClientError> {
+    post_json(info, path, &Value::Object(Default::default())).await
+}
+
+pub async fn delete_json<T: DeserializeOwned>(
+    info: &DaemonInfo,
+    path: &str,
+) -> Result<T, DaemonClientError> {
+    let response = daemon_request(info, reqwest::Method::DELETE, path)
+        .send()
+        .await
+        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+    decode_json_response(response).await
+}
+
+pub async fn shutdown_daemon(info: &DaemonInfo, reason: &str) -> Result<(), String> {
+    post_shutdown(info, reason).await
+}
+
+pub async fn wait_for_daemon_stop(info: &DaemonInfo, timeout: Duration) -> Result<(), String> {
+    wait_until_dead(info, timeout).await
+}
+
+fn daemon_request(
+    info: &DaemonInfo,
+    method: reqwest::Method,
+    path: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!(
+        "{}{}",
+        crate::daemon::chat_client::daemon_base_url(info),
+        path
+    );
+    let client = reqwest::Client::new();
+    let request = client.request(method, url);
+    match &info.auth_token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
+async fn decode_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, DaemonClientError> {
+    if !response.status().is_success() {
+        return Err(response_status_error(response).await);
+    }
+    response
+        .json::<T>()
+        .await
+        .map_err(|error| DaemonClientError::Json(format!("invalid daemon JSON: {error}")))
+}
+
+async fn decode_text_response(response: reqwest::Response) -> Result<String, DaemonClientError> {
+    if !response.status().is_success() {
+        return Err(response_status_error(response).await);
+    }
+    response.text().await.map_err(|error| {
+        DaemonClientError::Http(format!("failed to read daemon response: {error}"))
+    })
+}
+
+async fn response_status_error(response: reqwest::Response) -> DaemonClientError {
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| error.to_string());
+    DaemonClientError::Status { status, body }
 }
 
 async fn ensure_daemon_running_with_starter<F>(starter: F) -> Result<DaemonInfo, String>
@@ -137,9 +273,14 @@ async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
         .timeout(PING_TIMEOUT)
         .build()
         .map_err(|error| format!("failed to create daemon client: {error}"))?;
-    let response = client
+    let request = client
         .post(url)
-        .json(&serde_json::json!({"reason": reason}))
+        .json(&serde_json::json!({"reason": reason}));
+    let request = match &info.auth_token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    let response = request
         .send()
         .await
         .map_err(|error| format!("failed to request daemon shutdown: {error}"))?;

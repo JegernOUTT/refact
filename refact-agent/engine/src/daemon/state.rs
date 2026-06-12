@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, RwLock};
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::events::EventBus;
 use crate::daemon::idle::WorkerIdleSnapshot;
+use crate::daemon::supervisor::{WorkerInfo, WorkerState};
 use crate::daemon_link::WorkerStatusReport;
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,27 @@ pub struct ProxyActivity {
     pub live_proxy_streams: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRow {
+    pub project_id: String,
+    pub slug: String,
+    pub root: PathBuf,
+    pub pinned: bool,
+    pub last_active_ms: u64,
+    pub state: WorkerState,
+    pub pid: Option<u32>,
+    pub http_port: Option<u16>,
+    pub lsp_port: Option<u16>,
+    pub lsp_clients: usize,
+    pub busy_chats: usize,
+    pub exec_running: usize,
+    pub live_proxy_streams: u64,
+    pub cron_next_fire_ms: Option<u64>,
+    pub idle_deadline_ms: Option<u64>,
+    pub last_status_report_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
 pub struct DaemonState {
     pub config: DaemonConfig,
     pub auth_token: Option<String>,
@@ -55,6 +77,7 @@ pub struct DaemonState {
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
     pub events: EventBus,
+    pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     shutdown_tx: broadcast::Sender<String>,
 }
@@ -81,7 +104,7 @@ impl DaemonState {
         let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
         let supervisor = crate::daemon::supervisor::Supervisor::new_with_cron_pending(
             events.clone(),
-            daemon_dir,
+            daemon_dir.clone(),
             daemon_port,
             cron_pending.clone(),
             config.idle_timeout_secs,
@@ -105,6 +128,7 @@ impl DaemonState {
             supervisor,
             proxy_client,
             events,
+            daemon_dir,
             cron_pending,
             shutdown_tx,
         })
@@ -278,6 +302,68 @@ impl DaemonState {
             .unwrap_or_default()
     }
 
+    pub async fn worker_rows(&self) -> Vec<WorkerRow> {
+        let projects = {
+            let registry = self.projects.read().await;
+            registry.list()
+        };
+        let statuses = self.worker_statuses.read().await.clone();
+        let activity = self.proxy_activity.read().await.clone();
+        let cron_pending = self.cron_pending_snapshot().await;
+        let now = now_ms();
+        let mut rows = Vec::new();
+        for entry in projects {
+            let worker = self.supervisor.worker_info(&entry.id).await;
+            let status = statuses.get(&entry.id);
+            let activity = activity.get(&entry.id).cloned().unwrap_or_default();
+            let last_activity_ms = entry
+                .last_active_ms
+                .max(activity.last_proxy_activity_ms)
+                .max(
+                    status
+                        .map(|status| status.report.last_activity_ts)
+                        .unwrap_or(0),
+                );
+            let idle_deadline_ms = idle_deadline_ms(
+                now,
+                &entry,
+                worker.as_ref(),
+                status,
+                &activity,
+                cron_pending.get(&entry.id).copied(),
+                self.config.idle_timeout_secs,
+            );
+            rows.push(WorkerRow {
+                project_id: entry.id.clone(),
+                slug: entry.slug.clone(),
+                root: entry.root.clone(),
+                pinned: entry.pinned,
+                last_active_ms: last_activity_ms,
+                state: worker
+                    .as_ref()
+                    .map(|worker| worker.state.clone())
+                    .unwrap_or(WorkerState::Stopped),
+                pid: worker.as_ref().and_then(|worker| worker.pid),
+                http_port: worker.as_ref().map(|worker| worker.http_port),
+                lsp_port: worker.as_ref().map(|worker| worker.lsp_port),
+                lsp_clients: status.map(|status| status.report.lsp_clients).unwrap_or(0),
+                busy_chats: status.map(|status| status.report.busy_chats).unwrap_or(0),
+                exec_running: status.map(|status| status.report.exec_running).unwrap_or(0),
+                live_proxy_streams: activity.live_proxy_streams,
+                cron_next_fire_ms: cron_pending.get(&entry.id).copied(),
+                idle_deadline_ms,
+                last_status_report_ms: status.map(|status| status.received_ms),
+                last_error: worker.as_ref().and_then(|worker| worker.last_error.clone()),
+            });
+        }
+        rows.sort_by(|a, b| {
+            a.slug
+                .cmp(&b.slug)
+                .then_with(|| a.project_id.cmp(&b.project_id))
+        });
+        rows
+    }
+
     pub fn daemon_info(&self, port: u16, bind: String) -> DaemonInfo {
         let host_local = hostname_local();
         DaemonInfo {
@@ -294,6 +380,51 @@ impl DaemonState {
             },
         }
     }
+}
+
+fn idle_deadline_ms(
+    now: u64,
+    entry: &crate::daemon::projects::ProjectEntry,
+    worker: Option<&WorkerInfo>,
+    status: Option<&StoredWorkerStatus>,
+    activity: &ProxyActivity,
+    cron_next_fire_ms: Option<u64>,
+    idle_timeout_secs: u64,
+) -> Option<u64> {
+    if idle_timeout_secs == 0 || entry.pinned {
+        return None;
+    }
+    if worker.map(|worker| &worker.state) != Some(&WorkerState::Ready) {
+        return None;
+    }
+    if activity.live_proxy_streams > 0 {
+        return None;
+    }
+    if status
+        .map(|status| {
+            status.report.lsp_clients > 0
+                || status.report.busy_chats > 0
+                || status.report.exec_running > 0
+        })
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if cron_next_fire_ms
+        .map(|next_fire_ms| crate::daemon::idle::cron_pending_blocks_idle_stop(next_fire_ms, now))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let last_activity_ms = entry
+        .last_active_ms
+        .max(activity.last_proxy_activity_ms)
+        .max(
+            status
+                .map(|status| status.report.last_activity_ts)
+                .unwrap_or(0),
+        );
+    Some(last_activity_ms.saturating_add(idle_timeout_secs.saturating_mul(1000)))
 }
 
 pub fn now_ms() -> u64 {
