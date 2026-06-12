@@ -362,16 +362,41 @@ fn render_approval_modal(
     area: Rect,
 ) {
     let width = area.width.saturating_sub(6).min(96);
-    let height = area.height.saturating_sub(6).min(16);
+    let max_height = if modal.details_open() { 28 } else { 16 };
+    let height = area.height.saturating_sub(6).min(max_height);
     let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
     let block = Block::default().borders(Borders::ALL).title(" approval ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     frame.render_widget(
-        Paragraph::new(render_modal_lines(modal, inner.width as usize)).wrap(Wrap { trim: false }),
+        Paragraph::new(visible_approval_lines(
+            modal,
+            inner.width as usize,
+            inner.height as usize,
+        ))
+        .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn visible_approval_lines(
+    modal: &crate::approvals::ApprovalModalState,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let lines = render_modal_lines(modal, width);
+    if !modal.details_open() || height == 0 {
+        return lines;
+    }
+    let fixed = lines.len().min(2);
+    let body_height = height.saturating_sub(fixed);
+    let body_start = fixed + modal.detail_scroll().min(lines.len().saturating_sub(fixed));
+    lines[..fixed]
+        .iter()
+        .cloned()
+        .chain(lines[body_start..].iter().take(body_height).cloned())
+        .collect()
 }
 
 fn render_events_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -409,7 +434,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("During generation: Enter queues · empty Up selects queue · Enter edits · Delete removes"),
         Line::from("Ctrl-N new chat · Ctrl-P projects · Ctrl-M models · Ctrl-O modes"),
         Line::from("F2 daemon events/workers · Tab select next tool · Enter/Space expand tool"),
-        Line::from("Approvals: y approve once · a approve for chat · n/Esc deny · v full args"),
+        Line::from("Approvals: y approve once · a approve for chat · n reject · v details · Esc back"),
         Line::from("Ctrl-R toggle reasoning · PageUp/PageDown scroll · Ctrl-Q quit"),
     ];
     frame.render_widget(
@@ -502,6 +527,8 @@ mod tests {
             rule: "default".to_string(),
             tool_call_id: "call-1".to_string(),
             integr_config_path: None,
+            args: None,
+            diff: None,
         }]));
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -515,5 +542,55 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Approval required"));
         assert!(text.contains("shell"));
+    }
+
+    #[test]
+    fn render_approval_detail_snapshot_with_diff_and_shell_command() {
+        let mut app = App::new(project());
+        let mut modal = ApprovalModalState::from_event(&serde_json::json!({
+            "reasons": [
+                {
+                    "type": "confirmation",
+                    "tool_name": "shell",
+                    "command": "printf 'hi' && git diff",
+                    "rule": "ask",
+                    "tool_call_id": "call-shell",
+                    "args": {"command": "printf 'hi' && git diff", "cwd": "/tmp/demo"}
+                },
+                {
+                    "type": "confirmation",
+                    "tool_name": "apply_patch",
+                    "command": "apply patch",
+                    "rule": "ask",
+                    "tool_call_id": "call-patch",
+                    "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new"
+                }
+            ]
+        }))
+        .unwrap();
+        modal.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('v'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        app.test_set_approval(modal);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("approval 1 of 1"));
+        assert!(text.contains("shell command"));
+        assert!(text.contains("printf 'hi' && git diff"));
+        assert!(text.contains(r#""cwd": "/tmp/demo""#));
+        assert!(text.contains("apply_patch"));
+        assert!(text.contains("- old"));
+        assert!(text.contains("+ new"));
     }
 }

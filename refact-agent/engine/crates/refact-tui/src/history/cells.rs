@@ -1328,6 +1328,8 @@ mod tests {
             rule: "default".to_string(),
             tool_call_id: "call-1".to_string(),
             integr_config_path: None,
+            args: None,
+            diff: None,
         }])
     }
 

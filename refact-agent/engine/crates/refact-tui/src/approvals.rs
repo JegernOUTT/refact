@@ -6,6 +6,8 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::client::ToolDecision;
+use crate::render::wrapping::wrap_line;
+use crate::render::{color_enabled_from_env, render_unified_diff};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PauseReason {
@@ -15,10 +17,17 @@ pub struct PauseReason {
     pub rule: String,
     pub tool_call_id: String,
     pub integr_config_path: Option<String>,
+    pub args: Option<String>,
+    pub diff: Option<String>,
 }
 
 impl PauseReason {
     pub fn from_value(value: &Value) -> Option<Self> {
+        let command = value
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         Some(Self {
             reason_type: value
                 .get("type")
@@ -31,11 +40,7 @@ impl PauseReason {
                 .and_then(Value::as_str)
                 .unwrap_or("tool")
                 .to_string(),
-            command: value
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            command: command.clone(),
             rule: value
                 .get("rule")
                 .and_then(Value::as_str)
@@ -50,7 +55,78 @@ impl PauseReason {
                 .get("integr_config_path")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            args: extract_args(value).or_else(|| pretty_json_str(&command)),
+            diff: extract_diff(value),
         })
+    }
+}
+
+fn extract_args(value: &Value) -> Option<String> {
+    raw_args_value(value).and_then(pretty_json_value)
+}
+
+fn raw_args_value(value: &Value) -> Option<&Value> {
+    ["args", "arguments", "tool_args", "input"]
+        .iter()
+        .find_map(|key| value.get(*key))
+}
+
+fn pretty_json_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => pretty_jsonish_str(text),
+        other => serde_json::to_string_pretty(other).ok(),
+    }
+}
+
+fn pretty_json_str(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+}
+
+fn pretty_jsonish_str(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    pretty_json_str(trimmed).or_else(|| Some(trimmed.to_string()))
+}
+
+fn extract_diff(value: &Value) -> Option<String> {
+    ["diff", "preview_diff", "unified_diff", "patch"]
+        .iter()
+        .find_map(|key| string_field(value, key))
+        .or_else(|| raw_args_value(value).and_then(find_diff_field))
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn find_diff_field(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => ["diff", "preview_diff", "unified_diff", "patch"]
+            .iter()
+            .find_map(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| map.values().find_map(find_diff_field)),
+        Value::Array(values) => values.iter().find_map(find_diff_field),
+        _ => None,
     }
 }
 
@@ -60,7 +136,9 @@ pub enum ApprovalKeyAction {
     ApproveOnce,
     ApproveForChat,
     Deny,
-    ToggleFullArgs,
+    ToggleDetails,
+    Back,
+    ScrollDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +171,8 @@ impl ApprovalQueueKey {
 pub struct ApprovalModalState {
     key: ApprovalQueueKey,
     reasons: Vec<PauseReason>,
-    full_args: bool,
+    details_open: bool,
+    detail_scroll: usize,
     pending_after: usize,
 }
 
@@ -107,7 +186,8 @@ impl ApprovalModalState {
         Self {
             key: ApprovalQueueKey::from_reasons(scope, &reasons),
             reasons,
-            full_args: false,
+            details_open: false,
+            detail_scroll: 0,
             pending_after: 0,
         }
     }
@@ -136,11 +216,31 @@ impl ApprovalModalState {
     }
 
     pub fn full_args(&self) -> bool {
-        self.full_args
+        self.details_open
+    }
+
+    pub fn details_open(&self) -> bool {
+        self.details_open
+    }
+
+    pub fn detail_scroll(&self) -> usize {
+        self.detail_scroll
     }
 
     pub fn pending_after(&self) -> usize {
         self.pending_after
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.pending_after.saturating_add(1)
+    }
+
+    pub fn queue_position(&self) -> usize {
+        1
+    }
+
+    pub fn queue_label(&self) -> String {
+        format!("approval {} of {}", self.queue_position(), self.queue_len())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -162,10 +262,34 @@ impl ApprovalModalState {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => ApprovalKeyAction::ApproveOnce,
             KeyCode::Char('a') | KeyCode::Char('A') => ApprovalKeyAction::ApproveForChat,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ApprovalKeyAction::Deny,
+            KeyCode::Char('n') | KeyCode::Char('N') => ApprovalKeyAction::Deny,
             KeyCode::Char('v') | KeyCode::Char('V') => {
-                self.full_args = !self.full_args;
-                ApprovalKeyAction::ToggleFullArgs
+                self.details_open = !self.details_open;
+                self.detail_scroll = 0;
+                ApprovalKeyAction::ToggleDetails
+            }
+            KeyCode::Esc => {
+                if self.details_open {
+                    self.details_open = false;
+                    self.detail_scroll = 0;
+                }
+                ApprovalKeyAction::Back
+            }
+            KeyCode::Up if self.details_open => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                ApprovalKeyAction::ScrollDetails
+            }
+            KeyCode::Down if self.details_open => {
+                self.detail_scroll = self.detail_scroll.saturating_add(1);
+                ApprovalKeyAction::ScrollDetails
+            }
+            KeyCode::PageUp if self.details_open => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(5);
+                ApprovalKeyAction::ScrollDetails
+            }
+            KeyCode::PageDown if self.details_open => {
+                self.detail_scroll = self.detail_scroll.saturating_add(5);
+                ApprovalKeyAction::ScrollDetails
             }
             KeyCode::Enter => ApprovalKeyAction::None,
             _ => ApprovalKeyAction::None,
@@ -243,32 +367,62 @@ pub fn preview_command(command: &str, max_chars: usize) -> String {
 }
 
 pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(8);
     let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Approval required",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", state.queue_label()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
         Line::from(Span::styled(
-            "Approval required",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "y approve once · a approve for chat · n/Esc deny · v toggle args",
+            approval_help_text(state.details_open()),
             Style::default().fg(Color::DarkGray),
         )),
     ];
+    if state.details_open() {
+        render_detail_lines(state, width, &mut lines);
+    } else {
+        render_summary_lines(state, width, &mut lines);
+    }
+    lines
+}
+
+fn approval_help_text(details_open: bool) -> &'static str {
+    if details_open {
+        "y approve once · a approve for chat · n reject · v summary · Esc back · ↑/↓ scroll"
+    } else {
+        "y approve once · a approve for chat · n reject · v details · Esc back"
+    }
+}
+
+fn render_summary_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec<Line<'static>>) {
     if state.pending_after() > 0 {
         lines.push(Line::from(Span::styled(
-            format!("{} more pending", state.pending_after()),
+            format!("{} more pending in queue", state.pending_after()),
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for reason in state.reasons() {
-        let command = if state.full_args() {
-            reason.command.clone()
+    for (idx, reason) in state.reasons().iter().enumerate() {
+        let command = reason
+            .command
+            .is_empty()
+            .then(|| args_preview(reason.args.as_deref()))
+            .flatten()
+            .unwrap_or_else(|| preview_command(&reason.command, width.saturating_sub(12).min(140)));
+        let prefix = if state.reasons().len() > 1 {
+            format!("• {}/{} ", idx + 1, state.reasons().len())
         } else {
-            preview_command(&reason.command, width.saturating_sub(8).min(140))
+            "• ".to_string()
         };
         lines.push(Line::from(vec![
-            Span::styled("• ", Style::default().fg(Color::Cyan)),
+            Span::styled(prefix, Style::default().fg(Color::Cyan)),
             Span::styled(
                 reason.tool_name.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -283,13 +437,113 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
             )));
         }
     }
-    lines
+}
+
+fn args_preview(args: Option<&str>) -> Option<String> {
+    args.and_then(|args| {
+        args.lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| preview_command(line, 120))
+    })
+}
+
+fn render_detail_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::default());
+    for (idx, reason) in state.reasons().iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("tool {}/{}", idx + 1, state.reasons().len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", reason.tool_name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        if !reason.tool_call_id.is_empty() {
+            lines.push(meta_line("id", &reason.tool_call_id));
+        }
+        if !reason.rule.is_empty() {
+            lines.push(meta_line("rule", &reason.rule));
+        }
+        if let Some(path) = &reason.integr_config_path {
+            lines.push(meta_line("config", path));
+        }
+        if !reason.command.is_empty() {
+            let label = if is_shell_like(&reason.tool_name) {
+                "shell command"
+            } else {
+                "command"
+            };
+            lines.push(section_line(label));
+            push_wrapped_block(
+                lines,
+                &reason.command,
+                width,
+                Style::default().fg(Color::White),
+            );
+        }
+        if let Some(args) = &reason.args {
+            lines.push(section_line("args"));
+            push_wrapped_block(lines, args, width, Style::default().fg(Color::White));
+        }
+        if let Some(diff) = &reason.diff {
+            lines.push(section_line("diff"));
+            lines.extend(render_unified_diff(
+                diff,
+                Some(width.saturating_sub(2).max(8)),
+                color_enabled_from_env(),
+            ));
+        }
+        if idx + 1 < state.reasons().len() {
+            lines.push(Line::default());
+        }
+    }
+}
+
+fn meta_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {label}: {value}"),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+fn section_line(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {label}:"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn push_wrapped_block(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
+    if text.is_empty() {
+        lines.push(Line::from("  "));
+        return;
+    }
+    let block_width = width.saturating_sub(2).max(8);
+    for raw_line in text.lines() {
+        let line = Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(raw_line.to_string(), style),
+        ]);
+        lines.extend(wrap_line(line, Some(block_width)));
+    }
+}
+
+fn is_shell_like(tool_name: &str) -> bool {
+    matches!(tool_name, "shell" | "bash" | "command" | "run_command")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::wrapping::line_to_plain;
     use crossterm::event::KeyModifiers;
+    use serde_json::json;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
@@ -303,7 +557,17 @@ mod tests {
             rule: "*".to_string(),
             tool_call_id: id.to_string(),
             integr_config_path: None,
+            args: None,
+            diff: None,
         }
+    }
+
+    fn text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(line_to_plain)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -321,16 +585,39 @@ mod tests {
             modal.handle_key(key(KeyCode::Char('n'))),
             ApprovalKeyAction::Deny
         );
-        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Deny);
+        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
         assert_eq!(
             modal.handle_key(key(KeyCode::Enter)),
             ApprovalKeyAction::None
         );
         assert_eq!(
             modal.handle_key(key(KeyCode::Char('v'))),
-            ApprovalKeyAction::ToggleFullArgs
+            ApprovalKeyAction::ToggleDetails
         );
+        assert!(modal.details_open());
         assert!(modal.full_args());
+    }
+
+    #[test]
+    fn detail_toggle_back_and_scroll_state_machine() {
+        let mut modal = ApprovalModalState::new(vec![reason("call-1")]);
+        assert!(!modal.details_open());
+        assert_eq!(modal.detail_scroll(), 0);
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Char('v'))),
+            ApprovalKeyAction::ToggleDetails
+        );
+        assert!(modal.details_open());
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Down)),
+            ApprovalKeyAction::ScrollDetails
+        );
+        assert_eq!(modal.detail_scroll(), 1);
+        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
+        assert!(!modal.details_open());
+        assert_eq!(modal.detail_scroll(), 0);
+        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
+        assert!(!modal.details_open());
     }
 
     #[test]
@@ -364,6 +651,7 @@ mod tests {
         let first = queue.front().unwrap();
         assert_eq!(first.reasons()[0].tool_call_id, "call-1");
         assert_eq!(first.pending_after(), 1);
+        assert_eq!(first.queue_label(), "approval 1 of 2");
         assert_eq!(
             queue.pop_front().unwrap().reasons()[0].tool_call_id,
             "call-1"
@@ -371,10 +659,11 @@ mod tests {
         let second = queue.front().unwrap();
         assert_eq!(second.reasons()[0].tool_call_id, "call-2");
         assert_eq!(second.pending_after(), 0);
+        assert_eq!(second.queue_label(), "approval 1 of 1");
     }
 
     #[test]
-    fn render_modal_lines_reports_more_pending() {
+    fn render_modal_lines_reports_queue_count() {
         let mut queue = ApprovalQueue::new();
         queue.push(ApprovalModalState::with_scope(
             "chat-1",
@@ -385,11 +674,34 @@ mod tests {
             vec![reason("call-2")],
         ));
 
-        let text = render_modal_lines(queue.front().unwrap(), 80)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("1 more pending"));
+        let rendered = text(&render_modal_lines(queue.front().unwrap(), 80));
+        assert!(rendered.contains("approval 1 of 2"));
+        assert!(rendered.contains("1 more pending in queue"));
+    }
+
+    #[test]
+    fn detail_view_renders_pretty_args_command_and_diff() {
+        let mut modal = ApprovalModalState::from_event(&json!({
+            "reasons": [{
+                "type": "confirmation",
+                "tool_name": "shell",
+                "command": "printf hi",
+                "rule": "ask",
+                "tool_call_id": "call-1",
+                "args": {"command": "printf hi", "cwd": "/tmp/demo"},
+                "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new"
+            }]
+        }))
+        .unwrap();
+        modal.handle_key(key(KeyCode::Char('v')));
+
+        let rendered = text(&render_modal_lines(&modal, 100));
+        assert!(rendered.contains("shell command"));
+        assert!(rendered.contains("printf hi"));
+        assert!(rendered.contains("args"));
+        assert!(rendered.contains("\"command\": \"printf hi\""));
+        assert!(rendered.contains("diff"));
+        assert!(rendered.contains("- old"));
+        assert!(rendered.contains("+ new"));
     }
 }

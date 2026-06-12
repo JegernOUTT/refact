@@ -2040,7 +2040,10 @@ impl App {
             modal.handle_key(key)
         };
         match action {
-            ApprovalKeyAction::None | ApprovalKeyAction::ToggleFullArgs => Some(AppAction::None),
+            ApprovalKeyAction::None
+            | ApprovalKeyAction::ToggleDetails
+            | ApprovalKeyAction::Back
+            | ApprovalKeyAction::ScrollDetails => Some(AppAction::None),
             ApprovalKeyAction::ApproveOnce => self.pop_current_approval().map(|modal| {
                 self.push_history_item(TranscriptItem::Approval(
                     modal.clone(),
@@ -4005,6 +4008,53 @@ mod tests {
     }
 
     #[test]
+    fn multi_tool_pause_yields_per_tool_decisions() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_required".to_string(),
+            raw: json!({"reasons": [
+                {"type": "confirmation", "tool_name": "shell", "command": "echo one", "rule": "*", "tool_call_id": "call-1"},
+                {"type": "confirmation", "tool_name": "cat", "command": "cat Cargo.toml", "rule": "*", "tool_call_id": "call-2"}
+            ]}),
+        });
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('n'))),
+            AppAction::SendToolDecisions {
+                decisions: vec![
+                    ToolDecision {
+                        tool_call_id: "call-1".to_string(),
+                        accepted: false,
+                    },
+                    ToolDecision {
+                        tool_call_id: "call-2".to_string(),
+                        accepted: false,
+                    },
+                ],
+                patch: None,
+            }
+        );
+    }
+
+    #[test]
+    fn approval_detail_toggle_uses_escape_as_back_not_deny() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+
+        assert!(!app.approval_modal().unwrap().details_open());
+        assert_eq!(app.handle_key(key(KeyCode::Char('v'))), AppAction::None);
+        assert!(app.approval_modal().unwrap().details_open());
+        assert_eq!(app.handle_key(key(KeyCode::Down)), AppAction::None);
+        assert_eq!(app.approval_modal().unwrap().detail_scroll(), 1);
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        let modal = app.approval_modal().unwrap();
+        assert!(!modal.details_open());
+        assert_eq!(modal.detail_scroll(), 0);
+    }
+
+    #[test]
     fn two_approvals_before_first_resolved_preserve_fifo() {
         let mut app = App::new(project());
         app.handle_chat_event(pause_event(&app, "call-1", "shell"));
@@ -4200,6 +4250,8 @@ mod tests {
             rule: "default".to_string(),
             tool_call_id: "call-1".to_string(),
             integr_config_path: None,
+            args: None,
+            diff: None,
         }]));
         let action = app.handle_key(key(KeyCode::Char('a')));
         assert_eq!(
