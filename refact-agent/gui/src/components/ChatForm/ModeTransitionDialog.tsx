@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from "react";
 import { Flex, Text, Button, Badge } from "@radix-ui/themes";
-import { Dialog, Spinner } from "../ui";
+import { LoaderCircle } from "lucide-react";
+import { Dialog, Icon } from "../ui";
 import { Callout } from "../Callout";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
@@ -50,14 +51,11 @@ type ModeTransitionDialogProps = {
 
 type TransitionPhase = "analyzing" | "refreshing" | "opening" | "starting";
 
-const TRANSITION_PHASES: Record<
-  TransitionPhase,
-  { label: string; progress: number }
-> = {
-  analyzing: { label: "Analyzing conversation...", progress: 30 },
-  refreshing: { label: "Updating chat list...", progress: 55 },
-  opening: { label: "Opening new chat...", progress: 75 },
-  starting: { label: "Starting assistant...", progress: 92 },
+const TRANSITION_PHASES: Record<TransitionPhase, { label: string }> = {
+  analyzing: { label: "Analyzing conversation..." },
+  refreshing: { label: "Updating chat list..." },
+  opening: { label: "Opening new chat..." },
+  starting: { label: "Starting assistant..." },
 };
 
 function waitForNextFrame(): Promise<void> {
@@ -252,24 +250,16 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
               className={styles.loadingContainer}
             >
               <Flex align="center" justify="center" gap="2">
-                <Spinner label="Processing" />
+                <Icon
+                  icon={LoaderCircle}
+                  size="md"
+                  tone="accent"
+                  className={styles.spinnerIcon}
+                />
                 <Text color="gray" role="status" aria-live="polite">
                   {phaseInfo.label}
                 </Text>
               </Flex>
-              <div
-                className={styles.progressTrack}
-                role="progressbar"
-                aria-label={isSelf ? "Restart progress" : "Switch progress"}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={phaseInfo.progress}
-              >
-                <div
-                  className={styles.progressFill}
-                  style={{ width: `${phaseInfo.progress}%` }}
-                />
-              </div>
             </Flex>
           )}
 
@@ -280,16 +270,13 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
               </Button>
             </Dialog.Close>
             <Button onClick={() => void handleApply()} disabled={isBusy}>
-              {isBusy ? (
-                <>
-                  <Spinner size="sm" />
-                  {isSelf ? "Restarting..." : "Switching..."}
-                </>
-              ) : isSelf ? (
-                "Restart Mode"
-              ) : (
-                "Switch Mode"
-              )}
+              {isBusy
+                ? isSelf
+                  ? "Restarting..."
+                  : "Switching..."
+                : isSelf
+                  ? "Restart Mode"
+                  : "Switch Mode"}
             </Button>
           </Flex>
         </Flex>

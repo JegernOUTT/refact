@@ -76,10 +76,10 @@ describe("ModeTransitionDialog", () => {
 
     await waitFor(() => expect(regenerateRequested).toBe(true));
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
-    expect(
-      screen.getByRole("progressbar", { name: "Switch progress" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Starting assistant...")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Starting assistant...",
+    );
     expect(store.getState().chat.current_thread_id).toBe("new-chat");
 
     commandGate.resolve();

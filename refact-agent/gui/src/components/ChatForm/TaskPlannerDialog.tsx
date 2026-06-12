@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from "react";
 import { Flex, Text, Button, Badge } from "@radix-ui/themes";
-import { Dialog, Spinner } from "../ui";
+import { LoaderCircle } from "lucide-react";
+import { Dialog, Icon } from "../ui";
 import { Callout } from "../Callout";
 import {
   createChatWithId,
@@ -85,6 +86,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   const isLoading = isCreatingTask || isCreatingPlanner || isTransitioning;
 
   const handleApply = useCallback(async () => {
+    if (isLoading) return;
     setError(null);
     const now = new Date().toISOString();
     try {
@@ -170,6 +172,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       setError(extractErrorMessage(err));
     }
   }, [
+    isLoading,
     isInTaskWorkspace,
     taskId,
     pendingTask,
@@ -188,6 +191,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
   const handleOpenChange = useCallback(
     (newOpen: boolean) => {
+      if (!newOpen && isLoading) {
+        return;
+      }
       if (!newOpen) {
         // If the user is closing after a failed attempt with a half-created
         // task, roll it back so we don't leak orphan tasks.
@@ -199,7 +205,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       }
       onOpenChange(newOpen);
     },
-    [onOpenChange, pendingTask, deleteTask],
+    [onOpenChange, pendingTask, deleteTask, isLoading],
   );
 
   const title = isInTaskWorkspace ? "New Planner" : "Switch to Task Planner";
@@ -247,8 +253,15 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
               gap="2"
               className={styles.loadingContainer}
             >
-              <Spinner label="Processing" />
-              <Text color="gray">{loadingLabel}</Text>
+              <Icon
+                icon={LoaderCircle}
+                size="md"
+                tone="accent"
+                className={styles.spinnerIcon}
+              />
+              <Text color="gray" role="status" aria-live="polite">
+                {loadingLabel}
+              </Text>
             </Flex>
           )}
 
@@ -259,14 +272,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
               </Button>
             </Dialog.Close>
             <Button onClick={() => void handleApply()} disabled={isLoading}>
-              {isLoading ? (
-                <>
-                  <Spinner size="sm" />
-                  {loadingLabel}
-                </>
-              ) : (
-                buttonLabel
-              )}
+              {isLoading ? loadingLabel : buttonLabel}
             </Button>
           </Flex>
         </Flex>
