@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -317,12 +318,19 @@ async fn run_with_daemon_info(
     daemon: DaemonInfo,
     io: &mut dyn RunIo,
 ) -> Result<RunJsonSummary, RunFailure> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(options.timeout_secs);
     let root = resolve_project_root(&options)?;
-    let project = open_project(&daemon, &root).await?;
+    let project = with_setup_deadline(
+        deadline,
+        options.timeout_secs,
+        "open project",
+        open_project(&daemon, &root),
+    )
+    .await?;
     let chat_id = uuid::Uuid::new_v4().to_string();
     let client =
         ProxyChatClient::from_daemon_info(&daemon, project.project_id).map_err(map_client_error)?;
-    drive_chat(&client, &options, chat_id, io).await
+    drive_chat(&client, &options, chat_id, deadline, io).await
 }
 
 fn finish_result(
@@ -359,26 +367,66 @@ fn write_json_failure(io: &mut dyn RunIo, error: &RunFailure, exit_code: i32) {
     }
 }
 
+async fn with_setup_deadline<T, F>(
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+    step: &str,
+    future: F,
+) -> Result<T, RunFailure>
+where
+    F: Future<Output = Result<T, RunFailure>>,
+{
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => Err(RunFailure {
+            kind: RunErrorKind::Timeout,
+            message: format!(
+                "refact run setup timed out after {timeout_secs} seconds while {step}"
+            ),
+        }),
+    }
+}
+
 async fn drive_chat(
     client: &ProxyChatClient,
     options: &RunOptions,
     chat_id: String,
+    setup_deadline: tokio::time::Instant,
     io: &mut dyn RunIo,
 ) -> Result<RunJsonSummary, RunFailure> {
-    let mut stream = client.subscribe(&chat_id).await.map_err(map_client_error)?;
+    let mut stream =
+        with_setup_deadline(setup_deadline, options.timeout_secs, "subscribe", async {
+            client.subscribe(&chat_id).await.map_err(map_client_error)
+        })
+        .await?;
     let patch = set_params_patch(options);
-    client
-        .send_set_params(&chat_id, request_id("set-params"), patch)
-        .await
-        .map_err(map_client_error)?;
-    client
-        .send_user_message(&chat_id, request_id("user-message"), &options.prompt)
-        .await
-        .map_err(map_client_error)?;
+    with_setup_deadline(
+        setup_deadline,
+        options.timeout_secs,
+        "send set_params",
+        async {
+            client
+                .send_set_params(&chat_id, request_id("set-params"), patch)
+                .await
+                .map_err(map_client_error)
+        },
+    )
+    .await?;
+    with_setup_deadline(
+        setup_deadline,
+        options.timeout_secs,
+        "send user message",
+        async {
+            client
+                .send_user_message(&chat_id, request_id("user-message"), &options.prompt)
+                .await
+                .map_err(map_client_error)
+        },
+    )
+    .await?;
 
     let mut state = RunState::new(chat_id.clone());
     state.user_sent = true;
-    let timeout_at = tokio::time::Instant::now() + Duration::from_secs(options.timeout_secs);
     let mut retried_subscribe = false;
 
     loop {
@@ -395,16 +443,7 @@ async fn drive_chat(
             return Ok(summary);
         }
 
-        let timeout = tokio::time::sleep_until(timeout_at);
-        tokio::pin!(timeout);
         tokio::select! {
-            _ = &mut timeout => {
-                let _ = client.send_abort(&chat_id, request_id("timeout-abort")).await;
-                return Err(RunFailure {
-                    kind: RunErrorKind::Timeout,
-                    message: format!("refact run timed out after {} seconds", options.timeout_secs),
-                });
-            }
             _ = ctrl_c(options.listen_ctrl_c) => {
                 let _ = client.send_abort(&chat_id, request_id("ctrl-c-abort")).await;
                 return Err(RunFailure {
@@ -466,7 +505,7 @@ async fn handle_event(
         .and_then(Value::as_str)
         .unwrap_or_default()
     {
-        "snapshot" => handle_snapshot(state, &event)?,
+        "snapshot" => handle_snapshot(state, &event, options, io)?,
         "stream_started" => {
             state.stream_finished = false;
             state.runtime_idle = false;
@@ -502,11 +541,23 @@ async fn handle_event(
     Ok(EventOutcome::Continue)
 }
 
-fn handle_snapshot(state: &mut RunState, event: &Value) -> Result<(), RunFailure> {
+fn handle_snapshot(
+    state: &mut RunState,
+    event: &Value,
+    options: &RunOptions,
+    io: &mut dyn RunIo,
+) -> Result<(), RunFailure> {
     if let Some(text) = latest_assistant_text(event) {
-        if text.len() > state.final_text.len() {
-            state.final_text = text;
+        let old = state.final_text.clone();
+        if text.starts_with(&old) {
+            let suffix = &text[old.len()..];
+            if !options.json && !suffix.is_empty() {
+                io.write_stdout(suffix);
+            }
+        } else if !options.json {
+            io.write_stdout(&format!("\n--- reconnect ---\n{text}"));
         }
+        state.final_text = text;
     }
     if let Some(runtime) = event.get("runtime") {
         if let Some(error) = runtime.get("error").and_then(Value::as_str) {
@@ -1130,6 +1181,80 @@ mod tests {
         }));
         assert_eq!(summary.name, "shell");
         assert!(summary.args_preview.contains("echo hi"));
+    }
+
+    #[test]
+    fn reconnect_snapshot_prefix_prints_only_suffix() {
+        let mut state = RunState::new("chat".to_string());
+        state.final_text = "hello".to_string();
+        let mut io = BufferIo::new();
+        let opts = options(PathBuf::from("/tmp/project"), ApprovalPolicy::Deny, false);
+        handle_snapshot(
+            &mut state,
+            &json!({
+                "messages": [{"role": "assistant", "content": "hello world"}]
+            }),
+            &opts,
+            &mut io,
+        )
+        .unwrap();
+        assert_eq!(io.stdout, " world");
+        assert_eq!(state.final_text, "hello world");
+    }
+
+    #[test]
+    fn reconnect_snapshot_different_text_prints_separator_and_full_text() {
+        let mut state = RunState::new("chat".to_string());
+        state.final_text = "hello".to_string();
+        let mut io = BufferIo::new();
+        let opts = options(PathBuf::from("/tmp/project"), ApprovalPolicy::Deny, false);
+        handle_snapshot(
+            &mut state,
+            &json!({
+                "messages": [{"role": "assistant", "content": "goodbye"}]
+            }),
+            &opts,
+            &mut io,
+        )
+        .unwrap();
+        assert_eq!(io.stdout, "\n--- reconnect ---\ngoodbye");
+        assert_eq!(state.final_text, "goodbye");
+    }
+
+    #[test]
+    fn reconnect_snapshot_json_mode_updates_state_without_streaming() {
+        let mut state = RunState::new("chat".to_string());
+        state.final_text = "hello".to_string();
+        let mut io = BufferIo::new();
+        let opts = options(PathBuf::from("/tmp/project"), ApprovalPolicy::Deny, true);
+        handle_snapshot(
+            &mut state,
+            &json!({
+                "messages": [{"role": "assistant", "content": "hello world"}]
+            }),
+            &opts,
+            &mut io,
+        )
+        .unwrap();
+        assert!(io.stdout.is_empty());
+        assert_eq!(state.final_text, "hello world");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn setup_deadline_returns_timeout_for_pending_step() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let task = tokio::spawn(with_setup_deadline(
+            deadline,
+            5,
+            "subscribe",
+            std::future::pending::<Result<(), RunFailure>>(),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.kind, RunErrorKind::Timeout);
+        assert!(error.message.contains("setup timed out after 5 seconds"));
+        assert!(error.message.contains("subscribe"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

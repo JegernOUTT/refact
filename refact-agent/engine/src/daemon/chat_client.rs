@@ -17,12 +17,17 @@
 //! `tool_call_id`, `tool_name`, `command`, and `rule`. Completion is indicated by
 //! `stream_finished` plus an idle snapshot/runtime state.
 
+use std::time::Duration;
+
 use eventsource_stream::Eventsource;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde_json::json;
 
 use crate::daemon::state::DaemonInfo;
+
+pub(crate) const CHAT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum ChatClientError {
@@ -74,6 +79,7 @@ impl ProxyChatClient {
         auth_token: Option<String>,
     ) -> Result<Self, ChatClientError> {
         let client = reqwest::Client::builder()
+            .connect_timeout(CHAT_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| {
@@ -101,13 +107,11 @@ impl ProxyChatClient {
             self.project_id,
             encode_query_value(chat_id)
         );
-        let response = self
-            .with_auth(self.client.get(url))
-            .send()
-            .await
-            .map_err(|error| {
-                ChatClientError::Http(format!("failed to subscribe to chat: {error}"))
-            })?;
+        let response = send_with_timeout(
+            self.with_auth(self.client.get(url)),
+            "failed to subscribe to chat",
+        )
+        .await?;
         if !response.status().is_success() {
             return Err(status_error(response).await);
         }
@@ -208,13 +212,11 @@ impl ProxyChatClient {
             self.project_id,
             encode_path_segment(chat_id)
         );
-        let response = self
-            .with_auth(self.client.post(url).json(&body))
-            .send()
-            .await
-            .map_err(|error| {
-                ChatClientError::Http(format!("failed to send chat command: {error}"))
-            })?;
+        let response = send_with_timeout(
+            self.with_auth(self.client.post(url).json(&body)),
+            "failed to send chat command",
+        )
+        .await?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -261,16 +263,104 @@ fn encode_path_segment(value: &str) -> String {
 
 async fn status_error(response: reqwest::Response) -> ChatClientError {
     let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|error| error.to_string());
+    let body = match tokio::time::timeout(CHAT_REQUEST_TIMEOUT, response.text()).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => format!(
+            "response body timed out after {} seconds",
+            CHAT_REQUEST_TIMEOUT.as_secs()
+        ),
+    };
     ChatClientError::Status { status, body }
+}
+
+async fn send_with_timeout(
+    request: reqwest::RequestBuilder,
+    context: &str,
+) -> Result<reqwest::Response, ChatClientError> {
+    match tokio::time::timeout(CHAT_REQUEST_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(ChatClientError::Http(format!("{context}: {error}"))),
+        Err(_) => Err(ChatClientError::Http(format!(
+            "{context}: request timed out after {} seconds",
+            CHAT_REQUEST_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn chat_client_builds_with_bounded_setup_timeouts() {
+        assert_eq!(CHAT_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(CHAT_REQUEST_TIMEOUT, Duration::from_secs(30));
+        let _ = ProxyChatClient::new("http://127.0.0.1:8488".to_string(), "p".to_string(), None)
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_command_times_out_on_unresponsive_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let client =
+            ProxyChatClient::new(format!("http://127.0.0.1:{port}"), "p".to_string(), None)
+                .unwrap();
+        let request = tokio::spawn(async move {
+            client
+                .send_user_message("chat", "request".to_string(), "hello")
+                .await
+        });
+        accepted_rx.await.unwrap();
+        tokio::time::advance(CHAT_REQUEST_TIMEOUT + Duration::from_millis(1)).await;
+        let error = request.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("failed to send chat command"));
+        assert!(error
+            .to_string()
+            .contains("request timed out after 30 seconds"));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subscribe_does_not_timeout_sse_body_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(CHAT_REQUEST_TIMEOUT + Duration::from_secs(5)).await;
+            socket
+                .write_all(b"data: {\"type\":\"snapshot\",\"messages\":[]}\n\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client =
+            ProxyChatClient::new(format!("http://127.0.0.1:{port}"), "p".to_string(), None)
+                .unwrap();
+        let mut stream = client.subscribe("chat").await.unwrap();
+        tokio::time::advance(CHAT_REQUEST_TIMEOUT + Duration::from_secs(5)).await;
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            event.get("type").and_then(serde_json::Value::as_str),
+            Some("snapshot")
+        );
+        server.abort();
+    }
 
     #[test]
     fn daemon_base_url_uses_loopback_for_wildcard_binds() {
