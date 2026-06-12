@@ -6,14 +6,35 @@ use tokio::sync::Mutex as AMutex;
 use tokio::fs;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::trajectories::{find_trajectory_or_buddy_path, validate_trajectory_id};
+use crate::tools::task_tool_helpers::optional_id_string;
 use crate::tools::tools_description::{
-    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
+    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
-use crate::files_correction::get_project_dirs;
 
 pub struct ToolTrajectoryContext {
     pub config_path: String,
+}
+
+fn resolve_trajectory_lookup_id(args: &HashMap<String, Value>) -> Result<String, String> {
+    let trajectory_id = optional_id_string(args, "trajectory_id")?;
+    let chat_id = optional_id_string(args, "chat_id")?;
+    let id = match (trajectory_id, chat_id) {
+        (Some(trajectory_id), Some(chat_id)) if trajectory_id != chat_id => {
+            return Err("trajectory_id and chat_id must match when both are provided".to_string());
+        }
+        (Some(trajectory_id), _) => trajectory_id,
+        (None, Some(chat_id)) => chat_id,
+        (None, None) => {
+            return Err(
+                "⚠️ Missing trajectory_id or chat_id. 💡 Check .refact/trajectories/ for available IDs"
+                    .to_string(),
+            );
+        }
+    };
+    validate_trajectory_id(&id).map_err(|e| e.message)?;
+    Ok(id)
 }
 
 #[async_trait]
@@ -38,6 +59,7 @@ impl Tool for ToolTrajectoryContext {
                         "string",
                         "The trajectory ID to retrieve context from.",
                     ),
+                    ("chat_id", "string", "Chat ID alias for trajectory_id."),
                     ("message_start", "string", "Starting message index."),
                     ("message_end", "string", "Ending message index."),
                     (
@@ -46,7 +68,7 @@ impl Tool for ToolTrajectoryContext {
                         "Number of messages to include before/after (default: 3).",
                     ),
                 ],
-                &["trajectory_id", "message_start", "message_end"],
+                &["message_start", "message_end"],
             ),
             output_schema: None,
             annotations: None,
@@ -59,14 +81,7 @@ impl Tool for ToolTrajectoryContext {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let trajectory_id =
-            match args.get("trajectory_id") {
-                Some(Value::String(s)) => s.clone(),
-                _ => return Err(
-                    "⚠️ Missing trajectory_id. 💡 Check .refact/trajectories/ for available IDs"
-                        .to_string(),
-                ),
-            };
+        let trajectory_id = resolve_trajectory_lookup_id(args)?;
 
         let msg_start: usize = match args.get("message_start") {
             Some(Value::String(s)) => s
@@ -107,10 +122,8 @@ impl Tool for ToolTrajectoryContext {
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
-        let traj_path = project_dirs.iter()
-            .map(|dir| dir.join(".refact/trajectories").join(format!("{}.json", trajectory_id)))
-            .find(|p| p.exists())
+        let traj_path = find_trajectory_or_buddy_path(gcx, &trajectory_id)
+            .await
             .ok_or(format!("⚠️ Trajectory '{}' not found. 💡 Check .refact/trajectories/ or use knowledge() to search", trajectory_id))?;
 
         let content = fs::read_to_string(&traj_path)
@@ -260,4 +273,84 @@ fn extract_content(msg: &Value) -> String {
     }
 
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::tools::tools_description::Tool;
+    use serde_json::json;
+
+    async fn test_ccx(root: &std::path::Path) -> Arc<AMutex<AtCommandsContext>> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "conductor-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn trajectory_context_explicit_chat_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let traj_dir = temp.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&traj_dir).await.unwrap();
+        tokio::fs::write(
+            traj_dir.join("explicit-chat.json"),
+            serde_json::to_string(&json!({
+                "id": "explicit-chat",
+                "title": "Explicit chat",
+                "messages": [
+                    {"role": "user", "content": "hello from explicit chat"},
+                    {"role": "assistant", "content": "response from trajectory"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let ccx = test_ccx(temp.path()).await;
+        let mut tool = ToolTrajectoryContext {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([
+            ("chat_id".to_string(), json!("explicit-chat")),
+            ("message_start".to_string(), json!(0)),
+            ("message_end".to_string(), json!(0)),
+            ("expand_by".to_string(), json!(0)),
+        ]);
+
+        let output = tool_output_text(
+            tool.tool_execute(ccx, &"call".to_string(), &args)
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("explicit-chat"));
+        assert!(output.contains("hello from explicit chat"));
+        assert!(!output.contains("response from trajectory"));
+    }
 }

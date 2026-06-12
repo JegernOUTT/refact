@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use async_trait::async_trait;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
@@ -159,6 +160,21 @@ impl Tool for ToolAskQuestions {
                 });
             }
         }
+
+        let (wake_gcx, wake_task_id) = {
+            let ccx_lock = ccx.lock().await;
+            (
+                ccx_lock.global_context.clone(),
+                ccx_lock.task_meta.as_ref().map(|meta| meta.task_id.clone()),
+            )
+        };
+        crate::buddy::conductor::wake::enqueue_chat_or_task_wake(
+            wake_gcx,
+            &chat_id,
+            wake_task_id.as_deref(),
+            ConductorWakeReason::ChatLifecycle,
+        )
+        .await;
 
         let result = serde_json::json!({
             "type": "ask_questions",

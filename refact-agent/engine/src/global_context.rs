@@ -20,6 +20,7 @@ use crate::app_state::{
     ChatServices, EngineChatSessionFacade, IntegrationServices, ModelServices, PathServices,
     RuntimeServices, TokenizerState, WorkspaceServices,
 };
+use crate::buddy::conductor::wake::{ConductorWakeBus, ConductorWakeTargets};
 use crate::caps::CodeAssistantCaps;
 use crate::caps::providers::get_latest_provider_mtime;
 use crate::providers::{ProviderRegistry, load_providers_from_config};
@@ -286,6 +287,8 @@ pub struct GlobalContext {
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
+    pub conductor_wake_bus: Arc<AMutex<ConductorWakeBus>>,
+    pub conductor_wake_targets: Arc<AMutex<ConductorWakeTargets>>,
     pub agents: Arc<BackgroundAgentRegistry>,
     pub scheduler_config: SchedulerConfig,
 }
@@ -360,6 +363,8 @@ impl GlobalContext {
                     .clone()
                     .expect("buddy event sender is not initialized"),
                 user_activity: self.user_activity.clone(),
+                conductor_wake_bus: self.conductor_wake_bus.clone(),
+                conductor_wake_targets: self.conductor_wake_targets.clone(),
             },
             integrations: IntegrationServices {
                 integration_sessions: self.integration_sessions.clone(),
@@ -759,6 +764,8 @@ pub async fn create_global_context(
         buddy: Arc::new(AMutex::new(None)),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
+        conductor_wake_bus: Arc::new(AMutex::new(ConductorWakeBus::new())),
+        conductor_wake_targets: Arc::new(AMutex::new(ConductorWakeTargets::default())),
         agents,
         scheduler_config,
     };
@@ -803,6 +810,14 @@ pub mod tests {
             &second_app_state.model.tokenizers
         ));
         assert!(Arc::ptr_eq(&app_state.agents, &second_app_state.agents));
+        assert!(Arc::ptr_eq(
+            &app_state.buddy.conductor_wake_bus,
+            &second_app_state.buddy.conductor_wake_bus
+        ));
+        assert!(Arc::ptr_eq(
+            &app_state.buddy.conductor_wake_targets,
+            &second_app_state.buddy.conductor_wake_targets
+        ));
     }
 
     #[tokio::test]
@@ -936,6 +951,8 @@ pub mod tests {
             buddy: Arc::new(AMutex::new(None)),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
+            conductor_wake_bus: Arc::new(AMutex::new(ConductorWakeBus::new())),
+            conductor_wake_targets: Arc::new(AMutex::new(ConductorWakeTargets::default())),
             agents,
             scheduler_config: SchedulerConfig::default(),
         };

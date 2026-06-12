@@ -25,7 +25,7 @@ impl Tool for ToolBuddyOpenView {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Navigate the user's GUI to a specific Refact page (Buddy home, Stats, Customization, Providers, Default Models, Integrations, Extensions, Marketplace Hub & sub-marketplaces, Tasks list/workspace, Knowledge Graph).".to_string(),
+            description: "Navigate the user's GUI to a specific Refact page (Buddy home, Conductor, Stats, Customization, Providers, Default Models, Integrations, Extensions, Marketplace Hub & sub-marketplaces, Tasks list/workspace, Knowledge Graph).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -41,7 +41,8 @@ impl Tool for ToolBuddyOpenView {
                                     "default_models", "integrations", "extensions",
                                     "marketplace_hub", "marketplace", "skills_marketplace",
                                     "commands_marketplace", "delegates_marketplace",
-                                    "tasks_list", "task_workspace", "knowledge_graph"
+                                    "tasks_list", "task_workspace", "knowledge_graph",
+                                    "conductor"
                                 ]
                             },
                             "task_id": {

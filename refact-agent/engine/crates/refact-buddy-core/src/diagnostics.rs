@@ -10,6 +10,10 @@ pub enum DiagnosticSeverity {
     Critical,
 }
 
+fn default_occurrence_count() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticContext {
     pub error_type: String,
@@ -19,6 +23,8 @@ pub struct DiagnosticContext {
     pub chat_id: Option<String>,
     pub collected_at: String,
     pub severity: DiagnosticSeverity,
+    #[serde(default = "default_occurrence_count")]
+    pub occurrence_count: u64,
 }
 
 pub fn collect_diagnostics_from_error(error: &str) -> DiagnosticContext {
@@ -40,6 +46,7 @@ pub fn collect_diagnostics_from_error(error: &str) -> DiagnosticContext {
         chat_id: None,
         collected_at: Utc::now().to_rfc3339(),
         severity,
+        occurrence_count: 1,
     }
 }
 

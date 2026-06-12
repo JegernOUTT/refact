@@ -29,6 +29,8 @@ export function actionLabel(action: BuddyAction): string {
       return `Edit ${humanizeCustomizationKind(action.customization_kind)}`;
     case "offer_marketplace_install":
       return `Install ${humanizeMarketKind(action.market_kind)}`;
+    case "start_conductor_goal":
+      return "Create conductor goal";
     case "create_pulse_report":
       return `Create ${humanizePulseScope(action.scope)} report`;
     case "dismiss":
@@ -176,6 +178,8 @@ function humanizePage(page: BuddyPage): string {
       return "Knowledge Graph";
     case "worktrees":
       return "Worktrees";
+    case "conductor":
+      return "Conductor";
     case "setup_mode":
       return "Setup";
   }

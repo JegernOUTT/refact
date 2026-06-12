@@ -448,6 +448,22 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         }),
     ];
 
+    let conductor_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_conductor::ToolConductorSteerChat::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorSpawnPlanner::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorMemo::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorSetAutonomy::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorEscalate::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorGoalStatus::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorSay::new()),
+        Box::new(crate::tools::tool_conductor::ToolConductorAsk::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryList::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryDigest::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryEdit::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryRemove::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryInsert::new()),
+    ];
+
     let task_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(crate::tools::tool_task_init::ToolTaskInit::new()),
         Box::new(crate::tools::tool_task_board::ToolTaskBoardGet::new()),
@@ -581,6 +597,12 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
             description: "Chat compression and handoff tools".to_string(),
             category: ToolGroupCategory::Builtin,
             tools: chat_management_tools,
+        },
+        ToolGroup {
+            name: "Conductor".to_string(),
+            description: "Buddy conductor goal orchestration tools".to_string(),
+            category: ToolGroupCategory::Builtin,
+            tools: conductor_tools,
         },
         ToolGroup {
             name: "Task Management".to_string(),

@@ -54,6 +54,7 @@ const MAX_BEHAVIOR_TRAJECTORY_SCAN_FILES: usize = 5_000;
 const MAX_BEHAVIOR_TRAJECTORY_SCAN_ENTRIES: usize = 5_000;
 const MAX_BEHAVIOR_TASK_DIR_SCAN_ENTRIES: usize = 1_000;
 const MODEL_COST_RECENT_EVENT_LIMIT: usize = 500;
+const AUTONOMOUS_FORBIDDEN_ISSUE_TOOLS: &[&str] = &["buddy_create_issue", "buddy_open_issue"];
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1899,6 +1900,7 @@ pub async fn run_autonomous_buddy_chat(
         is_buddy_chat: true,
         buddy_chat_kind: "system".to_string(),
         workflow_id: Some(spec.workflow_id.clone()),
+        goal_id: None,
     });
 
     let result = crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await?;
@@ -1952,7 +1954,19 @@ async fn build_autonomous_messages(
         ChatMessage::new("system".to_string(), system_prompt),
         ChatMessage::new("user".to_string(), user_prompt),
     ];
-    Ok((messages, max_steps, subagent_config.tools))
+    Ok((
+        messages,
+        max_steps,
+        filter_autonomous_tools(subagent_config.tools),
+    ))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn filter_autonomous_tools(tools: Vec<String>) -> Vec<String> {
+    tools
+        .into_iter()
+        .filter(|tool| !AUTONOMOUS_FORBIDDEN_ISSUE_TOOLS.contains(&tool.as_str()))
+        .collect()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5069,6 +5083,56 @@ mod tests {
         assert!(!user_prompt.contains("promptsecret"));
         assert!(!user_prompt.contains("evidencesecret"));
         assert!(user_prompt.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn autonomous_tool_filter_removes_issue_tools_from_customized_configs() {
+        let tools = filter_autonomous_tools(vec![
+            "cat".to_string(),
+            "buddy_open_issue".to_string(),
+            "buddy_runtime_event".to_string(),
+            "buddy_create_issue".to_string(),
+        ]);
+
+        assert_eq!(
+            tools,
+            vec!["cat".to_string(), "buddy_runtime_event".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_autonomous_yaml_does_not_expose_issue_tools() {
+        let yamls = [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/buddy_dependency_radar.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/refact_compile_sniffer.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/refact_error_detective.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/buddy_security_whisperer.yaml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/refact-yaml-configs/src/defaults/subagents/buddy_test_coverage_watcher.yaml"
+            )),
+        ];
+
+        for yaml in yamls {
+            for tool in AUTONOMOUS_FORBIDDEN_ISSUE_TOOLS {
+                assert!(
+                    !yaml.contains(tool),
+                    "default autonomous YAML exposes {tool}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

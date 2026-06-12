@@ -211,13 +211,25 @@ fn test_auto_gate_blocks_without_repro() {
 }
 
 #[test]
-fn test_manual_gate_allows_without_auto_enabled() {
+fn test_manual_gate_requires_repro_and_rate_limit_safety() {
     let gate = IssueGate {
         has_diagnostics: true,
         has_repro_context: false,
         integration_configured: true,
         auto_creation_enabled: false,
         within_rate_limit: false,
+    };
+    assert!(!check_manual_issue_gate(&gate));
+}
+
+#[test]
+fn test_manual_gate_allows_without_auto_enabled_after_safety_checks() {
+    let gate = IssueGate {
+        has_diagnostics: true,
+        has_repro_context: true,
+        integration_configured: true,
+        auto_creation_enabled: false,
+        within_rate_limit: true,
     };
     assert!(check_manual_issue_gate(&gate));
 }
@@ -943,6 +955,23 @@ fn test_classification_case_insensitive() {
 }
 
 #[test]
+fn legacy_diagnostic_deserializes_occurrence_count_as_one() {
+    let json = r#"{
+        "error_type":"timeout",
+        "error_message":"connection timeout",
+        "source_file":null,
+        "tool_name":null,
+        "chat_id":null,
+        "collected_at":"2026-06-05T00:00:00Z",
+        "severity":"high"
+    }"#;
+
+    let ctx: DiagnosticContext = serde_json::from_str(json).unwrap();
+
+    assert_eq!(ctx.occurrence_count, 1);
+}
+
+#[test]
 fn test_classify_timeout() {
     assert_eq!(classify_error("connection timeout after 30s"), "timeout");
     assert_eq!(classify_error("request timed out"), "generic");
@@ -1020,6 +1049,7 @@ fn make_issue_ctx(message: &str) -> DiagnosticContext {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     }
 }
 
@@ -1203,7 +1233,7 @@ fn mcp_issue_prepare_respects_rate_limit_when_not_manual() {
     .unwrap_err();
     assert!(err.contains("rate limit active"));
 
-    let prepared = prepare_issue_content(
+    let err = prepare_issue_content(
         &ctx,
         Some("Title"),
         Some("Body"),
@@ -1211,6 +1241,23 @@ fn mcp_issue_prepare_respects_rate_limit_when_not_manual() {
         false,
         true,
         Some(std::time::Instant::now()),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.contains("rate limit active"));
+}
+
+#[test]
+fn manual_issue_prepare_bypasses_only_auto_creation_setting() {
+    let ctx = make_issue_ctx("human confirmed issue error");
+    let prepared = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        false,
+        true,
+        None,
         &[],
     )
     .unwrap();
@@ -1385,6 +1432,7 @@ async fn test_diagnostic_cap() {
             chat_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::Low,
+            occurrence_count: 1,
         };
         svc.add_diagnostic(ctx);
     }
@@ -1405,6 +1453,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         chat_id: Some("chat-1".to_string()),
         collected_at: "2026-04-27T10:00:00Z".to_string(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let ctx2 = DiagnosticContext {
         error_type: "test".to_string(),
@@ -1414,6 +1463,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         chat_id: Some("chat-2".to_string()),
         collected_at: "2026-04-27T10:01:00Z".to_string(),
         severity: DiagnosticSeverity::Low,
+        occurrence_count: 1,
     };
 
     super::storage::append_diagnostic(root, &ctx1)
@@ -1792,6 +1842,7 @@ fn make_job_context(
             chat_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         });
     }
     BuddyJobContext {
@@ -2156,6 +2207,7 @@ async fn diagnostic_metadata_is_redacted_before_storage() {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     });
 
     let stored = svc.recent_diagnostics.first().unwrap();
@@ -2177,6 +2229,7 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
         chat_id: Some("chat-1".to_string()),
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let mut later = ctx.clone();
     later.collected_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
@@ -2187,8 +2240,70 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
     svc.add_diagnostic(later);
 
     assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(svc.recent_diagnostics[0].occurrence_count, 2);
     assert_eq!(svc.runtime_queue.items.len(), 1);
     assert!(svc.runtime_queue.items.front().unwrap().dismissed);
+}
+
+#[tokio::test]
+async fn high_diagnostic_runtime_event_is_durable() {
+    let mut svc = make_service();
+    let ctx = DiagnosticContext {
+        error_type: "frontend".to_string(),
+        error_message: "Critical render error".to_string(),
+        source_file: Some("frontend/window_error".to_string()),
+        tool_name: None,
+        chat_id: Some("chat-1".to_string()),
+        collected_at: chrono::Utc::now().to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
+    };
+
+    svc.add_diagnostic(ctx);
+
+    let event = svc.runtime_queue.items.front().unwrap();
+    assert_eq!(event.priority, "high");
+    assert!(event.persistent);
+    assert_eq!(event.ttl_ms, None);
+    assert_eq!(
+        event.bubble_policy,
+        Some(super::types::BuddyBubblePolicy::Durable)
+    );
+}
+
+#[tokio::test]
+async fn duplicate_diagnostic_occurrence_increment_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    super::storage::bootstrap_buddy_storage(&root)
+        .await
+        .unwrap();
+    let mut svc = make_service();
+    svc.project_root = root.clone();
+    let ctx = DiagnosticContext {
+        error_type: "frontend".to_string(),
+        error_message: "Repeated render error".to_string(),
+        source_file: Some("frontend/window_error".to_string()),
+        tool_name: Some("frontend".to_string()),
+        chat_id: Some("chat-1".to_string()),
+        collected_at: chrono::Utc::now().to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
+    };
+
+    svc.add_diagnostic(ctx.clone());
+    let mut later = ctx.clone();
+    later.collected_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    svc.add_diagnostic(later);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(svc.recent_diagnostics[0].occurrence_count, 2);
+    let loaded = super::storage::load_recent_diagnostics(&root, 100)
+        .await
+        .unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].occurrence_count, 2);
 }
 
 #[test]
@@ -2487,6 +2602,122 @@ async fn test_runtime_queue_dismissal_survives_restart() {
         .find(|e| e.id == id)
         .expect("event missing");
     assert!(restored.dismissed, "dismissal must survive replay");
+}
+
+#[tokio::test]
+async fn test_runtime_queue_dismissal_timestamp_survives_restart() {
+    use super::actor::make_runtime_event;
+    use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut ev = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "dismissed-at-key",
+        "failed",
+        Some("high"),
+    );
+    let dismissed_at = chrono::Utc::now().to_rfc3339();
+    ev.dismissed = true;
+    ev.dismissed_at = Some(dismissed_at.clone());
+    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev })
+        .await
+        .unwrap();
+
+    let queue = load_runtime_queue(root).await;
+    let restored = queue.items.front().expect("event missing");
+
+    assert!(restored.dismissed);
+    assert_eq!(
+        restored.dismissed_at.as_deref(),
+        Some(dismissed_at.as_str())
+    );
+}
+
+#[test]
+fn buddy_service_restart_uses_original_dismissed_at_for_dedupe_window() {
+    use super::actor::make_runtime_event;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let mut queue = super::runtime_queue::RuntimeQueue::new();
+    let mut event = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "restart-key",
+        "failed",
+        Some("high"),
+    );
+    event.dismissed = true;
+    event.dismissed_at = Some((chrono::Utc::now() - Duration::hours(23)).to_rfc3339());
+    queue.items.push_back(event);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        queue,
+        events_tx,
+        None,
+    );
+
+    let incoming = make_runtime_event(
+        "error",
+        "boom again",
+        "frontend",
+        "restart-key",
+        "failed",
+        Some("high"),
+    );
+    let stored = svc.enqueue_runtime_event_with_stored(incoming).unwrap();
+
+    assert!(stored.dismissed);
+    assert_eq!(
+        stored.dismissed_at.as_deref(),
+        svc.dismissed_runtime_keys
+            .get("restart-key")
+            .map(|at| at.to_rfc3339())
+            .as_deref()
+    );
+}
+
+#[test]
+fn buddy_service_legacy_dismissed_runtime_key_uses_created_at_on_restart() {
+    use super::actor::make_runtime_event;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let mut queue = super::runtime_queue::RuntimeQueue::new();
+    let mut event = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "legacy-restart-key",
+        "failed",
+        Some("high"),
+    );
+    event.created_at = "2024-01-01T00:00:00Z".to_string();
+    event.dismissed = true;
+    event.dismissed_at = None;
+    queue.items.push_back(event);
+    let svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        queue,
+        events_tx,
+        None,
+    );
+
+    assert_eq!(
+        svc.dismissed_runtime_keys
+            .get("legacy-restart-key")
+            .map(|at| at.to_rfc3339())
+            .as_deref(),
+        Some("2024-01-01T00:00:00+00:00")
+    );
 }
 
 /// Fill the queue past its cap, write a `Removed` tombstone for an evicted
@@ -2904,6 +3135,42 @@ async fn generated_runtime_event_title_and_description_with_secret_use_fallbacks
 }
 
 #[tokio::test]
+async fn generated_runtime_event_fast_with_unsafe_output_uses_fallbacks() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test-user".to_string());
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![Some(format!(
+            "Runtime copied {home}/private/project token=FASTSECRET"
+        ))]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+    let fallback_title = "Safe fast runtime title".to_string();
+    let fallback_description = "Safe fast runtime description".to_string();
+
+    let (title, description) = super::actor::render_buddy_runtime_event_fast(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Puck".to_string(),
+        BuddyPulse::default(),
+        Some("secret_runtime_fast_test".to_string()),
+        format!("Description token=SUMMARYSECRET at {home}/private/project"),
+        "completed",
+        fallback_title.clone(),
+        Some(fallback_description.clone()),
+    )
+    .await;
+
+    assert_eq!(title, fallback_title);
+    assert_eq!(description.as_deref(), Some(fallback_description.as_str()));
+    let rendered = format!("{} {}", title, description.unwrap_or_default());
+    assert!(!rendered.contains("FASTSECRET"));
+    assert!(!rendered.contains("SUMMARYSECRET"));
+    assert!(!rendered.contains(home.as_str()));
+    assert!(!rendered.contains("[REDACTED"));
+}
+
+#[tokio::test]
 async fn generated_activity_title_with_secret_uses_fallback() {
     let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
         vec![Some("Activity token=ACTIVITYSECRET".to_string())],
@@ -3196,6 +3463,39 @@ fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
     }
 }
 
+fn assert_no_placeholder_opportunity_actions(opps: &[(BuddyOpportunity, u64)]) {
+    for (opp, _) in opps {
+        for action in &opp.proposed_actions {
+            match action {
+                BuddyAction::DraftAgentsMdPatch { content } => {
+                    assert!(
+                        !content.trim().is_empty(),
+                        "empty AGENTS.md draft in {}",
+                        opp.summary
+                    );
+                }
+                BuddyAction::DraftDefaultsChange { patch, .. }
+                | BuddyAction::DraftCustomizationChange { patch, .. } => {
+                    assert_ne!(
+                        patch,
+                        &serde_json::json!({}),
+                        "empty patch in {}",
+                        opp.summary
+                    );
+                    let serialized = serde_json::to_string(patch).unwrap();
+                    assert!(
+                        !serialized.contains("your-provider/model-name"),
+                        "placeholder model in {}: {}",
+                        opp.summary,
+                        serialized
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn push_opportunity(queue: &mut super::opportunities::OpportunityQueue, opp: BuddyOpportunity) {
     queue.push_with_cooldown(
         opp,
@@ -3436,6 +3736,11 @@ fn buddy_action_round_trip() {
             market_kind: MarketKind::Mcp,
             item_id: "github-mcp".to_string(),
         },
+        BuddyAction::StartConductorGoal {
+            title: "Buddy Conductor".to_string(),
+            plan_doc_slug: Some("master-plan".to_string()),
+            source_task_id: Some("task-1".to_string()),
+        },
         BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
         },
@@ -3470,6 +3775,7 @@ fn buddy_page_round_trip() {
         },
         BuddyPage::KnowledgeGraph,
         BuddyPage::Worktrees,
+        BuddyPage::Conductor,
         BuddyPage::SetupMode {
             mode: "setup_mcp".to_string(),
         },
@@ -3532,6 +3838,7 @@ fn schema_contract_buddy_page_variants() {
         ),
         (BuddyPage::KnowledgeGraph, "knowledge_graph"),
         (BuddyPage::Worktrees, "worktrees"),
+        (BuddyPage::Conductor, "conductor"),
         (
             BuddyPage::SetupMode {
                 mode: "setup_mcp".to_string(),
@@ -3636,6 +3943,14 @@ fn schema_contract_buddy_action_variants() {
                 item_id: "item-1".to_string(),
             },
             "offer_marketplace_install",
+        ),
+        (
+            BuddyAction::StartConductorGoal {
+                title: "Buddy Conductor".to_string(),
+                plan_doc_slug: Some("master-plan".to_string()),
+                source_task_id: Some("task-1".to_string()),
+            },
+            "start_conductor_goal",
         ),
         (
             BuddyAction::CreatePulseReport {
@@ -3890,6 +4205,7 @@ fn should_observe_thread_skips_buddy_task_setup_and_subchats() {
         is_buddy_chat: true,
         buddy_chat_kind: "investigation".to_string(),
         workflow_id: None,
+        goal_id: None,
     });
     assert!(!super::chat_reactions::should_observe_thread(&thread));
 
@@ -4381,7 +4697,7 @@ async fn parallel_observer_execution_not_sequentially_additive() {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let start = std::time::Instant::now();
-    let facts = super::actor::observe_buddy_facts_parallel(
+    let report = super::actor::observe_buddy_facts_parallel(
         observers,
         app,
         std::env::temp_dir(),
@@ -4389,7 +4705,9 @@ async fn parallel_observer_execution_not_sequentially_additive() {
     )
     .await;
     let elapsed = start.elapsed();
-    assert_eq!(facts.len(), 2);
+    assert_eq!(report.facts.len(), 2);
+    assert_eq!(report.successes.len(), 2);
+    assert!(report.failures.is_empty());
     assert!(
         elapsed < tokio::time::Duration::from_millis(1700),
         "parallel observers took too long: {:?}",
@@ -4415,6 +4733,7 @@ fn make_task_meta(id: &str, name: &str, status: TaskStatus, created_at: &str) ->
         is_name_generated: false,
         last_agents_summary_at: None,
         planner_session_state: None,
+        conductor: None,
     }
 }
 
@@ -4713,6 +5032,7 @@ fn diagnostic_cluster_threshold() {
             chat_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -4738,6 +5058,7 @@ fn frontend_error_burst() {
             chat_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::Medium,
+            occurrence_count: 1,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -4747,6 +5068,54 @@ fn frontend_error_burst() {
             .any(|f| f.kind == BuddyFactKind::FrontendErrorBurst),
         "frontend burst fact must be emitted for 5 frontend diagnostics"
     );
+}
+
+#[test]
+fn diagnostic_cluster_counts_occurrences() {
+    use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
+    let now = chrono::Utc::now();
+    let diags = vec![DiagnosticContext {
+        error_type: "timeout".to_string(),
+        error_message: "same timeout".to_string(),
+        source_file: None,
+        tool_name: None,
+        chat_id: None,
+        collected_at: (now - Duration::minutes(5)).to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 3,
+    }];
+
+    let facts = detect_diagnostic_cluster_facts(&diags, now);
+    let fact = facts
+        .iter()
+        .find(|f| f.kind == BuddyFactKind::DiagnosticCluster)
+        .expect("occurrences should satisfy cluster threshold");
+    assert_eq!(fact.payload["count"].as_u64(), Some(3));
+    assert_eq!(fact.payload["diagnostic_ids"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn frontend_error_burst_counts_occurrences() {
+    use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
+    let now = chrono::Utc::now();
+    let diags = vec![DiagnosticContext {
+        error_type: "js_error".to_string(),
+        error_message: "same frontend error".to_string(),
+        source_file: None,
+        tool_name: Some("frontend".to_string()),
+        chat_id: None,
+        collected_at: (now - Duration::minutes(2)).to_rfc3339(),
+        severity: DiagnosticSeverity::Medium,
+        occurrence_count: 5,
+    }];
+
+    let facts = detect_diagnostic_cluster_facts(&diags, now);
+    let fact = facts
+        .iter()
+        .find(|f| f.kind == BuddyFactKind::FrontendErrorBurst)
+        .expect("frontend occurrences should satisfy burst threshold");
+    assert_eq!(fact.payload["count"].as_u64(), Some(5));
+    assert_eq!(fact.payload["diagnostic_ids"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -5943,6 +6312,7 @@ async fn accept_agents_md_action_returns_content_draft_id() {
         &BuddyAction::DraftAgentsMdPatch {
             content: content.to_string(),
         },
+        None,
     )
     .await
     .expect("agents md draft action must succeed");
@@ -5963,6 +6333,7 @@ async fn accept_pulse_report_action_returns_report_draft_id() {
         &BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
         },
+        None,
     )
     .await
     .expect("pulse report draft action must succeed");
@@ -6033,6 +6404,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            goal_id: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,
@@ -6329,6 +6701,7 @@ async fn draft_customization_change_reads_real_editor_storage() {
                 id: id.to_string(),
                 patch: serde_json::json!({}),
             },
+            None,
         )
         .await
         .expect("draft action must succeed");
@@ -6890,21 +7263,16 @@ fn mode_overlap_payload_keys_match_detector() {
         "cooldown_key must include real mode_id, got: {}",
         opp.cooldown_key
     );
-    let has_customization_action = opp
+    assert!(opp.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::OpenPage {
+            page: BuddyPage::Customization
+        }
+    )));
+    assert!(opp
         .proposed_actions
         .iter()
-        .any(|a| matches!(a, BuddyAction::DraftCustomizationChange { .. }));
-    assert!(
-        has_customization_action,
-        "opp must have DraftCustomizationChange action"
-    );
-    if let Some(BuddyAction::DraftCustomizationChange { id, .. }) = opp
-        .proposed_actions
-        .iter()
-        .find(|a| matches!(a, BuddyAction::DraftCustomizationChange { .. }))
-    {
-        assert_eq!(id, "beta", "action id must match mode_id from payload");
-    }
+        .all(|a| !matches!(a, BuddyAction::DraftCustomizationChange { .. })));
 }
 
 #[tokio::test]
@@ -7329,7 +7697,7 @@ async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    let outcome = dispatch_action(app.clone(), "opp-acc-dm", &BuddyAction::Dismiss)
+    let outcome = dispatch_action(app.clone(), "opp-acc-dm", &BuddyAction::Dismiss, None)
         .await
         .unwrap();
 
@@ -7381,6 +7749,7 @@ async fn draft_customization_change_dispatches() {
             id: "mode-x".to_string(),
             patch: serde_json::json!({}),
         },
+        None,
     )
     .await
     .unwrap();
@@ -7453,7 +7822,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
         patch: serde_json::json!({}),
     };
 
-    let outcome = dispatch_action(app.clone(), "irrelevant-id", &action)
+    let outcome = dispatch_action(app.clone(), "irrelevant-id", &action, None)
         .await
         .unwrap();
 
@@ -7484,7 +7853,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
             .get("chat_buddy")
             .and_then(|v| v.get("model"))
             .and_then(|v| v.as_str()),
-        Some("your-provider/model-name")
+        None
     );
 
     assert!(
@@ -7730,7 +8099,11 @@ async fn accept_route_terminal_status_returns_409() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-terminal-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7764,7 +8137,11 @@ async fn accept_after_dismiss_returns_409() {
     let accept_err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dismiss-then-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7801,7 +8178,11 @@ async fn expired_opportunity_cannot_be_accepted() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-expired-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7854,7 +8235,11 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app1.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+                budget: None,
+                created_goal_id: None,
+            })),
         )
         .await
         {
@@ -7866,7 +8251,11 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app2.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+                budget: None,
+                created_goal_id: None,
+            })),
         )
         .await
         {
@@ -7898,7 +8287,11 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
     let _ = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-accept-dismiss-action".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap();
@@ -7953,7 +8346,11 @@ async fn accept_route_with_action_index_1_returns_second_action_without_navigati
     let response = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-action-index".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 1 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 1,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap();
@@ -7993,7 +8390,11 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8011,7 +8412,11 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8040,7 +8445,11 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8059,7 +8468,11 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8087,7 +8500,11 @@ async fn successful_marketplace_install_accepts_opportunity() {
     let response = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-ok".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+            created_goal_id: None,
+        })),
     )
     .await
     .unwrap();
@@ -8249,7 +8666,92 @@ fn restart_preserves_per_rule_cooldown() {
 }
 
 #[test]
-fn provider_tuning_uses_field_specific_defaults_kind() {
+fn surfaced_opportunities_do_not_emit_placeholder_drafts() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::DefaultModelMissing,
+        key: "provider:default_missing:chat_model".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "field": "chat_model", "model_id": serde_json::Value::Null }),
+        seen_at: now,
+        confidence: 0.95,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::ModePromptOverlap,
+        key: "customization:mode_overlap:alpha:beta".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "mode_id": "beta", "peer_id": "alpha" }),
+        seen_at: now,
+        confidence: 0.8,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::SkillTriggerWeak,
+        key: "customization:skill_trigger:skill-a".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "skill_id": "skill-a" }),
+        seen_at: now,
+        confidence: 0.8,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::AgentsMdGapDetected,
+        key: "agents_md:gap".to_string(),
+        source: "test",
+        payload: serde_json::json!({}),
+        seen_at: now,
+        confidence: 0.8,
+    });
+
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+
+    assert_no_placeholder_opportunity_actions(&opps);
+}
+
+#[test]
+fn provider_tuning_missing_without_candidate_has_navigation_only() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::DefaultModelMissing,
+        key: "provider:default_missing:chat_model".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "field": "chat_model", "model_id": serde_json::Value::Null }),
+        seen_at: now,
+        confidence: 0.95,
+    });
+
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+    let (opp, cooldown_secs) = opps
+        .iter()
+        .find(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
+        .expect("must emit provider tuning opportunity");
+
+    assert_eq!(*cooldown_secs, 7200);
+    assert_eq!(opp.cooldown_secs, 7200);
+    assert!(opp.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::OpenPage {
+            page: BuddyPage::DefaultModels
+        }
+    )));
+    assert!(opp
+        .proposed_actions
+        .iter()
+        .any(|a| matches!(a, BuddyAction::Dismiss)));
+    assert!(opp
+        .proposed_actions
+        .iter()
+        .all(|a| !matches!(a, BuddyAction::DraftDefaultsChange { .. })));
+}
+
+#[test]
+fn provider_tuning_uses_field_specific_defaults_kind_with_candidate() {
     use super::facts::FactStore;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
     let now = chrono::Utc::now();
@@ -8272,12 +8774,17 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
     ];
 
     for (field, patch_key, expected_kind_str) in cases {
+        let candidate_model = format!("openai/{}", field.replace('_', "-"));
         let mut store = FactStore::new();
         store.ingest(BuddyFact {
             kind: BuddyFactKind::DefaultModelMissing,
             key: format!("provider:default_missing:{}", field),
             source: "test",
-            payload: serde_json::json!({ "field": field, "model_id": serde_json::Value::Null }),
+            payload: serde_json::json!({
+                "field": field,
+                "model_id": serde_json::Value::Null,
+                "candidate_model_id": candidate_model,
+            }),
             seen_at: now,
             confidence: 0.95,
         });
@@ -8314,7 +8821,7 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
                     .get(*patch_key)
                     .and_then(|v| v.get("model"))
                     .and_then(|v| v.as_str()),
-                Some("your-provider/model-name"),
+                Some(candidate_model.as_str()),
                 "field={} patch must contain ProviderDefaults key '{}', got: {}",
                 field,
                 patch_key,
@@ -8841,6 +9348,7 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
                 initial_user_message: "please investigate".to_string(),
             },
         },
+        None,
     )
     .await
     .unwrap();
@@ -8899,6 +9407,7 @@ fn investigation_diagnostic_cluster_payload_has_diagnostic_ids_not_collected_at(
             chat_id: None,
             collected_at: (now - Duration::minutes(i + 1)).to_rfc3339(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         })
         .collect();
 
@@ -10152,6 +10661,7 @@ async fn investigation_enrich_context_resolves_diagnostic_ids() {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let id = diagnostic_id(&diag);
     let mut svc = make_service();

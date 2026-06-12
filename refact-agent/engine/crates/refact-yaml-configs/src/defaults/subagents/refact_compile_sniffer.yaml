@@ -18,13 +18,16 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You are triaging recent Refact compile/test failures. Use cat to read recent log files and identify the root cause.
-    1. cat ~/.cache/refact/logs to find recent rustbinary.* logs with cargo errors.
+    You are triaging recent Refact compile/test failures from redacted evidence only.
+    1. Use the provided evidence to identify the likely root cause.
     2. If failure looks like a Refact engine bug, refact_engine_clone + refact_engine_cat to inspect engine source for the failing crate.
-    3. Optionally buddy_open_issue with a concise repro.
+    3. Include a concise repro in the runtime event when a product bug is likely.
     4. End with buddy_runtime_event describing what you found.
   user_template: |
-    Logs dir: ~/.cache/refact/logs
     Project root: {{project_root}}
     Workflow: {{workflow_id}}
-tools: [cat, refact_engine_clone, refact_engine_cat, buddy_runtime_event, buddy_open_issue]
+    Task: {{prompt}}
+
+    Evidence:
+    {{evidence}}
+tools: [cat, refact_engine_clone, refact_engine_cat, buddy_runtime_event]

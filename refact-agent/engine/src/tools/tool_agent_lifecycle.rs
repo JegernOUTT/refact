@@ -158,6 +158,7 @@ fn user_message_command(content: String) -> ChatCommand {
         content: Value::String(content),
         attachments: vec![],
         context_files: vec![],
+        origin: None,
         suppress_auto_enrichment: false,
     }
 }
@@ -1130,6 +1131,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 

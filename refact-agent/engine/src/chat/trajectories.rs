@@ -5400,6 +5400,7 @@ mod tests {
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            goal_id: None,
         }
     }
 
@@ -15328,6 +15329,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         tokio::fs::write(
             task_dir.join("meta.yaml"),
@@ -15472,6 +15474,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         tokio::fs::write(
             task_dir.join("meta.yaml"),
@@ -15769,6 +15772,7 @@ mod tests {
                 is_buddy_chat: true,
                 buddy_chat_kind: "investigation".to_string(),
                 workflow_id: None,
+                goal_id: None,
             });
         }
         gcx.chat_sessions
@@ -15814,6 +15818,7 @@ mod tests {
                 is_buddy_chat: true,
                 buddy_chat_kind: "investigation".to_string(),
                 workflow_id: None,
+                goal_id: None,
             });
         }
         gcx.chat_sessions

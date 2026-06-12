@@ -9,8 +9,8 @@ pub use refact_buddy_core::queue::{
 
 use crate::buddy::types::{
     BuddyAction, BuddyFactKind, BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks,
-    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, InvestigationContext,
-    OpportunityStatus, PulseScope,
+    BuddyPage, BuddyPriority, BuddyPulse, DefaultsKind, InvestigationContext, OpportunityStatus,
+    PulseScope,
 };
 
 struct Rule {
@@ -219,12 +219,20 @@ mod rules {
                     .to_string();
                 let mut o = opp(
                     BuddyOpportunityKind::TaskHealth,
-                    "Abandoned task needs review",
+                    format!(
+                        "Abandoned task {} can become a conductor goal with guardrails",
+                        task_id
+                    ),
                     BuddyPriority::Normal,
                     fact.confidence,
                     vec![fact.key.clone()],
                     format!("task_health:abandoned:{}", task_id),
                     vec![
+                        BuddyAction::StartConductorGoal {
+                            title: format!("Recover abandoned task {}", task_id),
+                            plan_doc_slug: None,
+                            source_task_id: Some(task_id.clone()),
+                        },
                         BuddyAction::OpenPage {
                             page: BuddyPage::TasksList,
                         },
@@ -322,34 +330,62 @@ mod rules {
             .collect()
     }
 
-    fn provider_defaults_patch(field: &str) -> Option<(DefaultsKind, serde_json::Value)> {
+    fn provider_defaults_kind(field: &str) -> Option<DefaultsKind> {
+        match field {
+            "chat_model" => Some(DefaultsKind::ChatModel),
+            "chat_model_2" => Some(DefaultsKind::ChatModel2),
+            "task_planner_agent_model" => Some(DefaultsKind::TaskPlannerAgentModel),
+            "chat_light_model" => Some(DefaultsKind::ChatLightModel),
+            "chat_thinking_model" => Some(DefaultsKind::ChatThinkingModel),
+            "chat_buddy_model" => Some(DefaultsKind::ChatBuddyModel),
+            _ => None,
+        }
+    }
+
+    fn provider_defaults_patch(
+        field: &str,
+        model: &str,
+    ) -> Option<(DefaultsKind, serde_json::Value)> {
+        if model.trim().is_empty() || model == "your-provider/model-name" {
+            return None;
+        }
         match field {
             "chat_model" => Some((
                 DefaultsKind::ChatModel,
-                serde_json::json!({ "chat": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat": { "model": model } }),
             )),
             "chat_model_2" => Some((
                 DefaultsKind::ChatModel2,
-                serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_model_2": { "model": model } }),
             )),
             "task_planner_agent_model" => Some((
                 DefaultsKind::TaskPlannerAgentModel,
-                serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "task_planner_agent_model": { "model": model } }),
             )),
             "chat_light_model" => Some((
                 DefaultsKind::ChatLightModel,
-                serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_light": { "model": model } }),
             )),
             "chat_thinking_model" => Some((
                 DefaultsKind::ChatThinkingModel,
-                serde_json::json!({ "chat_thinking": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_thinking": { "model": model } }),
             )),
             "chat_buddy_model" => Some((
                 DefaultsKind::ChatBuddyModel,
-                serde_json::json!({ "chat_buddy": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_buddy": { "model": model } }),
             )),
             _ => None,
         }
+    }
+
+    fn payload_candidate_model(fact: &crate::buddy::types::BuddyFact) -> Option<String> {
+        fact.payload
+            .get("candidate_model_id")
+            .or_else(|| fact.payload.get("candidate_model"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "your-provider/model-name")
+            .map(String::from)
     }
 
     fn is_chat_default_field(field: &str) -> bool {
@@ -383,9 +419,28 @@ mod rules {
                     .get("field")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let Some((defaults_kind, patch)) = provider_defaults_patch(field) else {
+                if provider_defaults_kind(field).is_none() {
                     return None;
-                };
+                }
+                let mut actions = vec![
+                    BuddyAction::OpenPage {
+                        page: BuddyPage::DefaultModels,
+                    },
+                    BuddyAction::Dismiss,
+                ];
+                if let Some(candidate_model) = payload_candidate_model(fact) {
+                    if let Some((defaults_kind, patch)) =
+                        provider_defaults_patch(field, &candidate_model)
+                    {
+                        actions.insert(
+                            1,
+                            BuddyAction::DraftDefaultsChange {
+                                defaults_kind,
+                                patch,
+                            },
+                        );
+                    }
+                }
                 let mut o = opp(
                     BuddyOpportunityKind::ProviderTuning,
                     "Default model not configured",
@@ -393,16 +448,7 @@ mod rules {
                     fact.confidence,
                     vec![fact.key.clone()],
                     format!("provider:default_model_missing:{}", field),
-                    vec![
-                        BuddyAction::OpenPage {
-                            page: BuddyPage::DefaultModels,
-                        },
-                        BuddyAction::DraftDefaultsChange {
-                            defaults_kind,
-                            patch,
-                        },
-                        BuddyAction::Dismiss,
-                    ],
+                    actions,
                     now,
                 );
                 o.related = related_with_config_paths(vec!["providers/defaults".to_string()]);
@@ -762,11 +808,6 @@ mod rules {
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
                         },
-                        BuddyAction::DraftCustomizationChange {
-                            customization_kind: CustomizationKind::Mode,
-                            id: id.clone(),
-                            patch: serde_json::json!({}),
-                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -805,11 +846,6 @@ mod rules {
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
                         },
-                        BuddyAction::DraftCustomizationChange {
-                            customization_kind: CustomizationKind::Skill,
-                            id: id.clone(),
-                            patch: serde_json::json!({}),
-                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -839,8 +875,8 @@ mod rules {
                     vec![fact.key.clone()],
                     "agents_md:gap:global",
                     vec![
-                        BuddyAction::DraftAgentsMdPatch {
-                            content: String::new(),
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Customization,
                         },
                         BuddyAction::Dismiss,
                     ],
@@ -998,6 +1034,8 @@ impl OpportunityDetector {
                     continue;
                 }
                 seen.insert(opp.cooldown_key.clone());
+                let mut opp = opp;
+                opp.cooldown_secs = rule.cooldown_secs;
                 result.push((opp, rule.cooldown_secs));
             }
         }
@@ -1041,6 +1079,7 @@ pub fn primary_fact_kind_for_opportunity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::types::BuddyFact;
     use crate::buddy::facts::FactStore;
 
     #[test]
@@ -1055,5 +1094,44 @@ mod tests {
         assert_eq!(opps.len(), 1);
         assert!(opps[0].summary.contains("3 lifecycle candidate"));
         assert_eq!(opps[0].kind, BuddyOpportunityKind::MemoryGarden);
+    }
+
+    #[test]
+    fn buddy_opportunities_propose_conductor_goal_for_abandoned_task() {
+        let now = Utc::now();
+        let mut store = FactStore::new();
+        store.ingest(BuddyFact {
+            kind: BuddyFactKind::TaskAbandoned,
+            key: "task-abandoned:T-42".to_string(),
+            source: "test",
+            payload: serde_json::json!({ "task_id": "T-42" }),
+            seen_at: now,
+            confidence: 0.91,
+        });
+        let queue = OpportunityQueue::new();
+
+        let opps = rules::task_abandoned(&store, &BuddyPulse::default(), &queue, now);
+
+        assert_eq!(opps.len(), 1);
+        let opp = &opps[0];
+        assert!(opp.summary.contains("conductor goal"));
+        assert_eq!(opp.related.task_ids, vec!["T-42".to_string()]);
+        match &opp.proposed_actions[0] {
+            BuddyAction::StartConductorGoal {
+                title,
+                plan_doc_slug,
+                source_task_id,
+            } => {
+                assert_eq!(title, "Recover abandoned task T-42");
+                assert_eq!(plan_doc_slug, &None);
+                assert_eq!(source_task_id.as_deref(), Some("T-42"));
+            }
+            other => panic!("expected StartConductorGoal, got {other:?}"),
+        }
+        assert!(matches!(
+            opp.proposed_actions[1],
+            BuddyAction::OpenPage { .. }
+        ));
+        assert!(matches!(opp.proposed_actions[2], BuddyAction::Dismiss));
     }
 }

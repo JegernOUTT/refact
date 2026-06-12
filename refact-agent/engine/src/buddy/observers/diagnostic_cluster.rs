@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use crate::buddy::diagnostics::DiagnosticContext;
@@ -8,6 +8,32 @@ use crate::buddy::types::{BuddyFact, BuddyFactKind};
 use crate::app_state::AppState;
 
 pub struct DiagnosticClusterObserver;
+
+const DIAGNOSTIC_IDS_LIMIT: usize = 25;
+
+fn occurrence_count(diag: &DiagnosticContext) -> u64 {
+    diag.occurrence_count.max(1)
+}
+
+fn occurrence_total(diagnostics: &[&DiagnosticContext]) -> u64 {
+    diagnostics.iter().map(|diag| occurrence_count(diag)).sum()
+}
+
+fn unique_diagnostic_ids(diagnostics: &[&DiagnosticContext]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    diagnostics
+        .iter()
+        .filter_map(|diag| {
+            let id = crate::buddy::diagnostics::diagnostic_id(diag);
+            if seen.insert(id.clone()) {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .take(DIAGNOSTIC_IDS_LIMIT)
+        .collect()
+}
 
 pub fn detect_diagnostic_cluster_facts(
     diagnostics: &[DiagnosticContext],
@@ -39,16 +65,10 @@ pub fn detect_diagnostic_cluster_facts(
     }
 
     for (error_type, cluster_diagnostics) in &by_type {
-        if cluster_diagnostics.len() >= 3 {
-            tracing::debug!(
-                "diagnostic_cluster: type={} count={}",
-                error_type,
-                cluster_diagnostics.len()
-            );
-            let diagnostic_ids: Vec<String> = cluster_diagnostics
-                .iter()
-                .map(|diag| crate::buddy::diagnostics::diagnostic_id(diag))
-                .collect();
+        let count = occurrence_total(cluster_diagnostics);
+        if count >= 3 {
+            tracing::debug!("diagnostic_cluster: type={} count={}", error_type, count);
+            let diagnostic_ids = unique_diagnostic_ids(cluster_diagnostics);
             let sample_collected_at = cluster_diagnostics
                 .first()
                 .map(|diag| diag.collected_at.clone())
@@ -59,7 +79,7 @@ pub fn detect_diagnostic_cluster_facts(
                 source: "diagnostic_cluster",
                 payload: serde_json::json!({
                     "error_type": error_type,
-                    "count": cluster_diagnostics.len(),
+                    "count": count,
                     "window_seconds": 1800,
                     "diagnostic_ids": diagnostic_ids,
                     "sample_collected_at": sample_collected_at,
@@ -70,15 +90,13 @@ pub fn detect_diagnostic_cluster_facts(
         }
     }
 
-    if frontend_diagnostics.len() >= 5 {
+    let frontend_count = occurrence_total(&frontend_diagnostics);
+    if frontend_count >= 5 {
         tracing::debug!(
             "diagnostic_cluster: frontend burst count={}",
-            frontend_diagnostics.len()
+            frontend_count
         );
-        let diagnostic_ids: Vec<String> = frontend_diagnostics
-            .iter()
-            .map(|diag| crate::buddy::diagnostics::diagnostic_id(diag))
-            .collect();
+        let diagnostic_ids = unique_diagnostic_ids(&frontend_diagnostics);
         let sample_collected_at = frontend_diagnostics
             .first()
             .map(|diag| diag.collected_at.clone())
@@ -89,7 +107,7 @@ pub fn detect_diagnostic_cluster_facts(
             source: "diagnostic_cluster",
             payload: serde_json::json!({
                 "error_type": "frontend",
-                "count": frontend_diagnostics.len(),
+                "count": frontend_count,
                 "window_seconds": 300,
                 "diagnostic_ids": diagnostic_ids,
                 "sample_collected_at": sample_collected_at,

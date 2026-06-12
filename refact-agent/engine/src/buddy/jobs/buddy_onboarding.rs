@@ -208,6 +208,30 @@ mod tests {
             .join(format!("{id}.yaml"))
     }
 
+    fn default_subagent_yaml_paths() -> Vec<std::path::PathBuf> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("refact-yaml-configs")
+            .join("src")
+            .join("defaults")
+            .join("subagents");
+        let mut paths = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("yaml"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn load_subagent_config(path: &Path) -> SubagentConfig {
+        let yaml = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        serde_yaml::from_str::<SubagentConfig>(&yaml)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()))
+    }
+
     fn test_context(project_root: &Path, last_result: Option<String>) -> BuddyJobContext {
         BuddyJobContext {
             identity_name: "Pixel".to_string(),
@@ -290,20 +314,42 @@ mod tests {
                     "search_symbol_definition",
                     "create_textdoc",
                     "buddy_runtime_event",
-                    "buddy_open_issue",
                 ],
             ),
         ];
         for (id, tools) in expected {
             let path = subagent_yaml_path(id);
-            let yaml = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let config = serde_yaml::from_str::<SubagentConfig>(&yaml)
-                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            let config = load_subagent_config(&path);
             assert_eq!(config.id, id);
             assert!(config.subchat.autonomous_no_confirm.unwrap_or(false));
             for tool in tools {
                 assert!(config.tools.iter().any(|configured| configured == tool));
+            }
+        }
+    }
+
+    #[test]
+    fn autonomous_default_subagents_do_not_expose_destructive_tools() {
+        let forbidden_tools = [
+            "buddy_open_issue",
+            "buddy_create_issue",
+            "buddy_memory_archive",
+            "buddy_memory_merge",
+        ];
+        for path in default_subagent_yaml_paths() {
+            let config = load_subagent_config(&path);
+            if !config.subchat.autonomous_no_confirm.unwrap_or(false) {
+                continue;
+            }
+            for forbidden_tool in forbidden_tools {
+                assert!(
+                    !config
+                        .tools
+                        .iter()
+                        .any(|configured| configured == forbidden_tool),
+                    "autonomous workflow {} must not expose {forbidden_tool}",
+                    config.id
+                );
             }
         }
     }

@@ -214,6 +214,7 @@ fn make_runtime_event(
         controls: Vec::new(),
         chat_id: None,
         dismissed: false,
+        dismissed_at: None,
     }
 }
 

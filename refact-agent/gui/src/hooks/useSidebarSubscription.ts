@@ -51,6 +51,8 @@ import {
   addDraft,
   consumeDraft,
   removeDraft,
+  upsertConductorGoal,
+  addConductorGhostMessage,
 } from "../features/Buddy/buddySlice";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 
@@ -770,6 +772,12 @@ export function useSidebarSubscription() {
           break;
         case "DraftRemoved":
           dispatch(removeDraft(event.draft_id));
+          break;
+        case "ConductorGoalUpdated":
+          dispatch(upsertConductorGoal(event.goal));
+          break;
+        case "ConductorGhostMessage":
+          dispatch(addConductorGhostMessage(event.ghost));
           break;
       }
     },

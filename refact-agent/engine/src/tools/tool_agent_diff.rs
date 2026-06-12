@@ -14,7 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
-use crate::tools::task_tool_helpers::{required_string, require_bound_planner_task};
+use crate::tools::task_tool_helpers::{required_string, resolve_readonly_task_id};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 
@@ -644,7 +644,7 @@ impl Tool for ToolAgentDiff {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Show the real git diff for a task agent worktree against the task base commit or branch, including committed, staged, unstaged, and untracked changes. Planner-only; use this to inspect actual agent changes instead of relying on final reports.".to_string(),
+            description: "Show the real read-only git diff for a task agent worktree against the task base commit or branch, including committed, staged, unstaged, and untracked changes.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -666,25 +666,10 @@ impl Tool for ToolAgentDiff {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let is_planner = {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|meta| meta.role == "planner")
-                .unwrap_or(false)
-        };
-        if !is_planner {
-            return Err(
-                "agent_diff can only be called by the task planner. Switch to the planner chat to inspect agent diffs."
-                    .to_string(),
-            );
-        }
-
         let card_id = required_string(args, "card_id")?;
         let mode = AgentDiffMode::parse(args.get("mode"))?;
         let max_lines = parse_max_lines(args)?;
-        let task_id = require_bound_planner_task(&ccx, args).await?;
+        let task_id = resolve_readonly_task_id(&ccx, args, "agent_diff").await?;
         let gcx = ccx.lock().await.app.gcx.clone();
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
@@ -939,6 +924,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -1008,6 +994,26 @@ mod tests {
         ))
     }
 
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "conductor-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
     fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
@@ -1028,7 +1034,7 @@ mod tests {
             desc.input_schema["properties"]["mode"]["enum"],
             json!(["stat", "unified", "name-only"])
         );
-        assert!(desc.description.contains("real git diff"));
+        assert!(desc.description.contains("read-only"));
     }
 
     #[tokio::test]
@@ -1064,7 +1070,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_agent_diff_rejects_mismatched_task_id() {
+    async fn tool_agent_diff_unknown_explicit_task_id_is_clear() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(temp.path(), test_card(None, None)).await;
         let ccx = planner_ccx(gcx, "planner").await;
@@ -1079,10 +1085,41 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(
-            err,
-            "task_id override is not allowed from this planner chat"
+        assert!(err.contains("Task not found: task-2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn agent_diff_agent_introspection_explicit_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = legacy_repo_path(temp.path());
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        run_git(&repo, &["checkout", "-b", "agent-branch"]);
+        commit_file(&repo, "file.txt", "hello\nagent\n", "agent change");
+        let card = test_card(
+            Some("agent-branch".to_string()),
+            Some(repo.to_string_lossy().to_string()),
         );
+        let gcx = write_task(&repo, card).await;
+        let ccx = unbound_ccx(gcx).await;
+        let mut tool = ToolAgentDiff::new();
+
+        let output = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("task_id".to_string(), json!("task-1")),
+                    ("mode".to_string(), json!("name-only")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(output.contains("# Agent Diff for T-1"));
+        assert!(output.contains("file.txt"));
     }
 
     #[tokio::test]

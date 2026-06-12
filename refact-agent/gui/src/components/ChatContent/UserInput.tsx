@@ -9,6 +9,8 @@ import { Markdown } from "../Markdown";
 import styles from "./ChatContent.module.css";
 import { Reveal } from "../Reveal";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
+import { SurgeryBadge } from "./SurgeryBadge";
+import type { SurgeryBadgeInfo } from "./SurgeryBadgeInfo";
 
 export type UserInputProps = {
   children: UserMessage["content"];
@@ -18,6 +20,7 @@ export type UserInputProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
   onBranch?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
+  surgeryBadge?: SurgeryBadgeInfo | null;
 };
 
 const _UserInput: React.FC<UserInputProps> = ({
@@ -28,6 +31,7 @@ const _UserInput: React.FC<UserInputProps> = ({
   onRetry,
   onBranch,
   onDelete,
+  surgeryBadge,
 }) => {
   const copyToClipboard = useCopyToClipboard();
 
@@ -139,6 +143,9 @@ const _UserInput: React.FC<UserInputProps> = ({
   return (
     <MessageWrapper>
       <Container pt="1">
+        <Flex justify="end">
+          <SurgeryBadge info={surgeryBadge ?? null} />
+        </Flex>
         <Flex justify="end">
           <Box className={styles.userInput} onClick={handleEditClick}>
             {isCompressed ? (

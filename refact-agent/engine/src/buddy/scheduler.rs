@@ -3,6 +3,7 @@ use std::path::Path;
 use tokio::sync::Mutex as AMutex;
 
 use super::actor::BuddyService;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use super::diagnostics::DiagnosticContext;
 use super::settings::BuddySettings;
 use super::types::{
@@ -313,6 +314,16 @@ impl BuddyScheduler {
         buddy_arc: Arc<AMutex<Option<BuddyService>>>,
         project_root: &Path,
     ) {
+        super::conductor::recurring::service_recurring_goals(
+            gcx.gcx.clone(),
+            project_root,
+            chrono::Utc::now(),
+        )
+        .await;
+        super::conductor::wake::enqueue_all_wake(gcx.gcx.clone(), ConductorWakeReason::Heartbeat)
+            .await;
+        super::conductor::conduct_loop::run_due_conductor_wakes(gcx.gcx.clone()).await;
+
         let ctx_opt = {
             let buddy = buddy_arc.lock().await;
             buddy.as_ref().map(|svc| {
@@ -1299,6 +1310,7 @@ mod tests {
                 controls: vec![],
                 chat_id: None,
                 dismissed: false,
+                dismissed_at: None,
             }),
             last_result: Some("unhealthy".to_string()),
             ..Default::default()

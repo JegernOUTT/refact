@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
-use crate::tools::task_tool_helpers::{human_age, require_bound_planner_task, truncate_chars};
+use crate::tools::task_tool_helpers::{human_age, resolve_readonly_task_id, truncate_chars};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::{ChatSessionFacade, SessionState};
 
@@ -990,24 +990,8 @@ impl Tool for ToolTaskCheckAgents {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let ccx_lock = ccx.lock().await;
-
-        let is_planner = ccx_lock
-            .task_meta
-            .as_ref()
-            .map(|m| m.role == "planner")
-            .unwrap_or(false);
-
-        if !is_planner {
-            return Err("check_agents can only be called by the task planner. \
-                 Switch to the planner chat to check agent status."
-                .to_string());
-        }
-
-        drop(ccx_lock);
-
         let query = parse_agent_status_query(args)?;
-        let task_id = require_bound_planner_task(&ccx, args).await?;
+        let task_id = resolve_readonly_task_id(&ccx, args, "check_agents").await?;
         let (gcx, chat_facade) = {
             let ccx_lock = ccx.lock().await;
             (ccx_lock.app.gcx.clone(), ccx_lock.app.chat.facade.clone())
@@ -1112,6 +1096,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -1125,6 +1110,23 @@ mod tests {
         )
         .await
         .unwrap();
+        tokio::fs::write(
+            task_dir.join("board.yaml"),
+            serde_yaml::to_string(&TaskBoard::default()).unwrap(),
+        )
+        .await
+        .unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        gcx
+    }
+
+    async fn write_empty_task_id(
+        root: &std::path::Path,
+        task_id: &str,
+    ) -> Arc<crate::global_context::GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let task_dir = root.join(".refact").join("tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
         tokio::fs::write(
             task_dir.join("board.yaml"),
             serde_yaml::to_string(&TaskBoard::default()).unwrap(),
@@ -1156,6 +1158,26 @@ mod tests {
                     card_id: None,
                     planner_chat_id: None,
                 }),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "unbound-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
                 None,
             )
             .await,
@@ -1301,7 +1323,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_agents_rejects_mismatched_task_id_override() {
+    async fn task_introspection_explicit_task_id_check_agents_allows_planner_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_empty_task_id(temp.path(), "task-2").await;
+        let ccx = planner_ccx(gcx, "planner").await;
+
+        let output = tool_output_text(
+            ToolTaskCheckAgents::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &args(&[("task_id", json!("task-2"))]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("No agents have been spawned yet for this task"));
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_check_agents_reads_unbound_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_empty_task_id(temp.path(), "task-2").await;
+        let ccx = unbound_ccx(gcx).await;
+
+        let output = tool_output_text(
+            ToolTaskCheckAgents::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &args(&[("task_id", json!("task-2"))]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("No agents have been spawned yet for this task"));
+    }
+
+    #[tokio::test]
+    async fn check_agents_rejects_invalid_task_id_type() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let ccx = planner_ccx(gcx, "planner").await;
 
@@ -1309,15 +1371,12 @@ mod tests {
             .tool_execute(
                 ccx,
                 &"call".to_string(),
-                &args(&[("task_id", json!("task-2"))]),
+                &args(&[("task_id", json!(["task-2"]))]),
             )
             .await
             .unwrap_err();
 
-        assert_eq!(
-            err,
-            "task_id override is not allowed from this planner chat"
-        );
+        assert_eq!(err, "task_id must be a string");
     }
 
     #[tokio::test]

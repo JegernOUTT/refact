@@ -5,21 +5,26 @@ import {
   type EngineApiConnection,
   type PortOrConnection,
 } from "./chatCommands";
-import type {
-  BuddySnapshot,
-  BuddySettings,
-  BuddyActivityEntry,
-  BuddyConversationMeta,
-  BuddyConversationEntry,
-  BuddyCareRequest,
-  BuddyCareResponse,
-  BuddyQuestAcceptResponse,
-  BuddyPersonalityRerollResponse,
-  BuddyOpportunity,
-  OpportunityStatus,
-  BuddyPulse,
-  BuddyDraft,
-  BuddyOpportunityAcceptResponse,
+import {
+  normalizeGoalStatus,
+  type BuddySnapshot,
+  type BuddySettings,
+  type BuddyActivityEntry,
+  type BuddyConversationMeta,
+  type BuddyConversationEntry,
+  type BuddyCareRequest,
+  type BuddyCareResponse,
+  type BuddyQuestAcceptResponse,
+  type BuddyPersonalityRerollResponse,
+  type BuddyOpportunity,
+  type OpportunityStatus,
+  type BuddyPulse,
+  type BuddyDraft,
+  type BuddyOpportunityAcceptResponse,
+  type BuddyOpportunityAcceptRequest,
+  type ConductorGoal,
+  type CreateConductorGoalRequest,
+  type GoalAutonomy,
 } from "../../features/Buddy/types";
 import {
   addDraft,
@@ -228,6 +233,28 @@ export interface BuddyOpportunityDismissResponse {
   snapshot: BuddySnapshot;
 }
 
+export interface ConductorAnswerRequest {
+  goal_id: string;
+  question_id: string;
+  answer: string;
+}
+
+export interface ConductorAnswerResponse {
+  goal_id: string;
+  question_id: string;
+  answered: boolean;
+}
+
+export interface ConductorManualWakeResponse {
+  goal_id: string;
+  enqueued: boolean;
+}
+
+export interface ConductorAutonomyRequest {
+  goal_id: string;
+  autonomy: GoalAutonomy;
+}
+
 export interface BuddyInvestigationContextResponse {
   logs: string;
   internal_context: string;
@@ -262,6 +289,22 @@ function buddyUrlFromState(
   query?: Record<string, string | number | boolean | null | undefined>,
 ): string {
   return buildApiUrlFromState(state, path, query);
+}
+
+function normalizeConductorGoal(goal: ConductorGoal): ConductorGoal {
+  return {
+    ...goal,
+    status: normalizeGoalStatus(goal.status),
+    ledger: goal.ledger
+      ? {
+          ...goal.ledger,
+          status:
+            goal.ledger.status == null
+              ? goal.ledger.status
+              : normalizeGoalStatus(goal.ledger.status),
+        }
+      : goal.ledger,
+  };
 }
 
 async function parseBuddyResponse<T>(response: Response): Promise<T> {
@@ -622,17 +665,27 @@ export const buddyApi = createApi({
     }),
     acceptOpportunity: builder.mutation<
       BuddyOpportunityAcceptResponse,
-      { id: string; action_index: number }
+      BuddyOpportunityAcceptRequest
     >({
-      queryFn: async ({ id, action_index }, api, _opts, baseQuery) => {
+      queryFn: async (
+        { id, action_index, budget, created_goal_id },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
         const state = api.getState() as BuddyApiState;
+        const body = {
+          action_index,
+          ...(budget ? { budget } : {}),
+          ...(created_goal_id ? { created_goal_id } : {}),
+        };
         const result = await baseQuery({
           url: buddyUrlFromState(
             state,
             `/v1/buddy/opportunities/${encodeURIComponent(id)}/accept`,
           ),
           method: "POST",
-          body: { action_index },
+          body,
         });
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyOpportunityAcceptResponse };
@@ -656,6 +709,105 @@ export const buddyApi = createApi({
         return { data: result.data as BuddyOpportunityDismissResponse };
       },
       invalidatesTags: ["BuddyOpportunities", "BuddySnapshot"],
+    }),
+    answerConductorGhost: builder.mutation<
+      ConductorAnswerResponse,
+      ConductorAnswerRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(state, "/v1/buddy/conductor/answer"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as ConductorAnswerResponse };
+      },
+    }),
+    createConductorGoal: builder.mutation<
+      ConductorGoal,
+      CreateConductorGoalRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(state, "/v1/buddy/conductor/goals"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
+    pauseConductorGoal: builder.mutation<ConductorGoal, string>({
+      queryFn: async (goalId, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/conductor/goals/${encodeURIComponent(goalId)}/pause`,
+          ),
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
+    resumeConductorGoal: builder.mutation<ConductorGoal, string>({
+      queryFn: async (goalId, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/conductor/goals/${encodeURIComponent(goalId)}/resume`,
+          ),
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
+    setConductorGoalAutonomy: builder.mutation<
+      ConductorGoal,
+      ConductorAutonomyRequest
+    >({
+      queryFn: async ({ goal_id, autonomy }, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/conductor/goals/${encodeURIComponent(goal_id)}/autonomy`,
+          ),
+          method: "POST",
+          body: { autonomy },
+        });
+        if (result.error) return { error: result.error };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
+    manualWakeConductorGoal: builder.mutation<
+      ConductorManualWakeResponse,
+      string
+    >({
+      queryFn: async (goalId, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/conductor/goals/${encodeURIComponent(
+              goalId,
+            )}/manual_wake`,
+          ),
+          method: "POST",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as ConductorManualWakeResponse };
+      },
     }),
     getPulse: builder.query<BuddyPulse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
@@ -941,6 +1093,12 @@ export const {
   useGetOpportunitiesQuery,
   useAcceptOpportunityMutation,
   useDismissOpportunityMutation,
+  useAnswerConductorGhostMutation,
+  useCreateConductorGoalMutation,
+  usePauseConductorGoalMutation,
+  useResumeConductorGoalMutation,
+  useSetConductorGoalAutonomyMutation,
+  useManualWakeConductorGoalMutation,
   useGetPulseQuery,
   useCreateSkillDraftMutation,
   useCreateCommandDraftMutation,

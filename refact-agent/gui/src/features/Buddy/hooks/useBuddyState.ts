@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import {
   createInitialSemanticState,
@@ -8,10 +8,12 @@ import {
 import {
   selectBuddySnapshot,
   selectNowPlaying,
+  selectConductorGoals,
   clearNowPlaying,
 } from "../buddySlice";
 import { SIGNALS, STAGES, SKILLS } from "../constants";
-import type { BuddySemanticState, BuddyEvent } from "../types";
+import { conductorMoodForGoals } from "../conductorMood";
+import type { BuddySemanticState, BuddyEvent, ConductorGoal } from "../types";
 
 export interface BuddyStateHandle {
   state: BuddySemanticState;
@@ -23,6 +25,7 @@ export interface BuddyStateHandle {
   reset: () => void;
   handleCanvasEvent: (event: BuddyEvent) => void;
   onBuddyEvent?: (event: BuddyEvent) => void;
+  conductorGoals: ConductorGoal[];
 }
 
 export function useBuddyState(
@@ -36,6 +39,13 @@ export function useBuddyState(
 
   const reduxDispatch = useAppDispatch();
   const reduxSnapshot = useAppSelector(selectBuddySnapshot);
+
+  useAppSelector(selectConductorGoals);
+  const conductorGoals = useAppSelector(selectConductorGoals);
+  const conductorMood = useMemo(
+    () => conductorMoodForGoals(conductorGoals),
+    [conductorGoals],
+  );
 
   const nowPlaying = useAppSelector(selectNowPlaying);
   const prevSnapshotStageRef = useRef<number | null>(null);
@@ -67,6 +77,24 @@ export function useBuddyState(
   useEffect(() => {
     if (!reduxSnapshot) return;
     const { personality, pet, semantic } = reduxSnapshot.state;
+    const activityMood =
+      conductorMood?.mood ??
+      (semantic.mood === "Sleepy"
+        ? "sleepy"
+        : semantic.mood === "Restless"
+          ? "curious"
+          : semantic.mood === "Questing"
+            ? "focused"
+            : state.activity.mood);
+    const animationType =
+      conductorMood?.animationType ??
+      (semantic.focus === "dreaming"
+        ? "sleep"
+        : semantic.focus === "play time"
+          ? "perk"
+          : semantic.focus === "helping"
+            ? "idle"
+            : state.activity.animationType);
     dispatch({
       kind: "patch",
       patch: {
@@ -100,22 +128,8 @@ export function useBuddyState(
           affection: pet.needs.affection,
         },
         activity: {
-          mood:
-            semantic.mood === "Sleepy"
-              ? "sleepy"
-              : semantic.mood === "Restless"
-                ? "curious"
-                : semantic.mood === "Questing"
-                  ? "focused"
-                  : state.activity.mood,
-          animationType:
-            semantic.focus === "dreaming"
-              ? "sleep"
-              : semantic.focus === "play time"
-                ? "perk"
-                : semantic.focus === "helping"
-                  ? "idle"
-                  : state.activity.animationType,
+          mood: activityMood,
+          animationType,
           lastSignalTime: state.activity.lastSignalTime,
           lastSignalType: state.activity.lastSignalType,
         },
@@ -136,6 +150,8 @@ export function useBuddyState(
     reduxSnapshot?.state.semantic.mood,
     reduxSnapshot?.state.semantic.focus,
     reduxSnapshot?.state.progression.level,
+    conductorMood?.mood,
+    conductorMood?.animationType,
   ]);
 
   useEffect(() => {
@@ -281,5 +297,6 @@ export function useBuddyState(
     reset,
     handleCanvasEvent,
     onBuddyEvent,
+    conductorGoals,
   };
 }

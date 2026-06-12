@@ -27,7 +27,7 @@ messages:
     Steps:
     1. Review the dependency evidence and relevant manifests.
     2. Search current package context only for likely important findings.
-    3. Open an issue for clear dependency work that should not be forgotten.
+    3. Record clear dependency work that should not be forgotten in the runtime event.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
@@ -47,4 +47,3 @@ tools:
   - search_pattern
   - web_search
   - buddy_runtime_event
-  - buddy_open_issue

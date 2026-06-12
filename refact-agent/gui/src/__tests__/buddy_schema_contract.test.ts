@@ -26,6 +26,7 @@ function assertBuddyPage(page: BuddyPage): string {
     case "tasks_list":
     case "knowledge_graph":
     case "worktrees":
+    case "conductor":
       return page.type;
     case "task_workspace":
       return page.task_id;
@@ -57,6 +58,12 @@ function assertBuddyAction(action: BuddyAction): string {
       return action.customization_kind + action.id;
     case "offer_marketplace_install":
       return action.market_kind + action.item_id;
+    case "start_conductor_goal":
+      return (
+        (action.plan_doc_slug ?? "") +
+        action.title +
+        (action.source_task_id ?? "")
+      );
     case "create_pulse_report":
       return action.scope;
     case "dismiss":
@@ -87,6 +94,7 @@ describe("Buddy schema contract", () => {
       { type: "task_workspace", task_id: "task-1" },
       { type: "knowledge_graph" },
       { type: "worktrees" },
+      { type: "conductor" },
       { type: "setup_mode", mode: "setup_mcp" },
     ];
 
@@ -135,6 +143,12 @@ describe("Buddy schema contract", () => {
         kind: "offer_marketplace_install",
         market_kind: "delegate",
         item_id: "item-1",
+      },
+      {
+        kind: "start_conductor_goal",
+        title: "Buddy Conductor",
+        plan_doc_slug: "master-plan",
+        source_task_id: "task-1",
       },
       { kind: "create_pulse_report", scope: "all" },
       { kind: "dismiss" },

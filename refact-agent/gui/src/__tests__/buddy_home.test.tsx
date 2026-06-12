@@ -32,6 +32,7 @@ import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
 import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
+import { BuddyConductorGoalsPanel } from "../features/Buddy/BuddyConductorGoalsPanel";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
 import { BuddyWorld } from "../features/Buddy/BuddyWorld";
 import { AutonomousChats } from "../features/Buddy/AutonomousChats";
@@ -64,6 +65,7 @@ import type {
   BuddyConversationEntry,
   BuddyActivityEntry,
   BuddySpeechItem,
+  ConductorGoal,
 } from "../features/Buddy/types";
 import type React from "react";
 
@@ -266,6 +268,58 @@ function makePulse(overrides?: Partial<BuddyPulse>): BuddyPulse {
       unregistered_cache_dirs: 1,
       merged_branches: 2,
     },
+    ...overrides,
+  };
+}
+
+function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
+  return {
+    id: "goal-1",
+    title: "Ship conductor goals",
+    plan_doc_slug: "plan-doc",
+    plan_markdown: "# Plan",
+    done_when: { summary: "Done", checklist: ["Green checks"] },
+    status: "active",
+    autonomy: "full_auto",
+    budget: { wall_clock_secs: 3600, total_tokens: 10000, usd: 2 },
+    spent: {
+      elapsed_secs: 30,
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      total_tokens: 150,
+      cache_read_tokens: 25,
+      usd: 0.12,
+      no_progress_wakes: 0,
+    },
+    summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
+      status: "active",
+      autonomy: "full_auto",
+      planner_task_id: "planner-task-1",
+      task_ids: ["task-1"],
+      chat_ids: ["conductor-chat-1"],
+      memos: [],
+      learning_records: [],
+      pending_questions: [],
+      ghost_messages: [],
+      no_progress_wakes: 0,
+      turn_failures: 0,
+    },
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:01:00Z",
+    completed_at: null,
     ...overrides,
   };
 }
@@ -1137,6 +1191,35 @@ describe("BuddyHome_renders_all_sections", () => {
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
   });
+  it("home includes conductor goals panel", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), { conductor_goals: [makeConductorGoal()] }),
+      ),
+    );
+    server.use(
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+      http.get("*/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("*/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+    );
+
+    render(<BuddyHome />, { store });
+
+    expect(
+      await screen.findByTestId("buddy-home-conductor-goals"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Ship conductor goals")).toBeInTheDocument();
+  });
 
   it("settings section uses a CSS class wrapper when settings toggled on", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
@@ -1166,6 +1249,59 @@ describe("BuddyHome_renders_all_sections", () => {
     );
     expect(settingsSection).toBeInTheDocument();
     expect(settingsSection).not.toHaveAttribute("style");
+  });
+});
+
+describe("BuddyConductorGoalsPanel", () => {
+  it("renders empty state gracefully", () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyConductorGoalsPanel />, { store });
+
+    expect(screen.getByTestId("buddy-conductor-page")).toBeInTheDocument();
+    expect(screen.getByTestId("conductor-empty-state")).toHaveTextContent(
+      "No conductor goals yet",
+    );
+  });
+
+  it("renders conductor goal stats and opens conductor log", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    const goal = makeConductorGoal();
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot(makePulse(), { conductor_goals: [goal] })),
+    );
+
+    const { user } = render(<BuddyConductorGoalsPanel />, { store });
+
+    expect(screen.getByText("Ship conductor goals")).toBeInTheDocument();
+    expect(screen.getByText("active")).toBeInTheDocument();
+    expect(screen.getByText("150 / 10.0K")).toBeInTheDocument();
+    expect(screen.getByText("25 read")).toBeInTheDocument();
+    expect(screen.getByText("$0.12 / $2.00")).toBeInTheDocument();
+    expect(screen.getByText("P 100 · C 50")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Recurring controls" }));
+
+    expect(store.getState().pages.at(-1)).toEqual({ name: "scheduler" });
+  });
+
+  it("home panel navigates to dedicated conductor page", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), { conductor_goals: [makeConductorGoal()] }),
+      ),
+    );
+
+    const { user } = render(<BuddyConductorGoalsPanel compact />, { store });
+
+    expect(
+      screen.getByTestId("buddy-home-conductor-goals"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open Conductor" }));
+
+    expect(store.getState().pages.at(-1)).toEqual({ name: "conductor" });
   });
 });
 

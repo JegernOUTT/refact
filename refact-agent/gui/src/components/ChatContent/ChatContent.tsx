@@ -64,6 +64,7 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { PlanBanner } from "./PlanBanner";
+import { getSurgeryBadgeInfo } from "./SurgeryBadgeInfo";
 import type {
   CompressionPhase,
   CompressionReason,
@@ -408,6 +409,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               diffsByToolId={item.diffsByToolId}
               usage={item.message.usage}
               isStreaming={item.isStreaming}
+              surgeryBadge={getSurgeryBadgeInfo(item.message.extra)}
             />
           );
 
@@ -420,6 +422,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               checkpoints={item.message.checkpoints}
               onBranch={handleBranch}
               onDelete={handleDelete}
+              surgeryBadge={getSurgeryBadgeInfo(item.message.extra)}
             >
               {item.message.content}
             </UserInput>

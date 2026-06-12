@@ -176,6 +176,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
                 is_buddy_chat: true,
                 buddy_chat_kind: "investigation".to_string(),
                 workflow_id: None,
+                goal_id: None,
             }),
             auto_compact_enabled: None,
             frozen_request_prefix: None,

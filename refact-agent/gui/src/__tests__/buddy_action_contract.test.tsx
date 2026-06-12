@@ -17,6 +17,7 @@ import type {
   BuddyOpportunity,
   BuddyRuntimeEvent,
   BuddySnapshot,
+  ConductorGoal,
 } from "../features/Buddy/types";
 
 const CONFIG_STATE = {
@@ -158,6 +159,54 @@ function makeRuntimeEvent(
     priority: "high",
     created_at: "2024-01-01T00:00:00Z",
     chat_id: "chat-a",
+    ...overrides,
+  };
+}
+
+function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
+  return {
+    id: "goal-1",
+    title: "Recover task",
+    plan_doc_slug: "task-recovery",
+    plan_markdown: "# Recover task",
+    done_when: { summary: "Done", checklist: [] },
+    status: "active",
+    autonomy: "full_auto",
+    budget: {
+      wall_clock_secs: 7200,
+      no_progress_wakes: 3,
+    },
+    spent: {
+      elapsed_secs: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      no_progress_wakes: 0,
+    },
+    summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
+      task_ids: [],
+      chat_ids: [],
+      memos: [],
+      learning_records: [],
+      ghost_messages: [],
+      pending_questions: [],
+      no_progress_wakes: 0,
+      turn_failures: 0,
+    },
     ...overrides,
   };
 }
@@ -397,6 +446,153 @@ describe("buddy action execution contract", () => {
     );
   });
 
+  it("goal_proposal_accept_requires_done_when_budget_and_creates_goal_first", async () => {
+    let createBody: unknown = null;
+    let acceptBody: unknown = null;
+    server.use(
+      http.post("*/v1/buddy/conductor/goals", async ({ request }) => {
+        createBody = await request.json();
+        return HttpResponse.json(makeConductorGoal({ id: "created-goal" }));
+      }),
+      http.post("*/v1/buddy/opportunities/:id/accept", async ({ request }) => {
+        acceptBody = await request.json();
+        return acceptResponse({
+          kind: "start_conductor_goal",
+          goal: makeConductorGoal({ id: "created-goal" }),
+        });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const accept = screen.getByRole("button", {
+      name: "Create conductor goal",
+    });
+    expect(
+      screen.getByText("Guardrails before Buddy opens the conductor goal"),
+    ).toBeInTheDocument();
+    expect(accept).toBeDisabled();
+
+    await user.type(
+      screen.getByLabelText("Done when summary or checklist required"),
+      "Task recovered",
+    );
+    await user.type(screen.getByLabelText("Wall-clock hours required"), "2");
+    await user.type(screen.getByLabelText("No-progress wakes required"), "4");
+    await user.type(screen.getByLabelText("Token ceiling optional"), "50000");
+    await user.type(screen.getByLabelText("USD ceiling optional"), "3.25");
+    expect(accept).toBeEnabled();
+    await user.click(accept);
+
+    await waitFor(() => {
+      expect(createBody).toMatchObject({
+        title: "Recover task",
+        plan_doc_slug: "task-recovery",
+        done_when: { summary: "Task recovered", checklist: [] },
+        autonomy: "governed",
+        budget: {
+          wall_clock_secs: 7200,
+          no_progress_wakes: 4,
+          total_tokens: 50000,
+          usd: 3.25,
+        },
+      });
+      expect(acceptBody).toEqual({
+        action_index: 0,
+        created_goal_id: "created-goal",
+      });
+    });
+  });
+
+  it("successful_goal_proposal_accept_navigates_to_conductor", async () => {
+    server.use(
+      http.post("*/v1/buddy/conductor/goals", () =>
+        HttpResponse.json(makeConductorGoal({ id: "created-goal" })),
+      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+        acceptResponse({
+          kind: "start_conductor_goal",
+          goal: makeConductorGoal({ id: "created-goal" }),
+        }),
+      ),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
+    };
+
+    const { store, execute } = renderExecutor();
+    await execute(action, makeOpportunity({ proposed_actions: [action] }), 0, {
+      title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      plan_markdown: "# Recover task",
+      done_when: { summary: "Task recovered", checklist: [] },
+      autonomy: "governed",
+      budget: {
+        wall_clock_secs: 3600,
+        no_progress_wakes: 2,
+      },
+    });
+
+    expect(lastPage(store)).toMatchObject({ name: "conductor" });
+  });
+
+  it("goal_proposal_create_errors_display_clearly", async () => {
+    let acceptCalled = false;
+    server.use(
+      http.post("*/v1/buddy/conductor/goals", () =>
+        HttpResponse.json(
+          {
+            detail:
+              "invalid conductor goal: goal budget requires wall_clock_secs",
+          },
+          { status: 400 },
+        ),
+      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.type(
+      screen.getByLabelText("Done when summary or checklist required"),
+      "Task recovered",
+    );
+    await user.type(screen.getByLabelText("Wall-clock hours required"), "1");
+    await user.type(screen.getByLabelText("No-progress wakes required"), "2");
+    await user.click(
+      screen.getByRole("button", { name: "Create conductor goal" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "goal budget requires wall_clock_secs",
+      );
+    });
+    expect(acceptCalled).toBe(false);
+  });
+
   it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {
     let acceptCalls = 0;
     server.use(
@@ -455,6 +651,116 @@ describe("buddy action execution contract", () => {
       expect(screen.getByRole("alert")).toHaveTextContent("dismiss failed");
     });
     expect(button).toBeEnabled();
+  });
+
+  it("empty_defaults_draft_action_is_rejected_without_accepting", async () => {
+    let acceptCalled = false;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "draft_defaults_change",
+      defaults_kind: "chat_model",
+      patch: {},
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Adjust defaults" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("empty draft change");
+    });
+    expect(acceptCalled).toBe(false);
+  });
+
+  it("empty_agents_md_draft_action_is_rejected_without_accepting", async () => {
+    let acceptCalled = false;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "draft_agents_md_patch",
+      content: "  \n\t  ",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Update AGENTS.md" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "empty AGENTS.md draft",
+      );
+    });
+    expect(acceptCalled).toBe(false);
+  });
+
+  it("placeholder_model_draft_action_is_rejected_without_accepting", async () => {
+    let acceptCalled = false;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "draft_defaults_change",
+      defaults_kind: "chat_model",
+      patch: { chat: { model: "your-provider/model-name" } },
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Adjust defaults" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "placeholder model id",
+      );
+    });
+    expect(acceptCalled).toBe(false);
+  });
+
+  it("concrete_defaults_draft_action_still_flows", async () => {
+    let requestBody: unknown = null;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", async ({ request }) => {
+        requestBody = await request.json();
+        return acceptResponse({
+          kind: "draft",
+          draft_kind: "defaults_model",
+          draft_id: "concrete-defaults-draft",
+          defaults_kind: "chat_model",
+        });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "draft_defaults_change",
+      defaults_kind: "chat_model",
+      patch: { chat: { model: "openai/gpt-4o-mini" } },
+    };
+
+    const { store, execute } = renderExecutor();
+    await execute(action, makeOpportunity({ proposed_actions: [action] }), 0);
+
+    expect(requestBody).toEqual({ action_index: 0 });
+    expect(lastPage(store)).toMatchObject({
+      name: "default models",
+      draftId: "concrete-defaults-draft",
+    });
   });
 
   it("chat_companion_failed_accept_keeps_notification_visible", async () => {

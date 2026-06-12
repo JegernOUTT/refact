@@ -1090,6 +1090,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -1788,6 +1789,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         storage::save_task_meta(gcx.clone(), task_id, &meta)
             .await

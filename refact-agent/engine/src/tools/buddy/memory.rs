@@ -222,6 +222,10 @@ async fn checked_existing_memory_path(
     path: &Path,
 ) -> Result<PathBuf, String> {
     reject_dotdot(path)?;
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if ext != "md" && ext != "mdx" {
+        return Err("memory path must be a markdown file".to_string());
+    }
     let metadata = tokio::fs::symlink_metadata(path)
         .await
         .map_err(|e| format!("memory path not accessible: {e}"))?;
@@ -427,12 +431,14 @@ fn markdown_table(cards: &[KnowledgeCard]) -> String {
 }
 
 async fn append_audit_op(gcx: Arc<GlobalContext>, mut op: MemoryLifecycleOp) -> Result<(), String> {
-    let root = project_root(gcx).await?;
+    let root = project_root(gcx.clone()).await?;
     let now = Utc::now().to_rfc3339();
     op.status = MemoryOpStatus::Applied;
     op.requires_approval = false;
     op.applied_at = Some(now);
-    enqueue_memory_op(&root, op).await?;
+    let memory_ops = enqueue_memory_op(&root, op).await?;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    crate::buddy::actor::buddy_apply_memory_ops_state(app, memory_ops).await;
     Ok(())
 }
 
@@ -815,12 +821,21 @@ impl Tool for ToolBuddyMemoryMerge {
         }
         let gcx = ccx.lock().await.app.gcx.clone();
         let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let mut seen_superseded = HashSet::new();
+        let mut superseded_paths = Vec::new();
+        for raw in &superseded {
+            let path = resolve_memory_path(gcx.clone(), raw).await?;
+            let path = checked_existing_memory_path(gcx.clone(), &path).await?;
+            if seen_superseded.insert(path.clone()) {
+                superseded_paths.push(path);
+            }
+        }
         let source_id = hash_parts(&[
             string_arg(args, "canonical_title")?,
             string_arg(args, "canonical_content")?,
             &superseded.join(","),
         ]);
-        let canonical_path = match create_memory(
+        let create_outcome = create_memory(
             gcx.clone(),
             string_arg(args, "canonical_title")?,
             string_arg(args, "canonical_content")?,
@@ -829,16 +844,30 @@ impl Tool for ToolBuddyMemoryMerge {
             &source_id,
             0.9,
         )
-        .await?
-        {
-            CreateOutcome::Created(path) | CreateOutcome::Skipped(path) => path,
+        .await?;
+        let (canonical_path, skipped_existing) = match create_outcome {
+            CreateOutcome::Created(path) => {
+                let path = tokio::fs::canonicalize(&path)
+                    .await
+                    .map(|path| dunce::simplified(&path).to_path_buf())
+                    .map_err(|e| format!("failed to canonicalize created memory path: {e}"))?;
+                (path, false)
+            }
+            CreateOutcome::Skipped(path) => {
+                let path = checked_existing_memory_path(gcx.clone(), &path).await?;
+                (path, true)
+            }
         };
+        let archive_paths: Vec<PathBuf> = superseded_paths
+            .iter()
+            .filter(|path| !(skipped_existing && path.as_path() == canonical_path.as_path()))
+            .cloned()
+            .collect();
         let mut archived = 0usize;
-        for raw in &superseded {
-            let path = resolve_memory_path(gcx.clone(), raw).await?;
+        for path in &archive_paths {
             if archive_memory_file_checked(
                 app.clone(),
-                &path,
+                path,
                 Some(&canonical_path.to_string_lossy()),
             )
             .await?
@@ -859,7 +888,10 @@ impl Tool for ToolBuddyMemoryMerge {
             Utc::now().to_rfc3339(),
         );
         op.payload = MemoryLifecyclePayload {
-            superseded_paths: superseded,
+            superseded_paths: superseded_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
             canonical: Some(MemoryCreatePayload {
                 title: Some(string_arg(args, "canonical_title")?.to_string()),
                 content: string_arg(args, "canonical_content")?.to_string(),
@@ -870,12 +902,18 @@ impl Tool for ToolBuddyMemoryMerge {
             ..Default::default()
         };
         append_audit_op(gcx, op).await?;
+        let skipped_note = if skipped_existing {
+            " (identical canonical memory already existed and was kept active)"
+        } else {
+            ""
+        };
         Ok(result(
             tool_call_id,
             format!(
-                "Merged {} memories into {}",
+                "Merged {} memories into {}{}",
                 archived,
-                canonical_path.display()
+                canonical_path.display(),
+                skipped_note
             ),
         ))
     }
@@ -933,6 +971,20 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    async fn install_buddy_service(gcx: Arc<GlobalContext>, root: &Path) {
+        let tx = gcx.buddy_events_tx.as_ref().unwrap().clone();
+        let service = crate::buddy::actor::BuddyService::new(
+            root.to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        *gcx.buddy.lock().await = Some(service);
     }
 
     fn text(result: &(bool, Vec<ContextEnum>)) -> String {
@@ -1030,6 +1082,41 @@ mod tests {
         assert!(cards.iter().any(|card| card.title == "Create Test"));
         let state = load_memory_ops(dir.path()).await;
         assert_eq!(state.applied_count, 1);
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_create_updates_live_memory_ops_and_snapshot_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let ccx = ccx(dir.path()).await;
+        let gcx = { ccx.lock().await.app.gcx.clone() };
+        install_buddy_service(gcx.clone(), dir.path()).await;
+        let mut tool = ToolBuddyMemoryCreate {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(vec![
+                ("title", serde_json::json!("Create Live Test")),
+                ("content", serde_json::json!("remember the live frog")),
+                ("tags", serde_json::json!(["test"])),
+                ("kind", serde_json::json!("lesson")),
+                ("source_id", serde_json::json!("src-live-create")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let disk_state = load_memory_ops(dir.path()).await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let snapshot = crate::buddy::actor::buddy_snapshot(app).await.unwrap();
+        assert_eq!(disk_state.applied_count, 1);
+        assert_eq!(snapshot.pulse.memory.applied_ops, 1);
+        assert_eq!(snapshot.pulse.memory.pending_ops, 0);
+        let buddy = gcx.buddy.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert_eq!(service.memory_ops, disk_state);
     }
 
     #[tokio::test]
@@ -1203,6 +1290,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buddy_memory_archive_updates_live_memory_ops_and_snapshot_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_memory(
+            dir.path(),
+            "archive-live.md",
+            "Archive Live",
+            "lesson",
+            &["old"],
+            "old live body",
+        )
+        .await;
+        let ccx = ccx(dir.path()).await;
+        let gcx = { ccx.lock().await.app.gcx.clone() };
+        install_buddy_service(gcx.clone(), dir.path()).await;
+        let mut tool = ToolBuddyMemoryArchive {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(vec![
+                ("path", serde_json::json!(path.to_string_lossy())),
+                ("reason", serde_json::json!("obsolete live")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let disk_state = load_memory_ops(dir.path()).await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let snapshot = crate::buddy::actor::buddy_snapshot(app).await.unwrap();
+        assert_eq!(disk_state.applied_count, 1);
+        assert_eq!(snapshot.pulse.memory.applied_ops, 1);
+        assert_eq!(snapshot.pulse.memory.pending_ops, 0);
+        assert_eq!(disk_state.ops[0].op_type, MemoryOpType::ArchiveCandidate);
+        let buddy = gcx.buddy.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert_eq!(service.memory_ops, disk_state);
+    }
+
+    #[tokio::test]
     async fn buddy_memory_archive_rejects_path_outside_knowledge_dir() {
         let dir = tempfile::tempdir().unwrap();
         tokio::fs::create_dir_all(dir.path().join(KNOWLEDGE_FOLDER_NAME))
@@ -1338,5 +1467,141 @@ mod tests {
                 .count()
                 >= 3
         );
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_merge_prevalidates_all_paths_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = write_memory(dir.path(), "one.md", "One", "lesson", &["old"], "one body").await;
+        let missing = dir.path().join(KNOWLEDGE_FOLDER_NAME).join("missing.md");
+        let ccx = ccx(dir.path()).await;
+        let mut tool = ToolBuddyMemoryMerge {
+            config_path: String::new(),
+        };
+
+        let err = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(vec![
+                    ("canonical_title", serde_json::json!("Canonical")),
+                    ("canonical_content", serde_json::json!("canonical body")),
+                    (
+                        "superseded_paths",
+                        serde_json::json!([one.to_string_lossy(), missing.to_string_lossy()]),
+                    ),
+                    ("tags", serde_json::json!(["merged"])),
+                    ("kind", serde_json::json!("lesson")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("not accessible"));
+        assert!(tokio::fs::read_to_string(&one)
+            .await
+            .unwrap()
+            .contains("status: active"));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(KNOWLEDGE_FOLDER_NAME))
+                .unwrap()
+                .count(),
+            1
+        );
+        let state = load_memory_ops(dir.path()).await;
+        assert_eq!(state.applied_count, 0);
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_merge_keeps_existing_canonical_active_when_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = write_memory(
+            dir.path(),
+            "canonical.md",
+            "Canonical",
+            "lesson",
+            &["merged"],
+            "canonical body",
+        )
+        .await;
+        let old = write_memory(dir.path(), "old.md", "Old", "lesson", &["old"], "old body").await;
+        let ccx = ccx(dir.path()).await;
+        let mut tool = ToolBuddyMemoryMerge {
+            config_path: String::new(),
+        };
+
+        let result = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(vec![
+                    ("canonical_title", serde_json::json!("Canonical")),
+                    ("canonical_content", serde_json::json!("canonical body")),
+                    (
+                        "superseded_paths",
+                        serde_json::json!([canonical.to_string_lossy(), old.to_string_lossy()]),
+                    ),
+                    ("tags", serde_json::json!(["merged"])),
+                    ("kind", serde_json::json!("lesson")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let result_text = text(&result);
+        assert!(result_text.contains("Merged 1 memories into"));
+        assert!(result_text.contains("already existed and was kept active"));
+        assert!(tokio::fs::read_to_string(&canonical)
+            .await
+            .unwrap()
+            .contains("status: active"));
+        assert!(tokio::fs::read_to_string(&old)
+            .await
+            .unwrap()
+            .contains("status: archived"));
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_merge_deduplicates_superseded_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = write_memory(dir.path(), "one.md", "One", "lesson", &["old"], "one body").await;
+        let ccx = ccx(dir.path()).await;
+        let mut tool = ToolBuddyMemoryMerge {
+            config_path: String::new(),
+        };
+
+        let result = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(vec![
+                    ("canonical_title", serde_json::json!("Canonical")),
+                    (
+                        "canonical_content",
+                        serde_json::json!("dedup canonical body"),
+                    ),
+                    (
+                        "superseded_paths",
+                        serde_json::json!([one.to_string_lossy(), one.to_string_lossy()]),
+                    ),
+                    ("tags", serde_json::json!(["merged"])),
+                    ("kind", serde_json::json!("lesson")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        assert!(text(&result).contains("Merged 1 memories into"));
+        assert!(tokio::fs::read_to_string(&one)
+            .await
+            .unwrap()
+            .contains("status: archived"));
+        let state = load_memory_ops(dir.path()).await;
+        let merge_op = state
+            .ops
+            .iter()
+            .find(|op| op.op_type == MemoryOpType::MergeArchive)
+            .unwrap();
+        assert_eq!(merge_op.payload.superseded_paths.len(), 1);
     }
 }

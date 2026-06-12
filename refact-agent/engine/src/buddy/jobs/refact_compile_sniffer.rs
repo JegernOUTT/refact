@@ -5,6 +5,8 @@ use std::time::UNIX_EPOCH;
 
 use glob::glob;
 
+use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
+
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_COMPILE_SNIFFER_WORKFLOW_ID};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
@@ -16,6 +18,8 @@ const COOLDOWN_SECONDS: u64 = 60 * 60;
 const PRIORITY: u32 = 5;
 const MAX_LOG_LINES: usize = 5;
 const MAX_LOG_BYTES: u64 = 16 * 1024;
+const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_LOG_LINE_CHARS: usize = 1_000;
 
 fn modified_unix_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
@@ -26,16 +30,39 @@ fn modified_unix_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn validated_rustbinary_log_candidate(logs_dir: &Path, path: PathBuf) -> Option<PathBuf> {
+    let canonical_logs_dir = logs_dir.canonicalize().ok()?;
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    if metadata.len() > MAX_LOG_FILE_BYTES {
+        return None;
+    }
+    let canonical_path = path.canonicalize().ok()?;
+    if !canonical_path.starts_with(&canonical_logs_dir) {
+        return None;
+    }
+    Some(canonical_path)
+}
+
 fn newest_rustbinary_log(logs_dir: &Path) -> Option<PathBuf> {
     let pattern = logs_dir.join("rustbinary.*").to_string_lossy().to_string();
     glob(&pattern)
         .ok()?
         .filter_map(Result::ok)
-        .filter(|path| path.is_file())
+        .filter_map(|path| validated_rustbinary_log_candidate(logs_dir, path))
         .max_by_key(|path| modified_unix_secs(path))
 }
 
 fn first_log_lines(path: &Path) -> Option<Vec<String>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_LOG_FILE_BYTES
+    {
+        return None;
+    }
     let file = File::open(path).ok()?.take(MAX_LOG_BYTES);
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
@@ -51,17 +78,55 @@ fn first_log_lines(path: &Path) -> Option<Vec<String>> {
     Some(lines)
 }
 
+fn safe_log_identifier(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("[redacted-log]")
+        .to_string()
+}
+
+fn scrub_absolute_path_tokens(text: &str) -> String {
+    let mut result = String::new();
+    let mut in_path = false;
+    for ch in text.chars() {
+        if in_path {
+            if ch.is_whitespace() {
+                result.push(ch);
+                in_path = false;
+            }
+            continue;
+        }
+        if ch == '/' {
+            result.push_str("[REDACTED_PATH]");
+            in_path = true;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn safe_log_line(line: &str) -> String {
+    redact_and_cap_text(&scrub_absolute_path_tokens(line), MAX_LOG_LINE_CHARS)
+}
+
+fn safe_log_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|line| safe_log_line(line)).collect()
+}
+
 fn compile_error_evidence(logs_dir: &Path) -> Option<String> {
     let path = newest_rustbinary_log(logs_dir)?;
     let first_lines = first_log_lines(&path)?;
     if !first_lines.iter().any(|line| line.contains("error[E")) {
         return None;
     }
+    let safe_lines = safe_log_lines(&first_lines);
     Some(format!(
         "newest_log={}\nmodified_unix={}\nfirst_lines:\n{}",
-        path.display(),
+        safe_log_identifier(&path),
         modified_unix_secs(&path),
-        first_lines.join("\n")
+        safe_lines.join("\n")
     ))
 }
 
@@ -153,6 +218,23 @@ mod tests {
         app
     }
 
+    fn assert_no_compile_sniffer_leaks(text: &str) {
+        for raw in [
+            "/home/tester/.cache/refact/logs/rustbinary.2026-05-15",
+            "/home/tester/project/src/lib.rs",
+            "password=plainsecret",
+            "plainsecret",
+            "Bearer rawbearertoken123",
+            "rawbearertoken123",
+            "sk-compileapikey1234567890",
+        ] {
+            assert!(
+                !text.contains(raw),
+                "raw sensitive value leaked: {raw}\n{text}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn refact_compile_sniffer_should_run_when_recent_compile_errors_exist() {
         let dir = tempfile::tempdir().unwrap();
@@ -185,6 +267,71 @@ mod tests {
         let ctx = test_context(dir.path());
 
         assert!(!RefactCompileSnifferJob.should_run(gcx, &ctx).await);
+    }
+
+    #[test]
+    fn compile_error_evidence_redacts_paths_and_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let path = logs_dir.join("rustbinary.2026-05-15");
+        std::fs::write(
+            &path,
+            "error[E0425]: failed at /home/tester/project/src/lib.rs password=plainsecret\nBearer rawbearertoken123\napi_key=sk-compileapikey1234567890",
+        )
+        .unwrap();
+
+        let evidence = compile_error_evidence(&logs_dir).unwrap();
+
+        assert!(evidence.contains("newest_log=rustbinary.2026-05-15"));
+        assert!(evidence.contains("[REDACTED"));
+        assert_no_compile_sniffer_leaks(&evidence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_error_evidence_ignores_symlinked_newest_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let older = logs_dir.join("rustbinary.2026-05-15");
+        let outside = dir.path().join("outside.log");
+        let symlink = logs_dir.join("rustbinary.2026-05-16");
+        std::fs::write(&older, "error[E0425]: older compile error").unwrap();
+        std::fs::write(&outside, "error[E9999]: outside compile error").unwrap();
+        std::os::unix::fs::symlink(&outside, &symlink).unwrap();
+
+        let evidence = compile_error_evidence(&logs_dir).unwrap();
+
+        assert!(evidence.contains("newest_log=rustbinary.2026-05-15"));
+        assert!(!evidence.contains("rustbinary.2026-05-16"));
+        assert!(!evidence.contains("outside compile error"));
+    }
+
+    #[test]
+    fn compile_error_evidence_ignores_oversized_log_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let path = logs_dir.join("rustbinary.2026-05-15");
+        let mut contents = String::from("error[E0425]: oversized compile error\n");
+        contents.push_str(&"x".repeat(MAX_LOG_FILE_BYTES as usize));
+        std::fs::write(&path, contents).unwrap();
+
+        assert!(compile_error_evidence(&logs_dir).is_none());
+    }
+
+    #[test]
+    fn compile_sniffer_spec_prompt_contains_only_redacted_evidence() {
+        let ctx = test_context(Path::new("/workspace/refact"));
+        let evidence = "newest_log=rustbinary.2026-05-15\nfirst_lines:\nerror[E0425]: [REDACTED_PATH] password=[REDACTED] Bearer [REDACTED] api_key=[REDACTED]".to_string();
+
+        let spec = build_compile_sniffer_spec(&ctx, evidence);
+        let combined = format!("{}\n{}", spec.prompt, spec.evidence);
+
+        assert!(combined.contains("rustbinary.2026-05-15"));
+        assert!(combined.contains("[REDACTED"));
+        assert_no_compile_sniffer_leaks(&combined);
     }
 
     #[test]

@@ -41,6 +41,12 @@
   background-color: var(--accent-a4);
 }
 
+.surgeryBadge {
+  width: fit-content;
+  margin-bottom: var(--space-1);
+  cursor: help;
+}
+
 /* Reset Markdown margins inside user messages - override Radix styles */
 .userInput :global(.rt-Text),
 .userInput :global(.rt-Heading),

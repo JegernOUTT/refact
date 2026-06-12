@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use chrono::Utc;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use serde_json::json;
 use tokio::time::sleep;
 
@@ -94,6 +95,7 @@ fn make_runtime_event(
         controls: Vec::new(),
         chat_id: None,
         dismissed: false,
+        dismissed_at: None,
     }
 }
 
@@ -409,6 +411,15 @@ async fn record_stall_planner_notification(
     .map(|(_, recorded)| recorded)
 }
 
+fn conductor_wake_reason_for_stall(kind: StallKind) -> ConductorWakeReason {
+    match kind {
+        StallKind::IdleNoFinish
+        | StallKind::Completed
+        | StallKind::GeneratingNoTokens
+        | StallKind::ExecutingToolsNoProgress => ConductorWakeReason::AgentStall,
+    }
+}
+
 fn build_stalled_agent_planner_message(
     card_id: &str,
     card_title: &str,
@@ -687,6 +698,12 @@ pub async fn handle_agent_streaming_error(
     {
         tracing::error!("Failed to mark agent as failed: {}", e);
     }
+    crate::buddy::conductor::wake::enqueue_task_wake(
+        app.gcx.clone(),
+        &task_meta.task_id,
+        ConductorWakeReason::ChatLifecycle,
+    )
+    .await;
 }
 
 /// Mark a task card as failed and notify planner
@@ -1807,6 +1824,12 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                         )
                         .await?;
                     }
+                    crate::buddy::conductor::wake::enqueue_task_wake(
+                        app.gcx.clone(),
+                        task_id,
+                        conductor_wake_reason_for_stall(kind),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -1960,6 +1983,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         crate::tasks::storage::save_task_meta(gcx.clone(), &task.id, &meta)
             .await
@@ -2571,6 +2595,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         crate::tasks::storage::save_task_meta(gcx.clone(), &task.id, &meta)
             .await

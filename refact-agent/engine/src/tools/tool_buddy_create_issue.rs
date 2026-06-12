@@ -154,7 +154,7 @@ impl Tool for ToolBuddyCreateIssue {
                 title,
                 body,
                 labels,
-                false,
+                true,
             )
             .await
         } else {
@@ -164,6 +164,7 @@ impl Tool for ToolBuddyCreateIssue {
                 diagnostic_id,
                 collected_at,
                 error,
+                true,
             )
             .await
         }?;

@@ -55,6 +55,8 @@ pub struct BuddyRuntimeEvent {
     pub chat_id: Option<String>,
     #[serde(default)]
     pub dismissed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,6 +566,13 @@ pub enum BuddyAction {
         market_kind: MarketKind,
         item_id: String,
     },
+    StartConductorGoal {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_doc_slug: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_task_id: Option<String>,
+    },
     CreatePulseReport {
         scope: PulseScope,
     },
@@ -635,7 +644,51 @@ pub enum BuddyPage {
     TaskWorkspace { task_id: String },
     KnowledgeGraph,
     Worktrees,
+    Conductor,
     SetupMode { mode: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BuddyGhostMessage {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    pub role: BuddyGhostMessageRole,
+    pub content: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
+}
+
+impl Default for BuddyGhostMessage {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            goal_id: None,
+            role: BuddyGhostMessageRole::default(),
+            content: String::new(),
+            created_at: String::new(),
+            source_chat_id: None,
+            question_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuddyGhostMessageRole {
+    Say,
+    Ask,
+    Memo,
+}
+
+impl Default for BuddyGhostMessageRole {
+    fn default() -> Self {
+        Self::Say
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -847,5 +900,67 @@ mod tests {
             round_tripped.bubble_policy,
             Some(BuddyBubblePolicy::Ambient)
         );
+    }
+
+    #[test]
+    fn buddy_page_conductor() {
+        let page_json = serde_json::to_string(&BuddyPage::Conductor).unwrap();
+        let page_back: BuddyPage = serde_json::from_str(&page_json).unwrap();
+
+        assert_eq!(page_json, r#"{"type":"conductor"}"#);
+        assert_eq!(page_back, BuddyPage::Conductor);
+    }
+
+    #[test]
+    fn conductor_action_and_page_round_trip() {
+        let action = BuddyAction::StartConductorGoal {
+            title: "Buddy Conductor".to_string(),
+            plan_doc_slug: Some("master-plan".to_string()),
+            source_task_id: Some("task-1".to_string()),
+        };
+        let action_json = serde_json::to_string(&action).unwrap();
+        let action_back: BuddyAction = serde_json::from_str(&action_json).unwrap();
+
+        match action_back {
+            BuddyAction::StartConductorGoal {
+                title,
+                plan_doc_slug,
+                source_task_id,
+            } => {
+                assert_eq!(title, "Buddy Conductor");
+                assert_eq!(plan_doc_slug.as_deref(), Some("master-plan"));
+                assert_eq!(source_task_id.as_deref(), Some("task-1"));
+            }
+            other => panic!("expected StartConductorGoal, got {other:?}"),
+        }
+
+        let page_json = serde_json::to_string(&BuddyPage::Conductor).unwrap();
+        let page_back: BuddyPage = serde_json::from_str(&page_json).unwrap();
+
+        assert_eq!(page_json, r#"{"type":"conductor"}"#);
+        assert_eq!(page_back, BuddyPage::Conductor);
+    }
+
+    #[test]
+    fn buddy_ghost_message_round_trips_roles() {
+        for role in [
+            BuddyGhostMessageRole::Say,
+            BuddyGhostMessageRole::Ask,
+            BuddyGhostMessageRole::Memo,
+        ] {
+            let ghost = BuddyGhostMessage {
+                id: "ghost-1".to_string(),
+                goal_id: Some("goal-1".to_string()),
+                role,
+                content: "boo but helpful".to_string(),
+                created_at: "2026-06-03T00:00:00Z".to_string(),
+                source_chat_id: Some("chat-1".to_string()),
+                question_id: Some("question-1".to_string()),
+            };
+            let encoded = serde_json::to_string(&ghost).unwrap();
+            let decoded: BuddyGhostMessage = serde_json::from_str(&encoded).unwrap();
+
+            assert_eq!(decoded, ghost);
+        }
     }
 }

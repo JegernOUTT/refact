@@ -1,0 +1,257 @@
+.panel {
+  background: var(--gray-a2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.titleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sectionLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  color: var(--gray-10);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--gray-a4);
+  background: var(--gray-a2);
+  color: var(--gray-12);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  background: var(--gray-a3);
+  border-color: var(--gray-a6);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 1px;
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chipPrimary {
+  background: var(--accent-a3);
+  border-color: var(--accent-a6);
+  color: var(--accent-11);
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.filterActive {
+  background: var(--accent-a3);
+  border-color: var(--accent-a6);
+  color: var(--accent-11);
+  font-weight: 600;
+}
+
+.goalList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.goalCard {
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.tone_info {
+  border-color: var(--blue-a6);
+  background: linear-gradient(180deg, var(--blue-a2), var(--gray-a2));
+}
+
+.tone_warning {
+  border-color: var(--amber-a7);
+  background: linear-gradient(180deg, var(--amber-a2), var(--gray-a2));
+}
+
+.tone_danger {
+  border-color: var(--red-a7);
+  background: linear-gradient(180deg, var(--red-a2), var(--gray-a2));
+}
+
+.tone_success {
+  border-color: var(--green-a7);
+  background: linear-gradient(180deg, var(--green-a2), var(--gray-a2));
+}
+
+.tone_purple {
+  border-color: var(--purple-a7);
+  background: linear-gradient(180deg, var(--purple-a2), var(--gray-a2));
+}
+
+.goalHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.goalTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goalTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stateLine {
+  color: var(--gray-11);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.statusBadge {
+  flex-shrink: 0;
+  border-radius: 9999px;
+  border: 1px solid var(--gray-a4);
+  background: var(--gray-a3);
+  color: var(--gray-11);
+  padding: 2px 8px;
+  font-size: 10px;
+  text-transform: capitalize;
+}
+
+.statusAccent {
+  background: var(--color-panel-solid);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: var(--space-2);
+}
+
+.metaItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metaLabel {
+  color: var(--gray-10);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metaValue {
+  color: var(--gray-12);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.recentRail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-2);
+}
+
+.recentItem {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a3);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.recentText {
+  display: block;
+  margin-top: 2px;
+  color: var(--gray-12);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.controlsArea {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  border: 1px dashed var(--gray-a5);
+  background: var(--gray-a2);
+}
+
+.emptyState {
+  color: var(--gray-10);
+  font-size: 12px;
+  padding: var(--space-2) 0;
+}
+
+.compact .goalCard:nth-of-type(n + 4) {
+  display: none;
+}

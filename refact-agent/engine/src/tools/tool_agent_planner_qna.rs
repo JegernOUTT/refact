@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
@@ -355,7 +356,7 @@ impl Tool for ToolAgentAskPlanner {
         };
         let card_id_for_update = card_id.clone();
         let timestamp = Utc::now().to_rfc3339();
-        storage::update_board_atomic(gcx, &task_id, move |board| {
+        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
@@ -372,6 +373,12 @@ impl Tool for ToolAgentAskPlanner {
             Ok(())
         })
         .await?;
+        crate::buddy::conductor::wake::enqueue_task_wake(
+            gcx,
+            &task_id,
+            ConductorWakeReason::ChatLifecycle,
+        )
+        .await;
 
         let output = format!(
             "Question recorded for planner.\n\n- card_id: `{}`\n- question_id: `{}`\n- urgency: `{}`\n\nPlanner reply instruction: call `planner_reply(card_id=\"{}\", question_id=\"{}\", answer=\"...\")`.",
@@ -441,7 +448,7 @@ impl Tool for ToolPlannerReply {
         let card_id_for_update = card_id.clone();
         let question_id_for_update = question_id.clone();
         let answer_for_update = answer.clone();
-        storage::update_board_atomic(gcx, &task_id, move |board| {
+        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
@@ -458,6 +465,12 @@ impl Tool for ToolPlannerReply {
             Ok(())
         })
         .await?;
+        crate::buddy::conductor::wake::enqueue_task_wake(
+            gcx,
+            &task_id,
+            ConductorWakeReason::GhostAnswer,
+        )
+        .await;
 
         let output = format!(
             "Reply delivered to card `{}` for question `{}`.\n\nAnswer: {}",
@@ -583,6 +596,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 

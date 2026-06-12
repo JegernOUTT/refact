@@ -55,6 +55,12 @@ import {
   defaultBuddyPulse,
   defaultBuddySettings,
   updateBuddySettings,
+  upsertConductorGoal,
+  selectConductorGoals,
+  selectConductorGhostMessages,
+  selectActiveConductorGoals,
+  selectGoalById,
+  selectGoalForChat,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
@@ -73,24 +79,28 @@ import { createInitialAnimState } from "../features/Buddy/state";
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
 import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
-import type {
-  BuddySnapshot,
-  BuddyState,
-  BuddySettings,
-  ObserverToggles,
-  BuddyActivityEntry,
-  BuddySuggestion,
-  BuddyConversationEntry,
-  DiagnosticContext,
-  BuddySpeechItem,
-  BuddyRuntimeEvent,
-  BuddyOpportunity,
-  BuddyControl,
-  BuddyDraft,
-  BuddyPulse,
-  BuddyAction,
-  BuddyPage,
-  DraftKind,
+import {
+  normalizeGoalStatus,
+  type BuddySnapshot,
+  type BuddyState,
+  type BuddySettings,
+  type ObserverToggles,
+  type BuddyActivityEntry,
+  type BuddySuggestion,
+  type BuddyConversationEntry,
+  type DiagnosticContext,
+  type BuddySpeechItem,
+  type BuddyRuntimeEvent,
+  type BuddyOpportunity,
+  type BuddyControl,
+  type BuddyDraft,
+  type BuddyPulse,
+  type BuddyAction,
+  type BuddyPage,
+  type DraftKind,
+  type ConductorGoal,
+  type GoalStatusWire,
+  type BuddyGhostMessage,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
@@ -131,6 +141,13 @@ import {
   isFreshErrorWithinGrace,
 } from "../features/Buddy/buddyRuntimeEvents";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
+import { BuddyConductorGoalsPanel } from "../features/Buddy/BuddyConductorGoalsPanel";
+import {
+  conductorMoodForGoals,
+  goalToConductorState,
+} from "../features/Buddy/conductorMood";
+import { AssistantInput } from "../components/ChatContent/AssistantInput";
+import { getSurgeryBadgeInfo } from "../components/ChatContent/SurgeryBadgeInfo";
 import { server } from "../utils/mockServer";
 const reducer = buddySlice.reducer;
 const buddyDir = path.join(__dirname, "../features/Buddy");
@@ -387,6 +404,92 @@ function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
   };
 }
 
+function makeGhostMessage(
+  overrides?: Partial<BuddyGhostMessage>,
+): BuddyGhostMessage {
+  return {
+    id: "ghost-1",
+    goal_id: "goal-1",
+    role: "say",
+    content: "Tiny ghost says hi",
+    created_at: new Date().toISOString(),
+    source_chat_id: "chat-a",
+    question_id: null,
+    ...overrides,
+  };
+}
+type ConductorGoalOverrides = Omit<Partial<ConductorGoal>, "status" | "ledger"> & {
+  status?: GoalStatusWire;
+  ledger?: Omit<NonNullable<ConductorGoal["ledger"]>, "status"> & {
+    status?: GoalStatusWire | null;
+  };
+};
+function makeConductorGoal(overrides?: ConductorGoalOverrides): ConductorGoal {
+  const { status: overrideStatus, ledger: overrideLedger, ...rest } =
+    overrides ?? {};
+  const { status: overrideLedgerStatus, ...ledgerRest } = overrideLedger ?? {};
+  const status = normalizeGoalStatus(overrideStatus ?? "active");
+  const ledgerStatus =
+    overrideLedgerStatus == null
+      ? overrideLedgerStatus
+      : normalizeGoalStatus(overrideLedgerStatus);
+  return {
+    id: "goal-1",
+    title: "Ship conductor",
+    plan_doc_slug: "master-plan",
+    plan_markdown: "# Ship conductor",
+    done_when: { summary: "Done", checklist: ["Tests pass"] },
+    status,
+    autonomy: "full_auto",
+    budget: {
+      wall_clock_secs: 3600,
+      no_progress_wakes: 3,
+      total_tokens: 10000,
+      usd: 2,
+    },
+    spent: {
+      elapsed_secs: 10,
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      total_tokens: 140,
+      cache_read_tokens: 20,
+      usd: 0.1,
+      no_progress_wakes: 1,
+    },
+    summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
+      autonomy: "full_auto",
+      planner_task_id: "planner-task-1",
+      task_ids: ["task-1"],
+      chat_ids: ["chat-1"],
+      memos: [],
+      learning_records: [],
+      pending_questions: [],
+      ghost_messages: [],
+      no_progress_wakes: 1,
+      turn_failures: 0,
+      ...ledgerRest,
+      status: ledgerStatus ?? status,
+    },
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:10Z",
+    completed_at: null,
+    ...rest,
+  };
+}
+
 const noopCanvasContext = {
   clearRect: vi.fn(),
   fillRect: vi.fn(),
@@ -627,6 +730,92 @@ describe("Buddy chat notification freshness", () => {
     await waitFor(() => {
       expect(capturedBody).toEqual({ enabled: true });
     });
+  });
+
+  test("ghost say renders in companion overlay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const ghost = makeGhostMessage({
+        id: "ghost-say",
+        role: "say",
+        content: "I found a tiny clue",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch({
+        type: "buddy/addConductorGhostMessage",
+        payload: ghost,
+      });
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(container, "ghost:ghost-say");
+      await vi.advanceTimersByTimeAsync(50);
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Buddy says: I found a tiny clue/),
+        ).toBeInTheDocument();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("ghost ask renders reply control and posts only conductor answer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      let answerBody: unknown = null;
+      let chatCommandCalled = false;
+      server.use(
+        http.post("*/v1/buddy/conductor/answer", async ({ request }) => {
+          answerBody = await request.json();
+          return HttpResponse.json({
+            goal_id: "goal-ask",
+            question_id: "question-ask",
+            answered: true,
+          });
+        }),
+        http.post("*/v1/chats/:id/commands", () => {
+          chatCommandCalled = true;
+          return HttpResponse.json({ ok: true });
+        }),
+      );
+      const store = setUpStore();
+      const ghost = makeGhostMessage({
+        id: "ghost-ask",
+        goal_id: "goal-ask",
+        role: "ask",
+        content: "Can I keep poking this?",
+        question_id: "question-ask",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch({
+        type: "buddy/addConductorGhostMessage",
+        payload: ghost,
+      });
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(container, "ghost:ghost-ask");
+      fireEvent.change(screen.getByLabelText("Buddy answer"), {
+        target: { value: "Yes, gremlin approved" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Answer Buddy" }));
+
+      await waitFor(() => {
+        expect(answerBody).toEqual({
+          goal_id: "goal-ask",
+          question_id: "question-ask",
+          answer: "Yes, gremlin approved",
+        });
+      });
+      expect(chatCommandCalled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("global active speech still renders", async () => {
@@ -1949,6 +2138,321 @@ describe("buddySlice reducers", () => {
     expect(observers?.git_pressure).toBe(true);
     expect(observers?.diagnostic_cluster).toBe(true);
     expect(observers?.provider_health).toBe(true);
+  });
+});
+
+describe("buddy conductor goal state", () => {
+  test("setBuddySnapshot hydrates conductor goals when present", () => {
+    const goal = makeConductorGoal({ id: "goal-snapshot" });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toEqual([goal]);
+    expect(selectGoalById(rootState, "goal-snapshot")).toEqual(goal);
+  });
+
+  test("setBuddySnapshot hydrates ghost messages from conductor ledgers", () => {
+    const ghost = makeGhostMessage({ id: "ghost-ledger", role: "memo" });
+    const goal = makeConductorGoal({
+      id: "goal-ghost-ledger",
+      summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
+        ...makeConductorGoal().ledger,
+        ghost_messages: [ghost],
+      },
+    });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+
+    expect(selectConductorGhostMessages({ buddy: state })).toEqual([ghost]);
+  });
+
+  test("legacy snapshot without conductor goals remains compatible", () => {
+    const state = reducer(undefined, setBuddySnapshot(makeSnapshot()));
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toEqual([]);
+    expect(selectActiveConductorGoals(rootState)).toEqual([]);
+    expect(selectGoalById(rootState, "missing-goal")).toBeUndefined();
+  });
+
+  test("conductor goal event inserts, updates by goal id, and normalizes legacy status", () => {
+    const initialGoal = makeConductorGoal({ id: "goal-event" });
+    const updatedGoal = makeConductorGoal({
+      id: "goal-event",
+      title: "Updated conductor",
+      status: "waiting_for_human",
+    });
+
+    const withInitial = reducer(undefined, upsertConductorGoal(initialGoal));
+    const state = reducer(withInitial, upsertConductorGoal(updatedGoal));
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toHaveLength(1);
+    expect(selectGoalById(rootState, "goal-event")?.title).toBe(
+      "Updated conductor",
+    );
+    expect(selectGoalById(rootState, "goal-event")?.status).toBe("paused");
+    expect(selectGoalById(rootState, "goal-event")?.ledger?.status).toBe(
+      "paused",
+    );
+  });
+  test("active conductor goals exclude terminal statuses", () => {
+    const active = makeConductorGoal({ id: "goal-active", status: "active" });
+    const paused = makeConductorGoal({ id: "goal-paused", status: "paused" });
+    const done = makeConductorGoal({ id: "goal-done", status: "done" });
+    const escalated = makeConductorGoal({
+      id: "goal-escalated",
+      status: "escalated",
+    });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(
+        makeSnapshot({ conductor_goals: [active, paused, done, escalated] }),
+      ),
+    );
+
+    expect(
+      selectActiveConductorGoals({ buddy: state }).map((g) => g.id),
+    ).toEqual(["goal-active", "goal-paused"]);
+  });
+
+  test("selectGoalForChat resolves by chat and task ownership", () => {
+    const goal = makeConductorGoal({
+      id: "goal-owned",
+      summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
+        ...makeConductorGoal().ledger,
+        planner_task_id: "planner-task-owned",
+        task_ids: ["task-owned"],
+        chat_ids: ["chat-owned"],
+      },
+    });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+    const rootState = { buddy: state };
+
+    expect(selectGoalForChat(rootState, { chatId: "chat-owned" })?.id).toBe(
+      "goal-owned",
+    );
+    expect(selectGoalForChat(rootState, { taskId: "task-owned" })?.id).toBe(
+      "goal-owned",
+    );
+    expect(
+      selectGoalForChat(rootState, { taskId: "planner-task-owned" })?.id,
+    ).toBe("goal-owned");
+    expect(
+      selectGoalForChat(rootState, { chatId: "chat-missing" }),
+    ).toBeUndefined();
+  });
+
+  test("status-to-mood mapping covers canonical conducting, waiting, blocker, and done", () => {
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "active" })]),
+    ).toMatchObject({ state: "conducting", mood: "focused" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "proposed" })]),
+    ).toMatchObject({ state: "conducting", mood: "focused" });
+    expect(
+      conductorMoodForGoals([
+        makeConductorGoal({
+          status: "paused",
+          summary: {
+            ...makeConductorGoal().summary,
+            open_question_count: 1,
+          },
+        }),
+      ]),
+    ).toMatchObject({ state: "waiting_human", animationType: "perk" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "paused" })]),
+    ).toMatchObject({ state: "blocker", mood: "alert" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "done" })]),
+    ).toMatchObject({ state: "done", animationType: "celebrate" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "escalated" })]),
+    ).toMatchObject({ state: "escalated", tone: "danger" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "abandoned" })]),
+    ).toMatchObject({ state: "abandoned", tone: "warning" });
+  });
+
+  test("legacy conductor statuses normalize to canonical aliases", () => {
+    expect(normalizeGoalStatus("planned")).toBe("proposed");
+    expect(normalizeGoalStatus("running")).toBe("active");
+    expect(normalizeGoalStatus("waiting_for_human")).toBe("paused");
+    expect(normalizeGoalStatus("failed")).toBe("escalated");
+    expect(normalizeGoalStatus("cancelled")).toBe("abandoned");
+  });
+
+  test("escalated state outranks blocker and renders distinct panel mood", () => {
+    const blocker = makeConductorGoal({ id: "blocked", status: "paused" });
+    const escalated = makeConductorGoal({
+      id: "escalated",
+      status: "escalated",
+      summary: {
+        task_count: 1,
+        chat_count: 1,
+        memo_count: 1,
+        escalation_memo_count: 1,
+        surgery_memo_count: 0,
+        learning_record_count: 0,
+        pending_question_count: 0,
+        open_question_count: 0,
+        ghost_message_count: 0,
+        no_progress_wakes: 0,
+        turn_failures: 0,
+        has_planner_task: true,
+        has_conductor_chat: true,
+      },
+      ledger: {
+        ...makeConductorGoal().ledger,
+        memos: [
+          {
+            id: "memo-escalation",
+            kind: "escalation",
+            content: "Need human rescue",
+            created_at: "2024-01-01T00:00:30Z",
+            source_chat_id: "chat-1",
+            related_task_id: null,
+          },
+        ],
+      },
+    });
+    const store = setUpStore();
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [blocker, escalated] })),
+    );
+
+    expect(conductorMoodForGoals([blocker, escalated])).toMatchObject({
+      state: "escalated",
+      tone: "danger",
+    });
+
+    render(React.createElement(BuddyConductorGoalsPanel), {
+      store,
+    });
+
+    expect(screen.getByText("🆘 Escalated")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 memos · 0 ghost messages · 0 lessons"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Abandoned" }));
+    expect(
+      screen.getByText(
+        "No conductor goals yet. Tiny chaos engine is idling politely.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  test("surgery and done conductor states render dashboard labels", () => {
+    const surgery = makeConductorGoal({
+      id: "goal-surgery",
+      summary: {
+        task_count: 1,
+        chat_count: 1,
+        memo_count: 1,
+        escalation_memo_count: 0,
+        surgery_memo_count: 1,
+        learning_record_count: 0,
+        pending_question_count: 0,
+        open_question_count: 0,
+        ghost_message_count: 1,
+        no_progress_wakes: 0,
+        turn_failures: 0,
+        has_planner_task: true,
+        has_conductor_chat: true,
+      },
+      ledger: {
+        ...makeConductorGoal().ledger,
+        memos: [
+          {
+            id: "memo-surgery",
+            kind: "surgery",
+            content: "Trajectory surgery edit on chat agent-chat",
+            created_at: "2024-01-01T00:00:20Z",
+            source_chat_id: "chat-1",
+            related_task_id: null,
+          },
+        ],
+        ghost_messages: [
+          makeGhostMessage({
+            id: "ghost-memo",
+            role: "memo",
+            content: "Cleaned agent transcript",
+            created_at: "2024-01-01T00:00:21Z",
+          }),
+        ],
+      },
+    });
+    const done = makeConductorGoal({ id: "goal-done", status: "done" });
+    const store = setUpStore();
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [surgery, done] })),
+    );
+
+    expect(goalToConductorState(surgery)).toBe("surgery");
+    expect(goalToConductorState(done)).toBe("done");
+
+    render(React.createElement(BuddyConductorGoalsPanel), {
+      store,
+    });
+
+    expect(screen.getByText(/Surgery audit/u)).toBeInTheDocument();
+    expect(screen.getAllByText(/Done/u).length).toBeGreaterThan(1);
+    expect(
+      screen.getByText("1 memos · 1 ghost messages · 0 lessons"),
+    ).toBeInTheDocument();
+  });
+
+  test("surgery badge renders subtle audit marker from backend metadata", () => {
+    const info = getSurgeryBadgeInfo({
+      conductor_surgery: { action: "edit", reason: "Trim stale tool result" },
+    });
+
+    render(
+      React.createElement(AssistantInput, {
+        message: "Adjusted transcript result.",
+        surgeryBadge: info,
+      }),
+    );
+
+    expect(screen.getByTestId("buddy-surgery-badge")).toHaveTextContent(
+      "Buddy surgery",
+    );
   });
 });
 
@@ -3932,6 +4436,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
       { type: "worktrees" },
+      { type: "conductor" },
       { type: "setup_mode", mode: "setup_mcp" },
     ];
     const types = pages.map((p) => p.type);
@@ -3969,6 +4474,7 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
       [{ type: "tasks_list" }, "tasks list"],
       [{ type: "knowledge_graph" }, "knowledge graph"],
       [{ type: "worktrees" }, "tasks list"],
+      [{ type: "conductor" }, "conductor"],
     ];
 
     for (const [page, expectedName] of cases) {

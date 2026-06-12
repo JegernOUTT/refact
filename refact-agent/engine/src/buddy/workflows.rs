@@ -226,6 +226,8 @@ struct WorkflowTranscript {
 }
 
 const MAX_ENTRIES: usize = 100;
+const FAILURE_OUTPUT_SUMMARY_MAX_CHARS: usize = 1_000;
+const FAILURE_SUMMARY_MAX_CHARS: usize = 600;
 
 pub async fn buddy_wrap_workflow<T, F, Fut>(
     gcx: AppState,
@@ -422,15 +424,21 @@ pub async fn append_workflow_entry_with_failure(
     success: bool,
     failure: Option<(&WorkflowFailureCategory, &str)>,
 ) {
+    let output_summary = if !success || failure.is_some() {
+        redact_workflow_failure_text(output_summary, FAILURE_OUTPUT_SUMMARY_MAX_CHARS)
+    } else {
+        output_summary.to_string()
+    };
+    let failure_summary = failure
+        .map(|(_, summary)| redact_workflow_failure_text(summary, FAILURE_SUMMARY_MAX_CHARS))
+        .filter(|summary| !summary.is_empty());
     let entry = WorkflowEntry {
         timestamp: Utc::now().to_rfc3339(),
         input_summary: String::new(),
-        output_summary: output_summary.to_string(),
+        output_summary,
         success,
         failure_category: failure.map(|(category, _)| category.clone()),
-        failure_summary: failure
-            .map(|(_, summary)| summary.trim().to_string())
-            .filter(|summary| !summary.is_empty()),
+        failure_summary,
     };
 
     let mut transcript = match tokio::fs::read_to_string(path).await {
@@ -451,6 +459,18 @@ pub async fn append_workflow_entry_with_failure(
             path, e
         );
     }
+}
+
+fn redact_workflow_failure_text(text: &str, max_chars: usize) -> String {
+    let mut redacted = super::jobs::autonomous_chats::redact_and_cap_text(text, max_chars);
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            redacted = redacted.replace(&home, "~");
+        }
+    }
+    crate::llm::safe_truncate(&redacted, max_chars)
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

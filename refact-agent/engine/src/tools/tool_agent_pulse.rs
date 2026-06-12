@@ -11,7 +11,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatUsage, 
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
 use crate::tools::task_tool_helpers::{
-    human_age_at, required_string, require_bound_planner_task, truncate_chars,
+    human_age_at, required_string, resolve_readonly_task_id, truncate_chars,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_core::string_utils::redact_sensitive;
@@ -426,7 +426,7 @@ impl Tool for ToolAgentPulse {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Show a live planner-only pulse for one task agent: state, activity age, token usage, current edit target, last assistant preview, and last tool call.".to_string(),
+            description: "Show a live read-only pulse for one task agent: state, activity age, token usage, current edit target, last assistant preview, and last tool call.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -446,23 +446,8 @@ impl Tool for ToolAgentPulse {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let is_planner = {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|meta| meta.role == "planner")
-                .unwrap_or(false)
-        };
-        if !is_planner {
-            return Err(
-                "agent_pulse can only be called by the task planner. Switch to the planner chat to inspect agent pulse."
-                    .to_string(),
-            );
-        }
-
         let card_id = required_string(args, "card_id")?;
-        let task_id = require_bound_planner_task(&ccx, args).await?;
+        let task_id = resolve_readonly_task_id(&ccx, args, "agent_pulse").await?;
         let (gcx, chat_facade, sessions, fallback_token_cap) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -639,6 +624,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -697,6 +683,29 @@ mod tests {
         ))
     }
 
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        facade: Arc<dyn ChatSessionFacade>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let mut app = AppState::from_gcx(gcx).await;
+        app.chat.facade = facade;
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                200_000,
+                20,
+                false,
+                vec![],
+                "conductor-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
     fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
@@ -727,7 +736,7 @@ mod tests {
         assert_eq!(desc.name, "agent_pulse");
         assert_eq!(desc.input_schema["required"], json!(["card_id"]));
         assert!(desc.input_schema["properties"].get("task_id").is_some());
-        assert!(desc.description.contains("planner-only"));
+        assert!(desc.description.contains("read-only"));
     }
 
     #[tokio::test]
@@ -776,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_agent_pulse_rejects_mismatched_task_id() {
+    async fn tool_agent_pulse_unknown_explicit_task_id_is_clear() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let ccx = planner_ccx(gcx, "planner", Arc::new(MockChatSessionFacade::default())).await;
         let mut tool = ToolAgentPulse::new();
@@ -790,10 +799,29 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(
-            err,
-            "task_id override is not allowed from this planner chat"
+        assert!(err.contains("Task not found: task-2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn agent_pulse_agent_introspection_explicit_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatSessionFacade::default());
+        let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
+        let ccx = unbound_ccx(gcx, facade).await;
+        let mut tool = ToolAgentPulse::new();
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-29")),
+            ("task_id".to_string(), json!("task-1")),
+        ]);
+
+        let output = tool_output_text(
+            tool.tool_execute(ccx, &"call".to_string(), &args)
+                .await
+                .unwrap(),
         );
+
+        assert!(output.contains("# Agent Pulse: T-29"));
+        assert!(output.contains("check_agents redesign"));
     }
 
     #[tokio::test]

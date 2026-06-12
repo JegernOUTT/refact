@@ -110,6 +110,7 @@ mod ast;
 pub mod at_commands;
 pub mod at_tools;
 pub mod buddy;
+pub mod buddy_conductor;
 pub mod buddy_drafts;
 pub mod buddy_frontend_error;
 pub mod buddy_opportunities;
@@ -802,6 +803,40 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/mcp/oauth/status", get(handle_v1_mcp_oauth_status))
         .route("/mcp/oauth/cancel", post(handle_v1_mcp_oauth_cancel))
         .route("/buddy", get(buddy::handle_v1_buddy_snapshot))
+        .route(
+            "/buddy/conductor/goals",
+            get(buddy_conductor::handle_v1_buddy_conductor_goals_list)
+                .post(buddy_conductor::handle_v1_buddy_conductor_goal_create),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id",
+            get(buddy_conductor::handle_v1_buddy_conductor_goal_get)
+                .patch(buddy_conductor::handle_v1_buddy_conductor_goal_patch),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id/pause",
+            post(buddy_conductor::handle_v1_buddy_conductor_goal_pause),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id/resume",
+            post(buddy_conductor::handle_v1_buddy_conductor_goal_resume),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id/stop",
+            post(buddy_conductor::handle_v1_buddy_conductor_goal_stop),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id/autonomy",
+            post(buddy_conductor::handle_v1_buddy_conductor_goal_autonomy),
+        )
+        .route(
+            "/buddy/conductor/goals/:goal_id/manual_wake",
+            post(buddy_conductor::handle_v1_buddy_conductor_goal_manual_wake),
+        )
+        .route(
+            "/buddy/conductor/answer",
+            post(buddy_conductor::handle_v1_buddy_conductor_answer),
+        )
         .route(
             "/buddy/user_action",
             post(buddy::handle_v1_buddy_user_action),

@@ -26,6 +26,8 @@ const CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS: usize = 12;
 const CHAT_REACTION_ECHO_SHORT_PHRASE_WORDS: usize = 2;
 const CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS: usize = 7;
 
+const RAW_PATH_MARKERS: &[&str] = &["/home/", "/users/", "file://", "c:\\", "d:\\"];
+
 const CHAT_REACTION_ECHO_IDENTIFYING_WORDS: &[&str] = &[
     "account",
     "accounts",
@@ -145,10 +147,10 @@ const INSIGHT_KEYWORDS: &[&str] = &[
 ];
 
 pub const HUMOR_LINES: &[&str] = &[
-    "Pixel gremlin status: breadcrumb pile wearing a party hat. I approve suspiciously.",
+    "Buddy gremlin status: breadcrumb pile wearing a party hat. I approve suspiciously.",
     "Chaos ping: I stickered this thread and the sticker winked first. Normal, probably.",
     "Tiny gremlin note: this idea has snack-sized boots and illegal parkour energy.",
-    "Pixel detective mode: monocle on, snacks hidden, dignity lightly optional.",
+    "Buddy detective mode: monocle on, snacks hidden, dignity lightly optional.",
     "Mild scheming intensifies. I will behave. Mostly. Put that in tiny legal font.",
     "Gremlin confetti deployed: adorable sparkle cloud, zero structural warranty.",
     "This thread honked a tiny clown horn in my circuits. Respectfully obsessed.",
@@ -173,9 +175,9 @@ pub const BUG_LINES: &[&str] = &[
 ];
 
 pub const AMBIENT_LINES: &[&str] = &[
-    "Pixel ping: witnessed. Tiny helpful goblin wave deployed at legally cute speed.",
+    "Buddy ping: witnessed. Tiny helpful goblin wave deployed at legally cute speed.",
     "Small gremlin check-in: present, caffeinated, wearing supervision socks.",
-    "Ambient Pixel sparkle: noted, no alarms, just assistant confetti on standby.",
+    "Ambient Buddy sparkle: noted, no alarms, just assistant confetti on standby.",
     "I am orbiting this chat with one cute chaos sticker and excellent posture.",
     "Tiny companion blip: gremlin ears perked, snacks emotionally prepared.",
     "Soft chaos nod: watching the trail, resisting the breadcrumbs heroically.",
@@ -688,6 +690,11 @@ fn contains_redaction_marker(text: &str) -> bool {
     lower.contains("[redacted") || lower.contains("<redacted") || lower.contains("&lt;redacted")
 }
 
+fn contains_raw_path_marker(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    RAW_PATH_MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
     let generated_tokens = echo_word_tokens(generated);
     let tokens = echo_analysis_tokens(analysis_text);
@@ -730,6 +737,7 @@ pub fn sanitize_chat_reaction_speech_text(generated: &str, analysis_text: &str) 
     if normalized.is_empty()
         || redacted != normalized
         || contains_redaction_marker(&normalized)
+        || contains_raw_path_marker(&normalized)
         || contains_analysis_echo(&normalized, analysis_text)
     {
         return None;
@@ -812,6 +820,7 @@ pub fn build_reaction_event(
         controls: vec![],
         chat_id: Some(chat_id.to_string()),
         dismissed: false,
+        dismissed_at: None,
     }
 }
 
@@ -1778,7 +1787,7 @@ mod tests {
     fn humor_fallbacks_are_chaotic_gremlin_style_and_short() {
         assert!(
             HUMOR_LINES.len() >= 6,
-            "humor fallbacks need enough Pixel gremlin variety"
+            "humor fallbacks need enough Buddy gremlin variety"
         );
         assert!(HUMOR_LINES.iter().any(|line| line.contains("gremlin")));
         assert!(HUMOR_LINES.iter().any(|line| line.contains("Chaos")));
@@ -2011,6 +2020,14 @@ mod tests {
     fn generated_speech_with_credential_pattern_is_rejected() {
         let analysis = "please debug auth flow without storing secret material";
         let generated = "Bearer sk-VERYSECRET1234567890 while unrelated analysis continues";
+
+        assert!(sanitize_chat_reaction_speech_text(generated, analysis).is_none());
+    }
+
+    #[test]
+    fn generated_speech_with_raw_path_is_rejected() {
+        let analysis = "please debug auth flow without storing path material";
+        let generated = "Tiny alarm: /tmp is fine but /home/alice/private/project is not.";
 
         assert!(sanitize_chat_reaction_speech_text(generated, analysis).is_none());
     }

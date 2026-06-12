@@ -388,6 +388,7 @@ impl CronRunner {
                     content: serde_json::Value::String(prompt),
                     attachments: vec![],
                     context_files: vec![],
+                    origin: None,
                     suppress_auto_enrichment: false,
                 },
             }) != EnqueueCommandOutcome::Accepted
@@ -1264,6 +1265,7 @@ mod tests {
                     content: serde_json::Value::String("user message".to_string()),
                     attachments: vec![],
                     context_files: vec![],
+                    origin: None,
                     suppress_auto_enrichment: false,
                 },
             });

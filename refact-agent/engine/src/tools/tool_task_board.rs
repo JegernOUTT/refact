@@ -13,7 +13,7 @@ use crate::tools::tools_description::{
 };
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariants, BoardCard, ScopeGuardMode, TaskBoard};
-use crate::tasks::events::{TaskEvent, emit_task_event};
+use crate::tools::task_tool_helpers::{optional_id_string, resolve_readonly_task_id};
 
 fn make_source() -> ToolSource {
     ToolSource {
@@ -656,6 +656,22 @@ async fn get_task_id(
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
+async fn get_readonly_task_id(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    tool_name: &str,
+) -> Result<String, String> {
+    match optional_id_string(args, "task_id")? {
+        Some(_) => resolve_readonly_task_id(ccx, args, tool_name).await,
+        None if args.contains_key("task_id") => {
+            let mut fallback_args = args.clone();
+            fallback_args.remove("task_id");
+            get_task_id(ccx, &fallback_args).await
+        }
+        None => get_task_id(ccx, args).await,
+    }
+}
+
 pub struct ToolTaskBoardGet;
 pub struct ToolTaskBoardCreateCard;
 pub struct ToolTaskBoardUpdateCard;
@@ -677,7 +693,7 @@ impl Tool for ToolTaskBoardGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = get_readonly_task_id(&ccx, args, "board_get").await?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let board = storage::load_board(gcx, &task_id).await?;
         let card_id = args
@@ -788,50 +804,45 @@ impl Tool for ToolTaskBoardCreateCard {
             .unwrap_or("");
         let depends_on: Vec<String> = parse_depends_on(args.get("depends_on"));
         let target_files = parse_target_files(args.get("target_files"), instructions);
-        let mut board = storage::load_board(gcx.clone(), &task_id).await?;
+        let card_id_owned = card_id.to_string();
+        let title_owned = title.to_string();
+        let priority_owned = priority.to_string();
+        let instructions_owned = instructions.to_string();
 
-        if board.cards.iter().any(|c| c.id == card_id) {
-            return Err(format!("Card {} already exists", card_id));
-        }
+        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            if board.cards.iter().any(|c| c.id == card_id_owned) {
+                return Err(format!("Card {} already exists", card_id_owned));
+            }
 
-        board.cards.push(BoardCard {
-            id: card_id.to_string(),
-            title: title.to_string(),
-            column: "planned".to_string(),
-            priority: priority.to_string(),
-            depends_on,
-            instructions: instructions.to_string(),
-            assignee: None,
-            agent_chat_id: None,
-            status_updates: vec![],
-            comments: vec![],
-            final_report: None,
-            final_report_structured: None,
-            verifier_report: None,
-            created_at: Utc::now().to_rfc3339(),
-            started_at: None,
-            last_heartbeat_at: None,
-            completed_at: None,
-            agent_branch: None,
-            agent_worktree: None,
-            agent_worktree_name: None,
-            ab_variants: None,
-            target_files,
-            scope_guard_mode: Default::default(),
-            team_members: vec![],
-        });
-        board.rev += 1;
-
-        storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(
-            gcx.clone(),
-            TaskEvent::BoardChanged {
-                task_id: task_id.to_string(),
-                rev: board.rev,
-                board: board.clone(),
-            },
-        )
-        .await;
+            board.cards.push(BoardCard {
+                id: card_id_owned,
+                title: title_owned,
+                column: "planned".to_string(),
+                priority: priority_owned,
+                depends_on,
+                instructions: instructions_owned,
+                assignee: None,
+                agent_chat_id: None,
+                status_updates: vec![],
+                comments: vec![],
+                final_report: None,
+                final_report_structured: None,
+                verifier_report: None,
+                created_at: Utc::now().to_rfc3339(),
+                started_at: None,
+                last_heartbeat_at: None,
+                completed_at: None,
+                agent_branch: None,
+                agent_worktree: None,
+                agent_worktree_name: None,
+                ab_variants: None,
+                target_files,
+                scope_guard_mode: Default::default(),
+                team_members: vec![],
+            });
+            Ok(())
+        })
+        .await?;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Created card {} in Planned column", card_id);
@@ -902,39 +913,47 @@ impl Tool for ToolTaskBoardUpdateCard {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
-        let mut board = storage::load_board(gcx.clone(), &task_id).await?;
+        let card_id_owned = card_id.to_string();
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let priority = args
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let instructions = args
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let depends_on = args
+            .contains_key("depends_on")
+            .then(|| parse_depends_on(args.get("depends_on")));
+        let target_files_arg = args.get("target_files").cloned();
 
-        let card = board
-            .get_card_mut(card_id)
-            .ok_or(format!("Card {} not found", card_id))?;
+        storage::update_board_atomic(gcx, &task_id, move |board| {
+            let card = board
+                .get_card_mut(&card_id_owned)
+                .ok_or(format!("Card {} not found", card_id_owned))?;
 
-        if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
-            card.title = title.to_string();
-        }
-        if let Some(priority) = args.get("priority").and_then(|v| v.as_str()) {
-            card.priority = priority.to_string();
-        }
-        if let Some(instructions) = args.get("instructions").and_then(|v| v.as_str()) {
-            card.instructions = instructions.to_string();
-        }
-        if args.contains_key("depends_on") {
-            card.depends_on = parse_depends_on(args.get("depends_on"));
-        }
-        if args.contains_key("target_files") {
-            card.target_files = parse_target_files(args.get("target_files"), &card.instructions);
-        }
-
-        board.rev += 1;
-        storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(
-            gcx,
-            TaskEvent::BoardChanged {
-                task_id: task_id.to_string(),
-                rev: board.rev,
-                board: board.clone(),
-            },
-        )
-        .await;
+            if let Some(title) = title {
+                card.title = title;
+            }
+            if let Some(priority) = priority {
+                card.priority = priority;
+            }
+            if let Some(instructions) = instructions {
+                card.instructions = instructions;
+            }
+            if let Some(depends_on) = depends_on {
+                card.depends_on = depends_on;
+            }
+            if let Some(target_files_arg) = target_files_arg.as_ref() {
+                card.target_files = parse_target_files(Some(target_files_arg), &card.instructions);
+            }
+            Ok(())
+        })
+        .await?;
 
         let result = format!("Updated card {}", card_id);
         Ok((
@@ -1034,35 +1053,28 @@ impl Tool for ToolTaskBoardMoveCard {
                 column, valid_columns
             ));
         }
-        let mut board = storage::load_board(gcx.clone(), &task_id).await?;
         let now = Utc::now().to_rfc3339();
+        let card_id_owned = card_id.to_string();
+        let column_owned = column.to_string();
 
-        let card = board
-            .get_card_mut(card_id)
-            .ok_or(format!("Card {} not found", card_id))?;
-        let old_column = card.column.clone();
+        let (_, old_column) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let card = board
+                .get_card_mut(&card_id_owned)
+                .ok_or(format!("Card {} not found", card_id_owned))?;
+            let old_column = card.column.clone();
 
-        if column == "doing" && card.started_at.is_none() {
-            card.started_at = Some(now.clone());
-        }
-        if (column == "done" || column == "failed" || column == "regressed")
-            && card.completed_at.is_none()
-        {
-            card.completed_at = Some(now);
-        }
-        card.column = column.to_string();
-        board.rev += 1;
-
-        storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(
-            gcx.clone(),
-            TaskEvent::BoardChanged {
-                task_id: task_id.to_string(),
-                rev: board.rev,
-                board: board.clone(),
-            },
-        )
-        .await;
+            if column_owned == "doing" && card.started_at.is_none() {
+                card.started_at = Some(now.clone());
+            }
+            if (column_owned == "done" || column_owned == "failed" || column_owned == "regressed")
+                && card.completed_at.is_none()
+            {
+                card.completed_at = Some(now);
+            }
+            card.column = column_owned;
+            Ok(old_column)
+        })
+        .await?;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Moved card {} from {} to {}", card_id, old_column, column);
@@ -1143,26 +1155,17 @@ impl Tool for ToolTaskBoardDeleteCard {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
-        let mut board = storage::load_board(gcx.clone(), &task_id).await?;
+        let card_id_owned = card_id.to_string();
+        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let existed = board.cards.iter().any(|c| c.id == card_id_owned);
+            if !existed {
+                return Err(format!("Card {} not found", card_id_owned));
+            }
 
-        let existed = board.cards.iter().any(|c| c.id == card_id);
-        if !existed {
-            return Err(format!("Card {} not found", card_id));
-        }
-
-        board.cards.retain(|c| c.id != card_id);
-        board.rev += 1;
-
-        storage::save_board(gcx.clone(), &task_id, &board).await?;
-        emit_task_event(
-            gcx.clone(),
-            TaskEvent::BoardChanged {
-                task_id: task_id.to_string(),
-                rev: board.rev,
-                board: board.clone(),
-            },
-        )
-        .await;
+            board.cards.retain(|c| c.id != card_id_owned);
+            Ok(())
+        })
+        .await?;
         storage::update_task_stats(gcx, &task_id).await?;
 
         let result = format!("Deleted card {}", card_id);
@@ -1214,7 +1217,7 @@ impl Tool for ToolTaskReadyCards {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = get_readonly_task_id(&ccx, args, "ready_cards").await?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let board = storage::load_board(gcx, &task_id).await?;
@@ -1262,6 +1265,9 @@ impl Tool for ToolTaskReadyCards {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::tasks::types::{TaskMeta, TaskStatus};
+    use refact_buddy_core::user_action::UserAction;
 
     #[test]
     fn update_card_schema_includes_target_files() {
@@ -1328,6 +1334,389 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "unbound-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    async fn planner_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        task_id: &str,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                format!("planner-{}-1", task_id),
+                None,
+                "model".to_string(),
+                Some(crate::chat::types::TaskMeta {
+                    task_id: task_id.to_string(),
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some(format!("planner-{}-1", task_id)),
+                }),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    async fn write_task(
+        task_id: &str,
+        board: TaskBoard,
+    ) -> (tempfile::TempDir, Arc<crate::global_context::GlobalContext>) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact/tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        storage::save_task_meta(
+            gcx.clone(),
+            task_id,
+            &TaskMeta {
+                schema_version: 1,
+                id: task_id.to_string(),
+                name: "Task".to_string(),
+                status: TaskStatus::Active,
+                created_at: now.clone(),
+                updated_at: now,
+                cards_total: board.cards.len(),
+                cards_done: board
+                    .cards
+                    .iter()
+                    .filter(|card| card.column == "done")
+                    .count(),
+                cards_failed: board
+                    .cards
+                    .iter()
+                    .filter(|card| card.column == "failed" || card.column == "regressed")
+                    .count(),
+                agents_active: 0,
+                base_branch: None,
+                base_commit: None,
+                default_agent_model: None,
+                is_name_generated: false,
+                last_agents_summary_at: None,
+                planner_session_state: None,
+                conductor: None,
+            },
+        )
+        .await
+        .unwrap();
+        storage::save_board(gcx.clone(), task_id, &board)
+            .await
+            .unwrap();
+        (temp, gcx)
+    }
+
+    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        }
+    }
+
+    async fn run_board_tool(
+        tool: &mut dyn Tool,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: HashMap<String, Value>,
+    ) -> Result<String, String> {
+        tool.tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .map(output_text)
+    }
+
+    #[tokio::test]
+    async fn board_mutation_tools_use_atomic_update() {
+        let task_id = "atomic-board-tools";
+        let (_temp, gcx) = write_task(
+            task_id,
+            TaskBoard {
+                rev: 7,
+                cards: vec![card("T-1", "One", "planned", "P1", vec![])],
+                ..Default::default()
+            },
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone(), task_id).await;
+
+        let created = run_board_tool(
+            &mut ToolTaskBoardCreateCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("T-2")),
+                ("title".to_string(), json!("Two")),
+                ("instructions".to_string(), json!("Touch src/lib.rs")),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created, "Created card T-2 in Planned column");
+        let board = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(board.rev, 8);
+        assert!(board.get_card("T-2").is_some());
+
+        let updated = run_board_tool(
+            &mut ToolTaskBoardUpdateCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("T-2")),
+                ("priority".to_string(), json!("P0")),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, "Updated card T-2");
+        let board = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(board.rev, 9);
+        assert_eq!(board.get_card("T-2").unwrap().priority, "P0");
+
+        let moved = run_board_tool(
+            &mut ToolTaskBoardMoveCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("T-2")),
+                ("column".to_string(), json!("doing")),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved, "Moved card T-2 from planned to doing");
+        let board = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(board.rev, 10);
+        assert_eq!(board.get_card("T-2").unwrap().column, "doing");
+        assert!(board.get_card("T-2").unwrap().started_at.is_some());
+
+        let deleted = run_board_tool(
+            &mut ToolTaskBoardDeleteCard::new(),
+            ccx,
+            HashMap::from([("card_id".to_string(), json!("T-2"))]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, "Deleted card T-2");
+        let board = storage::load_board(gcx, task_id).await.unwrap();
+        assert_eq!(board.rev, 11);
+        assert!(board.get_card("T-2").is_none());
+    }
+
+    #[tokio::test]
+    async fn board_mutation_errors_do_not_change_rev() {
+        let task_id = "atomic-board-errors";
+        let (_temp, gcx) = write_task(
+            task_id,
+            TaskBoard {
+                rev: 3,
+                cards: vec![card("T-1", "One", "planned", "P1", vec![])],
+                ..Default::default()
+            },
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone(), task_id).await;
+
+        let duplicate = run_board_tool(
+            &mut ToolTaskBoardCreateCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("T-1")),
+                ("title".to_string(), json!("Duplicate")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate, "Card T-1 already exists");
+        assert_eq!(
+            storage::load_board(gcx.clone(), task_id).await.unwrap().rev,
+            3
+        );
+
+        let missing_update = run_board_tool(
+            &mut ToolTaskBoardUpdateCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("missing")),
+                ("title".to_string(), json!("Missing")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_update, "Card missing not found");
+        assert_eq!(
+            storage::load_board(gcx.clone(), task_id).await.unwrap().rev,
+            3
+        );
+
+        let missing_move = run_board_tool(
+            &mut ToolTaskBoardMoveCard::new(),
+            ccx.clone(),
+            HashMap::from([
+                ("card_id".to_string(), json!("missing")),
+                ("column".to_string(), json!("done")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_move, "Card missing not found");
+        assert_eq!(
+            storage::load_board(gcx.clone(), task_id).await.unwrap().rev,
+            3
+        );
+
+        let missing_delete = run_board_tool(
+            &mut ToolTaskBoardDeleteCard::new(),
+            ccx,
+            HashMap::from([("card_id".to_string(), json!("missing"))]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_delete, "Card missing not found");
+        let board = storage::load_board(gcx, task_id).await.unwrap();
+        assert_eq!(board.rev, 3);
+        assert_eq!(board.cards.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn board_move_failed_transition_records_task_failed() {
+        let task_id = "atomic-board-failure-action";
+        let mut failing_card = card("T-1", "One", "doing", "P1", vec![]);
+        failing_card
+            .status_updates
+            .push(crate::tasks::types::StatusUpdate {
+                timestamp: Utc::now().to_rfc3339(),
+                message: "the gremlin tripped".to_string(),
+            });
+        let (_temp, gcx) = write_task(
+            task_id,
+            TaskBoard {
+                rev: 1,
+                cards: vec![failing_card],
+                ..Default::default()
+            },
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone(), task_id).await;
+
+        run_board_tool(
+            &mut ToolTaskBoardMoveCard::new(),
+            ccx,
+            HashMap::from([
+                ("card_id".to_string(), json!("T-1")),
+                ("column".to_string(), json!("failed")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let ring = gcx.user_activity.lock().await;
+        assert!(ring.snapshot().iter().any(|action| matches!(
+            action,
+            UserAction::TaskFailed { task_id, reason_short, .. }
+                if task_id == "atomic-board-failure-action" && reason_short == "the gremlin tripped"
+        )));
+    }
+
+    #[tokio::test]
+    async fn concurrent_board_mutations_preserve_changes() {
+        let task_id = "atomic-board-concurrent";
+        let (_temp, gcx) = write_task(
+            task_id,
+            TaskBoard {
+                rev: 0,
+                cards: vec![],
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut handles = vec![];
+        for i in 0..8 {
+            let gcx = gcx.clone();
+            handles.push(tokio::spawn(async move {
+                storage::update_board_atomic(gcx, task_id, move |board| {
+                    board.cards.push(card(
+                        &format!("T-{}", i),
+                        &format!("Card {}", i),
+                        "planned",
+                        "P1",
+                        vec![],
+                    ));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let board = storage::load_board(gcx, task_id).await.unwrap();
+        assert_eq!(board.rev, 8);
+        let ids = board
+            .cards
+            .iter()
+            .map(|card| card.id.as_str())
+            .collect::<HashSet<_>>();
+        for i in 0..8 {
+            assert!(ids.contains(format!("T-{}", i).as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_board_get_reads_unbound_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task_id = "explicit-board-task";
+        tokio::fs::create_dir_all(temp.path().join(".refact/tasks").join(task_id))
+            .await
+            .unwrap();
+        storage::save_board(gcx.clone(), task_id, &sample_board())
+            .await
+            .unwrap();
+        let ccx = unbound_ccx(gcx).await;
+
+        let output = output_text(
+            ToolTaskBoardGet::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &HashMap::from([
+                        ("task_id".to_string(), serde_json::json!(task_id)),
+                        ("verbosity".to_string(), serde_json::json!("minimal")),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("id: T-23"));
+        assert!(output.contains("id: T-24"));
     }
 
     #[test]

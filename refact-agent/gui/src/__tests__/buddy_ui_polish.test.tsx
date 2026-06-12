@@ -285,6 +285,7 @@ describe("buddy UI polish", () => {
       [{ type: "task_workspace", task_id: "task-a" }, "task workspace"],
       [{ type: "knowledge_graph" }, "knowledge graph"],
       [{ type: "worktrees" }, "tasks list"],
+      [{ type: "conductor" }, "conductor"],
     ];
 
     for (const [page, expectedName] of cases) {

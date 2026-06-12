@@ -11,8 +11,9 @@ use super::config::{limits, timeouts};
 pub use refact_chat_api::{
     ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserTabInfo, BuddyThreadMeta,
     ChatCommand, ChatEvent, CommandRequest, CompressionPhase, CompressionReason, DeltaOp, DiffBox,
-    EventEnvelope, PauseReason, PendingSkillDeactivation, QueuedItem, RuntimeState, SessionState,
-    TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta,
+    EventEnvelope, MessageOrigin, PauseReason, PendingSkillDeactivation, QueuedItem, RuntimeState,
+    SessionState, TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds,
+    WorktreeMeta,
 };
 
 pub fn max_queue_size() -> usize {
@@ -297,6 +298,7 @@ pub struct ChatSession {
 pub struct PendingBrowserMessage {
     pub pending_message_id: String,
     pub content: serde_json::Value,
+    pub origin: Option<MessageOrigin>,
     pub attachments: Vec<serde_json::Value>,
     pub checkpoints: Vec<Checkpoint>,
     pub context_files: Vec<serde_json::Value>,

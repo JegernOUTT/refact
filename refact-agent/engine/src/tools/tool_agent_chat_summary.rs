@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::{AtCommandsContext, MAX_SUBCHAT_DEPTH};
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ContextEnum};
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use crate::tasks::storage;
-use crate::tools::task_tool_helpers::require_bound_planner_task;
+use crate::tools::task_tool_helpers::resolve_readonly_task_id;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::ChatSessionFacade;
 
@@ -420,7 +420,7 @@ impl Tool for ToolAgentChatSummary {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Planner-only LLM summary of one task agent transcript with decisions, files touched, blockers, next steps, current state, and confidence.".to_string(),
+            description: "Read-only LLM summary of one task agent transcript with decisions, files touched, blockers, next steps, current state, and confidence.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -441,24 +441,9 @@ impl Tool for ToolAgentChatSummary {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let is_planner = {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock
-                .task_meta
-                .as_ref()
-                .map(|meta| meta.role == "planner")
-                .unwrap_or(false)
-        };
-        if !is_planner {
-            return Err(
-                "agent_chat_summary can only be called by the task planner. Switch to the planner chat to audit agent transcripts."
-                    .to_string(),
-            );
-        }
-
         let card_id = required_string(args, "card_id")?;
         let focus = optional_string(args, "focus");
-        let task_id = require_bound_planner_task(&ccx, args).await?;
+        let task_id = resolve_readonly_task_id(&ccx, args, "agent_chat_summary").await?;
         let (gcx, chat_facade) = {
             let ccx_lock = ccx.lock().await;
             (ccx_lock.app.gcx.clone(), ccx_lock.app.chat.facade.clone())
@@ -619,6 +604,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -677,6 +663,29 @@ mod tests {
         ))
     }
 
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        facade: Arc<dyn ChatSessionFacade>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let mut app = AppState::from_gcx(gcx).await;
+        app.chat.facade = facade;
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                200_000,
+                20,
+                false,
+                vec![],
+                "conductor-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
     fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
@@ -695,7 +704,7 @@ mod tests {
         assert_eq!(desc.input_schema["required"], json!(["card_id"]));
         assert!(desc.input_schema["properties"].get("focus").is_some());
         assert!(desc.input_schema["properties"].get("task_id").is_some());
-        assert!(desc.description.contains("Planner-only"));
+        assert!(desc.description.contains("Read-only"));
     }
 
     #[tokio::test]
@@ -736,6 +745,37 @@ mod tests {
         let ccx = planner_ccx(gcx, "planner", facade).await;
         let mut tool = ToolAgentChatSummary::new();
         let args = HashMap::from([("card_id".to_string(), json!("T-29"))]);
+
+        let output = tool_output_text(
+            tool.tool_execute(ccx, &"call".to_string(), &args)
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("# Agent Chat Summary: T-29"));
+        assert!(output.contains("No messages found"));
+    }
+
+    #[tokio::test]
+    async fn agent_chat_summary_agent_introspection_explicit_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatSessionFacade::default());
+        facade.snapshots.lock().unwrap().insert(
+            "agent-chat-1".to_string(),
+            Ok(ChatSessionSnapshot {
+                messages: vec![],
+                thread: ThreadParams::default(),
+                session_state: SessionState::Idle,
+                pause_reasons: vec![],
+            }),
+        );
+        let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
+        let ccx = unbound_ccx(gcx, facade).await;
+        let mut tool = ToolAgentChatSummary::new();
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-29")),
+            ("task_id".to_string(), json!("task-1")),
+        ]);
 
         let output = tool_output_text(
             tool.tool_execute(ccx, &"call".to_string(), &args)

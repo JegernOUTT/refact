@@ -19,6 +19,7 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use crate::ast::ast_indexer_thread::AstIndexService;
 use crate::agents::registry::BackgroundAgentRegistry;
 use crate::buddy::actor::BuddyService;
+use crate::buddy::conductor::wake::{ConductorWakeBus, ConductorWakeTargets};
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
 use crate::chat::types::EnqueueCommandOutcome;
@@ -115,6 +116,8 @@ pub struct BuddyServices {
     pub buddy: Arc<AMutex<Option<BuddyService>>>,
     pub buddy_events_tx: tokio::sync::broadcast::Sender<BuddyEvent>,
     pub user_activity: Arc<AMutex<UserActivityRing>>,
+    pub conductor_wake_bus: Arc<AMutex<ConductorWakeBus>>,
+    pub conductor_wake_targets: Arc<AMutex<ConductorWakeTargets>>,
 }
 
 #[derive(Clone)]
@@ -586,22 +589,19 @@ impl BuddyEventSink for AppBuddyEventSink {
     ) -> Option<(String, Option<String>)> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let snapshot = self.snapshot().await?;
-        let pulse_one_liner = format!(
-            "{} pending ops, {} stuck tasks",
-            snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
-        );
-        let voice_ctx = crate::buddy::voice_service::VoiceCtx {
-            persona: &snapshot.state.personality,
-            identity_name: snapshot.state.identity.name.as_str(),
-            pulse_one_liner,
-            workflow_id: Some(workflow_id),
-            workflow_summary: Some(workflow_summary),
-        };
         Some(
-            crate::buddy::voice_service::voice_service()
-                .await
-                .render_runtime_event_fast(app, voice_ctx, status)
-                .await,
+            crate::buddy::actor::render_buddy_runtime_event_fast(
+                app,
+                snapshot.state.personality,
+                snapshot.state.identity.name,
+                snapshot.pulse,
+                Some(workflow_id.to_string()),
+                workflow_summary.to_string(),
+                status,
+                workflow_summary.to_string(),
+                Some(workflow_summary.to_string()),
+            )
+            .await,
         )
     }
 
