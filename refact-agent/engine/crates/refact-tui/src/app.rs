@@ -186,6 +186,32 @@ impl App {
         }
     }
 
+    fn notice_only(notice: impl Into<String>) -> Self {
+        Self {
+            transcript: vec![TranscriptItem::Notice(notice.into())],
+            composer: String::new(),
+            composer_mode: ComposerMode::Chat,
+            picker: ProjectPickerState::new(Vec::new()),
+            modal_picker: None,
+            approval_modal: None,
+            events_pane: EventsPaneState::new(),
+            current_project: None,
+            chat_id: uuid::Uuid::new_v4().to_string(),
+            model: None,
+            mode: None,
+            pending_model: None,
+            pending_mode: None,
+            session_state: SessionState::Error,
+            daemon_online: false,
+            scroll_offset: 0,
+            selected_tool_index: None,
+            help_open: false,
+            should_quit: false,
+            last_ctrl_c: None,
+            stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
+        }
+    }
+
     pub fn composer(&self) -> &str {
         &self.composer
     }
@@ -1040,6 +1066,34 @@ pub enum AppAction {
     Abort,
 }
 
+async fn show_startup_notice(message: String) -> Result<(), TuiError> {
+    let mut app = App::notice_only(message);
+    let mut terminal = TerminalSession::start()?;
+    terminal
+        .terminal_mut()
+        .draw(|frame| crate::ui::render(frame, &app))?;
+    let mut reader = EventStream::new();
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= Duration::from_secs(8) {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(250), reader.next()).await {
+            Ok(Some(Ok(Event::Key(key)))) if key.kind == KeyEventKind::Press => {
+                app.handle_key(key);
+                break;
+            }
+            Ok(Some(Ok(Event::Resize(_, _)))) => {
+                terminal
+                    .terminal_mut()
+                    .draw(|frame| crate::ui::render(frame, &app))?;
+            }
+            Ok(Some(Ok(_))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 enum RuntimeEvent {
     Input(Event),
@@ -1057,11 +1111,19 @@ enum RuntimeEvent {
 }
 
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
-    let base_url = options
-        .daemon_url
-        .or_else(|| std::env::var("REFACT_DAEMON_URL").ok())
-        .unwrap_or_else(|| "http://127.0.0.1:8488".to_string());
-    let client = DaemonClient::new(base_url, None)?;
+    let endpoint = match crate::client::resolve_daemon_endpoint(
+        options
+            .daemon_url
+            .or_else(|| std::env::var("REFACT_DAEMON_URL").ok()),
+    ) {
+        Ok(endpoint) => endpoint,
+        Err(warning) => {
+            let notice = warning.notice();
+            let _ = show_startup_notice(notice.clone()).await;
+            return Err(TuiError::Message(notice));
+        }
+    };
+    let client = DaemonClient::from_endpoint(endpoint)?;
     let root = match options.project_hint {
         Some(path) => path,
         None => std::env::current_dir().map_err(|error| TuiError::Message(error.to_string()))?,

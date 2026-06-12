@@ -20,3 +20,6 @@ tracing = "0.1"
 unicode-width = "0.2"
 url = "2.4.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

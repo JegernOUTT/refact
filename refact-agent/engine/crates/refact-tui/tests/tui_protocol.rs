@@ -4,18 +4,28 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use refact_tui::client::{DaemonClient, ToolDecision};
+use refact_tui::client::{
+    discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, DaemonClient,
+    ToolDecision,
+};
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
 struct State {
     commands: Arc<(Mutex<Vec<Value>>, Condvar)>,
+    authorizations: Arc<(Mutex<Vec<Option<String>>>, Condvar)>,
 }
 
 impl State {
     fn record_command(&self, command: Value) {
         let (lock, cond) = &*self.commands;
         lock.lock().unwrap().push(command);
+        cond.notify_all();
+    }
+
+    fn record_authorization(&self, authorization: Option<String>) {
+        let (lock, cond) = &*self.authorizations;
+        lock.lock().unwrap().push(authorization);
         cond.notify_all();
     }
 
@@ -36,6 +46,30 @@ impl State {
             let wait = deadline.saturating_duration_since(now);
             let (next_commands, timeout) = cond.wait_timeout(commands, wait).unwrap();
             commands = next_commands;
+            if timeout.timed_out() {
+                return false;
+            }
+        }
+    }
+
+    fn wait_for_authorization(&self, expected: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (lock, cond) = &*self.authorizations;
+        let mut authorizations = lock.lock().unwrap();
+        loop {
+            if authorizations
+                .iter()
+                .any(|value| value.as_deref() == Some(expected))
+            {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let (next_authorizations, timeout) = cond.wait_timeout(authorizations, wait).unwrap();
+            authorizations = next_authorizations;
             if timeout.timed_out() {
                 return false;
             }
@@ -117,6 +151,64 @@ async fn model_modes_and_events_protocol_paths_work() {
     assert_eq!(event.kind, "worker_ready");
 }
 
+#[tokio::test]
+async fn daemon_info_env_override_selects_custom_port_and_token() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("daemon.json"),
+        r#"{"pid":7,"port":43123,"bind":"0.0.0.0","version":"9.9.9","auth_token":"secret-token"}"#,
+    )
+    .unwrap();
+    let _guard = EnvGuard::set_daemon_dir(dir.path());
+
+    let endpoint = discover_daemon_endpoint().unwrap().unwrap();
+
+    assert_eq!(endpoint.base_url, "http://127.0.0.1:43123");
+    assert_eq!(endpoint.auth_token.as_deref(), Some("secret-token"));
+}
+
+#[tokio::test]
+async fn explicit_url_override_preserves_discovered_token() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("daemon.json"),
+        r#"{"pid":7,"port":43123,"bind":"127.0.0.1","version":"9.9.9","auth_token":"secret-token"}"#,
+    )
+    .unwrap();
+    let _guard = EnvGuard::set_daemon_dir(dir.path());
+
+    let endpoint = resolve_daemon_endpoint(Some("http://127.0.0.1:45454".to_string())).unwrap();
+
+    assert_eq!(endpoint.base_url, "http://127.0.0.1:45454");
+    assert_eq!(endpoint.auth_token.as_deref(), Some("secret-token"));
+}
+
+#[tokio::test]
+async fn daemon_client_sends_bearer_header() {
+    let state = State::default();
+    let base_url = spawn_server(state.clone()).await;
+    let client = DaemonClient::new(base_url, Some("secret-token".to_string())).unwrap();
+
+    let caps = client.get_caps("p1").await.unwrap();
+
+    assert_eq!(caps["chat_models"]["m1"]["name"], "Model One");
+    assert!(state.wait_for_authorization("Bearer secret-token"));
+}
+
+#[tokio::test]
+async fn corrupt_daemon_info_surfaces_visible_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("daemon.json");
+    std::fs::write(&path, "not json").unwrap();
+
+    let warning = discover_daemon_endpoint_from(&path).unwrap_err();
+
+    let notice = warning.notice();
+    assert!(notice.contains("Failed to read daemon info"));
+    assert!(notice.contains("daemon.json"));
+    assert!(notice.contains("expected ident"));
+}
+
 async fn spawn_server(state: State) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -127,6 +219,30 @@ async fn spawn_server(state: State) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+struct EnvGuard {
+    daemon_dir: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set_daemon_dir(path: &std::path::Path) -> Self {
+        let guard = Self {
+            daemon_dir: std::env::var_os("REFACT_DAEMON_DIR"),
+        };
+        std::env::set_var("REFACT_DAEMON_DIR", path);
+        guard
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.daemon_dir {
+            std::env::set_var("REFACT_DAEMON_DIR", value);
+        } else {
+            std::env::remove_var("REFACT_DAEMON_DIR");
+        }
+    }
 }
 
 fn handle_connection(mut stream: TcpStream, state: State) {
@@ -150,6 +266,7 @@ fn handle_connection(mut stream: TcpStream, state: State) {
         .map(|idx| idx + 4)
         .unwrap();
     let headers = String::from_utf8_lossy(&data[..header_end]).to_string();
+    state.record_authorization(header_value(&headers, "authorization"));
     let mut first = headers
         .lines()
         .next()
@@ -214,6 +331,14 @@ fn write_json(stream: &mut TcpStream, value: Value) {
         body.len(), body
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+fn header_value(headers: &str, name: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
 }
 
 fn write_sse_headers(stream: &mut TcpStream) {
