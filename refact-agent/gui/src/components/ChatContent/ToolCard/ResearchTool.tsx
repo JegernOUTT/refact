@@ -28,6 +28,7 @@ export const ResearchTool: React.FC<ResearchToolProps> = ({ toolCall }) => {
       toolCall={toolCall}
       icon={<BookOpen />}
       defaultSummary={summary}
+      unboundedContent
     />
   );
 };

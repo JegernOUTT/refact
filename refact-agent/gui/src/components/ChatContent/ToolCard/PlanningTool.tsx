@@ -14,6 +14,7 @@ export const PlanningTool: React.FC<PlanningToolProps> = ({ toolCall }) => {
       icon={<Target />}
       defaultSummary="Plan solution"
       variant="plan"
+      unboundedContent
     />
   );
 };

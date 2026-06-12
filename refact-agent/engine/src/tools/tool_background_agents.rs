@@ -10,6 +10,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::agents::types::{AgentListFilter, BackgroundAgent, BgAgentKind, BgAgentStatus};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const DEFAULT_LIMIT: usize = 20;
@@ -17,8 +18,6 @@ const DEFAULT_TERMINAL_HOURS: i64 = 24;
 const DEFAULT_WAIT_MS: u64 = 60_000;
 const MIN_WAIT_MS: u64 = 1_000;
 const MAX_WAIT_MS: u64 = 30 * 60 * 1_000;
-const RESULT_DEFAULT_LIMIT: usize = 4_000;
-const RESULT_DETAILS_LIMIT: usize = 16_000;
 
 pub struct ToolAgentList {
     pub config_path: String,
@@ -306,6 +305,8 @@ fn tool_message(tool_call_id: &str, content: String) -> (bool, Vec<ContextEnum>)
             content: ChatContent::SimpleText(content),
             tool_calls: None,
             tool_call_id: tool_call_id.to_string(),
+            preserve: Some(true),
+            output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         })],
     )
@@ -444,10 +445,7 @@ fn format_agent_counts(rows: &[BackgroundAgent]) -> String {
 fn format_optional_line(result: &mut String, label: &str, value: Option<&str>) {
     if let Some(value) = value {
         if !value.trim().is_empty() {
-            result.push_str(&format!(
-                "- {label}: {}\n",
-                truncate_chars(value.trim(), 500)
-            ));
+            result.push_str(&format!("- {label}: {}\n", value.trim()));
         }
     }
 }
@@ -509,18 +507,13 @@ async fn format_agent_result(
         ));
     }
 
-    let limit = if include_details {
-        RESULT_DETAILS_LIMIT
-    } else {
-        RESULT_DEFAULT_LIMIT
-    };
-    let needs_payload = include_details
+    let wants_payload = include_details
         || record
             .result_summary
             .as_deref()
             .map_or(true, |summary| summary.trim().is_empty());
     let mut payload_error = None;
-    let payload = if needs_payload {
+    let payload = if wants_payload {
         match load_result_payload(record).await {
             Ok(payload) => payload,
             Err(error) => {
@@ -567,7 +560,7 @@ async fn format_agent_result(
         ));
     }
     result.push_str("\n");
-    result.push_str(&truncate_chars(&summary, limit));
+    result.push_str(&summary);
     result.push('\n');
     format_list_line(&mut result, "Edited files", &record.edited_files);
     format_optional_line(&mut result, "Diff summary", record.diff_summary.as_deref());
@@ -582,7 +575,7 @@ async fn format_agent_result(
     if include_details {
         if let Some((payload_text, _)) = payload {
             result.push_str("\n## Details\n");
-            result.push_str(&truncate_chars(&payload_text, RESULT_DETAILS_LIMIT));
+            result.push_str(&payload_text);
             result.push('\n');
         } else if let Some(payload_error) = payload_error {
             result.push_str("\n## Details\n");
@@ -1329,7 +1322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_result_truncates_default_and_expands_details() {
+    async fn agent_result_returns_full_default_output() {
         let (_temp, app, ccx) = test_context(PARENT).await;
         let record = create_agent(&app, PARENT, BgAgentKind::Delegate, "Long result").await;
         let summary = "frog".repeat(5000);
@@ -1339,7 +1332,7 @@ mod tests {
             .await
             .unwrap();
 
-        let default_output = output_text(
+        let output = output_text(
             ToolAgentResult {
                 config_path: String::new(),
             }
@@ -1351,25 +1344,32 @@ mod tests {
             .await
             .unwrap(),
         );
-        let detailed_output = output_text(
-            ToolAgentResult {
-                config_path: String::new(),
-            }
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("agent_id", json!(completed.agent_id)),
-                    ("include_details", json!(true)),
-                ]),
-            )
-            .await
-            .unwrap(),
-        );
 
-        assert!(default_output.contains('…'));
-        assert!(default_output.chars().count() < detailed_output.chars().count());
-        assert!(detailed_output.contains("## Details"));
+        assert!(output.contains(&summary));
+        assert!(!output.contains('…'));
+        assert!(output.contains("- Diff summary: one frog changed"));
+
+        let (_, contexts) = ToolAgentResult {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"call-preserve".to_string(),
+            &args(&[("agent_id", json!(completed.agent_id))]),
+        )
+        .await
+        .unwrap();
+        let ContextEnum::ChatMessage(message) = contexts.into_iter().next().unwrap() else {
+            panic!("expected chat message")
+        };
+        assert_eq!(message.preserve, Some(true));
+        assert_eq!(
+            message
+                .output_filter
+                .as_ref()
+                .map(|filter| filter.limit_chars),
+            Some(usize::MAX)
+        );
     }
 
     #[tokio::test]

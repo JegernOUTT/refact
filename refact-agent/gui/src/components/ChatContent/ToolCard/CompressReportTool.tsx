@@ -156,6 +156,7 @@ export const CompressReportTool: React.FC<CompressReportToolProps> = ({
       icon={isProbe ? <BarChart3 /> : <Archive />}
       defaultSummary={isProbe ? "Analyze chat" : "Compress chat"}
       extractReport={isProbe ? extractProbeReport : extractApplyReport}
+      unboundedContent
     />
   );
 };

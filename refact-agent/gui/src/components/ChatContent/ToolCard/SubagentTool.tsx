@@ -57,6 +57,7 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
       defaultSummary={summary}
       meta={meta}
       extractReport={extractSubagentReport}
+      unboundedContent
     />
   );
 };
