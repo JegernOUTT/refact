@@ -556,7 +556,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     private fun getBuildInfo(): String {
         logIfBlockingOperationOnEdt("getBuildInfo")
         return withWakeRetry("build-info") {
-            InferenceGlobalContext.connection.get(url.resolve("build_info"), dataReceiveEnded = {
+            InferenceGlobalContext.connection.get(url.resolve("v1/build_info"), dataReceiveEnded = {
                 InferenceGlobalContext.status = ConnectionStatus.CONNECTED
                 InferenceGlobalContext.lastErrorMsg = null
             }, errorDataReceived = {}, failedDataReceiveEnded = {

@@ -70,14 +70,20 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         }
     }
 
-    class TestLspProcessHolder(project: Project, private val fakeDaemonClient: FakeDaemonClient) : LSPProcessHolder(project) {
+    class TestLspProcessHolder(
+        project: Project,
+        private val fakeDaemonClient: FakeDaemonClient,
+        private val refreshWorkerState: Boolean = false,
+    ) : LSPProcessHolder(project) {
         private val latch = CountDownLatch(1)
         val retryAttempts = mutableListOf<Int>()
 
         override val daemonClient: RefactDaemonClient
             get() = fakeDaemonClient
 
-        override fun refreshAttachedWorkerState() {}
+        override fun refreshAttachedWorkerState() {
+            if (refreshWorkerState) super.refreshAttachedWorkerState()
+        }
 
         override fun initializeAttachedProject() {}
 
@@ -194,6 +200,54 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
             assertEquals(URI("http://127.0.0.1:9999/p/abc123/"), holder.baseUrlOrNull())
         } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBuildInfoUsesDaemonProjectV1Namespace() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake, refreshWorkerState = true)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        val previousConnection = InferenceGlobalContext.connection
+        val testConnection = AsyncConnection()
+        InferenceGlobalContext.connection = testConnection
+        try {
+            withServer { server ->
+                fake.port = server.port
+                fake.baseUrlOverride = URI(server.url("/p/project-123/").toString())
+                server.enqueue(
+                    MockResponse.Builder()
+                        .code(200)
+                        .body("worker build")
+                        .build()
+                )
+                server.enqueue(
+                    MockResponse.Builder()
+                        .code(200)
+                        .addHeader("Content-Type", "application/json")
+                        .body("{}")
+                        .build()
+                )
+                server.enqueue(
+                    MockResponse.Builder()
+                        .code(200)
+                        .addHeader("Content-Type", "application/json")
+                        .body("{}")
+                        .build()
+                )
+
+                runOffEdt { holder.ensureStartedBlockingForTest("build-info") }
+
+                assertEquals("worker build", LSPProcessHolder.buildInfo)
+                assertEquals("/p/project-123/v1/build_info", server.takeRequest().path)
+                assertEquals("/p/project-123/v1/caps", server.takeRequest().path)
+                assertEquals("/p/project-123/v1/customization", server.takeRequest().path)
+            }
+        } finally {
+            InferenceGlobalContext.connection = previousConnection
+            testConnection.dispose()
             holder.dispose()
         }
     }

@@ -31,7 +31,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             time.sleep(2)
             self.send_json({"ok": True})
             return
-        if self.path == "/build_info":
+        if self.path == "/v1/build_info":
             self.send_json({"version": "fake-worker"})
             return
         self.send_response(404)

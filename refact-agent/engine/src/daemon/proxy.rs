@@ -32,11 +32,6 @@ pub struct ProxyV1Path {
     project_id: String,
 }
 
-#[derive(Deserialize)]
-pub struct ProxyBuildInfoPath {
-    project_id: String,
-}
-
 pub async fn proxy_v1(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     AxumPath(path): AxumPath<ProxyV1Path>,
@@ -44,14 +39,6 @@ pub async fn proxy_v1(
 ) -> Response<Body> {
     let worker_path = worker_v1_path(&path.project_id, request.uri());
     proxy_to_worker(state, path.project_id, worker_path, request).await
-}
-
-pub async fn proxy_build_info(
-    State((state, _)): State<(Arc<DaemonState>, u16)>,
-    AxumPath(path): AxumPath<ProxyBuildInfoPath>,
-    request: Request<Body>,
-) -> Response<Body> {
-    proxy_to_worker(state, path.project_id, "/build_info".to_string(), request).await
 }
 
 async fn proxy_to_worker(

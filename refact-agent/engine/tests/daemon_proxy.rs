@@ -101,7 +101,7 @@ impl Harness {
     }
 
     fn build_info_uri(&self) -> String {
-        format!("/p/{}/build_info", self.entry.id)
+        format!("/p/{}/v1/build_info", self.entry.id)
     }
 
     async fn stop(&self) {

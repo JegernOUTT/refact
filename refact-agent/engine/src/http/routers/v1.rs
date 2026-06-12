@@ -238,6 +238,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/code-completion", post(handle_v1_code_completion_web))
         .route("/code-lens", post(handle_v1_code_lens))
         .route("/caps", get(handle_v1_caps))
+        .route("/build_info", get(crate::http::routers::info::handle_info))
         .route("/model-capabilities", get(handle_v1_model_capabilities))
         .route("/model-supported", get(handle_v1_model_supported))
         .route("/tools", get(handle_v1_get_tools))

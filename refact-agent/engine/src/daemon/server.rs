@@ -117,10 +117,6 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/p/:project_id/v1/*path",
             any(crate::daemon::proxy::proxy_v1),
         )
-        .route(
-            "/p/:project_id/build_info",
-            any(crate::daemon::proxy::proxy_build_info),
-        )
         .layer(DefaultBodyLimit::max(
             crate::daemon::proxy::PROXY_BODY_LIMIT,
         ))
