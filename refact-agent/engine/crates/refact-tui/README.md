@@ -127,6 +127,7 @@ Fixture coverage:
 | `thinking_blocks.jsonl` | `set_thinking_blocks` delta visibility |
 | `server_content_blocks.jsonl` | `add_server_content_block` delta visibility |
 | `snapshot_resume.jsonl` | snapshot/resume rebuild from persisted user/assistant/tool messages |
+| `snapshot_recovery_content.jsonl` | sequence-gap snapshot correction for stable message ids without duplicate native scrollback insertions |
 | `seq_gap.jsonl` | sequence gap recovery without applying the gap delta |
 | `unknown_delta_ops.jsonl` | unknown delta ops preserved and tolerated without stopping later deltas |
 
@@ -144,6 +145,8 @@ Resize policy matches Codex: pending finalized cells re-render at the current wi
 Resize reflow is capped to 1,000 pending finalized cells per frame. Extra pending cells remain queued and render on later frames, so resize cannot force unbounded transcript rewrapping.
 
 Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes are added only when writing to a terminal buffer or native scrollback insertion, so wrapping and width calculations see plain visible text. `NO_COLOR`, `TERM=dumb`, and unsupported terminals keep the same styled visible text without OSC8; `REFACT_TUI_HYPERLINKS=1` or `0` overrides probing.
+
+Recovery snapshots replace the inline live region and pending finalized cells using revision-aware transcript keys, so changed content with stable message ids is rendered while identical snapshots do not enqueue duplicate cells. Finalized cells already inserted into native terminal scrollback are intentionally left as-is; the live transcript and future pending insertions follow the latest snapshot.
 
 ## Manual smoke
 

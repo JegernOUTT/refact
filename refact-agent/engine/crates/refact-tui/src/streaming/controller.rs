@@ -47,6 +47,11 @@ impl StreamController {
         self.policy.reset();
     }
 
+    pub fn replace_committed(&mut self, content: &str) {
+        self.clear();
+        self.committed.push_str(content);
+    }
+
     pub fn push_delta(&mut self, delta: &str) {
         self.collector.push_delta(delta);
         if let Some(source) = self.collector.commit_complete_source() {

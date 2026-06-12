@@ -175,6 +175,27 @@ fn run_fixture(name: &str) -> FixtureRun {
     }
 }
 
+fn run_fixture_with_recovery_snapshots(name: &str, native_scrollback: bool) -> FixtureRun {
+    let mut app = App::new(State::project());
+    app.set_native_scrollback(native_scrollback);
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    let mut recovery = None;
+    for raw in fixture_events(name) {
+        let event = chat_event_from_fixture(raw, &chat_id);
+        match tracker.observe(&event) {
+            ChatSeqDecision::Apply => {
+                app.apply_chat_event(event);
+            }
+            ChatSeqDecision::Resubscribe(message) => {
+                recovery.get_or_insert(message);
+                tracker.reset();
+            }
+        }
+    }
+    FixtureRun { app, recovery }
+}
+
 fn transcript_text(app: &App) -> String {
     app.visible_transcript()
         .iter()
@@ -253,6 +274,7 @@ fn fixture_directory_covers_required_protocol_cases() {
             "reasoning.jsonl",
             "seq_gap.jsonl",
             "server_content_blocks.jsonl",
+            "snapshot_recovery_content.jsonl",
             "snapshot_resume.jsonl",
             "thinking_blocks.jsonl",
             "tool_calls.jsonl",
@@ -345,6 +367,35 @@ fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
     let run = run_fixture("seq_gap.jsonl");
     assert!(run.recovery.unwrap().contains("expected 2, got 3"));
     assert!(!transcript_text(&run.app).contains("must not apply"));
+}
+
+#[test]
+fn snapshot_recovery_updates_stable_message_id_without_duplicates() {
+    let mut run = run_fixture_with_recovery_snapshots("snapshot_recovery_content.jsonl", true);
+    assert!(run.recovery.unwrap().contains("expected 4, got 5"));
+    let insertions = run.app.pending_history_insertions(80);
+    let inserted_text = insertions
+        .iter()
+        .flat_map(|insertion| insertion.lines.iter())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inserted_text.contains("snapshot corrected"));
+    assert!(!inserted_text.contains("partial stale"));
+    assert!(!inserted_text.contains("must not apply"));
+    assert_eq!(
+        insertions
+            .iter()
+            .map(|insertion| insertion.cell_ids.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(run.app.pending_history_insertions(80).is_empty());
 }
 
 #[test]

@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -1833,6 +1834,16 @@ impl App {
         true
     }
 
+    fn replace_live_region_from_snapshot(&mut self, next_keys: &[String]) {
+        self.transcript.clear();
+        self.stream_controller.clear();
+        if self.rendered_state_keys != next_keys {
+            self.history.clear_pending();
+        }
+        self.selected_tool_index = None;
+        self.rendered_state_cursor = 0;
+    }
+
     fn mark_rendered_state_from_messages(&mut self) {
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
@@ -1984,10 +1995,15 @@ impl App {
     }
 
     fn push_session_header(&mut self) {
-        self.push_history_item(TranscriptItem::Session {
-            title: self.session_header_title(),
-            subtitle: Some(self.session_header_subtitle()),
-        });
+        let title = self.session_header_title();
+        let subtitle = self.session_header_subtitle();
+        self.push_state_history_item(
+            session_header_key(&title, &subtitle),
+            TranscriptItem::Session {
+                title,
+                subtitle: Some(subtitle),
+            },
+        );
     }
 
     fn session_header_item(&self) -> TranscriptItem {
@@ -2029,17 +2045,28 @@ impl App {
             TranscriptRole::Assistant => {
                 let mut part = 0usize;
                 if !message.reasoning.is_empty() {
-                    self.push_state_history_item(
-                        render_message_key(message, "reasoning", part),
-                        TranscriptItem::Reasoning(message.reasoning.clone(), true),
-                    );
+                    if message.stream_finished {
+                        self.push_state_history_item(
+                            render_message_key(message, "reasoning", part),
+                            TranscriptItem::Reasoning(message.reasoning.clone(), true),
+                        );
+                    } else {
+                        self.transcript
+                            .push(TranscriptItem::Reasoning(message.reasoning.clone(), true));
+                    }
                     part += 1;
                 }
-                if message.stream_finished && !message.content.is_empty() {
-                    self.push_state_history_item(
-                        render_message_key(message, "assistant", part),
-                        TranscriptItem::Assistant(message.content.clone()),
-                    );
+                if !message.content.is_empty() {
+                    if message.stream_finished {
+                        self.push_state_history_item(
+                            render_message_key(message, "assistant", part),
+                            TranscriptItem::Assistant(message.content.clone()),
+                        );
+                    } else {
+                        self.stream_controller.replace_committed(&message.content);
+                        self.transcript
+                            .push(TranscriptItem::Assistant(message.content.clone()));
+                    }
                 }
                 part += 1;
                 for citation in &message.citations {
@@ -2270,9 +2297,18 @@ impl App {
             self.transcript_state.reset_from_messages(messages);
             let include_header = self.show_session_header || self.session_title.is_some();
             if self.native_scrollback {
-                self.rendered_state_cursor = 0;
-                let rendered_before = self.rendered_state_keys.len();
                 let messages = self.transcript_state.messages().to_vec();
+                let mut next_keys = Vec::new();
+                if include_header {
+                    next_keys.push(session_header_key(
+                        &self.session_header_title(),
+                        &self.session_header_subtitle(),
+                    ));
+                }
+                for message in &messages {
+                    next_keys.extend(rendered_state_keys_for_message(message));
+                }
+                self.replace_live_region_from_snapshot(&next_keys);
                 if include_header && self.rendered_state_cursor == 0 {
                     self.push_session_header();
                 }
@@ -2281,12 +2317,6 @@ impl App {
                 }
                 self.rendered_state_keys
                     .truncate(self.rendered_state_cursor);
-                if self.rendered_state_cursor < rendered_before {
-                    self.rebuild_render_transcript_from_state();
-                    if include_header {
-                        self.transcript.insert(0, self.session_header_item());
-                    }
-                }
             } else {
                 self.rebuild_render_transcript_from_state();
                 if include_header {
@@ -4507,17 +4537,103 @@ fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> 
         .as_deref()
         .or(message.tool_call_id.as_deref())
         .unwrap_or_default();
+    let revision = render_message_revision(message, part, index);
     if id.is_empty() {
         format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{:016x}",
             message.role.as_str(),
             part,
             index,
-            message.content.len()
+            revision
         )
     } else {
-        format!("{}:{}:{}", id, part, index)
+        format!("{}:{}:{}:{:016x}", id, part, index, revision)
     }
+}
+
+fn session_header_key(title: &str, subtitle: &str) -> String {
+    format!(
+        "session:header:0:{:016x}",
+        stable_revision(&(title, subtitle))
+    )
+}
+
+fn render_message_revision(message: &TranscriptMessage, part: &str, index: usize) -> u64 {
+    match part {
+        "user" | "assistant" | "notice" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            &message.content,
+            message.stream_finished,
+        )),
+        "reasoning" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            &message.reasoning,
+            message.stream_finished,
+        )),
+        "tool" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            &message.tool_call_id,
+            &message.content,
+            message.tool_failed,
+            message.stream_finished,
+        )),
+        "citation" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            indexed_message_value(
+                &message.citations,
+                index.saturating_sub(render_message_side_part_base(message)),
+            ),
+        )),
+        "server" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            indexed_message_value(
+                &message.server_content_blocks,
+                index
+                    .saturating_sub(render_message_side_part_base(message))
+                    .saturating_sub(message.citations.len()),
+            ),
+        )),
+        _ => stable_revision(&(
+            message.role.as_str(),
+            part,
+            &message.content,
+            &message.reasoning,
+            json_values_revision(&message.tool_calls),
+            &message.tool_call_id,
+            message.tool_failed,
+            json_values_revision(&message.citations),
+            json_values_revision(&message.thinking_blocks),
+            json_values_revision(&message.server_content_blocks),
+            message.stream_finished,
+            value_to_compact_string(&Value::Object(message.extra.clone())),
+        )),
+    }
+}
+
+fn render_message_side_part_base(message: &TranscriptMessage) -> usize {
+    usize::from(!message.reasoning.is_empty()) + 1
+}
+
+fn indexed_message_value(values: &[Value], index: usize) -> String {
+    values
+        .get(index)
+        .map(value_to_compact_string)
+        .unwrap_or_default()
+}
+
+fn json_values_revision(values: &[Value]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| format!("{values:?}"))
+}
+
+fn stable_revision<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
@@ -4529,12 +4645,23 @@ fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
         TranscriptRole::Assistant => {
             let mut part = 0usize;
             let mut keys = Vec::new();
-            if !message.reasoning.is_empty() {
+            if !message.reasoning.is_empty() && message.stream_finished {
                 keys.push(render_message_key(message, "reasoning", part));
+            }
+            if !message.reasoning.is_empty() {
                 part += 1;
             }
             if message.stream_finished && !message.content.is_empty() {
                 keys.push(render_message_key(message, "assistant", part));
+            }
+            part += 1;
+            for _ in &message.citations {
+                keys.push(render_message_key(message, "citation", part));
+                part += 1;
+            }
+            for _ in &message.server_content_blocks {
+                keys.push(render_message_key(message, "server", part));
+                part += 1;
             }
             keys
         }
@@ -4901,6 +5028,65 @@ mod tests {
         assert!(app.pending_history_insertions(80).is_empty());
         assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
         assert_eq!(app.history_render_count(), rendered_after_insert);
+    }
+
+    #[test]
+    fn native_snapshot_replaces_pending_changed_content_and_skips_identical_snapshot() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "a1", "role": "assistant", "content": "stale"}
+            ]}),
+        });
+        let stale = app.pending_history_insertions(80);
+        assert_eq!(
+            stale
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "a1", "role": "assistant", "content": "corrected"}
+            ]}),
+        });
+        let corrected = app.pending_history_insertions(80);
+        let corrected_text = corrected
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(line_to_plain_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(corrected_text.contains("corrected"));
+        assert!(!corrected_text.contains("stale"));
+        assert_eq!(
+            corrected
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "a1", "role": "assistant", "content": "corrected"}
+            ]}),
+        });
+        assert!(app.pending_history_insertions(80).is_empty());
     }
 
     #[test]
