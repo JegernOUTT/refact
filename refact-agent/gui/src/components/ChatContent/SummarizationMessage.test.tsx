@@ -16,11 +16,7 @@ function makeMessage(
 
 function getExpandedStats() {
   const grids = screen.getAllByTestId("summarization-card-stats");
-  const stats = grids[grids.length - 1];
-  if (!stats) {
-    throw new Error("Expected expanded stats grid");
-  }
-  return stats;
+  return grids[grids.length - 1];
 }
 
 describe("SummarizationMessage", () => {
