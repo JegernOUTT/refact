@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::header::{CONNECTION, CONTENT_TYPE, HeaderName, HeaderValue};
+use axum::http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Request, Response, StatusCode, Uri};
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -258,6 +258,15 @@ fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::He
         if should_strip_header(name.as_str(), &connection_tokens) {
             continue;
         }
+        if name == axum::http::header::AUTHORIZATION {
+            continue;
+        }
+        if name == COOKIE {
+            if let Some(value) = scrub_cookie_header(value) {
+                out.append(reqwest::header::COOKIE, value);
+            }
+            continue;
+        }
         let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) else {
             continue;
         };
@@ -270,6 +279,31 @@ fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::He
         out.insert(PROJECT_HEADER, value);
     }
     out
+}
+
+fn scrub_cookie_header(value: &HeaderValue) -> Option<reqwest::header::HeaderValue> {
+    let value = value.to_str().ok()?;
+    let cookies = value
+        .split(';')
+        .filter_map(|cookie| {
+            let cookie = cookie.trim();
+            if cookie.is_empty() {
+                return None;
+            }
+            if cookie
+                .split_once('=')
+                .map(|(name, _)| name.trim() == crate::daemon::auth::DAEMON_AUTH_COOKIE)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            Some(cookie.to_string())
+        })
+        .collect::<Vec<_>>();
+    if cookies.is_empty() {
+        return None;
+    }
+    reqwest::header::HeaderValue::from_str(&cookies.join("; ")).ok()
 }
 
 fn response_headers(headers: &reqwest::header::HeaderMap) -> HeaderMap {
@@ -379,6 +413,50 @@ mod tests {
         assert!(out.get("keep-alive").is_none());
         assert_eq!(out.get("x-keep").unwrap(), "ok");
         assert_eq!(out.get(PROJECT_HEADER).unwrap(), "project");
+    }
+
+    #[test]
+    fn request_headers_strips_authorization_and_daemon_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer daemon-token"),
+        );
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("refact_daemon_auth=secret; theme=dark"),
+        );
+
+        let out = request_headers(&headers, "project");
+
+        assert!(out.get(reqwest::header::AUTHORIZATION).is_none());
+        assert_eq!(out.get(reqwest::header::COOKIE).unwrap(), "theme=dark");
+    }
+
+    #[test]
+    fn request_headers_preserves_non_daemon_cookies() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static("theme=dark; sid=abc"));
+
+        let out = request_headers(&headers, "project");
+
+        assert_eq!(
+            out.get(reqwest::header::COOKIE).unwrap(),
+            "theme=dark; sid=abc"
+        );
+    }
+
+    #[test]
+    fn request_headers_omits_cookie_header_when_only_daemon_cookie_remains() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("refact_daemon_auth=secret"),
+        );
+
+        let out = request_headers(&headers, "project");
+
+        assert!(out.get(reqwest::header::COOKIE).is_none());
     }
 
     #[test]

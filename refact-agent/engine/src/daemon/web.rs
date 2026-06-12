@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{OriginalUri, Path as AxumPath, State};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Serialize;
 
@@ -52,16 +52,24 @@ struct PickerProject {
 }
 
 pub(crate) async fn handle_project_picker(
+    OriginalUri(uri): OriginalUri,
     State((state, port)): State<(Arc<DaemonState>, u16)>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = daemon_auth_redirect(&state, &uri) {
+        return response;
+    }
     let data = picker_data(state, port).await;
     html_response(StatusCode::OK, render_picker_html(&data))
 }
 
 pub(crate) async fn handle_project_gui_index(
+    OriginalUri(uri): OriginalUri,
     State((state, port)): State<(Arc<DaemonState>, u16)>,
     AxumPath(project_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = daemon_auth_redirect(&state, &uri) {
+        return response;
+    }
     if project_entry(&state, &project_id).await.is_none() {
         return html_response(
             StatusCode::NOT_FOUND,
@@ -105,6 +113,48 @@ fn invalid_asset_path(path: &str) -> bool {
 
 async fn project_entry(state: &DaemonState, project_id: &str) -> Option<ProjectEntry> {
     state.projects.read().await.get(project_id).cloned()
+}
+
+fn daemon_auth_redirect(state: &DaemonState, uri: &Uri) -> Option<Response> {
+    let expected = state.auth_token.as_deref()?;
+    let token = crate::daemon::auth::matching_daemon_query_token(uri.query(), expected)?;
+    let mut response = Response::new(axum::body::boxed(axum::body::Full::from(Vec::<u8>::new())));
+    *response.status_mut() = StatusCode::SEE_OTHER;
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&redirect_without_daemon_token(uri)).ok()?,
+    );
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&daemon_auth_cookie(&token)).ok()?,
+    );
+    Some(response)
+}
+
+fn daemon_auth_cookie(token: &str) -> String {
+    format!(
+        "{}={}; HttpOnly; SameSite=Strict; Path=/",
+        crate::daemon::auth::DAEMON_AUTH_COOKIE,
+        token
+    )
+}
+
+fn redirect_without_daemon_token(uri: &Uri) -> String {
+    let path = uri.path();
+    let pairs = uri
+        .query()
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .filter(|(name, _)| name != crate::daemon::auth::DAEMON_AUTH_QUERY)
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return path.to_string();
+    }
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        serializer.append_pair(&name, &value);
+    }
+    format!("{}?{}", path, serializer.finish())
 }
 
 async fn picker_data(state: Arc<DaemonState>, port: u16) -> PickerData {
@@ -352,11 +402,22 @@ mod tests {
     }
 
     async fn test_state() -> TestState {
+        test_state_with_auth(None).await
+    }
+
+    async fn test_state_with_auth(token: Option<&str>) -> TestState {
         let dir = tempfile::tempdir().unwrap();
+        let mut config = DaemonConfig::default();
+        if let Some(token) = token {
+            config.auth = crate::daemon::config::AuthConfig {
+                enabled: true,
+                token: Some(token.to_string()),
+            };
+        }
         let state = DaemonState::new(
-            DaemonConfig::default(),
+            config,
             EventBus::new(dir.path().join("events.jsonl")),
-            None,
+            token.map(str::to_string),
         );
         *state.projects.write().await = ProjectRegistry::empty(dir.path().join("projects.json"));
         TestState { _dir: dir, state }
@@ -413,6 +474,24 @@ mod tests {
         let injected = inject_daemon_origin_candidates(html, &candidates);
         assert!(injected.contains("http://127.0.0.1:8488/p/abc123"));
         assert!(!injected.contains("|| [];"));
+    }
+
+    #[test]
+    fn redirect_without_daemon_token_preserves_other_query() {
+        let uri: Uri = "/p/abc/?daemon_token=secret&theme=dark&q=a%20b"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            redirect_without_daemon_token(&uri),
+            "/p/abc/?theme=dark&q=a+b"
+        );
+    }
+
+    #[test]
+    fn picker_html_mentions_auth_error() {
+        assert!(PICKER_TEMPLATE
+            .contains("Authentication required. Open this page through the daemon launch URL."));
     }
 
     #[test]
@@ -485,6 +564,91 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Project not found"));
         assert!(body.contains("Back to projects"));
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_picker_requires_credentials() {
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tokenized_picker_sets_cookie_redirects_and_cookie_allows_next_request() {
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let response = crate::daemon::server::make_router(state.clone(), 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/?daemon_token=secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("refact_daemon_auth=secret-token"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Path=/"));
+
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, "refact_daemon_auth=secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tokenized_project_gui_sets_cookie_and_redirects() {
+        let test = test_state_with_auth(Some("secret-token")).await;
+        let state = test.state;
+        let root = tempfile::tempdir().unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/p/{}/?daemon_token=secret-token", entry.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            &format!("/p/{}/", entry.id)
+        );
+        assert!(response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("refact_daemon_auth=secret-token"));
     }
 
     #[tokio::test]

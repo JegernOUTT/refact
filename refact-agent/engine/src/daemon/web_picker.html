@@ -309,6 +309,7 @@
             fetch("/daemon/v1/projects"),
             fetch("/daemon/v1/events"),
           ]);
+          if (responses.some(function (response) { return response.status === 401; })) throw new Error("Authentication required. Open this page through the daemon launch URL.");
           if (!responses[0].ok || !responses[1].ok) throw new Error("daemon request failed");
           const status = await responses[0].json();
           const projects = await responses[1].json();
