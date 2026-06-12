@@ -183,7 +183,9 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Tool(card) => format!("tool:{}:{}:{}", card.id, card.name, card.result),
             TranscriptItem::Citation(text) => format!("citation:{text}"),
             TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
+            TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
+            TranscriptItem::Plan(text) => format!("plan:{text}"),
             TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
             TranscriptItem::Session { title, subtitle } => {
                 format!(

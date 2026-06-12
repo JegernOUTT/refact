@@ -1,3 +1,5 @@
+pub mod workflow;
+
 use crate::pickers::PickerItem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub enum CommandAction {
     OpenPicker { picker: CommandPicker },
     LocalToggle { toggle: LocalToggle },
     ShowInfo { topic: InfoTopic },
+    Workflow { command: workflow::WorkflowCommand },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +103,7 @@ pub fn command_picker_items(context: CommandContext) -> Vec<PickerItem> {
         .collect()
 }
 
-const COMMANDS: [CommandDef; 16] = [
+const COMMANDS: [CommandDef; 18] = [
     CommandDef {
         name: "new",
         aliases: &[],
@@ -154,7 +157,7 @@ const COMMANDS: [CommandDef; 16] = [
     CommandDef {
         name: "mention",
         aliases: &["file", "files"],
-        description: "Insert a file mention",
+        description: "picker reuse: insert a file mention",
         args_hint: "[path]",
         availability: CommandAvailability::Always,
         action: CommandAction::OpenPicker {
@@ -184,43 +187,17 @@ const COMMANDS: [CommandDef; 16] = [
     CommandDef {
         name: "stop",
         aliases: &["cancel"],
-        description: "Stop the active generation",
+        description: "backend command: stop the active generation",
         args_hint: "",
         availability: CommandAvailability::ActiveTurnOnly,
         action: CommandAction::BackendCommand { command: "stop" },
     },
-    CommandDef {
-        name: "review",
-        aliases: &[],
-        description: "Start a code review workflow",
-        args_hint: "[target]",
-        availability: CommandAvailability::IdleOnly,
-        action: CommandAction::BackendCommand { command: "review" },
-    },
-    CommandDef {
-        name: "plan",
-        aliases: &[],
-        description: "Start a planning workflow",
-        args_hint: "[goal]",
-        availability: CommandAvailability::IdleOnly,
-        action: CommandAction::BackendCommand { command: "plan" },
-    },
-    CommandDef {
-        name: "agent",
-        aliases: &[],
-        description: "Start an agentic workflow",
-        args_hint: "[task]",
-        availability: CommandAvailability::IdleOnly,
-        action: CommandAction::BackendCommand { command: "agent" },
-    },
-    CommandDef {
-        name: "diff",
-        aliases: &[],
-        description: "Show a diff overlay",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::BackendCommand { command: "diff" },
-    },
+    workflow::REVIEW_COMMAND,
+    workflow::PLAN_COMMAND,
+    workflow::GOAL_COMMAND,
+    workflow::AGENT_COMMAND,
+    workflow::DIFF_COMMAND,
+    workflow::COMPACT_COMMAND,
     CommandDef {
         name: "copy",
         aliases: &[],
@@ -274,5 +251,18 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.description.contains("aliases exit")));
+    }
+
+    #[test]
+    fn workflow_commands_document_mechanism() {
+        for name in [
+            "plan", "goal", "agent", "diff", "review", "mention", "compact",
+        ] {
+            let command = command_by_name(name).unwrap();
+            assert!(
+                command.description.contains(':') || command.description.contains("Insert"),
+                "{name} must document its mechanism"
+            );
+        }
     }
 }

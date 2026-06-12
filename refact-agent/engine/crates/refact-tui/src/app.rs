@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -14,8 +15,8 @@ use crate::client::{
     ToolDecision, WorkerInfo,
 };
 use crate::commands::{
-    command_by_name, command_picker_items, CommandAction, CommandContext, CommandPicker, InfoTopic,
-    LocalToggle,
+    command_by_name, command_picker_items, workflow, CommandAction, CommandContext, CommandPicker,
+    InfoTopic, LocalToggle,
 };
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
@@ -71,12 +72,14 @@ pub enum TranscriptItem {
     Tool(ToolCard),
     Citation(String),
     ServerContentBlock(String),
+    Diff(String),
     Notice(String),
     Approval(ApprovalModalState, Option<ApprovalOutcome>),
     Session {
         title: String,
         subtitle: Option<String>,
     },
+    Plan(String),
 }
 
 impl TranscriptItem {
@@ -472,6 +475,12 @@ impl App {
         &self.transcript_state
     }
 
+    fn current_project_root(&self) -> Option<PathBuf> {
+        self.current_project
+            .as_ref()
+            .map(|project| project.root.clone())
+    }
+
     pub fn stream_has_committable_lines(&self) -> bool {
         self.stream_controller.stable_lines_ready()
     }
@@ -632,6 +641,32 @@ impl App {
         }
     }
 
+    fn submit_structured_prompt(&mut self, prompt: &str) -> AppAction {
+        self.composer.set_text(prompt);
+        self.submit_composer()
+            .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
+            .unwrap_or(AppAction::None)
+    }
+
+    fn show_current_plan(&mut self) -> AppAction {
+        self.composer.clear();
+        match workflow::synthesize_current_plan(self.transcript_state.messages()) {
+            Some(plan) => self.push_history_item(TranscriptItem::Plan(plan)),
+            None => self.add_notice("No current plan is installed for this chat"),
+        }
+        AppAction::None
+    }
+
+    fn switch_to_agent_mode(&mut self) -> AppAction {
+        self.composer.clear();
+        self.mode = Some("agent".to_string());
+        self.pending_mode = None;
+        self.add_notice("Switching to Agent mode");
+        AppAction::SetParams {
+            patch: workflow::agent_mode_patch(),
+        }
+    }
+
     fn accept_modal_picker(&mut self, kind: PickerKind, accept: PickerAccept) -> AppAction {
         match (kind, accept) {
             (PickerKind::Model, PickerAccept::Single(Some(item))) => {
@@ -705,6 +740,33 @@ impl App {
             CommandAction::ShowInfo { topic } => {
                 self.show_info_topic(topic);
                 AppAction::None
+            }
+            CommandAction::Workflow { command } => self.execute_workflow_command(command),
+        }
+    }
+
+    fn execute_workflow_command(&mut self, command: workflow::WorkflowCommand) -> AppAction {
+        match command {
+            workflow::WorkflowCommand::ShowPlan => self.show_current_plan(),
+            workflow::WorkflowCommand::GoalPrompt => {
+                self.submit_structured_prompt(workflow::goal_prompt())
+            }
+            workflow::WorkflowCommand::AgentMode => self.switch_to_agent_mode(),
+            workflow::WorkflowCommand::GitDiff => {
+                self.composer.clear();
+                match self.current_project_root() {
+                    Some(root) => AppAction::LoadDiff { root },
+                    None => {
+                        self.add_notice("No active project for /diff");
+                        AppAction::None
+                    }
+                }
+            }
+            workflow::WorkflowCommand::ReviewPrompt => {
+                self.submit_structured_prompt(workflow::review_prompt())
+            }
+            workflow::WorkflowCommand::CompactPrompt => {
+                self.submit_structured_prompt(workflow::compact_prompt())
             }
         }
     }
@@ -924,6 +986,14 @@ impl App {
         let text = text.into();
         self.transcript_state.push_notice(text.clone());
         self.push_history_item(TranscriptItem::Notice(text));
+    }
+
+    fn show_diff_result(&mut self, diff: String) {
+        if diff.trim().is_empty() {
+            self.add_notice("No git diff for the current project");
+        } else {
+            self.push_history_item(TranscriptItem::Diff(diff));
+        }
     }
 
     fn replace_with_notice(&mut self, text: String) {
@@ -1989,6 +2059,12 @@ pub enum AppAction {
         prompt: String,
         params: Value,
     },
+    SetParams {
+        patch: Value,
+    },
+    LoadDiff {
+        root: PathBuf,
+    },
     SendToolDecisions {
         decisions: Vec<ToolDecision>,
         patch: Option<Value>,
@@ -2042,6 +2118,7 @@ enum RuntimeEvent {
     FileMentionsLoaded(Result<Vec<String>, String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
+    DiffLoaded(Result<String, String>),
 }
 
 #[derive(Debug, Default)]
@@ -2288,6 +2365,10 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 app.retry_hint = retry_hint_from_message(&error);
                 app.add_notice(format!("Command failed: {error}"))
             }
+            RuntimeEvent::DiffLoaded(Ok(diff)) => app.show_diff_result(diff),
+            RuntimeEvent::DiffLoaded(Err(error)) => {
+                app.add_notice(format!("Failed to load git diff: {error}"))
+            }
         }
     }
     Ok(())
@@ -2421,6 +2502,27 @@ async fn run_action(
                 });
             }
         }
+        AppAction::SetParams { patch } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .send_set_params(&project_id, &chat_id, patch)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                });
+            }
+        }
+        AppAction::LoadDiff { root } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = load_git_diff(root).await;
+                let _ = tx.send(RuntimeEvent::DiffLoaded(result)).await;
+            });
+        }
         AppAction::SendToolDecisions { decisions, patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
@@ -2462,6 +2564,32 @@ async fn run_action(
                 }
             }
         }
+    }
+}
+
+async fn load_git_diff(root: PathBuf) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || git_diff(&root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn git_diff(root: &std::path::Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--no-ext-diff")
+        .arg("--")
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("failed to run git diff: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("git diff exited with {}", output.status)
+        } else {
+            stderr
+        })
     }
 }
 
@@ -3002,6 +3130,15 @@ mod tests {
                 }
             }
         }
+
+        fn find_command(&self, command_type: &str) -> Option<Value> {
+            let (lock, _) = &*self.0;
+            lock.lock()
+                .unwrap()
+                .iter()
+                .find(|command| command.get("type").and_then(Value::as_str) == Some(command_type))
+                .cloned()
+        }
     }
 
     fn spawn_command_server(state: CommandState) -> String {
@@ -3174,6 +3311,145 @@ mod tests {
             .visible_transcript()
             .iter()
             .any(|item| matches!(item, TranscriptItem::Notice(text) if text.contains("Dangerous commands") && text.contains("Network tools"))));
+    }
+
+    #[test]
+    fn plan_command_shows_current_plan_cell() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "plan", "content": "base plan", "extra": {"plan": {"mode": "agent", "version": 1}}}}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "event", "content": "delta one", "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}}}}),
+        });
+
+        assert_eq!(app.execute_command_name("plan"), AppAction::None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Plan(text) if text.contains("base plan") && text.contains("delta one"))
+        }));
+    }
+
+    #[test]
+    fn goal_review_and_compact_insert_structured_prompts() {
+        let mut app = App::new(project());
+        assert!(matches!(
+            app.execute_command_name("goal"),
+            AppAction::SendMessage { prompt, .. } if prompt.contains("clarify the current goal")
+        ));
+
+        let mut app = App::new(project());
+        assert!(matches!(
+            app.execute_command_name("review"),
+            AppAction::SendMessage { prompt, .. } if prompt.contains("Review the current project changes")
+        ));
+
+        let mut app = App::new(project());
+        assert!(matches!(
+            app.execute_command_name("compact"),
+            AppAction::SendMessage { prompt, .. } if prompt.contains("ctx_probe")
+        ));
+    }
+
+    #[test]
+    fn agent_command_emits_mode_switch_patch() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("agent"),
+            AppAction::SetParams {
+                patch: json!({"mode": "agent", "tool_use": "agent"})
+            }
+        );
+        assert_eq!(app.mode(), Some("agent"));
+    }
+
+    #[test]
+    fn diff_command_loads_local_project_diff() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("diff"),
+            AppAction::LoadDiff {
+                root: PathBuf::from("/tmp/demo")
+            }
+        );
+    }
+
+    #[test]
+    fn show_diff_result_renders_diff_cell() {
+        let mut app = App::new(project());
+        app.show_diff_result("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new".to_string());
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| { matches!(item, TranscriptItem::Diff(text) if text.contains("+new")) }));
+    }
+
+    #[tokio::test]
+    async fn mode_switch_command_posts_set_params() {
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        let action = app.execute_command_name("agent");
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut subscriptions = SubscriptionManager::new();
+        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeEvent::CommandFinished(Ok(())))
+        ));
+
+        let command = state.find_command("set_params").unwrap();
+        assert_eq!(command["patch"]["mode"], "agent");
+        assert_eq!(command["patch"]["tool_use"], "agent");
+    }
+
+    #[tokio::test]
+    async fn load_git_diff_reads_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        std::fs::write(dir.path().join("file.txt"), "old\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-m",
+                "init"
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        std::fs::write(dir.path().join("file.txt"), "new\n").unwrap();
+
+        let diff = load_git_diff(dir.path().to_path_buf()).await.unwrap();
+        assert!(diff.contains("--- a/file.txt"));
+        assert!(diff.contains("+++ b/file.txt"));
+        assert!(diff.contains("-old"));
+        assert!(diff.contains("+new"));
     }
 
     #[test]

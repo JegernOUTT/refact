@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 
 use crate::app::TranscriptItem;
 use crate::approvals::{render_modal_lines, ApprovalModalState};
-use crate::render::MarkdownRenderer;
+use crate::render::{color_enabled_from_env, render_unified_diff, MarkdownRenderer};
 use crate::tools::{ToolCard, ToolStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,8 +18,10 @@ pub enum HistoryCellKind {
     Tool,
     Citation,
     ServerContentBlock,
+    Diff,
     Approval,
     Session,
+    Plan,
 }
 
 pub trait HistoryCell: HistoryCellClone + std::fmt::Debug + Send + Sync {
@@ -255,6 +257,42 @@ impl HistoryCell for ServerContentBlockCell {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiffCell {
+    text: String,
+}
+
+impl DiffCell {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl HistoryCell for DiffCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Diff
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = vec![role_line(
+            "diff",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )];
+        lines.extend(render_unified_diff(
+            &self.text,
+            Some(width.saturating_sub(2).max(8)),
+            color_enabled_from_env(),
+        ));
+        finish(lines)
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(self.kind(), &self.text))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolCallCell {
     card: ToolCard,
     selected: bool,
@@ -426,6 +464,39 @@ impl HistoryCell for SessionCell {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlanCell {
+    text: String,
+}
+
+impl PlanCell {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl HistoryCell for PlanCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Plan
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![role_line(
+            "plan",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )];
+        lines.extend(renderer.render(&self.text));
+        finish(lines)
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&("plan", &self.text))
+    }
+}
+
 pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<dyn HistoryCell> {
     match item {
         TranscriptItem::User(text) => Box::new(UserCell::new(text.clone())),
@@ -438,6 +509,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         TranscriptItem::ServerContentBlock(text) => {
             Box::new(ServerContentBlockCell::new(text.clone()))
         }
+        TranscriptItem::Diff(text) => Box::new(DiffCell::new(text.clone())),
         TranscriptItem::Notice(text) => Box::new(NoticeCell::new(text.clone())),
         TranscriptItem::Approval(state, outcome) => {
             Box::new(ApprovalCell::new(state.clone(), *outcome))
@@ -445,6 +517,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         TranscriptItem::Session { title, subtitle } => {
             Box::new(SessionCell::new(title.clone(), subtitle.clone()))
         }
+        TranscriptItem::Plan(text) => Box::new(PlanCell::new(text.clone())),
     }
 }
 
@@ -542,6 +615,24 @@ mod tests {
             text(&ServerContentBlockCell::new("{\"type\":\"web_search_call\"}").render(40)),
             "server content\n{\"type\":\"web_search_call\"}\n"
         );
+    }
+
+    #[test]
+    fn diff_cell_reuses_unified_diff_renderer() {
+        let cell = DiffCell::new("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new");
+        let rendered = text(&cell.render(80));
+        assert!(rendered.contains("diff\n"));
+        assert!(rendered.contains("- old"));
+        assert!(rendered.contains("+ new"));
+    }
+
+    #[test]
+    fn plan_cell_renders_markdown_plan() {
+        let cell = PlanCell::new("## Plan\n- do it");
+        let rendered = text(&cell.render(80));
+        assert!(rendered.contains("plan\n"));
+        assert!(rendered.contains("Plan"));
+        assert!(rendered.contains("do it"));
     }
 
     #[test]

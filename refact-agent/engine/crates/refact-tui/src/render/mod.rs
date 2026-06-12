@@ -6,7 +6,7 @@ pub mod wrapping;
 pub use diff::{is_unified_diff, render_unified_diff};
 pub use markdown::{render_markdown, render_markdown_with_options, MarkdownRenderer, RenderOptions};
 
-pub(crate) fn color_enabled_from_env() -> bool {
+pub fn color_enabled_from_env() -> bool {
     std::env::var_os("NO_COLOR").is_none()
         && std::env::var("TERM")
             .map(|term| term != "dumb")
