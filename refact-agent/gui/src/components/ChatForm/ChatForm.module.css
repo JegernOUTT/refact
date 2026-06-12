@@ -35,8 +35,10 @@
 }
 
 .chatFormMain {
-  border-color: transparent;
-  box-shadow: none;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
@@ -45,20 +47,25 @@
 }
 
 .chatFormCollapsed:hover,
-.chatFormCollapsed:focus-within {
-  border-color: var(--rf-border);
-  background: color-mix(in srgb, var(--rf-surface-1) 34%, transparent);
-}
-
-.chatFormExpanded {
-  border-color: var(--rf-border);
-  background: transparent;
-}
-
+.chatFormCollapsed:focus-within,
 .chatFormExpanded:focus-within {
   border-color: var(--rf-border-strong);
-  background: color-mix(in srgb, var(--rf-surface-glass) 42%, transparent);
-  box-shadow: var(--rf-elev-panel);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chatFormMain {
+    backdrop-filter: none;
+  }
+}
+
+/* Embedded composer: the parent dock group owns the glass panel chrome. */
+.chatFormEmbedded,
+.chatFormEmbedded:hover,
+.chatFormEmbedded:focus-within {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .chatFormCompact {
@@ -147,6 +154,9 @@
   min-width: 0;
   max-width: 340px;
   overflow: hidden;
+  /* At max-width: 0 the hidden set's text would wrap char-by-char into a
+     tall vertical stack and stretch the controls row; keep it one line. */
+  white-space: nowrap;
   transition:
     max-width var(--rf-dur-med) var(--rf-ease-standard),
     opacity var(--rf-dur-med) var(--rf-ease-standard),

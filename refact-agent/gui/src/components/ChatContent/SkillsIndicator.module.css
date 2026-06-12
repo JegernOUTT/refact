@@ -3,7 +3,7 @@
   align-items: center;
   gap: var(--rf-space-2);
   height: 28px;
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   padding: var(--rf-space-1) var(--rf-space-3);
@@ -12,6 +12,13 @@
   font-size: var(--font-size-1);
   color: var(--rf-color-muted);
   box-sizing: border-box;
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .indicator {
+    backdrop-filter: none;
+  }
 }
 
 .indicator:hover {

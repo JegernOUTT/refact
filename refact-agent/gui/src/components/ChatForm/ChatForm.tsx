@@ -189,12 +189,16 @@ export type ChatFormProps = {
   onSubmit: (str: string, sendPolicy?: SendPolicy) => void;
   onClose?: () => void;
   className?: string;
+  embedded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
 export const ChatForm: React.FC<ChatFormProps> = ({
   onSubmit,
   onClose,
   className,
+  embedded = false,
+  onExpandedChange,
 }) => {
   const dispatch = useAppDispatch();
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -567,6 +571,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   }, [openComposerMenus]);
 
   useEffect(() => {
+    onExpandedChange?.(isComposerExpanded);
+  }, [isComposerExpanded, onExpandedChange]);
+
+  useEffect(() => {
     if (openComposerMenus <= 0) return;
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -671,6 +679,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             isComposerExpanded
               ? styles.chatFormExpanded
               : styles.chatFormCollapsed,
+            { [styles.chatFormEmbedded]: embedded },
             className,
           )}
           onClick={(event) => {

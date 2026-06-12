@@ -1,7 +1,9 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import classNames from "classnames";
 import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
 import { Flex, Button, Card, Container } from "@radix-ui/themes";
+import styles from "./Chat.module.css";
 import { useAppSelector, useAppDispatch, useChatActions } from "../../hooks";
 import { type Config } from "../../features/Config/configSlice";
 import {
@@ -61,6 +63,30 @@ export const Chat: React.FC<ChatProps> = ({
   const preventSend = useAppSelector(selectPreventSend);
   const onEnableSend = () => dispatch(enableSend({ id: chatId }));
 
+  const bottomDockRef = useRef<HTMLDivElement>(null);
+  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
+
+  useEffect(() => {
+    const dock = bottomDockRef.current;
+    // The chat root renders through DropzoneProvider's asChild cloneElement,
+    // which overwrites any ref passed to it (react-dropzone's rootProps
+    // carry their own ref) — so resolve the root as the dock's parent.
+    const root = dock?.parentElement;
+    if (!dock || !root) return;
+
+    const updateClearance = () => {
+      root.style.setProperty(
+        "--rf-composer-clearance",
+        `${dock.offsetHeight}px`,
+      );
+    };
+
+    updateClearance();
+    const observer = new ResizeObserver(updateClearance);
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, []);
+
   const handleSubmit = useCallback(
     (value: string, sendPolicy?: "immediate" | "after_flow") => {
       const priority = sendPolicy === "immediate";
@@ -86,6 +112,9 @@ export const Chat: React.FC<ChatProps> = ({
   return (
     <DropzoneProvider asChild>
       <Flex
+        className={classNames(styles.chatRoot, {
+          [styles.composerExpanded]: isComposerExpanded,
+        })}
         style={{
           ...style,
           minHeight: 0,
@@ -102,6 +131,7 @@ export const Chat: React.FC<ChatProps> = ({
         {isBrowserOpen && <BrowserPanel chatId={chatId} />}
         <Flex
           direction="column"
+          className={styles.transcriptArea}
           style={{
             flex: "1 1 auto",
             minHeight: 0,
@@ -113,13 +143,13 @@ export const Chat: React.FC<ChatProps> = ({
           <ChatContent onRetry={handleRetry} onStopStreaming={handleAbort} />
         </Flex>
 
-        <Flex direction="column" style={{ flex: "0 0 auto" }}>
+        <Flex
+          ref={bottomDockRef}
+          direction="column"
+          className={styles.bottomDock}
+        >
           <Container>
             <SkillsIndicator chatId={chatId} />
-          </Container>
-
-          <Container>
-            <TaskProgressWidget />
           </Container>
 
           {!isBuddyChat && shouldCheckpointsPopupBeShown && <Checkpoints />}
@@ -132,7 +162,7 @@ export const Chat: React.FC<ChatProps> = ({
 
           {!isStreaming && preventSend && unCalledTools && (
             <Flex py="4">
-              <Card style={{ width: "100%" }}>
+              <Card className={styles.dockPanel} style={{ width: "100%" }}>
                 <Flex direction="column" align="center" gap="2" width="100%">
                   Chat was interrupted with uncalled tools calls.
                   <Button onClick={onEnableSend}>Resume</Button>
@@ -141,13 +171,20 @@ export const Chat: React.FC<ChatProps> = ({
             </Flex>
           )}
 
-          <Container style={{ position: "relative" }}>
-            {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
-            <ChatForm
-              key={chatId}
-              onSubmit={handleSubmit}
-              onClose={maybeSendToSidebar}
-            />
+          <Container>
+            <div className={styles.dockColumn}>
+              {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
+              <div className={styles.dockGroup}>
+                <TaskProgressWidget />
+                <ChatForm
+                  key={chatId}
+                  embedded
+                  onSubmit={handleSubmit}
+                  onClose={maybeSendToSidebar}
+                  onExpandedChange={setIsComposerExpanded}
+                />
+              </div>
+            </div>
           </Container>
         </Flex>
       </Flex>

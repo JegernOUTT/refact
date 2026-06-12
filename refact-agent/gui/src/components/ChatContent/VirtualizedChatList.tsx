@@ -139,22 +139,53 @@ export function VirtualizedChatList<T extends { key: string }>({
 
   const handleAtBottomChange = useCallback((bottom: boolean) => {
     if (bottom && userScrolledUpRef.current) {
-      // Only re-arm auto-follow if the user recently performed an active
-      // scroll-down gesture (wheel or touch). Virtuoso measurement
-      // adjustments can passively shift the scroll position into the
-      // atBottomThreshold — that must NOT re-arm follow.
-      const recentActiveScroll =
-        performance.now() - lastActiveScrollDownTsRef.current <
-        SCROLL_INTENT_MS;
-      if (recentActiveScroll) {
+      // Reaching the bottom by any user-driven means (wheel, keyboard,
+      // touch, scrollbar drag, ...) re-arms auto-follow by default. The
+      // only excluded path is a suppressed passive Virtuoso correction
+      // (anchor restore / measurement shift) that lands on the bottom
+      // without any recent user intent.
+      const now = performance.now();
+      const recentUserIntent =
+        pointerDownRef.current ||
+        now - lastUserInputTsRef.current < SCROLL_INTENT_MS ||
+        now - lastActiveScrollDownTsRef.current < SCROLL_INTENT_MS;
+      const suppressedPassiveCorrection =
+        now < suppressPassiveScrollUntilRef.current && !recentUserIntent;
+      if (!suppressedPassiveCorrection) {
         autoFollowRef.current = true;
         userScrolledUpRef.current = false;
       }
-      // When NOT an active scroll we leave userScrolledUpRef = true so the
-      // follow button reappears if Virtuoso later pushes us away from bottom.
     }
     setShowFollowButton(!bottom && userScrolledUpRef.current);
   }, []);
+
+  const pinToBottomIfFollowing = useCallback(() => {
+    if (!autoFollowRef.current || userScrolledUpRef.current) return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    suppressPassiveScrollUntilRef.current =
+      performance.now() + PASSIVE_SCROLL_GRACE_MS;
+    scroller.scrollTop = scroller.scrollHeight;
+    lastScrollTopRef.current = scroller.scrollTop;
+  }, []);
+
+  // The scrollable tail includes the composer-clearance spacer and the
+  // viewport is inset while the composer is expanded. Both change without a
+  // data change (dock growth, expand/collapse transitions, window resize).
+  // While follow is armed, re-pin to the true bottom so the glass panel
+  // never covers the streaming tail; observing the scroller makes the pin
+  // track CSS transitions frame-by-frame, keeping the text gliding in sync
+  // with the panel.
+  const handleTotalListHeightChanged = pinToBottomIfFollowing;
+
+  useLayoutEffect(() => {
+    if (!hasMeasuredHeight) return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const observer = new ResizeObserver(pinToBottomIfFollowing);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [hasMeasuredHeight, pinToBottomIfFollowing]);
 
   const handleFollowClick = useCallback(() => {
     autoFollowRef.current = true;
@@ -462,15 +493,7 @@ export function VirtualizedChatList<T extends { key: string }>({
 
   const Header = useCallback(() => <>{header}</>, [header]);
 
-  const Footer = useCallback(
-    () => (
-      <>
-        {footer}
-        <Box style={{ height: 80 }} />
-      </>
-    ),
-    [footer],
-  );
+  const Footer = useCallback(() => <>{footer}</>, [footer]);
 
   const components = useMemo(
     () => ({ Header, Scroller, List, Footer }),
@@ -510,6 +533,7 @@ export function VirtualizedChatList<T extends { key: string }>({
             itemContent={itemContent}
             components={components}
             atBottomStateChange={handleAtBottomChange}
+            totalListHeightChanged={handleTotalListHeightChanged}
             followOutput={followOutput}
             initialTopMostItemIndex={
               initialScrollIndex !== undefined

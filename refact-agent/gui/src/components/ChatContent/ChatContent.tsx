@@ -371,6 +371,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             </>
           )}
         </Flex>
+        <div aria-hidden="true" className={styles.composerClearance} />
       </>
     ),
     [

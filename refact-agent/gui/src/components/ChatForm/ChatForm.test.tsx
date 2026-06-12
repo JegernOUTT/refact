@@ -420,6 +420,22 @@ describe("ChatForm", () => {
     });
   });
 
+  test("reports expansion state through onExpandedChange", async () => {
+    const onExpandedChange = vi.fn();
+    const { user } = render(<App onExpandedChange={onExpandedChange} />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+
+    expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+    await user.click(screen.getByTestId("chat-form-textarea"));
+    await waitFor(() => {
+      expect(onExpandedChange).toHaveBeenLastCalledWith(true);
+    });
+  });
+
   test("collapsed composer renders status widgets next to the send control", () => {
     render(<App />, {
       preloadedState: {

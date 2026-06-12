@@ -8,11 +8,11 @@
 }
 
 .web {
-  padding: var(--rf-space-5) var(--rf-space-4);
+  padding: var(--rf-space-3) var(--rf-space-4);
 }
 
 .ide {
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .noPadding {

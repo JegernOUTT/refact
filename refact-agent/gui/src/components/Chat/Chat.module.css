@@ -1,0 +1,74 @@
+.chatRoot {
+  position: relative;
+  /* How far the floating dock overlaps the transcript viewport. Collapsed:
+     the full measured dock height, so content flows behind the glass.
+     Expanded: 0 — the transcript viewport is inset above the panel instead,
+     keeping the tail readable while typing. */
+  --rf-composer-overlap: var(--rf-composer-clearance, 0px);
+}
+
+.composerExpanded {
+  --rf-composer-overlap: 0px;
+}
+
+.transcriptArea {
+  transition: padding-bottom var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.composerExpanded .transcriptArea {
+  padding-bottom: var(--rf-composer-clearance, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcriptArea {
+    transition: none;
+  }
+}
+
+.bottomDock {
+  position: absolute;
+  z-index: var(--rf-z-dropdown);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  /* Match the transcript column gutters: chat root px (4px) + virtuoso list
+     padding (8px) on the left, chat root px + .content scrollbar clearance
+     (16px) on the right, so glass panels align with the messages above. */
+  padding-left: calc(var(--rf-space-1) + var(--rf-space-2));
+  padding-right: calc(var(--rf-space-1) + var(--rf-space-4));
+}
+
+.dockPanel {
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+/* Width-capped positioning context inside the dock Container so absolute
+   companions (buddy bubble) anchor to the content column, not the window. */
+.dockColumn {
+  position: relative;
+}
+
+/* Single glass block shared by the task progress widget and the composer. */
+.dockGroup {
+  overflow: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  transition: border-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.dockGroup:focus-within {
+  border-color: var(--rf-border-strong);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .dockPanel,
+  .dockGroup {
+    backdrop-filter: none;
+  }
+}

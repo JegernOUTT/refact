@@ -13,6 +13,7 @@ import {
 type VirtuosoCall = {
   atBottomStateChange?: (atBottom: boolean) => void;
   followOutput?: (isAtBottom: boolean) => false | "auto" | "smooth";
+  totalListHeightChanged?: (height: number) => void;
   increaseViewportBy?: { top: number; bottom: number };
   defaultItemHeight?: number;
   minOverscanItemCount?: { top: number; bottom: number };
@@ -219,6 +220,101 @@ describe("VirtualizedChatList", () => {
     await waitFor(() => {
       expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
     });
+  });
+
+  test("re-pins to the bottom on total height change while following", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 500,
+      writable: true,
+    });
+
+    call?.totalListHeightChanged?.(2000);
+    expect(scroller.scrollTop).toBe(2000);
+  });
+
+  test("does not re-pin on total height change after the user scrolled up", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 500,
+      writable: true,
+    });
+
+    fireEvent.wheel(scroller, { deltaY: -20 });
+    call?.totalListHeightChanged?.(2000);
+    expect(scroller.scrollTop).toBe(500);
+  });
+
+  test("re-arms auto-follow when bottom is reached without a tracked gesture", async () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 100,
+      writable: true,
+    });
+    fireEvent.scroll(scroller);
+
+    fireEvent.wheel(scroller, { deltaY: -20 });
+    scroller.scrollTop = 40;
+    fireEvent.scroll(scroller);
+    const onBottom = call?.atBottomStateChange;
+    expect(onBottom).toBeDefined();
+    onBottom?.(false);
+    expect(screen.getByTitle("Follow stream")).toBeInTheDocument();
+
+    // Simulate a scrollbar drag landing at the bottom: no wheel/keyboard
+    // events are emitted, the intent window from the wheel-up has passed,
+    // and no suppression window is active.
+    await new Promise((resolve) => setTimeout(resolve, 510));
+    onBottom?.(true);
+    await waitFor(() => {
+      expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
+    });
+    expect(call?.followOutput?.(true)).toBe("auto");
   });
 
   test("does not treat Virtuoso passive upward corrections as user scroll", () => {

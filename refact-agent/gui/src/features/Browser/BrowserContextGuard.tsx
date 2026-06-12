@@ -152,7 +152,7 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
   if (!info || chatId !== currentChatId) return null;
 
   return (
-    <Surface className={styles.guardCard} variant="surface-1">
+    <Surface className={styles.guardCard} variant="glass">
       <div className={styles.heading}>
         <Icon icon={TriangleAlert} tone="warning" />
         <span>Browser context is large ({formatKB(info.total_bytes)})</span>
