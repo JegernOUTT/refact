@@ -13,7 +13,7 @@ pub enum RefactCliCommand {
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
     Control(crate::daemon::cli::CliOptions),
-    Help,
+    Help(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +70,7 @@ where
         "ps" | "projects" | "restart" | "stop" | "logs" | "events" | "status" | "doctor"
         | "version" => parse_control(&args),
         "--version" | "-V" => parse_control(&[OsString::from("refact"), OsString::from("version")]),
-        "help" | "--help" | "-h" => Ok(RefactCliCommand::Help),
+        "help" | "--help" | "-h" => Ok(RefactCliCommand::Help(help_text())),
         other => Err(usage_error(format!("unknown subcommand `{}`", other))),
     }
 }
@@ -82,8 +82,8 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
         RefactCliCommand::Run(options) => DispatchResult::Run(options),
         RefactCliCommand::Tui(options) => DispatchResult::Tui(options),
         RefactCliCommand::Control(options) => DispatchResult::Control(options),
-        RefactCliCommand::Help => {
-            println!("{}", help_text());
+        RefactCliCommand::Help(text) => {
+            println!("{}", text);
             DispatchResult::Exit(0)
         }
     }
@@ -91,6 +91,18 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 
 pub fn help_text() -> &'static str {
     "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
+}
+
+pub fn daemon_help_text() -> &'static str {
+    "refact daemon [--foreground]\n\nRun the refact daemon control process.\n\nOPTIONS:\n    --foreground                Run in the foreground instead of detaching\n    -h, --help                  Print this help text"
+}
+
+pub fn tui_help_text() -> &'static str {
+    "refact tui [--project <path>]\n\nOpen the full-screen TUI.\n\nOPTIONS:\n    --project <path>            Project root (default: cwd)\n    -h, --help                  Print this help text"
+}
+
+pub fn run_help_text() -> &'static str {
+    "refact run [OPTIONS] <prompt>\n\nRun one headless chat turn through the daemon.\n\nOPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n    -h, --help                  Print this help text"
 }
 
 pub fn version_text() -> String {
@@ -117,7 +129,7 @@ fn parse_daemon(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError>
     for arg in args.iter().skip(2) {
         match arg.to_string_lossy().as_ref() {
             "--foreground" => foreground = true,
-            "--help" | "-h" => return Ok(RefactCliCommand::Help),
+            "--help" | "-h" => return Ok(RefactCliCommand::Help(daemon_help_text())),
             other => {
                 return Err(usage_error(format!(
                     "unexpected daemon argument `{}`",
@@ -130,6 +142,9 @@ fn parse_daemon(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError>
 }
 
 fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    if contains_help(args.iter().skip(2)) {
+        return Ok(RefactCliCommand::Help(run_help_text()));
+    }
     crate::daemon::run_cmd::parse_run_args(&args.iter().skip(2).cloned().collect::<Vec<_>>())
         .map(RefactCliCommand::Run)
         .map_err(usage_error)
@@ -148,7 +163,7 @@ fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
                 };
                 project = Some(std::path::PathBuf::from(path));
             }
-            "--help" | "-h" => return Ok(RefactCliCommand::Help),
+            "--help" | "-h" => return Ok(RefactCliCommand::Help(tui_help_text())),
             other => return Err(usage_error(format!("unexpected tui argument `{}`", other))),
         }
         i += 1;
@@ -157,9 +172,22 @@ fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
 }
 
 fn parse_control(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    if contains_help(args.iter().skip(2)) {
+        let subcommand = args
+            .get(1)
+            .and_then(|arg| arg.to_str())
+            .and_then(crate::daemon::cli::subcommand_usage_text)
+            .unwrap_or_else(help_text);
+        return Ok(RefactCliCommand::Help(subcommand));
+    }
     crate::daemon::cli::parse_cli_args(&args.iter().skip(1).cloned().collect::<Vec<_>>())
         .map(RefactCliCommand::Control)
         .map_err(usage_error)
+}
+
+fn contains_help<'a>(args: impl Iterator<Item = &'a OsString>) -> bool {
+    args.filter_map(|arg| arg.to_str())
+        .any(|arg| arg == "--help" || arg == "-h")
 }
 
 fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
@@ -318,6 +346,25 @@ mod tests {
         let error = parse_from(["refact", "bogus"]).unwrap_err();
         assert_eq!(error.exit_code, 2);
         assert!(error.message.contains("unknown subcommand `bogus`"));
+    }
+
+    #[test]
+    fn subcommand_daemon_help_routes_to_scoped_text() {
+        match parse_from(["refact", "logs", "--help"]).unwrap() {
+            RefactCliCommand::Help(text) => {
+                assert!(text.starts_with("refact logs"));
+                assert!(!text.contains("SUBCOMMANDS:"));
+            }
+            _ => panic!("expected help command"),
+        }
+
+        match parse_from(["refact", "run", "--help"]).unwrap() {
+            RefactCliCommand::Help(text) => {
+                assert!(text.starts_with("refact run"));
+                assert!(text.contains("--approve"));
+            }
+            _ => panic!("expected help command"),
+        }
     }
 
     #[test]

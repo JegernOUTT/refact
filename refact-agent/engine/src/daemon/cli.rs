@@ -7,6 +7,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use unicode_width::UnicodeWidthStr;
 
 use crate::daemon::client::{self, DaemonClientError};
 use crate::daemon::events::DaemonEvent;
@@ -251,13 +252,21 @@ fn parse_restart_stop(args: &mut Vec<String>, restart: bool) -> Result<CliOption
 
 fn parse_logs(args: &mut Vec<String>) -> Result<CliOptions, String> {
     let json = take_flag(args, "--json")?;
-    let follow = take_flag(args, "-f")? || take_flag(args, "--follow")?;
+    let follow_short = take_flag(args, "-f")?;
+    let follow_long = take_flag(args, "--follow")?;
+    let follow = follow_short || follow_long;
     let daemon = take_flag(args, "--daemon")?;
     let target = if args.is_empty() {
         None
     } else {
         Some(args.remove(0))
     };
+    if json && follow {
+        return Err("logs --json is incompatible with -f/--follow".to_string());
+    }
+    if daemon && target.is_some() {
+        return Err("logs --daemon does not accept a project target".to_string());
+    }
     Ok(CliOptions {
         command: CliCommand::Logs {
             target,
@@ -270,8 +279,13 @@ fn parse_logs(args: &mut Vec<String>) -> Result<CliOptions, String> {
 
 fn parse_events(args: &mut Vec<String>) -> Result<CliOptions, String> {
     let json = take_flag(args, "--json")?;
-    let follow = take_flag(args, "-f")? || take_flag(args, "--follow")?;
+    let follow_short = take_flag(args, "-f")?;
+    let follow_long = take_flag(args, "--follow")?;
+    let follow = follow_short || follow_long;
     let kind = take_option(args, "--kind")?;
+    if json && follow {
+        return Err("events --json is incompatible with -f/--follow".to_string());
+    }
     Ok(CliOptions {
         command: CliCommand::Events { kind, follow, json },
     })
@@ -785,6 +799,7 @@ fn print_daemon_not_running(
 async fn doctor_report() -> DoctorReport {
     let daemon_json_path = crate::daemon::paths::daemon_json_path();
     let mut checks = Vec::new();
+    checks.push(binary_path_check());
     let info = match crate::daemon::state::read_daemon_info(&daemon_json_path).await {
         Ok(Some(info)) => {
             checks.push(check(
@@ -808,7 +823,8 @@ async fn doctor_report() -> DoctorReport {
         }
     };
     if let Some(info) = &info {
-        let reachable = client::ping_daemon(info).await;
+        let status = client::get_json::<DaemonStatus>(info, "/daemon/v1/status").await;
+        let reachable = status.is_ok();
         checks.push(check(
             "daemon reachable",
             reachable,
@@ -842,6 +858,7 @@ async fn doctor_report() -> DoctorReport {
         if reachable {
             match client::get_json::<Vec<WorkerRow>>(info, "/daemon/v1/workers").await {
                 Ok(workers) => {
+                    let status_workers = status.as_ref().map(|status| status.workers).unwrap_or(0);
                     let responsive = workers_responsive(info, &workers).await;
                     let missing = workers
                         .iter()
@@ -854,6 +871,11 @@ async fn doctor_report() -> DoctorReport {
                         format!("{} workers", workers.len()),
                     ));
                     checks.push(check(
+                        "worker count",
+                        status_workers == workers.len() as u64,
+                        format!("status {status_workers}, listed {}", workers.len()),
+                    ));
+                    checks.push(check(
                         "project roots",
                         missing.is_empty(),
                         if missing.is_empty() {
@@ -863,10 +885,14 @@ async fn doctor_report() -> DoctorReport {
                         },
                     ));
                 }
-                Err(error) => checks.push(check("workers responsive", false, error.to_string())),
+                Err(error) => {
+                    checks.push(check("workers responsive", false, error.to_string()));
+                    checks.push(check("worker count", false, error.to_string()));
+                }
             }
         } else {
             checks.push(check("workers responsive", false, "daemon unreachable"));
+            checks.push(check("worker count", false, "daemon unreachable"));
         }
     } else {
         checks.push(check("daemon reachable", false, "daemon.json unavailable"));
@@ -878,6 +904,7 @@ async fn doctor_report() -> DoctorReport {
             false,
             "daemon.json unavailable",
         ));
+        checks.push(check("worker count", false, "daemon.json unavailable"));
     }
     checks.push(check(
         "lock file",
@@ -885,6 +912,21 @@ async fn doctor_report() -> DoctorReport {
         crate::daemon::paths::lock_path().display().to_string(),
     ));
     DoctorReport { checks }
+}
+
+fn binary_path_check() -> DoctorCheck {
+    match std::env::current_exe() {
+        Ok(path) => check(
+            "binary path",
+            path.is_file(),
+            if path.is_file() {
+                path.display().to_string()
+            } else {
+                format!("not a file: {}", path.display())
+            },
+        ),
+        Err(error) => check("binary path", false, error.to_string()),
+    }
 }
 
 async fn workers_responsive(info: &DaemonInfo, workers: &[WorkerRow]) -> bool {
@@ -1067,7 +1109,7 @@ fn format_table(rows: &[Vec<String>]) -> String {
             if widths.len() <= index {
                 widths.push(0);
             }
-            widths[index] = widths[index].max(cell.len());
+            widths[index] = widths[index].max(display_width(cell));
         }
     }
     let mut out = String::new();
@@ -1078,12 +1120,16 @@ fn format_table(rows: &[Vec<String>]) -> String {
             }
             out.push_str(cell);
             if index + 1 < row.len() {
-                out.push_str(&" ".repeat(widths[index].saturating_sub(cell.len())));
+                out.push_str(&" ".repeat(widths[index].saturating_sub(display_width(cell))));
             }
         }
         out.push('\n');
     }
     out
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 fn write_ps(
@@ -1191,6 +1237,21 @@ pub fn usage_text() -> &'static str {
     "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
 }
 
+pub fn subcommand_usage_text(subcommand: &str) -> Option<&'static str> {
+    match subcommand {
+        "ps" => Some("refact ps [--json]\n\nList daemon workers."),
+        "projects" => Some("refact projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n\nManage daemon project registry."),
+        "restart" => Some("refact restart [--json] (--daemon|<id|path>)\n\nRestart a project worker or the daemon."),
+        "stop" => Some("refact stop [--json] (--daemon|<id|path>)\n\nStop a project worker or the daemon."),
+        "logs" => Some("refact logs [--json] [-f] [--daemon|<id|path>]\n\nPrint daemon or worker logs.\n\nOPTIONS:\n    --daemon                    Print daemon logs\n    -f, --follow                Follow log output\n    --json                      Emit the current log as JSON; incompatible with follow"),
+        "events" => Some("refact events [--json] [-f] [--kind <kind>]\n\nPrint daemon events.\n\nOPTIONS:\n    --kind <kind>               Filter by event kind\n    -f, --follow                Follow event output\n    --json                      Emit events as JSON; incompatible with follow"),
+        "status" => Some("refact status [--json]\n\nPrint daemon health."),
+        "doctor" => Some("refact doctor [--json]\n\nDiagnose daemon setup."),
+        "version" => Some("refact version [--json]\n\nPrint version and build information."),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,6 +1287,38 @@ mod tests {
         assert!(table.contains("ready"));
         assert!(table.contains("8001"));
         assert!(table.contains("yes"));
+    }
+
+    #[test]
+    fn table_formatting_uses_unicode_display_width() {
+        let table = format_table(&[
+            vec!["NAME".to_string(), "VALUE".to_string()],
+            vec!["界".to_string(), "wide".to_string()],
+            vec!["aa".to_string(), "ascii".to_string()],
+        ]);
+        assert_eq!(table, "NAME  VALUE\n界    wide\naa    ascii\n");
+    }
+
+    #[test]
+    fn parse_logs_rejects_silent_target_and_follow_cases() {
+        let options = parse_cli_args(&["logs".into(), "project-id".into()]).unwrap();
+        match options.command {
+            CliCommand::Logs { target, daemon, .. } => {
+                assert_eq!(target.as_deref(), Some("project-id"));
+                assert!(!daemon);
+            }
+            _ => panic!("expected logs command"),
+        }
+
+        let error =
+            parse_cli_args(&["logs".into(), "--daemon".into(), "project-id".into()]).unwrap_err();
+        assert!(error.contains("does not accept a project target"));
+
+        let error = parse_cli_args(&["logs".into(), "--json".into(), "-f".into()]).unwrap_err();
+        assert!(error.contains("incompatible"));
+
+        let error = parse_cli_args(&["events".into(), "--json".into(), "-f".into()]).unwrap_err();
+        assert!(error.contains("incompatible"));
     }
 
     #[test]
@@ -1541,8 +1634,23 @@ mod tests {
         );
         let opened: Value = serde_json::from_slice(&out).unwrap();
         let project_id = opened["project_id"].as_str().unwrap().to_string();
+        let slug = opened["slug"].as_str().unwrap().to_string();
 
         out.clear();
+        let daemon_marker = "daemon-log-marker-B2\n";
+        let worker_marker = "worker-log-marker-B2\n";
+        tokio::fs::create_dir_all(crate::daemon::paths::logs_dir())
+            .await
+            .unwrap();
+        tokio::fs::write(crate::daemon::paths::daemon_log_path(), daemon_marker)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            crate::daemon::paths::logs_dir().join(format!("worker-{slug}.log")),
+            worker_marker,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             run_inner(
                 CliOptions {
@@ -1596,7 +1704,12 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(serde_json::from_slice::<Value>(&out).unwrap()["log"].is_string());
+        let log = serde_json::from_slice::<Value>(&out).unwrap()["log"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(log.contains(worker_marker));
+        assert!(!log.contains(daemon_marker));
 
         out.clear();
         assert_eq!(
@@ -1654,6 +1767,14 @@ mod tests {
         drop(project_dir);
         let report = doctor_report().await;
         assert_eq!(report.exit_code(), 1);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "binary path" && check.ok));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "worker count" && check.ok));
         assert!(report
             .checks
             .iter()
