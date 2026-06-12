@@ -196,6 +196,19 @@ struct BacktrackTarget {
     content: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PendingSendRetry {
+    prompt: String,
+    params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CommandContextTag {
+    SendMessage { prompt: String, params: Value },
+    Abort,
+    Other,
+}
+
 impl BacktrackTarget {
     fn matches(&self, message: &TranscriptMessage) -> bool {
         if let Some(message_id) = self.message_id.as_deref() {
@@ -281,6 +294,7 @@ pub struct App {
     mode: Option<String>,
     pending_model: Option<String>,
     pending_mode: Option<String>,
+    pending_send_retry: Option<PendingSendRetry>,
     session_state: SessionState,
     subscription_status: SubscriptionStatus,
     daemon_online: bool,
@@ -355,6 +369,7 @@ impl App {
             mode: None,
             pending_model: None,
             pending_mode: None,
+            pending_send_retry: None,
             session_state: SessionState::Idle,
             subscription_status: SubscriptionStatus::Online,
             daemon_online: true,
@@ -412,6 +427,7 @@ impl App {
             mode: None,
             pending_model: None,
             pending_mode: None,
+            pending_send_retry: None,
             session_state: SessionState::Error,
             subscription_status: SubscriptionStatus::Offline,
             daemon_online: false,
@@ -1239,6 +1255,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
+        self.pending_send_retry = None;
         self.model_context_windows.clear();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
@@ -1264,6 +1281,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
+        self.pending_send_retry = None;
         self.retry_hint = None;
     }
 
@@ -1293,6 +1311,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
+        self.pending_send_retry = None;
         self.retry_hint = None;
         AppAction::SubscribeCurrent
     }
@@ -1369,7 +1388,7 @@ impl App {
         if self.backtrack_pending.is_some() {
             return Some(self.start_backtrack_turn(prompt));
         }
-        let params = self.take_pending_params();
+        let params = self.take_submit_params(&prompt);
         if self.is_chat_active() {
             self.input_queue.enqueue(prompt, params);
             self.input_queue.clear_selection();
@@ -1383,6 +1402,7 @@ impl App {
         let Some(target) = self.backtrack_pending.take() else {
             return AppAction::None;
         };
+        self.pending_send_retry = None;
         if !self
             .transcript_state
             .messages()
@@ -1419,11 +1439,107 @@ impl App {
         AppAction::SendMessage { prompt, params }
     }
 
+    fn take_submit_params(&mut self, prompt: &str) -> Value {
+        if self
+            .pending_send_retry
+            .as_ref()
+            .is_some_and(|retry| retry.prompt == prompt)
+        {
+            return self
+                .pending_send_retry
+                .take()
+                .map(|retry| retry.params)
+                .unwrap_or_else(|| Value::Object(Map::new()));
+        }
+        self.pending_send_retry = None;
+        self.take_pending_params()
+    }
+
     fn dispatch_next_queued_input(&mut self) -> AppAction {
         let Some(QueuedInput { text, params, .. }) = self.input_queue.pop_next_ready() else {
             return AppAction::None;
         };
         self.start_prompt_turn(text, params)
+    }
+
+    fn handle_command_finished(
+        &mut self,
+        context: CommandContextTag,
+        result: Result<(), String>,
+    ) -> AppAction {
+        match result {
+            Ok(()) => self.handle_command_success(context),
+            Err(error) => self.handle_command_failure(context, error),
+        }
+    }
+
+    fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
+        match context {
+            CommandContextTag::Abort if self.session_state == SessionState::Idle => {
+                self.dispatch_next_queued_input()
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn handle_command_failure(&mut self, context: CommandContextTag, error: String) -> AppAction {
+        self.retry_hint = retry_hint_from_message(&error);
+        match context {
+            CommandContextTag::SendMessage { prompt, params } => {
+                self.rollback_failed_send_message(prompt, params, &error)
+            }
+            _ => {
+                self.add_notice(format!("Command failed: {error}"));
+                AppAction::None
+            }
+        }
+    }
+
+    fn rollback_failed_send_message(
+        &mut self,
+        prompt: String,
+        params: Value,
+        error: &str,
+    ) -> AppAction {
+        self.session_state = SessionState::Idle;
+        self.stream_controller.clear();
+        self.rollback_failed_send_transcript(&prompt);
+        self.restore_failed_prompt(prompt, params);
+        self.add_notice(format!("Command failed: {error}"));
+        AppAction::None
+    }
+
+    fn rollback_failed_send_transcript(&mut self, prompt: &str) {
+        let messages = self.transcript_state.messages();
+        let truncate_from = if messages.len() >= 2
+            && messages[messages.len() - 2].role == TranscriptRole::User
+            && messages[messages.len() - 2].content == prompt
+            && is_empty_live_assistant(&messages[messages.len() - 1])
+        {
+            Some(messages.len() - 2)
+        } else if messages.last().is_some_and(is_empty_live_assistant) {
+            Some(messages.len() - 1)
+        } else {
+            None
+        };
+        if let Some(index) = truncate_from {
+            self.transcript_state.truncate_messages(index);
+            self.rebuild_render_transcript_from_state();
+        }
+    }
+
+    fn restore_failed_prompt(&mut self, prompt: String, params: Value) {
+        let draft = self.composer.text().to_string();
+        if !draft.trim().is_empty() && draft != prompt {
+            let draft_params = self.take_pending_params();
+            self.input_queue.enqueue(draft, draft_params);
+            self.input_queue.clear_selection();
+        }
+        self.pending_send_retry = Some(PendingSendRetry {
+            prompt: prompt.clone(),
+            params,
+        });
+        self.composer.set_text(prompt);
     }
 
     fn begin_queue_edit(&mut self) -> AppAction {
@@ -3369,9 +3485,18 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
 enum RuntimeEvent {
     Input(Event),
     Tick,
-    Chat { generation: u64, event: ChatEvent },
-    ChatResubscribe { generation: u64, message: String },
-    ChatDisconnected { generation: u64, message: String },
+    Chat {
+        generation: u64,
+        event: ChatEvent,
+    },
+    ChatResubscribe {
+        generation: u64,
+        message: String,
+    },
+    ChatDisconnected {
+        generation: u64,
+        message: String,
+    },
     InputError(String),
     DaemonEvent(DaemonEventRecord),
     DaemonEventsDisconnected(String),
@@ -3384,7 +3509,10 @@ enum RuntimeEvent {
     SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
-    CommandFinished(Result<(), String>),
+    CommandFinished {
+        context: CommandContextTag,
+        result: Result<(), String>,
+    },
     DiffLoaded(Result<String, String>),
 }
 
@@ -3660,10 +3788,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     app.add_notice(format!("Failed to refresh workers: {error}"));
                 }
             }
-            RuntimeEvent::CommandFinished(Ok(())) => {}
-            RuntimeEvent::CommandFinished(Err(error)) => {
-                app.retry_hint = retry_hint_from_message(&error);
-                app.add_notice(format!("Command failed: {error}"))
+            RuntimeEvent::CommandFinished { context, result } => {
+                let action = app.handle_command_finished(context, result);
+                run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
             }
             RuntimeEvent::DiffLoaded(Ok(diff)) => app.show_diff_result(diff),
             RuntimeEvent::DiffLoaded(Err(error)) => {
@@ -3701,6 +3828,19 @@ fn stable_path_hash(path: &std::path::Path) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+fn is_empty_live_assistant(message: &TranscriptMessage) -> bool {
+    message.role == TranscriptRole::Assistant
+        && !message.stream_finished
+        && message.content.is_empty()
+        && message.reasoning.is_empty()
+        && message.tool_calls.is_empty()
+        && message.citations.is_empty()
+        && message.thinking_blocks.is_empty()
+        && message.server_content_blocks.is_empty()
+        && message.extra.is_empty()
+        && message.unknown_delta_ops.is_empty()
 }
 
 async fn run_action(
@@ -3816,6 +3956,10 @@ async fn run_action(
                 let chat_id = app.chat_id().to_string();
                 let client = client.clone();
                 let tx = tx.clone();
+                let context = CommandContextTag::SendMessage {
+                    prompt: prompt.clone(),
+                    params: params.clone(),
+                };
                 tokio::spawn(async move {
                     let result = async {
                         if params.as_object().is_some_and(|object| !object.is_empty()) {
@@ -3829,7 +3973,9 @@ async fn run_action(
                     }
                     .await
                     .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished { context, result })
+                        .await;
                 });
             }
         }
@@ -3843,7 +3989,12 @@ async fn run_action(
                         .send_retry_from_index(&project_id, &chat_id, index, content)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -3857,7 +4008,12 @@ async fn run_action(
                         .send_set_params(&project_id, &chat_id, patch)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -3886,7 +4042,12 @@ async fn run_action(
                         )
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -3907,7 +4068,12 @@ async fn run_action(
                         .delete_trajectory(&project_id, &chat_id)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -3936,7 +4102,12 @@ async fn run_action(
                     }
                     .await
                     .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -3950,7 +4121,12 @@ async fn run_action(
                         .send_abort(&project_id, &chat_id)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::CommandFinished(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            context: CommandContextTag::Abort,
+                            result,
+                        })
+                        .await;
                 });
             }
         }
@@ -5232,6 +5408,104 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn send_message_failure_rolls_back_and_restores_prompt() {
+        let mut app = App::new(project());
+        app.composer.set_text("hello");
+        let action = app.handle_key(key(KeyCode::Enter));
+        let (prompt, params) = match action {
+            AppAction::SendMessage { prompt, params } => (prompt, params),
+            other => panic!("unexpected action: {other:?}"),
+        };
+        app.composer.set_text("draft");
+
+        let result = app.handle_command_finished(
+            CommandContextTag::SendMessage {
+                prompt: prompt.clone(),
+                params: params.clone(),
+            },
+            Err("fake client error".to_string()),
+        );
+
+        assert_eq!(result, AppAction::None);
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.composer(), "hello");
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.input_queue().items()[0].text, "draft");
+        assert!(!app
+            .transcript_state()
+            .messages()
+            .iter()
+            .any(|message| message.role == TranscriptRole::Assistant));
+        assert!(!app
+            .visible_transcript()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Assistant(_))));
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("fake client error"))
+        }));
+
+        let retry = app.handle_key(key(KeyCode::Enter));
+        match retry {
+            AppAction::SendMessage {
+                prompt: retry_prompt,
+                params: retry_params,
+            } => {
+                assert_eq!(retry_prompt, prompt);
+                assert_eq!(retry_params, params);
+            }
+            other => panic!("unexpected retry action: {other:?}"),
+        }
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.input_queue().items()[0].text, "draft");
+    }
+
+    #[test]
+    fn abort_success_dispatches_next_queued_input_once() {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        app.composer.set_text("second");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        app.composer.set_text("third");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.input_queue().len(), 2);
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
+        assert_eq!(app.session_state(), SessionState::Idle);
+
+        let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
+
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "second"
+        ));
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.input_queue().items()[0].text, "third");
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.input_queue().len(), 1);
+    }
+
+    #[test]
+    fn abort_success_with_empty_queue_stays_idle() {
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
+        assert_eq!(app.session_state(), SessionState::Idle);
+
+        let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
+
+        assert_eq!(action, AppAction::None);
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(app.input_queue().is_empty());
+    }
+
+    #[test]
     fn queued_item_can_be_edited_and_removed() {
         let mut app = App::new(project());
         app.session_state = SessionState::Generating;
@@ -5802,7 +6076,10 @@ new-chat = "ctrl-x"
         run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
         assert!(matches!(
             rx.recv().await,
-            Some(RuntimeEvent::CommandFinished(Ok(())))
+            Some(RuntimeEvent::CommandFinished {
+                context: CommandContextTag::Other,
+                result: Ok(())
+            })
         ));
 
         let command = state.find_command("set_params").unwrap();
