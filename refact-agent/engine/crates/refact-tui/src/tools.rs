@@ -27,6 +27,7 @@ impl ToolStatus {
 pub struct ToolCard {
     pub id: String,
     pub name: String,
+    pub args: String,
     pub args_preview: String,
     pub result: String,
     pub status: ToolStatus,
@@ -61,6 +62,7 @@ impl ToolCard {
         Self {
             id,
             name,
+            args: raw_args.clone(),
             args_preview: compact_preview(&raw_args, 96),
             result: String::new(),
             status: ToolStatus::Running,
@@ -78,6 +80,7 @@ impl ToolCard {
 
     pub fn update_from_tool_call(&mut self, update: ToolCard) {
         self.name = update.name;
+        self.args = update.args;
         self.args_preview = update.args_preview;
     }
 

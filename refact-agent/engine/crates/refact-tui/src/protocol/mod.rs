@@ -190,6 +190,8 @@ pub enum TranscriptRole {
     Assistant,
     Tool,
     Notice,
+    Plan,
+    Event,
     Other(String),
 }
 
@@ -200,6 +202,8 @@ impl TranscriptRole {
             "assistant" => Self::Assistant,
             "tool" => Self::Tool,
             "notice" => Self::Notice,
+            "plan" => Self::Plan,
+            "event" => Self::Event,
             other => Self::Other(other.to_string()),
         }
     }
@@ -210,6 +214,8 @@ impl TranscriptRole {
             Self::Assistant => "assistant",
             Self::Tool => "tool",
             Self::Notice => "notice",
+            Self::Plan => "plan",
+            Self::Event => "event",
             Self::Other(role) => role.as_str(),
         }
     }
@@ -563,6 +569,9 @@ fn message_id(raw: &Value) -> Option<String> {
 
 fn extra_fields(raw: &Value) -> Map<String, Value> {
     let mut extra = raw.as_object().cloned().unwrap_or_default();
+    if let Some(nested_extra) = raw.get("extra").and_then(Value::as_object) {
+        extra.extend(nested_extra.clone());
+    }
     for key in [
         "message_id",
         "role",
@@ -582,6 +591,7 @@ fn extra_fields(raw: &Value) -> Map<String, Value> {
         "summarized_range",
         "summarization_tier",
         "summarized_token_estimate",
+        "extra",
     ] {
         extra.remove(key);
     }

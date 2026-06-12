@@ -164,6 +164,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let title = match app.session_state() {
         SessionState::Generating => " message (Enter queues · Esc cancels) ",
         SessionState::Paused => " approval pending ",
+        SessionState::WaitingUserInput => " waiting for input ",
         _ => " message ",
     };
     let inner_width = input_area.width.saturating_sub(2).max(1);

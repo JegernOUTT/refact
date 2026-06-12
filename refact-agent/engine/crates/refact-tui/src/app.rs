@@ -21,7 +21,7 @@ use crate::commands::{
 use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
-use crate::history::cells::ApprovalOutcome;
+use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
 use crate::pickers::{
     file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
@@ -71,6 +71,7 @@ pub enum TranscriptItem {
     Assistant(String),
     Reasoning(String, bool),
     Tool(ToolCard),
+    Plan(PlanCellData),
     Citation(String),
     ServerContentBlock(String),
     Diff(String),
@@ -87,6 +88,7 @@ impl TranscriptItem {
     fn keeps_live(&self) -> bool {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
             || matches!(self, Self::Approval(_, None))
+            || matches!(self, Self::Plan(_))
     }
 }
 
@@ -96,6 +98,7 @@ pub enum SessionState {
     Generating,
     ExecutingTools,
     Paused,
+    WaitingUserInput,
     Error,
 }
 
@@ -113,6 +116,7 @@ impl SessionState {
             SessionState::Generating => "generating",
             SessionState::ExecutingTools => "tools",
             SessionState::Paused => "paused",
+            SessionState::WaitingUserInput => "waiting input",
             SessionState::Error => "error",
         }
     }
@@ -1178,8 +1182,50 @@ impl App {
                     TranscriptItem::Notice(message.content.clone()),
                 );
             }
+            TranscriptRole::Plan => {
+                self.upsert_current_plan_item(render_message_key(message, "plan", 0));
+            }
+            TranscriptRole::Event => {
+                if is_plan_delta_message(message) {
+                    self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
+                } else {
+                    self.push_internal_event(message);
+                }
+            }
             TranscriptRole::Other(_) => {}
         }
+    }
+
+    fn upsert_current_plan_item(&mut self, key: String) {
+        let Some(plan) = current_plan_cell_data(self.transcript_state.messages()) else {
+            return;
+        };
+        self.rendered_state_keys
+            .truncate(self.rendered_state_cursor);
+        self.rendered_state_keys.push(key);
+        self.rendered_state_cursor += 1;
+        if let Some(existing) = self.transcript.iter_mut().find_map(|item| match item {
+            TranscriptItem::Plan(existing) => Some(existing),
+            _ => None,
+        }) {
+            *existing = plan;
+        } else {
+            self.push_history_item(TranscriptItem::Plan(plan));
+        }
+    }
+
+    fn push_internal_event(&mut self, message: &TranscriptMessage) {
+        let (subkind, source, payload) = event_metadata(message);
+        self.events_pane.push_event(DaemonEventRecord {
+            ts_ms: now_ms(),
+            kind: format!("chat.{subkind}"),
+            project_id: self.current_project_id().map(str::to_string),
+            payload: json!({
+                "source": source,
+                "content": message.content,
+                "payload": payload,
+            }),
+        });
     }
 
     fn approval_scope(&self, raw: &Value, event_seq: Option<u64>) -> String {
@@ -1390,6 +1436,7 @@ impl App {
             "generating" => SessionState::Generating,
             "executing_tools" => SessionState::ExecutingTools,
             "paused" => SessionState::Paused,
+            "waiting_user_input" => SessionState::WaitingUserInput,
             "error" => SessionState::Error,
             _ => SessionState::Idle,
         };
@@ -1443,7 +1490,7 @@ impl App {
             .unwrap_or_default()
         {
             "tool" => self.handle_tool_message(message),
-            "assistant" | "user" => {
+            "assistant" | "user" | "plan" | "event" => {
                 let message = TranscriptMessage::from_wire(message);
                 self.append_render_message(&message);
             }
@@ -1666,7 +1713,10 @@ impl App {
     fn is_chat_active(&self) -> bool {
         matches!(
             self.session_state,
-            SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
+            SessionState::Generating
+                | SessionState::ExecutingTools
+                | SessionState::Paused
+                | SessionState::WaitingUserInput
         )
     }
 
@@ -1767,7 +1817,10 @@ impl App {
                     AppAction::None
                 } else if matches!(
                     self.session_state,
-                    SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
+                    SessionState::Generating
+                        | SessionState::ExecutingTools
+                        | SessionState::Paused
+                        | SessionState::WaitingUserInput
                 ) {
                     self.cancel_queue_edit();
                     self.session_state = SessionState::Idle;
@@ -2026,7 +2079,10 @@ impl App {
     fn ctrl_c_action(&mut self) -> AppAction {
         if matches!(
             self.session_state,
-            SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
+            SessionState::Generating
+                | SessionState::ExecutingTools
+                | SessionState::Paused
+                | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
             self.session_state = SessionState::Idle;
@@ -2958,6 +3014,72 @@ fn spawn_subscription_task(
             }
         }
     })
+}
+
+fn current_plan_cell_data(messages: &[TranscriptMessage]) -> Option<PlanCellData> {
+    let base = current_plan_message(messages)?;
+    let deltas = messages
+        .iter()
+        .filter(|message| is_plan_delta_message(message))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    let content = synthesize_plan_content(&base.content, &deltas);
+    let plan_meta = base.extra.get("plan").and_then(Value::as_object);
+    let mode = plan_meta
+        .and_then(|meta| meta.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("agent")
+        .to_string();
+    let version = plan_meta
+        .and_then(|meta| meta.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u32;
+    Some(PlanCellData::new(content, mode, version, deltas.len()))
+}
+
+fn current_plan_message(messages: &[TranscriptMessage]) -> Option<&TranscriptMessage> {
+    messages
+        .iter()
+        .filter(|message| message.role == TranscriptRole::Plan)
+        .max_by_key(|message| {
+            message
+                .extra
+                .get("plan")
+                .and_then(|plan| plan.get("version"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+}
+
+fn is_plan_delta_message(message: &TranscriptMessage) -> bool {
+    event_subkind(message) == Some("plan_delta")
+}
+
+fn event_metadata(message: &TranscriptMessage) -> (String, String, Value) {
+    let event = message.extra.get("event").and_then(Value::as_object);
+    let subkind = event
+        .and_then(|event| event.get("subkind"))
+        .and_then(Value::as_str)
+        .unwrap_or("event")
+        .to_string();
+    let source = event
+        .and_then(|event| event.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("chat")
+        .to_string();
+    let payload = event
+        .and_then(|event| event.get("payload"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    (subkind, source, payload)
+}
+
+fn event_subkind(message: &TranscriptMessage) -> Option<&str> {
+    message
+        .extra
+        .get("event")
+        .and_then(|event| event.get("subkind"))
+        .and_then(Value::as_str)
 }
 
 fn notice_transcript_state(text: String) -> TranscriptState {
