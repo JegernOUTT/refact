@@ -6,7 +6,6 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonSyntaxException
 import com.intellij.openapi.Disposable
 import com.intellij.util.text.findTextRange
-import com.smallcloud.refactai.struct.SMCExceptions
 import org.apache.hc.client5.http.async.methods.AbstractBinResponseConsumer
 import org.apache.hc.client5.http.async.methods.SimpleHttpRequest
 import org.apache.hc.client5.http.config.RequestConfig
@@ -21,6 +20,7 @@ import org.apache.hc.core5.http.message.BasicHeader
 import org.apache.hc.core5.http.nio.AsyncRequestProducer
 import org.apache.hc.core5.http.nio.entity.AsyncEntityProducers
 import org.apache.hc.core5.http.nio.support.BasicRequestProducer
+import org.apache.hc.core5.http.protocol.HttpContext
 import org.apache.hc.core5.http.ssl.TLS
 import org.apache.hc.core5.http.support.BasicRequestBuilder
 import org.apache.hc.core5.reactor.IOReactorConfig
@@ -37,13 +37,26 @@ import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as I
 
 private const val STREAMING_PREFIX = "data: "
 
+class HttpStatusException(
+    val statusCode: Int,
+    val responseBody: String,
+    val uri: URI,
+) : Exception("HTTP $statusCode from $uri: $responseBody")
+
+
 class AsyncConnection : Disposable {
     private val client: CloseableHttpAsyncClient = HttpAsyncClients.customHttp2()
         .setTlsStrategy(ClientTlsStrategyBuilder.create()
             .setSslContext(SSLContexts.custom().loadTrustMaterial(TrustSelfSignedStrategy()).build())
             .setTlsVersions(TLS.V_1_3, TLS.V_1_2)
             .build())
-        .setRetryStrategy(DefaultHttpRequestRetryStrategy(5, TimeValue.ofMilliseconds(50)))
+        .setRetryStrategy(
+            object : DefaultHttpRequestRetryStrategy(5, TimeValue.ofMilliseconds(50)) {
+                override fun retryRequest(response: HttpResponse, execCount: Int, context: HttpContext): Boolean {
+                    return false
+                }
+            }
+        )
         .evictIdleConnections(TimeValue.ofSeconds(10))
         .setIOReactorConfig(
             IOReactorConfig.custom()
@@ -152,6 +165,7 @@ class AsyncConnection : Disposable {
                 object : AbstractBinResponseConsumer<String>() {
                     private var bufferStr = ""
                     private var isStreaming = false
+                    private var statusCode = 0
                     override fun releaseResources() {
                     }
 
@@ -171,6 +185,9 @@ class AsyncConnection : Disposable {
 
                         val part = Charset.forName("UTF-8").decode(src)
                         bufferStr += part
+                        if (statusCode !in 200..299) {
+                            return
+                        }
                         if (part.startsWith(STREAMING_PREFIX)) {
                             isStreaming = true
                             try {
@@ -196,9 +213,13 @@ class AsyncConnection : Disposable {
                     }
 
                     override fun start(response: HttpResponse?, contentType: ContentType?) {
+                        statusCode = response?.code ?: 0
                     }
 
                     override fun buildResult(): String {
+                        if (statusCode !in 200..299) {
+                            throw HttpStatusException(statusCode, bufferStr, uri)
+                        }
                         return bufferStr
                     }
 

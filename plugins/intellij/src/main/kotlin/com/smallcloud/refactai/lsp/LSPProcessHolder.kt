@@ -2,7 +2,6 @@ package com.smallcloud.refactai.lsp
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
-import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
@@ -18,9 +17,9 @@ import com.intellij.util.messages.Topic
 import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.Resources.binPrefix
 import com.smallcloud.refactai.io.ConnectionStatus
+import com.smallcloud.refactai.io.HttpStatusException
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
-import org.apache.hc.core5.concurrent.ComplexFuture
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -82,6 +81,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     protected open val daemonClient: RefactDaemonClient = HttpRefactDaemonClient()
 
     private val exitThread: Thread = Thread {
+        closeAttachedProject()
         terminate()
     }
 
@@ -351,6 +351,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         startupInProgress = true
         try {
             capabilities = LSPCapabilities()
+            closeAttachedProject()
             terminate()
             if (!newConfig.isValid) return
             val bin = BIN_PATH
@@ -371,6 +372,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             isWorking = true
             refreshAttachedWorkerState()
             if (shouldAbortLifecycleWork()) {
+                closeAttachedProject()
                 terminate()
                 return
             }
@@ -400,30 +402,66 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     open fun fetchCustomization(): JsonObject? {
         logIfBlockingOperationOnEdt("fetchCustomization")
         customizationCache?.let { return it }
-        if (!isWorking) {
-            val direct = getCustomizationDirectly()
-            customizationCache = direct
-            return direct
+        if (baseUrlOrNull() == null) {
+            ensureStartedIfNeeded("fetch-customization")
         }
         val server = fetchCustomizationFromServer()
         customizationCache = server
         return server
     }
 
-    fun fetchCustomizationDirectly(): JsonObject? {
-        logIfBlockingOperationOnEdt("fetchCustomizationDirectly")
-        val direct = getCustomizationDirectly()
-        customizationCache = direct
-        return direct
-    }
-
     fun getCachedCustomization(): JsonObject? {
         return customizationCache
     }
 
+    private fun shouldWakeAndRetry(error: Throwable?): Boolean {
+        if (error is HttpStatusException) {
+            return error.statusCode == 502 || error.statusCode == 503
+        }
+        return error?.cause?.let { shouldWakeAndRetry(it) } ?: false
+    }
+
+    protected open fun sleepBeforeWakeRetry(attempt: Int) {
+        Thread.sleep((attempt * 100L).coerceAtMost(300L))
+    }
+
+    fun wakeWorkerForRetry(reason: String): Boolean {
+        val bin = BIN_PATH ?: return false
+        val root = projectRootPath() ?: return false
+        val config = lastConfig ?: currentConfig()
+        return try {
+            logger.debug("LSP daemon wake retry: $reason")
+            daemonClient.ensureDaemon(bin)
+            attachedProject = daemonClient.openProject(root, config)
+            lastConfig = config
+            isWorking = true
+            true
+        } catch (e: Exception) {
+            logger.warn("LSP wake retry failed: ${e.message}")
+            false
+        }
+    }
+
+    private fun <T> withWakeRetry(reason: String, block: () -> T?): T? {
+        repeat(3) { attempt ->
+            try {
+                return block()
+            } catch (e: Exception) {
+                logger.warn("LSP $reason error ${e.message}")
+                if (attempt < 2 && shouldWakeAndRetry(e)) {
+                    if (!wakeWorkerForRetry("$reason-${attempt + 1}")) return null
+                    sleepBeforeWakeRetry(attempt + 1)
+                } else {
+                    return null
+                }
+            }
+        }
+        return null
+    }
+
     private fun fetchCustomizationFromServer(): JsonObject? {
-        val baseUrl = baseUrlOrNull() ?: return null
-        try {
+        return withWakeRetry("customization-http") {
+            val baseUrl = baseUrlOrNull() ?: return@withWakeRetry null
             val config = InferenceGlobalContext.connection.get(baseUrl.resolve("v1/customization"), dataReceiveEnded = {
                 InferenceGlobalContext.status = ConnectionStatus.CONNECTED
                 InferenceGlobalContext.lastErrorMsg = null
@@ -433,10 +471,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     InferenceGlobalContext.lastErrorMsg = it.message
                 }
             }).join().get()
-            return Gson().fromJson(config as String, JsonObject::class.java)
-        } catch (e: Exception) {
-            logger.warn("LSP fetchCustomization error " + e.message)
-            return null
+            Gson().fromJson(config as String, JsonObject::class.java)
         }
     }
 
@@ -485,6 +520,15 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
+    private fun closeAttachedProject() {
+        val projectToClose = attachedProject ?: return
+        try {
+            daemonClient.closeProject(projectToClose)
+        } catch (e: Exception) {
+            logger.warn("LSP daemon project close failed: ${e.message}")
+        }
+    }
+
     private fun terminate() {
         if (!isDisposed) {
             logIfBlockingOperationOnEdt("terminate")
@@ -499,6 +543,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
         try {
             ragStatusCheckerScheduler.shutdown()
+            closeAttachedProject()
             terminate()
             healthCheckerScheduler.shutdown()
             lifecycleScheduler.shutdown()
@@ -510,24 +555,17 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
     private fun getBuildInfo(): String {
         logIfBlockingOperationOnEdt("getBuildInfo")
-        var res = ""
-        InferenceGlobalContext.connection.get(url.resolve("build_info"), dataReceiveEnded = {
-            InferenceGlobalContext.status = ConnectionStatus.CONNECTED
-            InferenceGlobalContext.lastErrorMsg = null
-        }, errorDataReceived = {}, failedDataReceiveEnded = {
-            InferenceGlobalContext.status = ConnectionStatus.ERROR
-            if (it != null) {
-                InferenceGlobalContext.lastErrorMsg = it.message
-            }
-        }).also {
-            try {
-                res = it.get().get() as String
-                logger.warn("build_info request finished")
-            } catch (e: Exception) {
-                logger.warn("build_info ${e.message}")
-            }
-        }
-        return res
+        return withWakeRetry("build-info") {
+            InferenceGlobalContext.connection.get(url.resolve("build_info"), dataReceiveEnded = {
+                InferenceGlobalContext.status = ConnectionStatus.CONNECTED
+                InferenceGlobalContext.lastErrorMsg = null
+            }, errorDataReceived = {}, failedDataReceiveEnded = {
+                InferenceGlobalContext.status = ConnectionStatus.ERROR
+                if (it != null) {
+                    InferenceGlobalContext.lastErrorMsg = it.message
+                }
+            }).get().get() as String
+        } ?: ""
     }
 
     open val url: URI
@@ -543,56 +581,36 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
     open fun getCaps(): LSPCapabilities {
         logIfBlockingOperationOnEdt("getCaps")
-        var res = LSPCapabilities()
-        InferenceGlobalContext.connection.get(url.resolve("v1/caps"), dataReceiveEnded = {
-            InferenceGlobalContext.status = ConnectionStatus.CONNECTED
-            InferenceGlobalContext.lastErrorMsg = null
-        }, errorDataReceived = {}, failedDataReceiveEnded = {
-            if (it != null) {
-                InferenceGlobalContext.lastErrorMsg = it.message
-            }
-        }).also {
-            val requestFuture: ComplexFuture<*>?
-            try {
-                requestFuture = it.get() as ComplexFuture
-                val out = requestFuture.get()
-                logger.debug("LSP caps_received $out")
-                val gson = Gson()
-                res = gson.fromJson(out as String, LSPCapabilities::class.java)
-                logger.debug("caps_received request finished")
-            } catch (e: Exception) {
-                logger.debug("caps_received ${e.message}")
-            }
-            return res
-        }
+        return withWakeRetry("caps") {
+            val out = InferenceGlobalContext.connection.get(url.resolve("v1/caps"), dataReceiveEnded = {
+                InferenceGlobalContext.status = ConnectionStatus.CONNECTED
+                InferenceGlobalContext.lastErrorMsg = null
+            }, errorDataReceived = {}, failedDataReceiveEnded = {
+                if (it != null) {
+                    InferenceGlobalContext.lastErrorMsg = it.message
+                }
+            }).get().get() as String
+            Gson().fromJson(out, LSPCapabilities::class.java)
+        } ?: LSPCapabilities()
     }
 
     fun getRagStatus(): RagStatus? {
         logIfBlockingOperationOnEdt("getRagStatus")
-        InferenceGlobalContext.connection.get(url.resolve("v1/rag-status"),
-            requestProperties = mapOf("redirect" to "follow", "cache" to "no-cache", "referrer" to "no-referrer"),
-            dataReceiveEnded = {
-                InferenceGlobalContext.status = ConnectionStatus.CONNECTED
-                InferenceGlobalContext.lastErrorMsg = null
-            },
-            errorDataReceived = {},
-            failedDataReceiveEnded = {
-                InferenceGlobalContext.status = ConnectionStatus.ERROR
-                if (it != null) {
-                    InferenceGlobalContext.lastErrorMsg = it.message
-                }
-            }).also {
-            val requestFuture: ComplexFuture<*>?
-            try {
-                requestFuture = it.get() as ComplexFuture
-                val out = requestFuture.get()
-                val gson = Gson()
-                return gson.fromJson(out as String, RagStatus::class.java)
-            } catch (e: Exception) {
-                InferenceGlobalContext.status = ConnectionStatus.ERROR
-                InferenceGlobalContext.lastErrorMsg = e.message
-                return null
-            }
+        return withWakeRetry("rag-status") {
+            val out = InferenceGlobalContext.connection.get(url.resolve("v1/rag-status"),
+                requestProperties = mapOf("redirect" to "follow", "cache" to "no-cache", "referrer" to "no-referrer"),
+                dataReceiveEnded = {
+                    InferenceGlobalContext.status = ConnectionStatus.CONNECTED
+                    InferenceGlobalContext.lastErrorMsg = null
+                },
+                errorDataReceived = {},
+                failedDataReceiveEnded = {
+                    InferenceGlobalContext.status = ConnectionStatus.ERROR
+                    if (it != null) {
+                        InferenceGlobalContext.lastErrorMsg = it.message
+                    }
+                }).get().get() as String
+            Gson().fromJson(out, RagStatus::class.java)
         }
     }
 
@@ -712,35 +730,5 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         fun cleanup() {
         }
 
-        fun getCustomizationDirectly(): JsonObject? {
-            val bin = BIN_PATH ?: return null
-            val process = GeneralCommandLine(listOf(bin, "worker", "--print-customization")).withRedirectErrorStream(true)
-                .createProcess()
-            val isExit = process.waitFor(3, TimeUnit.SECONDS)
-            val out = process.inputStream.bufferedReader().use { it.readText() }
-            if (isExit) {
-                if (process.exitValue() != 0) {
-                    logger.warn("LSP bad_things_happened $out")
-                    return null
-                }
-            } else {
-                process.destroy()
-                return null
-            }
-            val trimmed = out.trim()
-            val jsonStart = trimmed.indexOf('{')
-            val jsonEnd = trimmed.lastIndexOf('}')
-            if (jsonStart < 0 || jsonEnd < 0 || jsonEnd <= jsonStart) {
-                logger.warn("LSP customization output does not contain valid JSON: $trimmed")
-                return null
-            }
-            val customizationStr = trimmed.substring(jsonStart, jsonEnd + 1)
-            return try {
-                Gson().fromJson(customizationStr, JsonObject::class.java)
-            } catch (e: Exception) {
-                logger.warn("LSP can not parse json string: ${e.message}")
-                null
-            }
-        }
     }
 }

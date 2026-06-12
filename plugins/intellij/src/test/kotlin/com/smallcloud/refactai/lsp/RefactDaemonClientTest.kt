@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
+import java.nio.file.Path
 import java.io.IOException
 
 class RefactDaemonClientTest {
@@ -65,6 +67,23 @@ class RefactDaemonClientTest {
 
         assertEquals(DaemonStatus(pid = 11, version = "9.0.0"), status)
         assertEquals(listOf(commands[0].argv), spawned)
+    }
+
+    @Test
+    fun intellijPluginDoesNotContainDirectCustomizationSpawn() {
+        val sourceRoot = Path.of("src/main/kotlin/com/smallcloud/refactai")
+        val forbidden = listOf("--print-" + "customization", "getCustomization" + "Directly", "fetchCustomization" + "Directly")
+        val matches = Files.walk(sourceRoot).use { paths ->
+            paths.filter { Files.isRegularFile(it) }
+                .filter { it.toString().endsWith(".kt") }
+                .flatMap { path ->
+                    val text = Files.readString(path)
+                    forbidden.filter { text.contains(it) }.map { "$path contains $it" }.stream()
+                }
+                .toList()
+        }
+
+        assertEquals(emptyList<String>(), matches)
     }
 
     @Test

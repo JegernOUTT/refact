@@ -20,6 +20,7 @@ interface RefactDaemonClient {
     fun status(): DaemonStatus
     fun ensureDaemon(binPath: String): DaemonStatus
     fun openProject(root: String, settings: LSPConfig): DaemonProject
+    fun closeProject(project: DaemonProject)
 }
 
 data class DaemonStatus(
@@ -174,6 +175,15 @@ class HttpRefactDaemonClient(
             projectId = projectId,
             baseUrl = URI("http://127.0.0.1:${daemon.port}/p/$projectId/"),
             daemon = daemon,
+        )
+    }
+
+    override fun closeProject(project: DaemonProject) {
+        request(
+            URI("http://127.0.0.1:${project.daemon.port}/daemon/v1/projects/${project.projectId}/stop"),
+            "POST",
+            null,
+            project.daemon.authToken,
         )
     }
 

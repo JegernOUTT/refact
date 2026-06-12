@@ -52,12 +52,7 @@ class RefactCodeVisionProviderFactory : CodeVisionProviderFactory {
             return emptySequence()
         }
 
-        val customization = if (lspHolder.baseUrlOrNull() == null) {
-            lspHolder.ensureStartedAsync("code-vision-create-providers")
-            cachedCustomization ?: lspHolder.fetchCustomizationDirectly()
-        } else {
-            cachedCustomization ?: lspHolder.fetchCustomization()
-        } ?: return emptySequence()
+        val customization = cachedCustomization ?: lspHolder.fetchCustomization() ?: return emptySequence()
         if (customization.has("code_lens")) {
             val allCodeLenses = customization.get("code_lens").asJsonObject
             val allCodeLensKeys = allCodeLenses.keySet().toList()
