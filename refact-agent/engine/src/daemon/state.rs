@@ -448,7 +448,9 @@ pub fn worker_status_event_fields_changed(
     previous: &WorkerStatusReport,
     next: &WorkerStatusReport,
 ) -> bool {
-    previous.busy_chats != next.busy_chats || previous.lsp_clients != next.lsp_clients
+    previous.busy_chats != next.busy_chats
+        || previous.lsp_clients != next.lsp_clients
+        || previous.exec_running != next.exec_running
 }
 
 fn hostname_local() -> String {
@@ -590,18 +592,30 @@ mod tests {
     }
 
     #[test]
-    fn worker_status_change_filter_only_checks_busy_and_lsp() {
+    fn worker_status_event_fields_changed_checks_event_fields() {
+        let previous = status_report(1, 2, 0);
+        let mut activity_only = status_report(1, 2, 0);
+        activity_only.last_activity_ts = 99;
+
         assert!(!worker_status_event_fields_changed(
-            &status_report(1, 2, 3),
-            &status_report(1, 2, 99)
+            &previous,
+            &activity_only
         ));
         assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 3),
-            &status_report(2, 2, 3)
+            &status_report(1, 2, 0),
+            &status_report(2, 2, 0)
         ));
         assert!(worker_status_event_fields_changed(
-            &status_report(1, 2, 3),
-            &status_report(1, 3, 3)
+            &status_report(1, 2, 0),
+            &status_report(1, 3, 0)
+        ));
+        assert!(worker_status_event_fields_changed(
+            &status_report(1, 2, 0),
+            &status_report(1, 2, 1)
+        ));
+        assert!(worker_status_event_fields_changed(
+            &status_report(1, 2, 1),
+            &status_report(1, 2, 0)
         ));
     }
 
