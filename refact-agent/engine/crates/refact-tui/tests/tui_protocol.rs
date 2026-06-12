@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,8 @@ use refact_tui::client::{
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use serde_json::{json, Value};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]
 struct State {
@@ -209,6 +211,12 @@ fn rendered_snapshot(app: &App, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+fn drain_stream(app: &mut App) {
+    while app.stream_has_committable_lines() {
+        app.apply_stream_commit_tick();
+    }
+}
+
 #[test]
 fn fixture_directory_covers_required_protocol_cases() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -320,6 +328,78 @@ fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
     let run = run_fixture("seq_gap.jsonl");
     assert!(run.recovery.unwrap().contains("expected 2, got 3"));
     assert!(!transcript_text(&run.app).contains("must not apply"));
+}
+
+#[test]
+fn streaming_table_rows_hold_until_block_completes() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "1", "type": "stream_started", "message_id": "assistant-1"}),
+        &chat_id,
+    ));
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "2", "type": "stream_delta", "message_id": "assistant-1", "ops": [{"op": "append_content", "text": "| A | B |\n"}]}),
+        &chat_id,
+    ));
+    drain_stream(&mut app);
+    assert_eq!(app.active_stream_committed(), "");
+    assert_eq!(app.active_stream_live(), "| A | B |\n");
+    assert!(transcript_text(&app).contains("assistant:| A | B |"));
+    assert!(!transcript_text(&app).contains("| one | two |"));
+
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "3", "type": "stream_delta", "message_id": "assistant-1", "ops": [{"op": "append_content", "text": "| --- | --- |\n| one | two |\n"}]}),
+        &chat_id,
+    ));
+    drain_stream(&mut app);
+    let text = transcript_text(&app);
+    assert_eq!(app.active_stream_committed(), "");
+    assert!(app.active_stream_live().contains("| one | two |"));
+    assert!(text.contains("| one | two |"));
+    assert!(!text.contains("assistant:| A | B |\nassistant:| one | two |"));
+
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "4", "type": "stream_delta", "message_id": "assistant-1", "ops": [{"op": "append_content", "text": "\nAfter table.\n"}]}),
+        &chat_id,
+    ));
+    drain_stream(&mut app);
+    assert!(app.active_stream_committed().contains("| one | two |"));
+    assert!(app.active_stream_committed().contains("After table."));
+    assert!(transcript_text(&app).contains("After table."));
+}
+
+#[test]
+fn streaming_code_fence_splits_and_unicode_boundaries_finalize_correctly() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let deltas = ["```rust\nfn", " main() { println!(\"🦀\"); }\n`", "``\n"];
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "1", "type": "stream_started", "message_id": "assistant-1"}),
+        &chat_id,
+    ));
+    for (idx, delta) in deltas.iter().enumerate() {
+        app.apply_chat_event(chat_event_from_fixture(
+            json!({"chat_id": chat_id, "seq": (idx + 2).to_string(), "type": "stream_delta", "message_id": "assistant-1", "ops": [{"op": "append_content", "text": delta}]}),
+            &chat_id,
+        ));
+        app.apply_stream_commit_tick();
+    }
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "5", "type": "stream_finished", "message_id": "assistant-1"}),
+        &chat_id,
+    ));
+    assert!(transcript_text(&app).contains("```rust\nfn main() { println!(\"🦀\"); }\n```\n"));
+}
+
+#[test]
+fn streaming_final_output_matches_fixture_source_after_ticks() {
+    let source = "| A | B |\n|---|---|\n| one | two |\n\n```rust\nfn main() {}\n```\n";
+    let mut app = run_fixture("assistant_streaming.jsonl").app;
+    drain_stream(&mut app);
+    let text = transcript_text(&app);
+    assert!(text.contains(source));
+    assert_eq!(app.transcript_state().messages()[1].content, source);
 }
 
 #[test]
@@ -566,12 +646,15 @@ async fn spawn_server(state: State) -> String {
 }
 
 struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
     daemon_dir: Option<std::ffi::OsString>,
 }
 
 impl EnvGuard {
     fn set_daemon_dir(path: &std::path::Path) -> Self {
+        let lock = ENV_LOCK.lock().unwrap();
         let guard = Self {
+            _lock: lock,
             daemon_dir: std::env::var_os("REFACT_DAEMON_DIR"),
         };
         std::env::set_var("REFACT_DAEMON_DIR", path);

@@ -17,9 +17,9 @@ use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind
 use crate::protocol::{
     content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
 };
+use crate::streaming::{run_commit_tick, StreamController};
 use crate::terminal::TerminalSession;
 use crate::tools::{now_ms, ToolCard, ToolStatus};
-use crate::vendored::markdown_stream::MarkdownStreamCollector;
 
 const PATCH_LIKE_FUNCTIONS: &[&str] = &[
     "patch",
@@ -198,7 +198,7 @@ pub struct App {
     usage: Option<UsageSummary>,
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
-    stream_collector: MarkdownStreamCollector,
+    stream_controller: StreamController,
 }
 
 impl App {
@@ -235,7 +235,7 @@ impl App {
             usage: None,
             should_quit: false,
             last_ctrl_c: None,
-            stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
+            stream_controller: StreamController::new(None, std::path::Path::new(".")),
         }
     }
 
@@ -265,7 +265,7 @@ impl App {
             usage: None,
             should_quit: false,
             last_ctrl_c: None,
-            stream_collector: MarkdownStreamCollector::new(None, std::path::Path::new(".")),
+            stream_controller: StreamController::new(None, std::path::Path::new(".")),
         }
     }
 
@@ -327,6 +327,18 @@ impl App {
 
     pub fn transcript_state(&self) -> &TranscriptState {
         &self.transcript_state
+    }
+
+    pub fn stream_has_committable_lines(&self) -> bool {
+        self.stream_controller.stable_lines_ready()
+    }
+
+    pub fn active_stream_committed(&self) -> &str {
+        self.stream_controller.committed()
+    }
+
+    pub fn active_stream_live(&self) -> String {
+        self.stream_controller.live()
     }
 
     pub fn project_picker(&self) -> &ProjectPickerState {
@@ -409,7 +421,7 @@ impl App {
             project.slug,
             project.root.display()
         ));
-        self.stream_collector.clear();
+        self.stream_controller.clear();
         self.composer_mode = ComposerMode::Chat;
         self.modal_picker = None;
         self.clear_approvals();
@@ -420,7 +432,7 @@ impl App {
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.replace_with_notice("New chat started".to_string());
         self.session_state = SessionState::Idle;
-        self.stream_collector.clear();
+        self.stream_controller.clear();
         self.clear_approvals();
         self.selected_tool_index = None;
     }
@@ -435,7 +447,7 @@ impl App {
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.session_state = SessionState::Generating;
-        self.stream_collector.clear();
+        self.stream_controller.clear();
         self.usage = None;
         let params = self.take_pending_params();
         Some((prompt, params))
@@ -461,29 +473,36 @@ impl App {
     }
 
     fn append_assistant(&mut self, text: &str) {
-        self.stream_collector.push_delta(text);
-        if let Some(committed) = self.stream_collector.commit_complete_source() {
-            self.append_assistant_text(&committed);
+        self.stream_controller.push_delta(text);
+        self.sync_assistant_stream_item();
+    }
+
+    fn sync_assistant_stream_item(&mut self) {
+        let visible = self.stream_controller.visible();
+        if visible.is_empty() {
+            return;
+        }
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::Assistant(value)) => *value = visible,
+            _ => self.transcript.push(TranscriptItem::Assistant(visible)),
         }
     }
 
-    fn append_assistant_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if !matches!(self.transcript.last(), Some(TranscriptItem::Assistant(_))) {
-            self.transcript
-                .push(TranscriptItem::Assistant(String::new()));
-        }
-        if let Some(TranscriptItem::Assistant(value)) = self.transcript.last_mut() {
-            value.push_str(text);
+    fn run_stream_commit_tick(&mut self) {
+        if run_commit_tick(&mut self.stream_controller).is_some() {
+            self.sync_assistant_stream_item();
         }
     }
 
     fn finalize_assistant_stream(&mut self) {
-        let tail = self.stream_collector.finalize_and_drain_source();
-        if !tail.is_empty() {
-            self.append_assistant_text(&tail);
+        let final_content = self.stream_controller.finalize();
+        if !final_content.is_empty() {
+            match self.transcript.last_mut() {
+                Some(TranscriptItem::Assistant(value)) => *value = final_content,
+                _ => self
+                    .transcript
+                    .push(TranscriptItem::Assistant(final_content)),
+            }
         }
     }
 
@@ -607,6 +626,10 @@ impl App {
         self.handle_chat_event(event);
     }
 
+    pub fn apply_stream_commit_tick(&mut self) {
+        self.run_stream_commit_tick();
+    }
+
     fn handle_chat_event(&mut self, event: ChatEvent) {
         if event
             .chat_id
@@ -622,7 +645,7 @@ impl App {
             SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
             SseEvent::StreamStarted { message_id } => {
                 self.session_state = SessionState::Generating;
-                self.stream_collector.clear();
+                self.stream_controller.clear();
                 self.transcript_state.start_assistant(message_id.as_deref());
                 self.rebuild_render_transcript_from_state();
             }
@@ -1479,7 +1502,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 let action = app.handle_key(key);
                 run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
             }
-            RuntimeEvent::Input(Event::Resize(_, _)) | RuntimeEvent::Tick => {}
+            RuntimeEvent::Input(Event::Resize(_, _)) => {}
+            RuntimeEvent::Tick => app.run_stream_commit_tick(),
             RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
                 subscriptions.apply_chat_event(&mut app, generation, event);
@@ -2079,7 +2103,8 @@ mod tests {
             kind: "stream_delta".to_string(),
             raw: json!({"ops": [{"op": "append_content", "text": "hi"}]}),
         });
-        assert_eq!(assistant_text(&app), "");
+        assert_eq!(assistant_text(&app), "hi");
+        assert!(!app.stream_has_committable_lines());
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
@@ -2262,7 +2287,8 @@ mod tests {
             kind: "stream_delta".to_string(),
             raw: json!({"ops": [{"op": "append_content", "text": "# Title\npartial"}]}),
         });
-        assert_eq!(assistant_text(&app), "# Title\n");
+        assert_eq!(assistant_text(&app), "# Title\npartial");
+        assert!(app.stream_has_committable_lines());
 
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -2270,7 +2296,8 @@ mod tests {
             kind: "stream_delta".to_string(),
             raw: json!({"ops": [{"op": "append_content", "text": " tail"}]}),
         });
-        assert_eq!(assistant_text(&app), "# Title\n");
+        assert_eq!(assistant_text(&app), "# Title\npartial tail");
+        assert!(app.stream_has_committable_lines());
 
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),

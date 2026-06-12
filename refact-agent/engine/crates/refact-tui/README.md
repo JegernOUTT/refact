@@ -9,11 +9,15 @@ This crate uses `competitors/codex/codex-rs/tui` as the reference implementation
 - `src/vendored/markdown_stream.rs`
 - `src/vendored/line_truncation.rs`
 - `src/vendored/decoded_text_merge.rs`
+- `src/streaming/chunking.rs`
+- `src/streaming/commit_tick.rs`
+- `src/streaming/controller.rs`
+- `src/streaming/table_holdback.rs`
 
+The first TUI slice ports only the protocol-agnostic streaming and rendering helpers.
 The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the codex event-loop and terminal-restore patterns without importing codex protocol, auth, app-server, cloud, or onboarding code.
 
-## Codex parity matrix
-
+The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the codex event-loop and terminal-restore patterns without importing codex protocol, auth, app-server, cloud, or onboarding code.
 | Card | Matrix area | Codex reference | Refact TUI target and status |
 |---|---|---|---|
 | C-1 | Full protocol model | `chatwidget/protocol.rs`, `chatwidget/protocol_requests.rs`, `thread_transcript.rs` | Replace ad hoc JSON matching with typed Refact SSE events and delta ops: `snapshot`, `stream_started`, `stream_delta`, `stream_finished`, `message_*`, `runtime_updated`, `pause_*`, `queue_updated`, `ack`, and `DeltaOp` variants. C-0 fixtures lock the current contract. |

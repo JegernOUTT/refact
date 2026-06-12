@@ -37,6 +37,10 @@ impl MarkdownStreamCollector {
         self.buffer.push_str(delta);
     }
 
+    pub fn pending_source(&self) -> &str {
+        &self.buffer[self.committed_source_len..]
+    }
+
     pub fn commit_complete_source(&mut self) -> Option<String> {
         let commit_end = self.buffer.rfind('\n').map(|idx| idx + 1)?;
         if commit_end <= self.committed_source_len {
