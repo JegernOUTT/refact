@@ -418,6 +418,85 @@ describe("ChatForm", () => {
     });
   });
 
+  test("collapsed composer renders status widgets next to the send control", () => {
+    render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    expect(form).not.toBeNull();
+    if (!form) return;
+
+    expect(form.className).toContain("chatFormCollapsed");
+    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
+    expect(form.contains(collapsedStatus)).toBe(true);
+    expect(
+      collapsedStatus.querySelector('[class*="usageCounterContainer"]'),
+    ).not.toBeNull();
+  });
+
+  test("clicking the context usage widget does not expand the composer", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    expect(form).not.toBeNull();
+    if (!form) return;
+
+    expect(form.className).toContain("chatFormCollapsed");
+    const collapsedStatus = screen.getByTestId("composer-collapsed-status");
+    const usageWidget = collapsedStatus.querySelector("[aria-haspopup]");
+    expect(usageWidget).not.toBeNull();
+    if (!usageWidget) return;
+
+    await user.click(usageWidget);
+    await waitFor(() => {
+      expect(screen.getByText("Context usage")).toBeInTheDocument();
+    });
+    expect(form.className).toContain("chatFormCollapsed");
+  });
+
+  test("clicking stop while collapsed aborts without expanding the composer", async () => {
+    const commandSpy = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandSpy(await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+
+    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+    chat.threads[chat.current_thread_id].streaming = true;
+
+    const { user } = render(<App />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    expect(form).not.toBeNull();
+    if (!form) return;
+
+    expect(form.className).toContain("chatFormCollapsed");
+    await user.click(screen.getByLabelText("Stop generation"));
+
+    await waitFor(() => {
+      expect(commandSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "abort" }),
+      );
+    });
+    expect(form.className).toContain("chatFormCollapsed");
+  });
+
   test.each([
     "{Shift>}{enter>}{/enter}{/Shift}", // hold shift, hold enter, release enter, release shift,
     "{Shift>}{enter>}{/Shift}{/enter}", // hold shift, hold enter, release enter, release shift,

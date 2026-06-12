@@ -132,9 +132,43 @@
   mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
-.collapsedStatusControl {
-  display: none;
+.actionControlsSwap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.controlsSwapItem {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 340px;
+  overflow: hidden;
+  transition:
+    max-width var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-med) var(--rf-ease-standard),
+    visibility 0s linear;
+}
+
+.controlsSwapItem > span {
+  display: inline-flex;
+  min-width: 0;
   flex-shrink: 0;
+}
+
+.chatFormCollapsed .expandedActionsSet,
+.chatFormExpanded .collapsedStatusSet {
+  max-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    max-width var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    visibility 0s linear var(--rf-dur-med);
 }
 
 .inputHeader {
@@ -276,7 +310,8 @@
   .chatFormMain,
   .chatForm__form,
   .expandedComposerContentInner,
-  .bottomControlsRow {
+  .bottomControlsRow,
+  .controlsSwapItem {
     transition: none;
   }
 
@@ -327,6 +362,26 @@
 
 @container (max-width: 260px) {
   .hideTopCompressLast {
+    display: none;
+  }
+}
+
+@container (max-width: 500px) {
+  .chatFormCollapsed .bottomWorkspaceControl {
+    display: none;
+  }
+}
+
+@container (max-width: 440px) {
+  .chatFormCollapsed .bottomModeControl,
+  .hideCollapsedStatusFirst {
+    display: none;
+  }
+}
+
+@container (max-width: 380px) {
+  .chatFormCollapsed .bottomModelControl,
+  .hideCollapsedStatusSecond {
     display: none;
   }
 }
