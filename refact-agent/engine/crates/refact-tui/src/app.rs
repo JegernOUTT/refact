@@ -5065,7 +5065,7 @@ mod tests {
         let corrected_text = corrected
             .iter()
             .flat_map(|insertion| insertion.lines.iter())
-            .map(line_to_plain_string)
+            .map(|hl| line_to_plain_string(&hl.line))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(corrected_text.contains("corrected"));

@@ -378,7 +378,8 @@ fn snapshot_recovery_updates_stable_message_id_without_duplicates() {
         .iter()
         .flat_map(|insertion| insertion.lines.iter())
         .map(|line| {
-            line.spans
+            line.line
+                .spans
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>()
