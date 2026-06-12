@@ -562,6 +562,17 @@
   }
 }
 
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller {
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+  scrollbar-gutter: auto;
+}
+
+.virtualizedListWrapper[data-following-scrollbar="true"] .virtuosoScroller::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 .virtuosoScroller {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   height: 100%;

@@ -515,6 +515,7 @@ export function VirtualizedChatList<T extends { key: string }>({
     <ChatScrollAnchorContext.Provider value={scrollAnchorValue}>
       <Box
         ref={wrapperRef}
+        className={styles.virtualizedListWrapper}
         style={{
           flexGrow: 1,
           height: "100%",
@@ -523,6 +524,7 @@ export function VirtualizedChatList<T extends { key: string }>({
           overflow: "hidden",
           position: "relative",
         }}
+        data-following-scrollbar={showFollowButton ? "false" : "true"}
         data-testid="chat-virtualized-list-wrapper"
       >
         {hasMeasuredHeight && (
