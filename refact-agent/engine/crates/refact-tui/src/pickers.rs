@@ -7,7 +7,7 @@ pub enum PickerKind {
     SlashCommand,
     FileMention,
     Session,
-    MultiSelect,
+    Permissions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,16 @@ impl PickerState {
         Self::with_selection_mode(kind, items, PickerSelectionMode::Multi)
     }
 
+    pub fn multi_with_selected(
+        kind: PickerKind,
+        items: Vec<PickerItem>,
+        selected_ids: Vec<String>,
+    ) -> Self {
+        let mut picker = Self::with_selection_mode(kind, items, PickerSelectionMode::Multi);
+        picker.selected_ids = selected_ids;
+        picker
+    }
+
     fn with_selection_mode(
         kind: PickerKind,
         items: Vec<PickerItem>,
@@ -82,7 +92,7 @@ impl PickerState {
             PickerKind::SlashCommand => "commands",
             PickerKind::FileMention => "files",
             PickerKind::Session => "sessions",
-            PickerKind::MultiSelect => "select",
+            PickerKind::Permissions => "permissions",
         }
     }
 
@@ -384,7 +394,7 @@ mod tests {
     #[test]
     fn multi_select_returns_original_item_order() {
         let mut picker = PickerState::multi(
-            PickerKind::MultiSelect,
+            PickerKind::Permissions,
             vec![
                 PickerItem {
                     id: "a".to_string(),

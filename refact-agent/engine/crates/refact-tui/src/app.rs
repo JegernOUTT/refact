@@ -11,12 +11,12 @@ use tokio::task::JoinHandle;
 
 use crate::approvals::{ApprovalKeyAction, ApprovalModalState, ApprovalQueue};
 use crate::client::{
-    ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ProjectEntry,
-    ToolDecision, WorkerInfo,
+    worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
+    OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
 };
 use crate::commands::{
-    command_by_name, command_picker_items, workflow, CommandAction, CommandContext, CommandPicker,
-    InfoTopic, LocalToggle,
+    command_by_name, command_picker_items, session, workflow, CommandAction, CommandContext,
+    CommandPicker, InfoTopic, LocalToggle,
 };
 use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
@@ -79,6 +79,7 @@ pub enum TranscriptItem {
     ServerContentBlock(String),
     Diff(String),
     Notice(String),
+    Info(Vec<String>),
     Approval(ApprovalModalState, Option<ApprovalOutcome>),
     Session {
         title: String,
@@ -247,6 +248,9 @@ pub struct App {
     session_state: SessionState,
     subscription_status: SubscriptionStatus,
     daemon_online: bool,
+    daemon_status: Option<DaemonStatus>,
+    daemon_base_url: Option<String>,
+    permission_policy: session::PermissionPolicy,
     retry_hint: Option<String>,
     model_context_windows: HashMap<String, u64>,
     default_context_window_tokens: Option<u64>,
@@ -307,6 +311,9 @@ impl App {
             session_state: SessionState::Idle,
             subscription_status: SubscriptionStatus::Online,
             daemon_online: true,
+            daemon_status: None,
+            daemon_base_url: None,
+            permission_policy: session::PermissionPolicy::default(),
             retry_hint: None,
             model_context_windows: HashMap::new(),
             default_context_window_tokens: None,
@@ -352,6 +359,9 @@ impl App {
             session_state: SessionState::Error,
             subscription_status: SubscriptionStatus::Offline,
             daemon_online: false,
+            daemon_status: None,
+            daemon_base_url: None,
+            permission_policy: session::PermissionPolicy::default(),
             retry_hint: None,
             model_context_windows: HashMap::new(),
             default_context_window_tokens: None,
@@ -460,6 +470,18 @@ impl App {
 
     pub fn daemon_online(&self) -> bool {
         self.daemon_online
+    }
+
+    pub fn daemon_status(&self) -> Option<&DaemonStatus> {
+        self.daemon_status.as_ref()
+    }
+
+    pub fn daemon_base_url(&self) -> Option<&str> {
+        self.daemon_base_url.as_deref()
+    }
+
+    pub fn permission_policy(&self) -> session::PermissionPolicy {
+        self.permission_policy
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -660,25 +682,10 @@ impl App {
         self.open_session_picker(items);
     }
     fn open_permissions_picker(&mut self) {
-        self.modal_picker = Some(PickerState::multi(
-            PickerKind::MultiSelect,
-            vec![
-                PickerItem {
-                    id: "editing_tools".to_string(),
-                    title: "Editing tools".to_string(),
-                    description: "Allow file edits and patch application".to_string(),
-                },
-                PickerItem {
-                    id: "network_tools".to_string(),
-                    title: "Network tools".to_string(),
-                    description: "Browser, fetch, and integration calls".to_string(),
-                },
-                PickerItem {
-                    id: "dangerous_commands".to_string(),
-                    title: "Dangerous commands".to_string(),
-                    description: "Shell and destructive command approvals".to_string(),
-                },
-            ],
+        self.modal_picker = Some(PickerState::multi_with_selected(
+            PickerKind::Permissions,
+            session::permission_picker_items(),
+            session::selected_permission_ids(self.permission_policy),
         ));
         self.composer_mode = ComposerMode::Chat;
     }
@@ -790,20 +797,13 @@ impl App {
                     self.resume_chat(item.id, item.title, Some(item.description))
                 }
             }
-            (PickerKind::MultiSelect, PickerAccept::Multi(items)) => {
-                if items.is_empty() {
-                    self.add_notice("No permissions selected");
-                } else {
-                    let selected = items
-                        .iter()
-                        .map(|item| item.title.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.add_notice(format!(
-                        "Permissions picker selected {selected}; backend wiring is not yet implemented"
-                    ));
+            (PickerKind::Permissions, PickerAccept::Multi(items)) => {
+                let policy = session::permission_policy_from_items(&items);
+                self.permission_policy = policy;
+                self.add_notice(session::permission_policy_notice(policy));
+                AppAction::SetParams {
+                    patch: session::permission_policy_patch(policy),
                 }
-                AppAction::None
             }
             _ => AppAction::None,
         }
@@ -816,10 +816,6 @@ impl App {
             return AppAction::None;
         };
         match command.action {
-            CommandAction::SendPrompt { prompt } => {
-                self.composer.set_text(prompt);
-                self.submit_composer().unwrap_or(AppAction::None)
-            }
             CommandAction::BackendCommand { command } => {
                 if command == "stop" && self.is_chat_active() {
                     self.cancel_queue_edit();
@@ -838,7 +834,54 @@ impl App {
                 self.show_info_topic(topic);
                 AppAction::None
             }
+            CommandAction::Session { command } => self.execute_session_command(command, args),
             CommandAction::Workflow { command } => self.execute_workflow_command(command),
+        }
+    }
+
+    fn execute_session_command(
+        &mut self,
+        command: session::SessionCommand,
+        args: &str,
+    ) -> AppAction {
+        match command {
+            session::SessionCommand::New => {
+                self.composer.clear();
+                self.new_chat();
+                AppAction::SubscribeCurrent
+            }
+            session::SessionCommand::Resume => {
+                self.composer.clear();
+                self.start_session_lookup()
+            }
+            session::SessionCommand::Fork => {
+                self.composer.clear();
+                self.fork_chat()
+            }
+            session::SessionCommand::Rename => self.rename_chat(args),
+            session::SessionCommand::Archive => {
+                self.composer.clear();
+                self.archive_chat()
+            }
+            session::SessionCommand::Model => {
+                self.composer.clear();
+                AppAction::LoadModels
+            }
+            session::SessionCommand::Mode => {
+                self.composer.clear();
+                AppAction::LoadModes
+            }
+            session::SessionCommand::Permissions => {
+                self.composer.clear();
+                self.open_permissions_picker();
+                AppAction::None
+            }
+            session::SessionCommand::Status => {
+                self.composer.clear();
+                self.show_status_card();
+                AppAction::LoadDaemonStatus
+            }
+            session::SessionCommand::Init => self.submit_structured_prompt(session::init_prompt()),
         }
     }
 
@@ -871,33 +914,12 @@ impl App {
     fn execute_picker_command(&mut self, picker: CommandPicker) -> AppAction {
         self.composer.clear();
         match picker {
-            CommandPicker::Model => AppAction::LoadModels,
-            CommandPicker::Mode => AppAction::LoadModes,
             CommandPicker::FileMention => self.start_file_mention_lookup(),
-            CommandPicker::ResumeSession => self.start_session_lookup(),
-            CommandPicker::Permissions => {
-                self.open_permissions_picker();
-                AppAction::None
-            }
         }
     }
 
-    fn execute_local_toggle(&mut self, toggle: LocalToggle, args: &str) -> AppAction {
+    fn execute_local_toggle(&mut self, toggle: LocalToggle, _args: &str) -> AppAction {
         match toggle {
-            LocalToggle::NewChat => {
-                self.composer.clear();
-                self.new_chat();
-                AppAction::SubscribeCurrent
-            }
-            LocalToggle::ForkChat => {
-                self.composer.clear();
-                self.fork_chat()
-            }
-            LocalToggle::RenameChat => self.rename_chat(args),
-            LocalToggle::ArchiveChat => {
-                self.composer.clear();
-                self.archive_chat()
-            }
             LocalToggle::ClearTranscript => {
                 self.composer.clear();
                 self.replace_with_notice("Transcript cleared".to_string());
@@ -912,18 +934,59 @@ impl App {
         match topic {
             InfoTopic::Help => self.help_open = true,
             InfoTopic::Status => {
-                let project = self
-                    .current_project()
-                    .map(|project| project.slug.as_str())
-                    .unwrap_or("-");
-                let model = self.model().unwrap_or("default");
-                let mode = self.mode().unwrap_or("agent");
-                self.add_notice(format!(
-                    "Status: project {project}, model {model}, mode {mode}, state {}",
-                    self.session_state().as_str()
-                ));
+                self.show_status_card();
             }
         }
+    }
+
+    fn show_status_card(&mut self) {
+        let snapshot = self.status_snapshot();
+        let text = session::status_card_text(&snapshot);
+        self.push_history_item(TranscriptItem::Info(
+            text.lines().map(str::to_string).collect(),
+        ));
+    }
+
+    fn status_snapshot(&self) -> session::StatusSnapshot {
+        session::StatusSnapshot {
+            daemon_online: self.daemon_online,
+            daemon_version: self
+                .daemon_status
+                .as_ref()
+                .map(|status| status.version.clone()),
+            daemon_port: self.daemon_status.as_ref().map(|status| status.port),
+            daemon_base_url: self.daemon_base_url.clone(),
+            worker: worker_status_line(self.current_worker()),
+            project: self
+                .current_project()
+                .map(|project| project.slug.clone())
+                .unwrap_or_else(|| "-".to_string()),
+            project_root: self
+                .current_project()
+                .map(|project| project.root.display().to_string()),
+            model: self.model().unwrap_or("default").to_string(),
+            mode: self.mode().unwrap_or("agent").to_string(),
+            session_id: self.chat_id.clone(),
+            usage: self.usage().map(|usage| session::StatusUsage {
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.tokens_used(),
+                context_window_tokens: self.context_window_tokens(),
+            }),
+        }
+    }
+
+    fn apply_daemon_status(&mut self, status: DaemonStatus, base_url: String) {
+        self.daemon_online = true;
+        self.daemon_status = Some(status);
+        self.daemon_base_url = Some(base_url);
+        self.show_status_card();
+    }
+
+    fn record_daemon_status_error(&mut self, error: &str) {
+        self.daemon_online = false;
+        self.retry_hint = retry_hint_from_message(error);
+        self.add_notice(format!("Failed to load daemon status: {error}"));
     }
 
     fn set_project(&mut self, project: OpenProjectResponse) {
@@ -1532,6 +1595,16 @@ impl App {
             {
                 self.session_title = Some(title.to_string());
             }
+            self.permission_policy = session::PermissionPolicy {
+                auto_approve_editing_tools: thread
+                    .get("auto_approve_editing_tools")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                auto_approve_dangerous_commands: thread
+                    .get("auto_approve_dangerous_commands")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            };
             self.model = thread
                 .get("model")
                 .and_then(Value::as_str)
@@ -2475,6 +2548,13 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_set_daemon_status(&mut self, status: DaemonStatus, base_url: impl Into<String>) {
+        self.daemon_online = true;
+        self.daemon_status = Some(status);
+        self.daemon_base_url = Some(base_url.into());
+    }
+
+    #[cfg(test)]
     pub fn test_history_render_count(&self) -> usize {
         self.history.render_count()
     }
@@ -2492,6 +2572,7 @@ pub enum AppAction {
     },
     LoadSessions,
     RefreshWorkers,
+    LoadDaemonStatus,
     OpenProject(PathBuf),
     SubscribeCurrent,
     SendMessage {
@@ -2563,6 +2644,7 @@ enum RuntimeEvent {
     ModesLoaded(Result<Value, String>),
     FileMentionsLoaded(Result<Vec<String>, String>),
     SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
+    DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
     DiffLoaded(Result<String, String>),
@@ -2812,6 +2894,10 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 app.add_notice(format!("Failed to load recent chats: {error}"));
                 app.open_session_picker(Vec::new());
             }
+            RuntimeEvent::DaemonStatusLoaded(Ok((status, base_url))) => {
+                app.apply_daemon_status(status, base_url)
+            }
+            RuntimeEvent::DaemonStatusLoaded(Err(error)) => app.record_daemon_status_error(&error),
             RuntimeEvent::WorkersLoaded(Ok(workers)) => app.set_workers(workers),
             RuntimeEvent::WorkersLoaded(Err(error)) => {
                 if app.events_pane.open {
@@ -2929,6 +3015,19 @@ async fn run_action(
             }
         }
         AppAction::RefreshWorkers => refresh_workers(client.clone(), tx.clone()),
+        AppAction::LoadDaemonStatus => {
+            let client = client.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let base_url = client.base_url().to_string();
+                let result = client
+                    .status()
+                    .await
+                    .map(|status| (status, base_url))
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(RuntimeEvent::DaemonStatusLoaded(result)).await;
+            });
+        }
         AppAction::OpenProject(root) => {
             let client = client.clone();
             let tx = tx.clone();
@@ -3609,6 +3708,30 @@ fn render_frame(
     Ok(())
 }
 
+fn worker_status_line(worker: Option<&WorkerInfo>) -> String {
+    let Some(worker) = worker else {
+        return "unknown".to_string();
+    };
+    let mut parts = vec![worker_state_label(Some(worker))];
+    if let Some(pid) = worker.pid {
+        parts.push(format!("pid {pid}"));
+    }
+    if worker.http_port > 0 {
+        parts.push(format!("http {}", worker.http_port));
+    }
+    if worker.lsp_port > 0 {
+        parts.push(format!("lsp {}", worker.lsp_port));
+    }
+    if let Some(error) = worker
+        .last_error
+        .as_deref()
+        .filter(|error| !error.trim().is_empty())
+    {
+        parts.push(format!("error {error}"));
+    }
+    parts.join(" · ")
+}
+
 fn approval_patch(modal: &ApprovalModalState) -> Value {
     let all_patch_like = modal.reasons().iter().all(|reason| {
         PATCH_LIKE_FUNCTIONS
@@ -3986,11 +4109,13 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()));
         let picker = app.modal_picker().unwrap();
         assert_eq!(picker.filtered_items()[0].id, "status");
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
-        assert!(app
-            .visible_transcript()
-            .iter()
-            .any(|item| matches!(item, TranscriptItem::Notice(text) if text.contains("Status:"))));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::LoadDaemonStatus
+        );
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Info(lines) if lines.iter().any(|line| line.contains("Daemon:")))
+        }));
     }
 
     #[test]
@@ -4014,16 +4139,139 @@ mod tests {
     fn permissions_command_uses_multi_select_picker() {
         let mut app = App::new(project());
         app.execute_command_name("permissions");
-        assert!(app.modal_picker().unwrap().is_multi());
-        app.handle_key(key(KeyCode::Down));
+        let picker = app.modal_picker().unwrap();
+        assert!(picker.is_multi());
+        assert_eq!(picker.kind, PickerKind::Permissions);
         app.handle_key(key(KeyCode::Char(' ')));
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SetParams {
+                patch: json!({"auto_approve_editing_tools": true, "auto_approve_dangerous_commands": true})
+            }
+        );
+        assert_eq!(
+            app.permission_policy(),
+            session::PermissionPolicy {
+                auto_approve_editing_tools: true,
+                auto_approve_dangerous_commands: true,
+            }
+        );
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("TUI sends Allow Once") && text.contains("server enforces"))
+        }));
+    }
+
+    #[test]
+    fn session_command_group_parses_and_dispatches() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("new"), AppAction::SubscribeCurrent);
+        assert_eq!(app.execute_command_name("resume"), AppAction::LoadSessions);
+        assert_eq!(app.execute_command_name("model"), AppAction::LoadModels);
+        assert_eq!(app.execute_command_name("mode"), AppAction::LoadModes);
+        assert_eq!(app.execute_command_name("permissions"), AppAction::None);
+        assert!(app
+            .modal_picker()
+            .is_some_and(|picker| picker.kind == PickerKind::Permissions));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("status"),
+            AppAction::LoadDaemonStatus
+        );
         assert!(app
             .visible_transcript()
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Notice(text) if text.contains("Dangerous commands") && text.contains("Network tools"))));
+            .any(|item| matches!(item, TranscriptItem::Info(_))));
+
+        let mut app = App::new(project());
+        assert!(matches!(
+            app.execute_command_name("init"),
+            AppAction::SendMessage { prompt, .. } if prompt.contains("bootstrap this project")
+        ));
+    }
+
+    #[test]
+    fn model_command_opens_picker_after_caps_load() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("model"), AppAction::LoadModels);
+        app.open_model_picker(json!({"chat_models": {"m1": {"name": "Model One"}}}));
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.kind, PickerKind::Model);
+        assert_eq!(picker.filtered_items()[0].id, "m1");
+    }
+
+    #[test]
+    fn status_command_snapshot_includes_daemon_worker_session_and_usage() {
+        let mut app = App::new(project());
+        app.test_set_daemon_status(
+            DaemonStatus {
+                pid: 7,
+                version: "1.2.3".to_string(),
+                port: 8488,
+                started_at_ms: 10,
+                uptime_secs: 20,
+                workers: 1,
+                cron_pending: HashMap::new(),
+            },
+            "http://127.0.0.1:8488",
+        );
+        app.set_workers(vec![WorkerInfo {
+            project_id: "p1".to_string(),
+            pid: Some(42),
+            http_port: 9000,
+            lsp_port: 9001,
+            state: Value::String("ready".to_string()),
+            last_error: None,
+        }]);
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "thread": {
+                    "title": "Status chat",
+                    "model": "gpt-demo",
+                    "mode": "agent",
+                    "auto_approve_editing_tools": true,
+                    "auto_approve_dangerous_commands": false
+                },
+                "runtime": {
+                    "state": "idle",
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+                },
+                "messages": []
+            }),
+        });
+        app.apply_caps(&json!({"chat_models": {"gpt-demo": {"n_ctx": 1000}}}));
+        assert_eq!(
+            app.execute_command_name("status"),
+            AppAction::LoadDaemonStatus
+        );
+        let text = app
+            .visible_transcript()
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Info(lines) => Some(lines.join("\n")),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready · pid 42 · http 9000 · lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent\nSession: {}\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left",
+                &app.chat_id()[..8]
+            )
+        );
+        assert_eq!(
+            app.permission_policy(),
+            session::PermissionPolicy {
+                auto_approve_editing_tools: true,
+                auto_approve_dangerous_commands: false,
+            }
+        );
     }
 
     #[test]

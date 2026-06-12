@@ -190,7 +190,7 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
-            TranscriptItem::Plan(data) => format!("plan:{}", data.content),
+            TranscriptItem::Info(lines) => format!("info:{}", lines.join("|")),
             TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
             TranscriptItem::Session { title, subtitle } => {
                 format!(

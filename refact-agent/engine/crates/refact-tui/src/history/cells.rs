@@ -20,6 +20,7 @@ pub enum HistoryCellKind {
     Assistant,
     Reasoning,
     Notice,
+    Info,
     Tool,
     Exec,
     Diff,
@@ -213,6 +214,42 @@ impl HistoryCell for NoticeCell {
 
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.text))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InfoCell {
+    lines: Vec<String>,
+}
+
+impl InfoCell {
+    pub fn new(lines: Vec<String>) -> Self {
+        Self { lines }
+    }
+}
+
+impl HistoryCell for InfoCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Info
+    }
+
+    fn render(&self, _width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for (idx, text) in self.lines.iter().enumerate() {
+            let style = if idx == 0 {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            lines.push(Line::from(Span::styled(text.clone(), style)));
+        }
+        finish(lines)
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(self.kind(), &self.lines))
     }
 }
 
@@ -939,6 +976,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         }
         TranscriptItem::Diff(text) => Box::new(DiffCell::new(text.clone())),
         TranscriptItem::Notice(text) => Box::new(NoticeCell::new(text.clone())),
+        TranscriptItem::Info(lines) => Box::new(InfoCell::new(lines.clone())),
         TranscriptItem::Approval(state, outcome) => {
             Box::new(ApprovalCell::new(state.clone(), *outcome))
         }

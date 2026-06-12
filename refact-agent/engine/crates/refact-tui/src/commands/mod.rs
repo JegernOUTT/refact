@@ -1,3 +1,4 @@
+pub mod session;
 pub mod workflow;
 
 use crate::pickers::PickerItem;
@@ -11,19 +12,11 @@ pub enum CommandAvailability {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPicker {
-    Model,
-    Mode,
     FileMention,
-    ResumeSession,
-    Permissions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalToggle {
-    NewChat,
-    ForkChat,
-    RenameChat,
-    ArchiveChat,
     ClearTranscript,
     Quit,
 }
@@ -36,11 +29,11 @@ pub enum InfoTopic {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
-    SendPrompt { prompt: &'static str },
     BackendCommand { command: &'static str },
     OpenPicker { picker: CommandPicker },
     LocalToggle { toggle: LocalToggle },
     ShowInfo { topic: InfoTopic },
+    Session { command: session::SessionCommand },
     Workflow { command: workflow::WorkflowCommand },
 }
 
@@ -107,57 +100,17 @@ pub fn command_picker_items(context: CommandContext) -> Vec<PickerItem> {
         .collect()
 }
 
-const COMMANDS: [CommandDef; 22] = [
-    CommandDef {
-        name: "new",
-        aliases: &[],
-        description: "Start a new chat",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::NewChat,
-        },
-    },
-    CommandDef {
-        name: "resume",
-        aliases: &["sessions", "history"],
-        description: "Open recent project chats",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::OpenPicker {
-            picker: CommandPicker::ResumeSession,
-        },
-    },
-    CommandDef {
-        name: "fork",
-        aliases: &["branch"],
-        description: "Branch the current chat into a new chat",
-        args_hint: "",
-        availability: CommandAvailability::IdleOnly,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::ForkChat,
-        },
-    },
-    CommandDef {
-        name: "rename",
-        aliases: &["title"],
-        description: "Rename the current chat using composer text",
-        args_hint: "<title>",
-        availability: CommandAvailability::Always,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::RenameChat,
-        },
-    },
-    CommandDef {
-        name: "archive",
-        aliases: &["remove"],
-        description: "Remove the current chat from recent sessions",
-        args_hint: "",
-        availability: CommandAvailability::IdleOnly,
-        action: CommandAction::LocalToggle {
-            toggle: LocalToggle::ArchiveChat,
-        },
-    },
+const COMMANDS: [CommandDef; 23] = [
+    session::NEW_COMMAND,
+    session::RESUME_COMMAND,
+    session::FORK_COMMAND,
+    session::RENAME_COMMAND,
+    session::ARCHIVE_COMMAND,
+    session::MODEL_COMMAND,
+    session::MODE_COMMAND,
+    session::PERMISSIONS_COMMAND,
+    session::STATUS_COMMAND,
+    session::INIT_COMMAND,
     CommandDef {
         name: "clear",
         aliases: &[],
@@ -179,26 +132,6 @@ const COMMANDS: [CommandDef; 22] = [
         },
     },
     CommandDef {
-        name: "model",
-        aliases: &[],
-        description: "Choose the model for the next message",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::OpenPicker {
-            picker: CommandPicker::Model,
-        },
-    },
-    CommandDef {
-        name: "mode",
-        aliases: &["tool-use"],
-        description: "Choose the chat mode for the next message",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::OpenPicker {
-            picker: CommandPicker::Mode,
-        },
-    },
-    CommandDef {
         name: "mention",
         aliases: &["file", "files"],
         description: "picker reuse: insert a file mention",
@@ -216,16 +149,6 @@ const COMMANDS: [CommandDef; 22] = [
         availability: CommandAvailability::Always,
         action: CommandAction::ShowInfo {
             topic: InfoTopic::Help,
-        },
-    },
-    CommandDef {
-        name: "status",
-        aliases: &[],
-        description: "Show current session status",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::ShowInfo {
-            topic: InfoTopic::Status,
         },
     },
     CommandDef {
@@ -258,16 +181,6 @@ const COMMANDS: [CommandDef; 22] = [
         availability: CommandAvailability::Always,
         action: CommandAction::BackendCommand { command: "raw" },
     },
-    CommandDef {
-        name: "permissions",
-        aliases: &["approval"],
-        description: "Open permissions controls",
-        args_hint: "",
-        availability: CommandAvailability::Always,
-        action: CommandAction::OpenPicker {
-            picker: CommandPicker::Permissions,
-        },
-    },
 ];
 
 #[cfg(test)]
@@ -299,9 +212,31 @@ mod tests {
     }
 
     #[test]
+    fn session_command_group_is_visible_in_popup() {
+        let items = command_picker_items(CommandContext { active_turn: false });
+        for title in [
+            "/new",
+            "/resume",
+            "/fork",
+            "/rename",
+            "/archive",
+            "/model",
+            "/mode",
+            "/permissions",
+            "/status",
+            "/init",
+        ] {
+            assert!(
+                items.iter().any(|item| item.title == title),
+                "missing {title}"
+            );
+        }
+    }
+
+    #[test]
     fn workflow_commands_document_mechanism() {
         for name in [
-            "plan", "goal", "agent", "diff", "review", "mention", "compact",
+            "plan", "goal", "agent", "diff", "review", "mention", "compact", "init",
         ] {
             let command = command_by_name(name).unwrap();
             assert!(
