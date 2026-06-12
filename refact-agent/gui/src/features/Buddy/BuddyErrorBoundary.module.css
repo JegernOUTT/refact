@@ -48,6 +48,22 @@
   white-space: nowrap;
 }
 
+.errorDetailsField {
+  min-width: 0;
+  flex: 1;
+  min-height: 8rem;
+  max-height: 16rem;
+  resize: vertical;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  color: var(--rf-color-fg);
+  font: var(--rf-text-1) / var(--rf-line) var(--font-family-code);
+}
+
 .copyButton {
   transform: translateY(0) scale(1);
   display: inline-flex;
@@ -131,7 +147,8 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .reportPanel,
-  .valueText {
+  .valueText,
+  .errorDetailsField {
     backdrop-filter: none;
   }
 }

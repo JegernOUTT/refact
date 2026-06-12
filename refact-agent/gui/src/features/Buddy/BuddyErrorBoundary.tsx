@@ -20,6 +20,7 @@ type Props = {
 
 type State = {
   failed: boolean;
+  errorDetails: string | null;
 };
 
 function issueUrl(threadId: string | null): string {
@@ -103,7 +104,33 @@ const CrashField: React.FC<{
   </Flex>
 );
 
-const ChatCrashReportPanel: React.FC = () => {
+const ErrorDetailsField: React.FC<{ details: string | null }> = ({
+  details,
+}) => (
+  <Flex direction="column" gap="1">
+    <Text size="2" color="gray" weight="medium">
+      Error details
+    </Text>
+    <Flex align="start" gap="2">
+      <textarea
+        readOnly
+        className={styles.errorDetailsField}
+        value={details ?? "No frontend error details were captured."}
+        aria-label="Frontend error details"
+        data-testid="crash-error-details"
+      />
+      <CopyInlineButton
+        value={details}
+        ariaLabel="Copy frontend error details"
+        testId="copy-crash-error-details"
+      />
+    </Flex>
+  </Flex>
+);
+
+const ChatCrashReportPanel: React.FC<{ errorDetails: string | null }> = ({
+  errorDetails,
+}) => {
   const chatId = useAppSelector(selectCurrentThreadId) || null;
   const activeThread = useAppSelector(selectThread);
   const [fetchTrajectory, trajectoryQuery] = useLazyGetTrajectoryQuery();
@@ -192,6 +219,7 @@ const ChatCrashReportPanel: React.FC = () => {
             copyLabel="Copy thread JSON path"
             testId="copy-crash-thread-path"
           />
+          <ErrorDetailsField details={errorDetails} />
 
           <button
             type="button"
@@ -233,10 +261,14 @@ const ChatCrashReportPanel: React.FC = () => {
 export class BuddyErrorBoundary extends React.Component<Props, State> {
   override state: State = {
     failed: false,
+    errorDetails: null,
   };
 
-  static getDerivedStateFromError(): State {
-    return { failed: true };
+  static getDerivedStateFromError(error: Error): State {
+    return {
+      failed: true,
+      errorDetails: error.stack ?? error.message,
+    };
   }
 
   override componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
@@ -244,7 +276,9 @@ export class BuddyErrorBoundary extends React.Component<Props, State> {
       ? `${error.stack ?? error.message}\n\nComponent stack:\n${
           errorInfo.componentStack
         }`
-      : error;
+      : error.stack ?? error.message;
+
+    this.setState({ errorDetails: details });
 
     void reportBuddyFrontendError({
       source: "react_error_boundary",
@@ -257,7 +291,7 @@ export class BuddyErrorBoundary extends React.Component<Props, State> {
   override render(): React.ReactNode {
     if (this.state.failed) {
       if (this.props.showThreadReportPanel === true) {
-        return <ChatCrashReportPanel />;
+        return <ChatCrashReportPanel errorDetails={this.state.errorDetails} />;
       }
 
       return (

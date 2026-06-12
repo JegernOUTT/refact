@@ -19,6 +19,7 @@ import {
   getInformationMessage,
 } from "../../Errors/informationSlice";
 import { SettingsSection } from "../../Settings/SettingsSection";
+import { DefaultModels } from "../../DefaultModels";
 
 import styles from "./ProvidersView.module.css";
 import { selectConfig } from "../../Config/configSlice";
@@ -36,7 +37,8 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
 }) => {
   const dispatch = useAppDispatch();
 
-  const currentHost = useAppSelector(selectConfig).host;
+  const currentConfig = useAppSelector(selectConfig);
+  const currentHost = currentConfig.host;
   const globalError = useAppSelector(getErrorMessage);
   const information = useAppSelector(getInformationMessage);
 
@@ -109,6 +111,12 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
             handleSetCurrentProvider={handleSetCurrentProvider}
             onAddInstance={handleAddInstance}
             onDuplicateProvider={handleDuplicateProvider}
+          />
+          <DefaultModels
+            embedded
+            host={currentConfig.host}
+            tabbed={currentConfig.tabbed}
+            backFromDefaultModels={backFromProviders}
           />
         </SettingsSection>
       ) : null}
