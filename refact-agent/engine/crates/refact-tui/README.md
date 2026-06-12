@@ -9,6 +9,7 @@ This crate uses `competitors/codex/codex-rs/tui` as the reference implementation
 - `src/vendored/markdown_stream.rs`
 - `src/vendored/line_truncation.rs`
 - `src/vendored/decoded_text_merge.rs`
+- `src/vendored/terminal_hyperlinks.rs`
 - `src/streaming/chunking.rs`
 - `src/streaming/commit_tick.rs`
 - `src/streaming/controller.rs`
@@ -140,6 +141,9 @@ C-3 uses `ratatui::Viewport::Inline` by default. Finalized transcript cells are 
 Set `REFACT_TUI_ALT_SCREEN=1` to use the previous alternate-screen/full-transcript fallback for terminals or CI environments where inline viewport behavior is not usable. In fallback mode, the flat transcript remains in the frame buffer and PageUp/PageDown keep the legacy local scroll behavior.
 
 Resize policy matches Codex: pending finalized cells re-render at the current width before insertion, while content already inserted into native scrollback keeps the width it had when inserted.
+Resize reflow is capped to 1,000 pending finalized cells per frame. Extra pending cells remain queued and render on later frames, so resize cannot force unbounded transcript rewrapping.
+
+Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes are added only when writing to a terminal buffer or native scrollback insertion, so wrapping and width calculations see plain visible text. `NO_COLOR`, `TERM=dumb`, and unsupported terminals keep the same styled visible text without OSC8; `REFACT_TUI_HYPERLINKS=1` or `0` overrides probing.
 
 ## Manual smoke
 

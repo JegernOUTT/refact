@@ -9,6 +9,7 @@ use crate::app::TranscriptItem;
 use crate::approvals::{render_modal_lines, ApprovalModalState};
 use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff, MarkdownRenderer};
 use crate::tools::{ToolCard, ToolStatus};
+use crate::vendored::terminal_hyperlinks::{plain_hyperlink_lines, HyperlinkLine};
 
 const COLLAPSED_OUTPUT_LINES: usize = 12;
 const EXPANDED_OUTPUT_LINES: usize = 200;
@@ -43,10 +44,12 @@ pub enum ToolCellType {
     RequestInput,
     Generic,
 }
-
 pub trait HistoryCell: HistoryCellClone + std::fmt::Debug + Send + Sync {
     fn kind(&self) -> HistoryCellKind;
     fn render(&self, width: usize) -> Vec<Line<'static>>;
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        plain_hyperlink_lines(self.render(width))
+    }
     fn is_final(&self) -> bool {
         true
     }
@@ -108,6 +111,22 @@ impl HistoryCell for UserCell {
         finish(lines)
     }
 
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            if self.selected { "you selected" } else { "you" },
+            Style::default()
+                .fg(if self.selected {
+                    Color::Cyan
+                } else {
+                    Color::Blue
+                })
+                .add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(renderer.render_with_links(&self.text));
+        finish_links(lines)
+    }
+
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.text, self.selected))
     }
@@ -139,6 +158,18 @@ impl HistoryCell for AssistantCell {
         )];
         lines.extend(renderer.render(&self.text));
         finish(lines)
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            "assistant",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(renderer.render_with_links(&self.text));
+        finish_links(lines)
     }
 
     fn revision(&self) -> u64 {
@@ -190,6 +221,23 @@ impl HistoryCell for ReasoningCell {
             lines.extend(renderer.render(&self.text));
         }
         finish(lines)
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let label = if self.collapsed {
+            "reasoning collapsed"
+        } else {
+            "reasoning"
+        };
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            label,
+            Style::default().fg(Color::DarkGray),
+        ))];
+        if !self.collapsed {
+            lines.extend(renderer.render_with_links(&self.text));
+        }
+        finish_links(lines)
     }
 
     fn revision(&self) -> u64 {
@@ -284,6 +332,16 @@ impl HistoryCell for CitationCell {
         finish(lines)
     }
 
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            "citation",
+            Style::default().fg(Color::Cyan),
+        ))];
+        lines.extend(renderer.render_with_links(&self.text));
+        finish_links(lines)
+    }
+
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.text))
     }
@@ -313,6 +371,16 @@ impl HistoryCell for ServerContentBlockCell {
         )];
         lines.extend(renderer.render(&self.text));
         finish(lines)
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            server_content_label(&self.text),
+            Style::default().fg(Color::Magenta),
+        ))];
+        lines.extend(renderer.render_with_links(&self.text));
+        finish_links(lines)
     }
 
     fn revision(&self) -> u64 {
@@ -788,6 +856,26 @@ impl HistoryCell for PlanCell {
         finish(lines)
     }
 
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let update_label = if self.data.delta_count == 1 {
+            "1 update".to_string()
+        } else {
+            format!("{} updates", self.data.delta_count)
+        };
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            format!(
+                "plan · {} · v{} · {}",
+                self.data.mode, self.data.version, update_label
+            ),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(renderer.render_with_links(&self.data.content));
+        finish_links(lines)
+    }
+
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.data))
     }
@@ -838,6 +926,16 @@ impl HistoryCell for EventCell {
         )];
         lines.extend(renderer.render(&self.data.content));
         finish(lines)
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let renderer = MarkdownRenderer::new(Some(width));
+        let mut lines = vec![HyperlinkLine::new(role_line(
+            format!("event · {} · {}", self.data.subkind, self.data.source),
+            Style::default().fg(Color::DarkGray),
+        ))];
+        lines.extend(renderer.render_with_links(&self.data.content));
+        finish_links(lines)
     }
 
     fn revision(&self) -> u64 {
@@ -1002,6 +1100,14 @@ pub fn render_transcript_item_lines(
     cell_from_transcript_item(item, selected).render(width)
 }
 
+pub fn render_transcript_item_hyperlink_lines(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+) -> Vec<HyperlinkLine> {
+    cell_from_transcript_item(item, selected).render_with_links(width)
+}
+
 pub fn cell_from_tool_card(card: ToolCard, selected: bool) -> Box<dyn HistoryCell> {
     match tool_cell_type_for(&card.name) {
         ToolCellType::Exec => Box::new(ExecToolCell::new(card, selected)),
@@ -1104,6 +1210,11 @@ fn role_line(label: impl Into<String>, style: Style) -> Line<'static> {
 
 fn finish(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines.push(Line::default());
+    lines
+}
+
+fn finish_links(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
+    lines.push(HyperlinkLine::new(Line::default()));
     lines
 }
 

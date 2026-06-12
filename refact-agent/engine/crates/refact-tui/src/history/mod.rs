@@ -4,6 +4,10 @@ use std::io;
 use ratatui::backend::Backend;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
+
+use crate::vendored::terminal_hyperlinks::{
+    hyperlinks_enabled_from_env, mark_buffer_hyperlinks, visible_lines, HyperlinkLine,
+};
 use ratatui::Terminal;
 
 use crate::app::TranscriptItem;
@@ -12,6 +16,7 @@ pub mod cells;
 
 const MAX_INSERTION_LINES: usize = 2048;
 const MAX_CACHE_ENTRIES: usize = 256;
+pub const RESIZE_REFLOW_PENDING_CELL_CAP: usize = 1_000;
 
 #[derive(Debug, Clone)]
 struct HistoryEntry {
@@ -22,7 +27,7 @@ struct HistoryEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryInsertion {
     pub cell_ids: Vec<u64>,
-    pub lines: Vec<Line<'static>>,
+    pub lines: Vec<HyperlinkLine>,
 }
 
 impl HistoryInsertion {
@@ -35,7 +40,7 @@ impl HistoryInsertion {
 pub struct HistoryBuffer {
     next_id: u64,
     pending: VecDeque<HistoryEntry>,
-    cache: HashMap<(u64, u16, u64), Vec<Line<'static>>>,
+    cache: HashMap<(u64, u16, u64), Vec<HyperlinkLine>>,
     render_count: usize,
     inserted_cell_count: usize,
 }
@@ -74,11 +79,35 @@ impl HistoryBuffer {
         insertions
     }
 
+    pub fn drain_pending_capped(&mut self, width: u16, max_cells: usize) -> Vec<HistoryInsertion> {
+        let insertions = self.pending_insertions_capped(width, max_cells);
+        let drained = insertions
+            .iter()
+            .map(|insertion| insertion.cell_ids.len())
+            .sum::<usize>();
+        self.inserted_cell_count += drained;
+        self.pending.drain(..drained);
+        insertions
+    }
+
     pub fn pending_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
+        self.pending_insertions_capped(width, self.pending.len())
+    }
+
+    pub fn pending_insertions_capped(
+        &mut self,
+        width: u16,
+        max_cells: usize,
+    ) -> Vec<HistoryInsertion> {
         let mut insertions = Vec::new();
         let mut current_ids = Vec::new();
         let mut current_lines = Vec::new();
-        let entries = self.pending.iter().cloned().collect::<Vec<_>>();
+        let entries = self
+            .pending
+            .iter()
+            .take(max_cells)
+            .cloned()
+            .collect::<Vec<_>>();
         for entry in entries {
             let lines = self.render_entry(&entry, width);
             if !current_lines.is_empty() && current_lines.len() + lines.len() > MAX_INSERTION_LINES
@@ -116,12 +145,12 @@ impl HistoryBuffer {
         self.cache.len()
     }
 
-    fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<Line<'static>> {
+    fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<HyperlinkLine> {
         let key = (entry.id, width, entry.cell.revision());
         if let Some(lines) = self.cache.get(&key) {
             return lines.clone();
         }
-        let lines = entry.cell.render(width as usize);
+        let lines = entry.cell.render_with_links(width as usize);
         self.cache.insert(key, lines.clone());
         self.enforce_cache_bound();
         self.render_count += 1;
@@ -162,8 +191,11 @@ pub fn insert_history<B: Backend>(
         return Ok(());
     }
     let lines = insertion.lines;
+    let enabled = hyperlinks_enabled_from_env();
     terminal.insert_before(height, move |buffer| {
-        Paragraph::new(lines).render(buffer.area, buffer);
+        let visible = visible_lines(lines.clone());
+        Paragraph::new(visible).render(buffer.area, buffer);
+        mark_buffer_hyperlinks(buffer, buffer.area, &lines, enabled);
     })
 }
 
@@ -173,6 +205,14 @@ pub fn render_transcript_item_lines(
     selected: bool,
 ) -> Vec<Line<'static>> {
     cells::render_transcript_item_lines(item, width, selected)
+}
+
+pub fn render_transcript_item_hyperlink_lines(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+) -> Vec<HyperlinkLine> {
+    cells::render_transcript_item_hyperlink_lines(item, width, selected)
 }
 
 #[cfg(test)]
@@ -188,7 +228,7 @@ mod tests {
             .scrollback()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(|cell| crate::vendored::terminal_hyperlinks::strip_osc8(cell.symbol()))
             .collect::<String>()
     }
 
@@ -227,6 +267,35 @@ mod tests {
     }
 
     #[test]
+    fn markdown_link_inserted_into_scrollback_carries_osc8_when_enabled() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Assistant(
+            "Read [docs](https://example.com/docs) now".to_string(),
+        ));
+        let insertions = history.drain_pending(80);
+        assert_eq!(
+            insertions[0].lines[1].hyperlinks[0].destination,
+            "https://example.com/docs"
+        );
+
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 3));
+        let area = buffer.area;
+        let lines = insertions[0].lines.clone();
+        Paragraph::new(visible_lines(lines.clone())).render(area, &mut buffer);
+        mark_buffer_hyperlinks(&mut buffer, area, &lines, true);
+        let raw = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(raw.contains("\x1b]8;;https://example.com/docs\x1b\\"));
+        assert_eq!(
+            crate::vendored::terminal_hyperlinks::strip_osc8(&raw).contains("Read docs now"),
+            true
+        );
+    }
+
+    #[test]
     fn pending_content_rewraps_by_width_before_insert() {
         let mut history = HistoryBuffer::new();
         history.enqueue(TranscriptItem::Assistant(
@@ -241,6 +310,38 @@ mod tests {
         let wide_again = history.drain_pending(40);
         assert_eq!(history.render_count(), 2);
         assert_eq!(wide_again, wide);
+    }
+
+    #[test]
+    fn resize_rewrap_caps_pending_cells_and_preserves_rest_for_next_frame() {
+        let mut history = HistoryBuffer::new();
+        for idx in 0..1_001 {
+            history.enqueue(TranscriptItem::Assistant(format!(
+                "row {idx} alpha beta gamma delta epsilon"
+            )));
+        }
+
+        let first = history.drain_pending_capped(12, RESIZE_REFLOW_PENDING_CELL_CAP);
+        assert_eq!(
+            first
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            RESIZE_REFLOW_PENDING_CELL_CAP
+        );
+        assert_eq!(history.pending_cell_count(), 1);
+        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP);
+
+        let second = history.drain_pending_capped(40, RESIZE_REFLOW_PENDING_CELL_CAP);
+        assert_eq!(
+            second
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(history.pending_cell_count(), 0);
+        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP + 1);
     }
 
     #[test]

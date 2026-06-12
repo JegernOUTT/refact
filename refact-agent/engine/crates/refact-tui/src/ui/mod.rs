@@ -12,6 +12,9 @@ use crate::overlay::PagerMode;
 use crate::pickers::PickerState;
 use crate::theme::ThemeRole;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::vendored::terminal_hyperlinks::{
+    hyperlinks_enabled_from_env, mark_buffer_hyperlinks, visible_lines, HyperlinkLine,
+};
 
 pub mod footer;
 
@@ -168,9 +171,9 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut lines = Vec::new();
+    let mut lines = Vec::<HyperlinkLine>::new();
     for (idx, item) in app.visible_transcript().iter().enumerate() {
-        lines.extend(crate::history::render_transcript_item_lines(
+        lines.extend(crate::history::render_transcript_item_hyperlink_lines(
             item,
             area.width.saturating_sub(2) as usize,
             app.transcript_item_selected(idx, item),
@@ -178,23 +181,30 @@ fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     app.note_rendered_messages(app.visible_transcript().len());
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
+        lines.push(HyperlinkLine::new(Line::from(Span::styled(
             "History is in native scrollback. Start typing below.",
             Style::default().fg(Color::DarkGray),
-        )));
+        ))));
     }
+    let visible = visible_lines(lines.clone());
     frame.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(visible)
             .block(Block::default().borders(Borders::BOTTOM))
             .wrap(Wrap { trim: false }),
         area,
     );
+    mark_buffer_hyperlinks(
+        frame.buffer_mut(),
+        area,
+        &lines,
+        hyperlinks_enabled_from_env(),
+    );
 }
 
 fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut lines = Vec::new();
+    let mut lines = Vec::<HyperlinkLine>::new();
     for (idx, item) in app.visible_transcript().iter().enumerate() {
-        lines.extend(crate::history::render_transcript_item_lines(
+        lines.extend(crate::history::render_transcript_item_hyperlink_lines(
             item,
             area.width.saturating_sub(2) as usize,
             app.transcript_item_selected(idx, item),
@@ -202,10 +212,10 @@ fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     app.note_rendered_messages(app.visible_transcript().len());
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
+        lines.push(HyperlinkLine::new(Line::from(Span::styled(
             "Start typing. Enter sends, Shift-Enter inserts a newline.",
             Style::default().fg(Color::DarkGray),
-        )));
+        ))));
     }
     let total = lines.len();
     let height = area.height as usize;
@@ -213,12 +223,19 @@ fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .saturating_sub(height)
         .saturating_sub(app.scroll_offset());
     let end = total.saturating_sub(app.scroll_offset()).min(total);
-    let view = lines[start..end].to_vec();
+    let view_links = lines[start..end].to_vec();
+    let view = visible_lines(view_links.clone());
     frame.render_widget(
         Paragraph::new(view)
             .block(Block::default().borders(Borders::BOTTOM))
             .wrap(Wrap { trim: false }),
         area,
+    );
+    mark_buffer_hyperlinks(
+        frame.buffer_mut(),
+        area,
+        &view_links,
+        hyperlinks_enabled_from_env(),
     );
 }
 

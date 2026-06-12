@@ -24,7 +24,7 @@ use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
-use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
+use crate::history::{insert_history, HistoryBuffer, HistoryInsertion, RESIZE_REFLOW_PENDING_CELL_CAP};
 use crate::keymap::{
     HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
 };
@@ -591,7 +591,8 @@ impl App {
     }
 
     pub fn pending_history_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
-        self.history.drain_pending(width)
+        self.history
+            .drain_pending_capped(width, RESIZE_REFLOW_PENDING_CELL_CAP)
     }
 
     pub fn history_pending_count(&self) -> usize {

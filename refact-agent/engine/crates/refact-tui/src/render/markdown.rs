@@ -8,6 +8,9 @@ use super::diff::{is_unified_diff, render_unified_diff};
 use super::highlight::highlight_code;
 use super::wrapping::{line_to_plain, line_width, pad_line, wrap_line};
 use crate::vendored::decoded_text_merge::DecodedTextMerge;
+use crate::vendored::terminal_hyperlinks::{
+    plain_hyperlink_lines, remap_wrapped_line, visible_lines, HyperlinkLine,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownRenderer {
@@ -61,10 +64,43 @@ impl MarkdownRenderer {
             },
         )
     }
+
+    pub fn render_with_links(&self, source: &str) -> Vec<HyperlinkLine> {
+        render_markdown_hyperlink_lines_with_options(
+            source,
+            RenderOptions {
+                width: self.width,
+                color_enabled: self.color_enabled,
+            },
+        )
+    }
 }
 
 pub fn render_markdown(source: &str, width: Option<usize>) -> Vec<Line<'static>> {
     render_markdown_with_options(source, RenderOptions::new(width))
+}
+
+pub fn render_markdown_hyperlink_lines_with_options(
+    source: &str,
+    options: RenderOptions,
+) -> Vec<HyperlinkLine> {
+    if is_unified_diff(source) {
+        return plain_hyperlink_lines(render_unified_diff(
+            source,
+            options.width,
+            options.color_enabled,
+        ));
+    }
+
+    let mut parser_options = Options::empty();
+    parser_options.insert(Options::ENABLE_TABLES);
+    parser_options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(source, parser_options).into_offset_iter();
+    let mut writer = Writer::new(options);
+    for (event, _) in DecodedTextMerge::new(parser) {
+        writer.handle_event(event);
+    }
+    writer.finish_with_links()
 }
 
 pub fn render_markdown_with_options(source: &str, options: RenderOptions) -> Vec<Line<'static>> {
@@ -85,8 +121,9 @@ pub fn render_markdown_with_options(source: &str, options: RenderOptions) -> Vec
 
 struct Writer {
     options: RenderOptions,
-    out: Vec<Line<'static>>,
-    current: Vec<Span<'static>>,
+    out: Vec<HyperlinkLine>,
+    current: HyperlinkLine,
+    link_stack: Vec<String>,
     style_stack: Vec<Style>,
     list_depth: usize,
     list_stack: Vec<Option<u64>>,
@@ -99,7 +136,8 @@ impl Writer {
         Self {
             options,
             out: Vec::new(),
-            current: Vec::new(),
+            current: HyperlinkLine::new(Line::default()),
+            link_stack: Vec::new(),
             style_stack: vec![Style::default()],
             list_depth: 0,
             list_stack: Vec::new(),
@@ -108,7 +146,11 @@ impl Writer {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(self) -> Vec<Line<'static>> {
+        visible_lines(self.finish_with_links())
+    }
+
+    fn finish_with_links(mut self) -> Vec<HyperlinkLine> {
         if self.code_block.is_some() {
             self.flush_code_block();
         }
@@ -137,10 +179,10 @@ impl Writer {
             Event::HardBreak => self.hard_break(),
             Event::Rule => {
                 self.flush_line();
-                self.out.push(Line::from(Span::styled(
+                self.out.push(HyperlinkLine::new(Line::from(Span::styled(
                     "─".repeat(self.options.width.unwrap_or(24).min(80)),
                     self.style(MarkdownStyle::Muted),
-                )));
+                ))));
             }
             Event::Html(html) | Event::InlineHtml(html) => self.push_span(Span::styled(
                 html.to_string(),
@@ -207,7 +249,10 @@ impl Writer {
                     self.style(MarkdownStyle::ListMarker),
                 ));
             }
-            Tag::Link { .. } => self.push_merged_style(Modifier::UNDERLINED, Some(Color::Cyan)),
+            Tag::Link { dest_url, .. } => {
+                self.link_stack.push(dest_url.to_string());
+                self.push_merged_style(Modifier::UNDERLINED, Some(Color::Cyan));
+            }
             Tag::Table(alignments) => {
                 self.flush_line();
                 self.table = Some(TableState::new(alignments));
@@ -237,8 +282,12 @@ impl Writer {
                 self.style_stack.pop();
                 self.flush_line();
             }
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.style_stack.pop();
+            }
+            TagEnd::Link => {
+                self.style_stack.pop();
+                self.link_stack.pop();
             }
             TagEnd::BlockQuote => {
                 self.style_stack.pop();
@@ -279,7 +328,8 @@ impl Writer {
         if let Some(table) = &mut self.table {
             table.push_span(span);
         } else {
-            self.current.push(span);
+            self.current
+                .push_span(span, self.link_stack.last().map(String::as_str));
         }
     }
 
@@ -292,11 +342,12 @@ impl Writer {
     }
 
     fn flush_line(&mut self) {
-        if self.current.is_empty() {
+        if self.current.line.spans.is_empty() {
             return;
         }
-        let line = Line::from(std::mem::take(&mut self.current));
-        self.out.extend(wrap_line(line, self.options.width));
+        let source = std::mem::take(&mut self.current);
+        let wrapped = wrap_line(source.line.clone(), self.options.width);
+        self.out.extend(remap_wrapped_line(&source, wrapped));
     }
 
     fn flush_code_block(&mut self) {
@@ -308,10 +359,10 @@ impl Writer {
         } else {
             format!("code · {}", code_block.lang)
         };
-        self.out.push(Line::from(Span::styled(
+        self.out.push(HyperlinkLine::new(Line::from(Span::styled(
             label,
             self.style(MarkdownStyle::Muted),
-        )));
+        ))));
         for line in highlight_code(
             &code_block.source,
             &code_block.lang,
@@ -319,8 +370,10 @@ impl Writer {
         ) {
             let mut spans = vec![Span::styled("  ", self.style(MarkdownStyle::Muted))];
             spans.extend(line.spans);
-            self.out
-                .extend(wrap_line(Line::from(spans), self.options.width));
+            self.out.extend(plain_hyperlink_lines(wrap_line(
+                Line::from(spans),
+                self.options.width,
+            )));
         }
     }
 
@@ -328,7 +381,8 @@ impl Writer {
         let Some(table) = self.table.take() else {
             return;
         };
-        self.out.extend(render_table(table, self.options));
+        self.out
+            .extend(plain_hyperlink_lines(render_table(table, self.options)));
     }
 
     fn push_merged_style(&mut self, modifier: Modifier, color: Option<Color>) {
@@ -771,6 +825,33 @@ mod tests {
         );
         let rendered = text(&lines);
         assert!(rendered.iter().any(|line| line == url));
+    }
+
+    #[test]
+    fn markdown_link_fixture_has_enabled_and_disabled_osc8_snapshots() {
+        let lines = render_markdown_hyperlink_lines_with_options(
+            "Read [docs](https://example.com/docs) today",
+            RenderOptions {
+                width: Some(80),
+                color_enabled: true,
+            },
+        );
+        assert_eq!(line_to_plain(&lines[0].line), "Read docs today");
+        assert_eq!(
+            lines[0].hyperlinks[0].destination,
+            "https://example.com/docs"
+        );
+
+        let enabled = crate::vendored::terminal_hyperlinks::line_with_osc8(&lines[0], true);
+        let enabled_text = line_to_plain(&enabled);
+        assert_eq!(
+            crate::vendored::terminal_hyperlinks::strip_osc8(&enabled_text),
+            "Read docs today"
+        );
+        assert!(enabled_text.contains("\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\"));
+
+        let disabled = crate::vendored::terminal_hyperlinks::line_with_osc8(&lines[0], false);
+        assert_eq!(line_to_plain(&disabled), "Read docs today");
     }
 
     #[test]
