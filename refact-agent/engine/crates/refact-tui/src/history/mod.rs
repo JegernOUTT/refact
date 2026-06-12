@@ -11,6 +11,7 @@ use crate::app::TranscriptItem;
 pub mod cells;
 
 const MAX_INSERTION_LINES: usize = 2048;
+const MAX_CACHE_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone)]
 struct HistoryEntry {
@@ -46,6 +47,7 @@ impl HistoryBuffer {
 
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+        self.cache.clear();
     }
 
     pub fn enqueue(&mut self, item: TranscriptItem) -> u64 {
@@ -65,6 +67,9 @@ impl HistoryBuffer {
             .iter()
             .map(|insertion| insertion.cell_ids.len())
             .sum::<usize>();
+        for insertion in &insertions {
+            self.evict_cache_entries(&insertion.cell_ids);
+        }
         self.pending.clear();
         insertions
     }
@@ -107,6 +112,10 @@ impl HistoryBuffer {
         self.inserted_cell_count
     }
 
+    pub fn cache_entry_count(&self) -> usize {
+        self.cache.len()
+    }
+
     fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<Line<'static>> {
         let key = (entry.id, width, entry.cell.revision());
         if let Some(lines) = self.cache.get(&key) {
@@ -114,8 +123,26 @@ impl HistoryBuffer {
         }
         let lines = entry.cell.render(width as usize);
         self.cache.insert(key, lines.clone());
+        self.enforce_cache_bound();
         self.render_count += 1;
         lines
+    }
+
+    fn evict_cache_entries(&mut self, cell_ids: &[u64]) {
+        self.cache
+            .retain(|(id, _, _), _| !cell_ids.iter().any(|cell_id| cell_id == id));
+    }
+
+    fn enforce_cache_bound(&mut self) {
+        if self.cache.len() <= MAX_CACHE_ENTRIES {
+            return;
+        }
+        let mut keys = self.cache.keys().copied().collect::<Vec<_>>();
+        keys.sort_unstable();
+        let remove_count = self.cache.len().saturating_sub(MAX_CACHE_ENTRIES);
+        for key in keys.into_iter().take(remove_count) {
+            self.cache.remove(&key);
+        }
     }
 
     #[cfg(test)]
@@ -226,5 +253,23 @@ mod tests {
         let second = history.pending_insertions(40);
         assert_eq!(history.render_count(), 2);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_evicted_after_drain_and_bounded_for_pending_cells() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Notice("one".to_string()));
+        history.pending_insertions(40);
+        assert_eq!(history.cache_entry_count(), 1);
+        history.drain_pending(40);
+        assert_eq!(history.cache_entry_count(), 0);
+
+        for idx in 0..300 {
+            history.enqueue(TranscriptItem::Notice(format!("cell {idx}")));
+        }
+        history.pending_insertions(40);
+        assert!(history.cache_entry_count() <= MAX_CACHE_ENTRIES);
+        history.drain_pending(40);
+        assert_eq!(history.cache_entry_count(), 0);
     }
 }

@@ -236,6 +236,7 @@ pub struct TranscriptMessage {
     pub server_content_blocks: Vec<Value>,
     pub extra: Map<String, Value>,
     pub unknown_delta_ops: Vec<UnknownDeltaOp>,
+    pub stream_finished: bool,
 }
 
 impl TranscriptMessage {
@@ -254,12 +255,14 @@ impl TranscriptMessage {
             server_content_blocks: Vec::new(),
             extra: Map::new(),
             unknown_delta_ops: Vec::new(),
+            stream_finished: true,
         }
     }
 
     pub fn assistant(message_id: Option<String>) -> Self {
         let mut message = Self::new(TranscriptRole::Assistant);
         message.message_id = message_id;
+        message.stream_finished = false;
         message
     }
 
@@ -311,6 +314,10 @@ impl TranscriptMessage {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        message.stream_finished = raw
+            .get("stream_finished")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         message.extra = extra_fields(raw);
         message
     }
@@ -332,6 +339,10 @@ impl TranscriptState {
 
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
+    }
+
+    pub fn messages_mut(&mut self) -> &mut [TranscriptMessage] {
+        &mut self.messages
     }
 
     pub fn usage(&self) -> Option<&Value> {
@@ -376,7 +387,9 @@ impl TranscriptState {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, message)| message.role == TranscriptRole::Assistant)
+            .find(|(_, message)| {
+                message.role == TranscriptRole::Assistant && !message.stream_finished
+            })
             .map(|(idx, _)| idx);
         self.active_assistant_id = self
             .active_assistant_index
@@ -398,13 +411,28 @@ impl TranscriptState {
     }
 
     pub fn add_message(&mut self, raw: &Value) {
-        let message = TranscriptMessage::from_wire(raw);
+        let mut message = TranscriptMessage::from_wire(raw);
+        if matches!(
+            message.role,
+            TranscriptRole::Assistant | TranscriptRole::Tool
+        ) && raw
+            .get("stream_finished")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            message.stream_finished = true;
+        }
         if let Some(usage) = message.usage.clone() {
             self.usage = Some(usage);
         }
         let is_assistant = message.role == TranscriptRole::Assistant;
         self.messages.push(message);
-        if is_assistant {
+        if is_assistant
+            && !self
+                .messages
+                .last()
+                .is_some_and(|message| message.stream_finished)
+        {
             let idx = self.messages.len() - 1;
             self.active_assistant_id = self.messages[idx].message_id.clone();
             self.active_assistant_index = Some(idx);
@@ -416,10 +444,20 @@ impl TranscriptState {
     }
 
     pub fn finish_assistant(&mut self, message_id: Option<&str>, usage: Option<Value>) {
+        let should_finish = message_id.filter(|value| !value.is_empty()).is_some()
+            || self.active_assistant_index.is_some();
+        if !should_finish {
+            return;
+        }
+        let idx = self.ensure_assistant_index(message_id);
+        self.messages[idx].stream_finished = true;
         if let Some(usage) = usage {
-            let idx = self.ensure_assistant_index(message_id);
             self.messages[idx].usage = Some(usage.clone());
             self.usage = Some(usage);
+        }
+        if self.active_assistant_index == Some(idx) {
+            self.active_assistant_index = None;
+            self.active_assistant_id = None;
         }
     }
 
@@ -477,6 +515,7 @@ impl TranscriptState {
             }) {
                 self.active_assistant_id = Some(id.to_string());
                 self.active_assistant_index = Some(idx);
+                self.messages[idx].stream_finished = false;
                 return idx;
             }
         }
@@ -492,6 +531,7 @@ impl TranscriptState {
                     }
                     self.active_assistant_id = Some(id.to_string());
                 }
+                self.messages[idx].stream_finished = false;
                 return idx;
             }
         }
@@ -501,6 +541,7 @@ impl TranscriptState {
                     && message.message_id.as_deref() == Some(id)
             }) {
                 self.active_assistant_index = Some(idx);
+                self.messages[idx].stream_finished = false;
                 return idx;
             }
         }
@@ -519,6 +560,7 @@ impl TranscriptState {
                     self.active_assistant_id = Some(id.to_string());
                 }
                 self.active_assistant_index = Some(idx);
+                self.messages[idx].stream_finished = false;
                 return idx;
             }
         }
@@ -597,6 +639,7 @@ fn extra_fields(raw: &Value) -> Map<String, Value> {
         "thinking_blocks",
         "citations",
         "server_content_blocks",
+        "stream_finished",
         "summarized_range",
         "summarization_tier",
         "summarized_token_estimate",

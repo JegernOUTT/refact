@@ -33,9 +33,7 @@ use crate::pickers::{
     file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
     PickerAccept, PickerItem, PickerKind, PickerState,
 };
-use crate::protocol::{
-    content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
-};
+use crate::protocol::{DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState};
 use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
@@ -99,6 +97,10 @@ impl TranscriptItem {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
             || matches!(self, Self::Approval(_, None))
             || matches!(self, Self::Plan(_))
+    }
+
+    fn can_enter_history(&self) -> bool {
+        !matches!(self, Self::Assistant(text) if text.is_empty())
     }
 }
 
@@ -587,6 +589,14 @@ impl App {
         self.history.pending_cell_count()
     }
 
+    pub fn history_inserted_cell_count(&self) -> usize {
+        self.history.inserted_cell_count()
+    }
+
+    pub fn history_render_count(&self) -> usize {
+        self.history.render_count()
+    }
+
     pub fn flush_pending_paste(&mut self) -> bool {
         self.composer.flush_pending_paste(Instant::now())
     }
@@ -607,6 +617,7 @@ impl App {
                     self.history.enqueue(item);
                 }
             }
+            self.mark_rendered_state_from_messages();
         }
         self.native_scrollback = enabled;
     }
@@ -1710,22 +1721,45 @@ impl App {
     }
 
     fn push_state_history_item(&mut self, key: String, item: TranscriptItem) {
+        if !self.record_state_history_key(key) {
+            return;
+        }
+        self.push_history_item(item);
+    }
+
+    fn record_state_history_key(&mut self, key: String) -> bool {
         if self
             .rendered_state_keys
             .get(self.rendered_state_cursor)
             .is_some_and(|existing| existing == &key)
         {
             self.rendered_state_cursor += 1;
-            return;
+            return false;
         }
         self.rendered_state_keys
             .truncate(self.rendered_state_cursor);
         self.rendered_state_keys.push(key);
         self.rendered_state_cursor += 1;
-        self.push_history_item(item);
+        true
+    }
+
+    fn mark_rendered_state_from_messages(&mut self) {
+        self.rendered_state_cursor = 0;
+        self.rendered_state_keys.clear();
+        let messages = self.transcript_state.messages().to_vec();
+        for message in &messages {
+            for key in rendered_state_keys_for_message(message) {
+                self.record_state_history_key(key);
+            }
+        }
+        self.rendered_state_keys
+            .truncate(self.rendered_state_cursor);
     }
 
     fn push_history_item(&mut self, item: TranscriptItem) {
+        if !item.can_enter_history() {
+            return;
+        }
         if self.native_scrollback && !item.keeps_live() {
             self.history.enqueue(item);
         } else {
@@ -1733,14 +1767,58 @@ impl App {
         }
     }
 
-    fn flush_live_assistant_to_history(&mut self) {
-        let Some(last) = self.transcript.last() else {
+    fn flush_finalized_state_assistant_to_history(&mut self, message_id: Option<&str>) {
+        let Some((key, state_content)) =
+            self.finalized_assistant_message(message_id).map(|message| {
+                (
+                    render_message_key(
+                        message,
+                        "assistant",
+                        finalized_assistant_content_part(message),
+                    ),
+                    message.content.clone(),
+                )
+            })
+        else {
             return;
         };
-        if matches!(last, TranscriptItem::Assistant(_)) {
-            let item = self.transcript.pop().expect("last checked");
-            self.history.enqueue(item);
+        let live_idx = self
+            .transcript
+            .iter()
+            .rposition(|item| matches!(item, TranscriptItem::Assistant(text) if !text.is_empty()));
+        let live_content = live_idx.and_then(|idx| match self.transcript.get(idx) {
+            Some(TranscriptItem::Assistant(text)) => Some(text.clone()),
+            _ => None,
+        });
+        let content = live_content.unwrap_or(state_content);
+        if content.is_empty() {
+            return;
         }
+        if let Some(idx) = live_idx {
+            self.transcript.remove(idx);
+        }
+        self.push_state_history_item(key, TranscriptItem::Assistant(content));
+    }
+
+    fn finalized_assistant_message(&self, message_id: Option<&str>) -> Option<&TranscriptMessage> {
+        let normalized_id = message_id.filter(|value| !value.is_empty());
+        if let Some(id) = normalized_id {
+            return self
+                .transcript_state
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.role == TranscriptRole::Assistant
+                        && message.message_id.as_deref() == Some(id)
+                        && message.stream_finished
+                });
+        }
+        self.transcript_state
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == TranscriptRole::Assistant && message.stream_finished)
     }
 
     fn run_stream_commit_tick(&mut self) {
@@ -1758,9 +1836,6 @@ impl App {
                     .transcript
                     .push(TranscriptItem::Assistant(final_content)),
             }
-        }
-        if self.native_scrollback {
-            self.flush_live_assistant_to_history();
         }
     }
 
@@ -1837,10 +1912,16 @@ impl App {
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        if !self.native_scrollback {
+            self.rendered_state_keys.clear();
+        }
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             self.append_render_message(message);
+        }
+        if self.native_scrollback {
+            self.rendered_state_keys
+                .truncate(self.rendered_state_cursor);
         }
         self.sync_backtrack_selection_after_rebuild();
     }
@@ -1864,13 +1945,13 @@ impl App {
                     );
                     part += 1;
                 }
-                if !message.content.is_empty() || message.tool_calls.is_empty() {
+                if message.stream_finished && !message.content.is_empty() {
                     self.push_state_history_item(
                         render_message_key(message, "assistant", part),
                         TranscriptItem::Assistant(message.content.clone()),
                     );
-                    part += 1;
                 }
+                part += 1;
                 for citation in &message.citations {
                     self.push_state_history_item(
                         render_message_key(message, "citation", part),
@@ -1889,16 +1970,7 @@ impl App {
                     self.push_tool_call(tool);
                 }
             }
-            TranscriptRole::Tool => self.complete_tool(
-                message.tool_call_id.as_deref().unwrap_or_default(),
-                message.content.clone(),
-                if message.tool_failed {
-                    ToolStatus::Error
-                } else {
-                    ToolStatus::Success
-                },
-                now_ms(),
-            ),
+            TranscriptRole::Tool => self.push_state_tool_result(message),
             TranscriptRole::Notice => {
                 self.push_state_history_item(
                     render_message_key(message, "notice", 0),
@@ -2044,6 +2116,9 @@ impl App {
                 self.finalize_assistant_stream();
                 self.transcript_state
                     .finish_assistant(message_id.as_deref(), usage.clone());
+                if self.native_scrollback {
+                    self.flush_finalized_state_assistant_to_history(message_id.as_deref());
+                }
                 if let Some(usage) = usage {
                     self.update_usage_value(&usage);
                 } else {
@@ -2265,26 +2340,33 @@ impl App {
     }
 
     fn handle_tool_message(&mut self, message: &Value) {
-        let id = message
-            .get("tool_call_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let result = content_text(message).unwrap_or_default();
-        let failed = message
-            .get("tool_failed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let completed_at_ms = now_ms();
+        let message = TranscriptMessage::from_wire(message);
+        self.push_state_tool_result(&message);
+    }
+
+    fn push_state_tool_result(&mut self, message: &TranscriptMessage) {
+        let key = render_message_key(message, "tool", 0);
+        if self
+            .rendered_state_keys
+            .get(self.rendered_state_cursor)
+            .is_some_and(|existing| existing == &key)
+        {
+            self.rendered_state_cursor += 1;
+            return;
+        }
+        self.rendered_state_keys
+            .truncate(self.rendered_state_cursor);
+        self.rendered_state_keys.push(key);
+        self.rendered_state_cursor += 1;
         self.complete_tool(
-            &id,
-            result,
-            if failed {
+            message.tool_call_id.as_deref().unwrap_or_default(),
+            message.content.clone(),
+            if message.tool_failed {
                 ToolStatus::Error
             } else {
                 ToolStatus::Success
             },
-            completed_at_ms,
+            now_ms(),
         );
     }
 
@@ -2324,7 +2406,22 @@ impl App {
                     card.result = result.clone();
                     card.status = status;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
-                    self.selected_tool_index = Some(idx);
+                    if self.native_scrollback {
+                        let item = self.transcript.remove(idx);
+                        self.history.enqueue(item);
+                        self.selected_tool_index = self.selected_tool_index.and_then(|selected| {
+                            if selected == idx {
+                                None
+                            } else if selected > idx {
+                                Some(selected - 1)
+                            } else {
+                                Some(selected)
+                            }
+                        });
+                    } else {
+                        self.selected_tool_index = Some(idx);
+                    }
+                    self.finalize_matching_tool_messages(id);
                     return;
                 }
             }
@@ -2333,8 +2430,25 @@ impl App {
         card.result = result;
         card.status = status;
         card.duration_ms = Some(0);
-        self.transcript.push(TranscriptItem::Tool(card));
-        self.selected_tool_index = Some(self.transcript.len() - 1);
+        let item = TranscriptItem::Tool(card);
+        if self.native_scrollback {
+            self.history.enqueue(item);
+            self.selected_tool_index = None;
+        } else {
+            self.transcript.push(item);
+            self.selected_tool_index = Some(self.transcript.len() - 1);
+        }
+        self.finalize_matching_tool_messages(id);
+    }
+
+    fn finalize_matching_tool_messages(&mut self, id: &str) {
+        for message in self.transcript_state.messages_mut() {
+            if message.role == TranscriptRole::Tool
+                && (message.tool_call_id.as_deref() == Some(id) || id.is_empty())
+            {
+                message.stream_finished = true;
+            }
+        }
     }
 
     fn toggle_selected_tool(&mut self) -> bool {
@@ -4299,6 +4413,44 @@ fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> 
     }
 }
 
+fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
+    match message.role {
+        TranscriptRole::User => (!message.content.is_empty())
+            .then(|| render_message_key(message, "user", 0))
+            .into_iter()
+            .collect(),
+        TranscriptRole::Assistant => {
+            let mut part = 0usize;
+            let mut keys = Vec::new();
+            if !message.reasoning.is_empty() {
+                keys.push(render_message_key(message, "reasoning", part));
+                part += 1;
+            }
+            if message.stream_finished && !message.content.is_empty() {
+                keys.push(render_message_key(message, "assistant", part));
+            }
+            keys
+        }
+        TranscriptRole::Tool => vec![render_message_key(message, "tool", 0)],
+        TranscriptRole::Notice => vec![render_message_key(message, "notice", 0)],
+        TranscriptRole::Plan => vec![render_message_key(message, "plan", 0)],
+        TranscriptRole::Event => vec![render_message_key(
+            message,
+            if is_plan_delta_message(message) {
+                "plan_delta"
+            } else {
+                "event"
+            },
+            0,
+        )],
+        TranscriptRole::Other(_) => Vec::new(),
+    }
+}
+
+fn finalized_assistant_content_part(message: &TranscriptMessage) -> usize {
+    usize::from(!message.reasoning.is_empty())
+}
+
 fn render_frame(
     terminal: &mut crate::terminal::RefactTerminal,
     app: &mut App,
@@ -4543,6 +4695,105 @@ mod tests {
         app.test_push_history_item(TranscriptItem::Notice("native".to_string()));
         assert_eq!(app.visible_transcript().len(), 0);
         assert_eq!(app.history_pending_count(), 2);
+    }
+
+    #[test]
+    fn native_scrollback_prompt_start_does_not_enqueue_blank_assistant() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        app.composer.set_text("hello");
+
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+
+        assert_eq!(app.history_pending_count(), 1);
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(app.visible_transcript(), &[]);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        assert_eq!(app.history_pending_count(), 0);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_content", "text": "hi"}]}),
+        });
+        assert_eq!(app.history_pending_count(), 0);
+        assert_eq!(assistant_text(&app), "hi");
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        assert_eq!(assistant_text(&app), "");
+        assert_eq!(app.history_pending_count(), 1);
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_scrollback_completed_tool_moves_to_history_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}}]}]}),
+        });
+        assert_eq!(tool_cards(&app).len(), 1);
+
+        app.complete_tool("call-1", "done".to_string(), ToolStatus::Success, now_ms());
+
+        assert_eq!(tool_cards(&app).len(), 0);
+        assert_eq!(app.selected_tool_index(), None);
+        assert_eq!(app.history_pending_count(), 1);
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        let rendered_after_insert = app.history_render_count();
+        app.begin_frame_render();
+        assert_eq!(app.visible_transcript().len(), 0);
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+        assert_eq!(app.history_render_count(), rendered_after_insert);
     }
 
     #[test]
