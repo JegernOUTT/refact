@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -94,6 +95,13 @@ pub enum SessionState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionStatus {
+    Online,
+    Waking,
+    Offline,
+}
+
 impl SessionState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -136,6 +144,14 @@ impl UsageSummary {
             format!("{} tok", self.total_tokens)
         } else {
             format!("{} in · {} out", self.prompt_tokens, self.completion_tokens)
+        }
+    }
+
+    pub fn tokens_used(self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.prompt_tokens.saturating_add(self.completion_tokens)
         }
     }
 }
@@ -214,7 +230,11 @@ pub struct App {
     pending_model: Option<String>,
     pending_mode: Option<String>,
     session_state: SessionState,
+    subscription_status: SubscriptionStatus,
     daemon_online: bool,
+    retry_hint: Option<String>,
+    model_context_windows: HashMap<String, u64>,
+    default_context_window_tokens: Option<u64>,
     scroll_offset: usize,
     selected_tool_index: Option<usize>,
     help_open: bool,
@@ -265,7 +285,11 @@ impl App {
             pending_model: None,
             pending_mode: None,
             session_state: SessionState::Idle,
+            subscription_status: SubscriptionStatus::Online,
             daemon_online: true,
+            retry_hint: None,
+            model_context_windows: HashMap::new(),
+            default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
             help_open: false,
@@ -301,7 +325,11 @@ impl App {
             pending_model: None,
             pending_mode: None,
             session_state: SessionState::Error,
+            subscription_status: SubscriptionStatus::Offline,
             daemon_online: false,
+            retry_hint: None,
+            model_context_windows: HashMap::new(),
+            default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
             help_open: false,
@@ -361,8 +389,23 @@ impl App {
         self.session_state
     }
 
+    pub fn subscription_status(&self) -> SubscriptionStatus {
+        self.subscription_status
+    }
+
     pub fn usage(&self) -> Option<UsageSummary> {
         self.usage
+    }
+
+    pub fn context_window_tokens(&self) -> Option<u64> {
+        self.model
+            .as_deref()
+            .and_then(|model| context_window_for_model(&self.model_context_windows, model))
+            .or(self.default_context_window_tokens)
+    }
+
+    pub fn retry_hint(&self) -> Option<&str> {
+        self.retry_hint.as_deref()
     }
 
     pub fn daemon_online(&self) -> bool {
@@ -485,6 +528,7 @@ impl App {
     }
 
     fn open_model_picker(&mut self, caps: Value) {
+        self.apply_caps(&caps);
         let items = model_items_from_caps(&caps);
         if items.is_empty() {
             self.add_notice("No models returned by caps");
@@ -492,6 +536,12 @@ impl App {
             self.modal_picker = Some(PickerState::new(PickerKind::Model, items));
             self.composer_mode = ComposerMode::Chat;
         }
+    }
+
+    pub fn apply_caps(&mut self, caps: &Value) {
+        self.model_context_windows = model_context_windows(caps);
+        self.default_context_window_tokens =
+            default_context_window(caps, &self.model_context_windows);
     }
 
     fn open_mode_picker(&mut self, modes: Value) {
@@ -729,6 +779,10 @@ impl App {
         self.modal_picker = None;
         self.clear_approvals();
         self.selected_tool_index = None;
+        self.usage = None;
+        self.model_context_windows.clear();
+        self.default_context_window_tokens = None;
+        self.retry_hint = None;
     }
 
     fn new_chat(&mut self) {
@@ -740,6 +794,8 @@ impl App {
         self.rendered_state_keys.clear();
         self.clear_approvals();
         self.selected_tool_index = None;
+        self.usage = None;
+        self.retry_hint = None;
     }
 
     fn submit_composer(&mut self) -> Option<(String, Value)> {
@@ -754,6 +810,7 @@ impl App {
         self.session_state = SessionState::Generating;
         self.stream_controller.clear();
         self.usage = None;
+        self.retry_hint = None;
         let params = self.take_pending_params();
         Some((prompt, params))
     }
@@ -1023,6 +1080,8 @@ impl App {
             return;
         }
         self.daemon_online = true;
+        self.subscription_status = SubscriptionStatus::Online;
+        self.retry_hint = None;
         let protocol_event = event.protocol_event();
         let raw = event.raw;
         match protocol_event {
@@ -1307,11 +1366,108 @@ impl App {
     }
 
     fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
+        self.update_current_worker_from_list(&workers);
         self.events_pane.set_workers(workers);
     }
 
     fn push_daemon_event(&mut self, event: DaemonEventRecord) {
+        self.update_current_worker_from_event(&event);
         self.events_pane.push_event(event);
+    }
+
+    fn begin_subscription_attempt(&mut self) {
+        self.subscription_status = SubscriptionStatus::Waking;
+        self.daemon_online = true;
+    }
+
+    fn record_chat_resubscribe(&mut self, message: &str) {
+        self.subscription_status = SubscriptionStatus::Waking;
+        self.daemon_online = true;
+        self.retry_hint = retry_hint_from_message(message);
+    }
+
+    fn record_chat_disconnected(&mut self, message: &str) {
+        if worker_waking_message(message) {
+            self.subscription_status = SubscriptionStatus::Waking;
+            self.daemon_online = true;
+        } else {
+            self.subscription_status = SubscriptionStatus::Offline;
+            self.daemon_online = false;
+        }
+        self.retry_hint = retry_hint_from_message(message);
+    }
+
+    fn update_current_worker_from_list(&mut self, workers: &[WorkerInfo]) {
+        let Some(project) = self.current_project.as_mut() else {
+            return;
+        };
+        if let Some(worker) = workers
+            .iter()
+            .find(|worker| worker.project_id == project.project_id)
+            .cloned()
+        {
+            project.worker = Some(worker);
+        }
+    }
+
+    fn update_current_worker_from_event(&mut self, event: &DaemonEventRecord) {
+        let Some(project_id) = event.project_id.as_deref() else {
+            return;
+        };
+        let Some(project) = self.current_project.as_mut() else {
+            return;
+        };
+        if project.project_id != project_id {
+            return;
+        }
+        let state = match event.kind.as_str() {
+            "worker_starting" => Some("starting"),
+            "worker_ready" => Some("ready"),
+            "worker_stopped" => Some("stopped"),
+            "worker_crashed" => Some("crashed"),
+            _ => None,
+        };
+        let Some(state) = state else {
+            return;
+        };
+        match state {
+            "starting" => self.subscription_status = SubscriptionStatus::Waking,
+            "ready" if self.subscription_status == SubscriptionStatus::Waking => {
+                self.subscription_status = SubscriptionStatus::Online;
+            }
+            _ => {}
+        }
+        let previous = project.worker.clone();
+        project.worker = Some(WorkerInfo {
+            project_id: project.project_id.clone(),
+            pid: event
+                .payload
+                .get("pid")
+                .and_then(Value::as_u64)
+                .map(|pid| pid as u32)
+                .or_else(|| previous.as_ref().and_then(|worker| worker.pid)),
+            http_port: event
+                .payload
+                .get("http_port")
+                .and_then(Value::as_u64)
+                .map(|port| port as u16)
+                .or_else(|| previous.as_ref().map(|worker| worker.http_port))
+                .unwrap_or_default(),
+            lsp_port: event
+                .payload
+                .get("lsp_port")
+                .and_then(Value::as_u64)
+                .map(|port| port as u16)
+                .or_else(|| previous.as_ref().map(|worker| worker.lsp_port))
+                .unwrap_or_default(),
+            state: Value::String(state.to_string()),
+            last_error: event
+                .payload
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| previous.and_then(|worker| worker.last_error)),
+        });
     }
 
     fn is_chat_active(&self) -> bool {
@@ -1880,6 +2036,7 @@ enum RuntimeEvent {
     DaemonEventsDisconnected(String),
     ProjectsLoaded(Result<Vec<ProjectEntry>, String>),
     ProjectOpened(Result<OpenProjectResponse, String>),
+    CapsLoaded(Result<Value, String>),
     ModelsLoaded(Result<Value, String>),
     ModesLoaded(Result<Value, String>),
     FileMentionsLoaded(Result<Vec<String>, String>),
@@ -2013,13 +2170,15 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     spawn_tick_task(tx.clone());
     spawn_daemon_events_task(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
-    if let Some(project_id) = app.current_project_id() {
+    if let Some(project_id) = app.current_project_id().map(str::to_string) {
+        app.begin_subscription_attempt();
         subscriptions.subscribe(
             client.clone(),
-            project_id.to_string(),
+            project_id.clone(),
             app.chat_id().to_string(),
             tx.clone(),
         );
+        load_caps(client.clone(), tx.clone(), project_id);
     }
 
     loop {
@@ -2051,6 +2210,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 message,
             } => {
                 if subscriptions.is_current(generation) {
+                    app.record_chat_resubscribe(&message);
                     app.add_notice(format!("SSE resync: {message}"));
                     subscriptions.reconnect_current(client.clone(), tx.clone());
                 }
@@ -2062,7 +2222,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 if !subscriptions.is_current(generation) {
                     continue;
                 }
-                app.daemon_online = false;
+                app.record_chat_disconnected(&message);
                 app.add_notice(format!("SSE disconnected: {message}; reconnecting…"));
                 subscriptions.reconnect_current(client.clone(), tx.clone());
             }
@@ -2079,24 +2239,35 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             }
             RuntimeEvent::ProjectOpened(Ok(project)) => {
                 app.set_project(project);
-                if let Some(project_id) = app.current_project_id() {
+                if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                    app.begin_subscription_attempt();
                     subscriptions.subscribe(
                         client.clone(),
-                        project_id.to_string(),
+                        project_id.clone(),
                         app.chat_id().to_string(),
                         tx.clone(),
                     );
+                    load_caps(client.clone(), tx.clone(), project_id);
                 }
             }
             RuntimeEvent::ProjectOpened(Err(error)) => {
                 app.add_notice(format!("Failed to open project: {error}"))
             }
+            RuntimeEvent::CapsLoaded(Ok(caps)) => app.apply_caps(&caps),
+            RuntimeEvent::CapsLoaded(Err(error)) => {
+                if worker_waking_message(&error) {
+                    app.subscription_status = SubscriptionStatus::Waking;
+                }
+                app.retry_hint = retry_hint_from_message(&error);
+            }
             RuntimeEvent::ModelsLoaded(Ok(caps)) => app.open_model_picker(caps),
             RuntimeEvent::ModelsLoaded(Err(error)) => {
+                app.retry_hint = retry_hint_from_message(&error);
                 app.add_notice(format!("Failed to load models: {error}"))
             }
             RuntimeEvent::ModesLoaded(Ok(modes)) => app.open_mode_picker(modes),
             RuntimeEvent::ModesLoaded(Err(error)) => {
+                app.retry_hint = retry_hint_from_message(&error);
                 app.add_notice(format!("Failed to load modes: {error}"))
             }
             RuntimeEvent::FileMentionsLoaded(Ok(completions)) => {
@@ -2114,6 +2285,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             }
             RuntimeEvent::CommandFinished(Ok(())) => {}
             RuntimeEvent::CommandFinished(Err(error)) => {
+                app.retry_hint = retry_hint_from_message(&error);
                 app.add_notice(format!("Command failed: {error}"))
             }
         }
@@ -2217,10 +2389,11 @@ async fn run_action(
             });
         }
         AppAction::SubscribeCurrent => {
-            if let Some(project_id) = app.current_project_id() {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                app.begin_subscription_attempt();
                 subscriptions.subscribe(
                     client.clone(),
-                    project_id.to_string(),
+                    project_id,
                     app.chat_id().to_string(),
                     tx.clone(),
                 );
@@ -2368,6 +2541,16 @@ fn refresh_workers(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
     });
 }
 
+fn load_caps(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>, project_id: String) {
+    tokio::spawn(async move {
+        let result = client
+            .get_caps(&project_id)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx.send(RuntimeEvent::CapsLoaded(result)).await;
+    });
+}
+
 fn spawn_daemon_events_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
     tokio::spawn(async move {
         loop {
@@ -2483,6 +2666,184 @@ fn notice_transcript_state(text: String) -> TranscriptState {
 
 fn token_count(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|key| value.get(*key)?.as_u64())
+}
+
+fn model_context_windows(caps: &Value) -> HashMap<String, u64> {
+    let mut windows = HashMap::new();
+    if let Some(models) = caps.get("chat_models") {
+        collect_model_context_windows(models, &mut windows);
+    }
+    if let Some(models) = caps.get("models").and_then(|models| models.get("chat")) {
+        collect_model_context_windows(models, &mut windows);
+    }
+    if let Some(models) = caps.get("available_models") {
+        collect_model_context_windows(models, &mut windows);
+    }
+    windows
+}
+
+fn collect_model_context_windows(models: &Value, windows: &mut HashMap<String, u64>) {
+    match models {
+        Value::Object(map) => {
+            for (id, model) in map {
+                insert_model_context_window(id, model, windows);
+            }
+        }
+        Value::Array(items) => {
+            for model in items {
+                if let Some(id) = model.get("id").and_then(Value::as_str) {
+                    insert_model_context_window(id, model, windows);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn insert_model_context_window(id: &str, model: &Value, windows: &mut HashMap<String, u64>) {
+    let Some(window) = context_window_from_model(model) else {
+        return;
+    };
+    if !id.is_empty() {
+        windows.insert(id.to_string(), window);
+    }
+    if let Some(model_id) = model
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        windows.insert(model_id.to_string(), window);
+    }
+}
+
+fn context_window_from_model(model: &Value) -> Option<u64> {
+    token_count(
+        model,
+        &[
+            "n_ctx",
+            "context_window",
+            "context_window_tokens",
+            "context_length",
+            "max_context_window_tokens",
+            "max_prompt_tokens",
+            "max_model_len",
+        ],
+    )
+    .or_else(|| model.get("limits").and_then(context_window_from_model))
+    .or_else(|| model.get("base").and_then(context_window_from_model))
+}
+
+fn default_context_window(caps: &Value, windows: &HashMap<String, u64>) -> Option<u64> {
+    default_chat_model(caps)
+        .and_then(|model| context_window_for_model(windows, model))
+        .or_else(|| {
+            (windows.len() == 1)
+                .then(|| windows.values().next().copied())
+                .flatten()
+        })
+}
+
+fn default_chat_model(caps: &Value) -> Option<&str> {
+    caps.get("defaults")
+        .and_then(|defaults| {
+            string_field(
+                defaults,
+                &[
+                    "chat_default_model",
+                    "default_chat_model",
+                    "chat_model",
+                    "model",
+                ],
+            )
+        })
+        .or_else(|| {
+            string_field(
+                caps,
+                &[
+                    "chat_default_model",
+                    "default_chat_model",
+                    "chat_model",
+                    "model",
+                ],
+            )
+        })
+}
+
+fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key)?.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+fn context_window_for_model(windows: &HashMap<String, u64>, model: &str) -> Option<u64> {
+    windows.get(model).copied().or_else(|| {
+        windows.iter().find_map(|(id, window)| {
+            id.rsplit('/').next().filter(|suffix| *suffix == model)?;
+            Some(*window)
+        })
+    })
+}
+
+fn worker_waking_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("status 502")
+        || message.contains("status 503")
+        || message.contains("status 504")
+        || message.contains("bad gateway")
+        || message.contains("service unavailable")
+        || (message.contains("worker")
+            && (message.contains("starting")
+                || message.contains("waking")
+                || message.contains("spawn")
+                || message.contains("not ready")
+                || message.contains("unavailable")))
+}
+
+fn retry_hint_from_message(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("retry-after")
+        || lower.contains("retry_after")
+    {
+        return Some(
+            retry_after_hint(message)
+                .map(|retry_after| format!("rate limited; retry after {retry_after}"))
+                .unwrap_or_else(|| "rate limited; retry later".to_string()),
+        );
+    }
+    if worker_waking_message(message) {
+        return Some("worker waking; retrying".to_string());
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return Some("request timed out; retrying".to_string());
+    }
+    None
+}
+
+fn retry_after_hint(message: &str) -> Option<String> {
+    [
+        "retry_after_ms",
+        "retry-after",
+        "retry_after",
+        "retry after",
+    ]
+    .into_iter()
+    .find_map(|needle| retry_value_after(message, needle))
+}
+
+fn retry_value_after(message: &str, needle: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    let start = lower.find(needle)? + needle.len();
+    let rest = message
+        .get(start..)?
+        .trim_start_matches(|ch: char| ch == ':' || ch == '=' || ch == '"' || ch.is_whitespace());
+    let value = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '.' || *ch == '-')
+        .collect::<String>();
+    (!value.is_empty()).then_some(value)
 }
 
 fn value_to_compact_string(value: &Value) -> String {
@@ -3180,6 +3541,49 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn caps_update_context_window_for_selected_and_default_models() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "defaults": {"chat_default_model": "openai/gpt-demo"},
+            "chat_models": {
+                "openai/gpt-demo": {"n_ctx": 128_000},
+                "openai/gpt-small": {"n_ctx": 32_000}
+            }
+        }));
+
+        assert_eq!(app.context_window_tokens(), Some(128_000));
+
+        app.open_model_picker(
+            json!({"chat_models": {"openai/gpt-small": {"name": "Small", "n_ctx": 32_000}}}),
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+
+        assert_eq!(app.context_window_tokens(), Some(32_000));
+    }
+
+    #[test]
+    fn subscription_status_tracks_waking_offline_and_retry_hints() {
+        let mut app = App::new(project());
+
+        app.begin_subscription_attempt();
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
+        assert!(app.daemon_online());
+
+        app.record_chat_disconnected("request failed with status 503: worker starting");
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
+        assert_eq!(app.retry_hint(), Some("worker waking; retrying"));
+        assert!(app.daemon_online());
+
+        app.record_chat_disconnected("connection refused");
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Offline);
+        assert!(!app.daemon_online());
+
+        app.record_chat_resubscribe("request failed with status 429: retry-after: 2s");
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
+        assert_eq!(app.retry_hint(), Some("rate limited; retry after 2s"));
     }
 
     #[test]

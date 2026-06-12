@@ -430,7 +430,7 @@ code · rust
 ┌ message ─────────────────────────────────────────────────────────────┐
 │Ask Refact…                                                           │
 └──────────────────────────────────────────────────────────────────────┘
- fixture · gpt-demo · agent · idle · daemon ● · worker unknown · usage …"#;
+ 30 used · fixture · gpt-demo · agent · ● idle · daemon online · worker…"#;
     assert_eq!(snapshot, expected);
 }
 

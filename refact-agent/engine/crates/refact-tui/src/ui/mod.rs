@@ -6,10 +6,10 @@ use ratatui::Frame;
 
 use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
-use crate::client::worker_state_label;
 use crate::events_pane::{render_event_lines, render_worker_lines};
 use crate::pickers::PickerState;
-use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
+
+pub mod footer;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.begin_frame_render();
@@ -45,10 +45,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.events_pane().open {
         render_events_pane(frame, app, chunks[2]);
         render_composer(frame, app, composer_area);
-        render_status(frame, app, chunks[4]);
+        footer::render(frame, app, chunks[4]);
     } else {
         render_composer(frame, app, composer_area);
-        render_status(frame, app, chunks[3]);
+        footer::render(frame, app, chunks[3]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
         render_project_picker(frame, app.project_picker(), area);
@@ -182,33 +182,6 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .saturating_add(view.cursor_row.min(max_rows.saturating_sub(1)));
         frame.set_cursor_position((x, y));
     }
-}
-
-fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let project = app
-        .current_project()
-        .map(|project| project.slug.as_str())
-        .unwrap_or("-");
-    let model = app.model().unwrap_or("default");
-    let mode = app.mode().unwrap_or("agent");
-    let state = app.session_state().as_str();
-    let daemon_dot = if app.daemon_online() { "●" } else { "○" };
-    let worker = app
-        .current_worker()
-        .map(|worker| worker_state_label(Some(worker)))
-        .unwrap_or_else(|| "unknown".to_string());
-    let usage = app
-        .usage()
-        .map(|usage| format!(" · usage {}", usage.display()))
-        .unwrap_or_default();
-    let status = format!(
-        " {project} · {model} · {mode} · {state} · daemon {daemon_dot} · worker {worker}{usage} "
-    );
-    let line = truncate_line_with_ellipsis_if_overflow(Line::from(status), area.width as usize);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
 }
 
 fn render_project_picker(frame: &mut Frame<'_>, picker: &ProjectPickerState, area: Rect) {
