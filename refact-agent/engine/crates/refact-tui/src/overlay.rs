@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crate::keymap::{KeyAction, KeyDispatch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerMode {
@@ -115,91 +115,49 @@ impl PagerOverlay {
         format!("{mode} · {search} · c copy mode · q/Esc close")
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> PagerAction {
-        if key.kind != KeyEventKind::Press {
-            return PagerAction::None;
-        }
+    pub fn handle_dispatch(&mut self, dispatch: KeyDispatch) -> PagerAction {
         if self.search_input.is_some() {
-            return self.handle_search_key(key);
+            return self.handle_search_dispatch(dispatch);
         }
-        match key {
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => PagerAction::Close,
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers,
-                ..
-            } if modifiers.is_empty() => PagerAction::Close,
-            KeyEvent {
-                code: KeyCode::Char('/'),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+        match dispatch.action {
+            Some(KeyAction::Cancel) => PagerAction::Close,
+            Some(KeyAction::OverlaySearch) => {
                 self.search_input = Some(String::new());
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            Some(KeyAction::OverlayToggleCopyMode) => {
                 self.toggle_mode();
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers,
-                ..
-            } if modifiers.is_empty() => {
+            Some(KeyAction::OverlayNextMatch) => {
                 self.next_match();
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char('N'),
-                modifiers,
-                ..
-            } if modifiers == KeyModifiers::SHIFT || modifiers.is_empty() => {
+            Some(KeyAction::OverlayPreviousMatch) => {
                 self.prev_match();
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            } => {
+            Some(KeyAction::MoveDown) => {
                 self.scroll = self.scroll.saturating_add(1).min(self.lines().len());
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Up, ..
-            } => {
+            Some(KeyAction::MoveUp) => {
                 self.scroll = self.scroll.saturating_sub(1);
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
+            Some(KeyAction::ScrollPageDown) => {
                 self.scroll = self.scroll.saturating_add(10).min(self.lines().len());
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
+            Some(KeyAction::ScrollPageUp) => {
                 self.scroll = self.scroll.saturating_sub(10);
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
+            Some(KeyAction::MoveHome) => {
                 self.scroll = 0;
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::End, ..
-            } => {
+            Some(KeyAction::MoveEnd) => {
                 self.scroll = self.lines().len().saturating_sub(1);
                 PagerAction::None
             }
@@ -207,38 +165,38 @@ impl PagerOverlay {
         }
     }
 
-    fn handle_search_key(&mut self, key: KeyEvent) -> PagerAction {
-        match key {
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
+    #[cfg(test)]
+    pub fn test_handle_action(&mut self, action: KeyAction) -> PagerAction {
+        self.handle_dispatch(KeyDispatch::action(action))
+    }
+
+    #[cfg(test)]
+    pub fn test_handle_text(&mut self, text: char) -> PagerAction {
+        self.handle_dispatch(KeyDispatch::text(text))
+    }
+
+    fn handle_search_dispatch(&mut self, dispatch: KeyDispatch) -> PagerAction {
+        match dispatch.action {
+            Some(KeyAction::Cancel) => {
                 self.search_input = None;
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } => {
+            Some(KeyAction::Accept) => {
                 let query = self.search_input.take().unwrap_or_default();
                 self.apply_search(query);
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
+            Some(KeyAction::Backspace) => {
                 if let Some(input) = self.search_input.as_mut() {
                     input.pop();
                 }
                 PagerAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                if let Some(input) = self.search_input.as_mut() {
-                    input.push(ch);
+            None => {
+                if let Some(ch) = dispatch.text {
+                    if let Some(input) = self.search_input.as_mut() {
+                        input.push(ch);
+                    }
                 }
                 PagerAction::None
             }
@@ -299,10 +257,6 @@ impl PagerOverlay {
 mod tests {
     use super::*;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::empty())
-    }
-
     #[test]
     fn pager_scrolls_searches_and_cycles_matches() {
         let mut pager = PagerOverlay::new(
@@ -310,18 +264,18 @@ mod tests {
             vec!["alpha".into(), "beta".into(), "alphabet".into()],
             vec!["raw alpha".into()],
         );
-        pager.handle_key(key(KeyCode::PageDown));
+        pager.test_handle_action(KeyAction::ScrollPageDown);
         assert_eq!(pager.scroll(), 3);
-        pager.handle_key(key(KeyCode::PageUp));
+        pager.test_handle_action(KeyAction::ScrollPageUp);
         assert_eq!(pager.scroll(), 0);
-        pager.handle_key(key(KeyCode::Char('/')));
-        pager.handle_key(key(KeyCode::Char('a')));
-        pager.handle_key(key(KeyCode::Char('l')));
-        pager.handle_key(key(KeyCode::Enter));
+        pager.test_handle_action(KeyAction::OverlaySearch);
+        pager.test_handle_text('a');
+        pager.test_handle_text('l');
+        pager.test_handle_action(KeyAction::Accept);
         assert_eq!(pager.query(), "al");
         assert_eq!(pager.match_count(), 2);
         assert_eq!(pager.active_match_line(), Some(0));
-        pager.handle_key(key(KeyCode::Char('n')));
+        pager.test_handle_action(KeyAction::OverlayNextMatch);
         assert_eq!(pager.active_match_line(), Some(2));
     }
 
@@ -333,9 +287,12 @@ mod tests {
             vec!["raw one".into(), "raw two".into()],
         );
         assert_eq!(pager.mode(), PagerMode::Rendered);
-        pager.handle_key(key(KeyCode::Char('c')));
+        pager.test_handle_action(KeyAction::OverlayToggleCopyMode);
         assert!(pager.is_copy_mode());
         assert_eq!(pager.visible_lines(3), vec!["raw one", "raw two"]);
-        assert_eq!(pager.handle_key(key(KeyCode::Esc)), PagerAction::Close);
+        assert_eq!(
+            pager.test_handle_action(KeyAction::Cancel),
+            PagerAction::Close
+        );
     }
 }

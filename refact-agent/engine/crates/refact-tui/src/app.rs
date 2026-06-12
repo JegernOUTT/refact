@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::approvals::{ApprovalKeyAction, ApprovalModalState, ApprovalQueue};
+use crate::approvals::{ApprovalModalState, ApprovalQueue};
 use crate::client::{
     worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
     OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
@@ -25,6 +25,9 @@ use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
+use crate::keymap::{
+    HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
+};
 use crate::overlay::{PagerAction, PagerOverlay};
 use crate::pickers::{
     file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
@@ -38,6 +41,7 @@ use crate::sessions::{
 };
 use crate::streaming::{run_commit_tick, StreamController};
 use crate::terminal::TerminalSession;
+use crate::theme::TuiTheme;
 use crate::tools::{now_ms, ToolCard, ToolStatus};
 
 const PATCH_LIKE_FUNCTIONS: &[&str] = &[
@@ -247,6 +251,9 @@ pub struct App {
     transcript: Vec<TranscriptItem>,
     transcript_state: TranscriptState,
     composer: ComposerState,
+    keymap: KeymapRegistry,
+    vim: VimState,
+    theme: TuiTheme,
     input_queue: InputQueue,
     server_queue_size: usize,
     server_queue_previews: Vec<String>,
@@ -303,6 +310,8 @@ impl App {
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
+        let keymap = KeymapRegistry::default();
+        let vim = VimState::new(keymap.vim_mode_enabled());
         Self {
             transcript: vec![TranscriptItem::Notice(format!(
                 "Opened project {} at {}",
@@ -315,6 +324,9 @@ impl App {
                 project.root.display()
             )),
             composer: ComposerState::new(history_entries),
+            keymap,
+            vim,
+            theme: TuiTheme::default(),
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -368,6 +380,9 @@ impl App {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             composer: ComposerState::new(Vec::new()),
+            keymap: KeymapRegistry::default(),
+            vim: VimState::new(false),
+            theme: TuiTheme::default(),
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -421,6 +436,43 @@ impl App {
 
     pub fn composer_state(&self) -> &ComposerState {
         &self.composer
+    }
+
+    pub fn keymap(&self) -> &KeymapRegistry {
+        &self.keymap
+    }
+
+    pub fn theme(&self) -> &TuiTheme {
+        &self.theme
+    }
+
+    pub fn vim_enabled(&self) -> bool {
+        self.vim.enabled()
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.vim.mode()
+    }
+
+    pub fn keymap_help_rows(&self) -> Vec<HelpRow> {
+        self.keymap.help_rows()
+    }
+
+    fn apply_tui_config_content(&mut self, content: &str) {
+        match KeymapRegistry::from_config_file_content(Some(content)) {
+            Ok(keymap) => {
+                self.vim.set_enabled(keymap.vim_mode_enabled());
+                for warning in keymap.warnings() {
+                    self.add_notice(format!("TUI keymap warning: {warning}"));
+                }
+                self.keymap = keymap;
+            }
+            Err(error) => self.add_notice(format!("Failed to load TUI keymap config: {error}")),
+        }
+        match TuiTheme::from_config_file_content(Some(content)) {
+            Ok(theme) => self.theme = theme,
+            Err(error) => self.add_notice(format!("Failed to load TUI theme config: {error}")),
+        }
     }
 
     pub fn input_queue(&self) -> &InputQueue {
@@ -2348,14 +2400,11 @@ impl App {
             self.help_open = false;
             return AppAction::None;
         }
-        if let Some(overlay) = self.transcript_overlay.as_mut() {
-            if overlay.handle_key(key) == PagerAction::Close {
-                self.transcript_overlay = None;
-            }
-            return AppAction::None;
+        if self.transcript_overlay.is_some() {
+            return self.handle_transcript_overlay_key(key);
         }
-        if let Some(action) = self.handle_approval_key(key) {
-            return action;
+        if self.approval_modal().is_some() {
+            return self.handle_approval_key(key);
         }
         if self.modal_picker.is_some() {
             return self.handle_modal_picker_key(key);
@@ -2363,359 +2412,352 @@ impl App {
         if self.composer_mode == ComposerMode::ProjectPicker {
             return self.handle_project_picker_key(key);
         }
-        match key {
-            KeyEvent {
-                code: KeyCode::Char('?'),
-                ..
-            } => {
+        let main_dispatch = self.keymap.dispatch(KeyContext::Main, key);
+        if matches!(
+            main_dispatch.action,
+            Some(KeyAction::ShowHelp | KeyAction::ToggleVimMode)
+        ) {
+            return self.handle_main_dispatch(main_dispatch, key);
+        }
+        if let Some(action) = self.handle_vim_key(key) {
+            return action;
+        }
+        self.handle_main_dispatch(main_dispatch, key)
+    }
+
+    fn handle_vim_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        if !self.vim.enabled() {
+            return None;
+        }
+        let dispatch = self.keymap.dispatch(self.vim.context(), key);
+        let outcome = self.vim.handle_dispatch(dispatch);
+        if !outcome.consumed {
+            return None;
+        }
+        self.input_queue.clear_selection();
+        match outcome.effect {
+            VimEffect::None => {}
+            VimEffect::MoveLeft => self.composer.move_left(false),
+            VimEffect::MoveDown => self.composer.move_down_or_history(false),
+            VimEffect::MoveUp => self.composer.move_up_or_history(false),
+            VimEffect::MoveRight => self.composer.move_right(false),
+            VimEffect::WordForward => self.composer.move_word_forward(false),
+            VimEffect::WordBackward => self.composer.move_word_backward(false),
+            VimEffect::LineStart => self.composer.move_home(false),
+            VimEffect::LineEnd => self.composer.move_end(false),
+            VimEffect::DeleteLine => self.composer.delete_current_line(),
+            VimEffect::Append => self.composer.move_right(false),
+            VimEffect::OpenBelow => self.composer.open_line_below(),
+        }
+        Some(AppAction::None)
+    }
+
+    fn handle_main_dispatch(&mut self, dispatch: KeyDispatch, key: KeyEvent) -> AppAction {
+        match dispatch.action {
+            Some(KeyAction::ShowHelp) => {
                 self.help_open = true;
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::F(2),
-                ..
-            } => {
+            Some(KeyAction::ToggleEvents) => {
                 self.events_pane.toggle();
                 AppAction::RefreshWorkers
             }
-            KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => self.quit_action(),
-            KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
+            Some(KeyAction::Quit) => self.quit_action(),
+            Some(KeyAction::NewChat) => {
                 self.new_chat();
                 AppAction::SubscribeCurrent
             }
-            KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => AppAction::LoadProjects,
-            KeyEvent {
-                code: KeyCode::Char('m'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => AppAction::LoadModels,
-            KeyEvent {
-                code: KeyCode::Char('o'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => AppAction::LoadModes,
-            KeyEvent {
-                code: KeyCode::Char('t'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => self.open_transcript_overlay(),
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => AppAction::OpenExternalEditor {
+            Some(KeyAction::OpenProjects) => AppAction::LoadProjects,
+            Some(KeyAction::OpenModels) => AppAction::LoadModels,
+            Some(KeyAction::OpenModes) => AppAction::LoadModes,
+            Some(KeyAction::OpenTranscriptOverlay) => self.open_transcript_overlay(),
+            Some(KeyAction::OpenExternalEditor) => AppAction::OpenExternalEditor {
                 draft: self.composer.text().to_string(),
             },
-            KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                for item in &mut self.transcript {
-                    if let TranscriptItem::Reasoning(_, collapsed) = item {
-                        *collapsed = !*collapsed;
-                    }
-                }
+            Some(KeyAction::ToggleReasoning) => {
+                self.toggle_reasoning_items();
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => self.ctrl_c_action(),
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                if self.cancel_queue_edit() {
-                    AppAction::None
-                } else if self.backtrack_pending.is_some() {
-                    self.cancel_backtrack();
-                    AppAction::None
-                } else if self.events_pane.open {
-                    self.events_pane.open = false;
-                    AppAction::None
-                } else if matches!(
-                    self.session_state,
-                    SessionState::Generating
-                        | SessionState::ExecutingTools
-                        | SessionState::Paused
-                        | SessionState::WaitingUserInput
-                ) {
-                    self.cancel_queue_edit();
-                    self.session_state = SessionState::Idle;
-                    self.add_notice("Cancel requested");
-                    AppAction::Abort
-                } else {
-                    self.handle_idle_escape()
-                }
-            }
-            KeyEvent {
-                code: KeyCode::Tab, ..
-            } => {
+            Some(KeyAction::CtrlC) => self.ctrl_c_action(),
+            Some(KeyAction::Cancel) => self.cancel_action(),
+            Some(KeyAction::CycleToolSelection) => {
                 self.cycle_tool_selection();
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers,
-                ..
-            } if self.composer.is_empty()
-                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
-            {
-                self.toggle_selected_tool();
-                AppAction::None
+            Some(KeyAction::ToggleSelectedTool) => {
+                if self.composer.is_empty() {
+                    self.toggle_selected_tool();
+                    AppAction::None
+                } else {
+                    self.insert_dispatch_text(dispatch)
+                }
             }
-            KeyEvent {
-                code: KeyCode::Char('/'),
-                modifiers,
-                ..
-            } if self.composer.is_empty()
-                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
-            {
-                self.input_queue.clear_selection();
-                self.composer.insert_text("/");
-                self.open_slash_command_picker();
-                AppAction::None
+            Some(KeyAction::OpenSlashCommands) => {
+                if self.composer.is_empty() {
+                    self.input_queue.clear_selection();
+                    self.composer.insert_text("/");
+                    self.open_slash_command_picker();
+                    AppAction::None
+                } else {
+                    self.insert_dispatch_text(dispatch)
+                }
             }
-            KeyEvent {
-                code: KeyCode::Char('@'),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            Some(KeyAction::OpenFileMention) => {
                 self.input_queue.clear_selection();
                 self.composer.insert_text("@");
                 self.start_file_mention_lookup()
             }
-            KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::SHIFT,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::ALT,
-                ..
-            } => {
+            Some(KeyAction::InsertNewline) => {
                 self.composer.insert_explicit_newline(Instant::now());
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } if self.selected_backtrack_index.is_some() && self.composer.is_empty() => {
-                self.accept_backtrack_selection()
-            }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() => {
-                self.begin_queue_edit()
-            }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } if self.composer.is_empty() && self.toggle_selected_tool() => AppAction::None,
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } => match self.composer.enter(Instant::now()) {
-                EnterDecision::InsertedNewline => AppAction::None,
-                EnterDecision::Submit => self.submit_composer().unwrap_or(AppAction::None),
-            },
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } if self.composer.is_empty()
-                && self.input_queue.selected_index().is_some()
-                && !self.input_queue.is_editing() =>
-            {
-                self.remove_selected_queue_item()
-            }
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
-                self.input_queue.clear_selection();
-                self.composer.backspace();
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Delete,
-                ..
-            } if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() => {
-                self.remove_selected_queue_item()
-            }
-            KeyEvent {
-                code: KeyCode::Delete,
-                ..
-            } => {
-                self.input_queue.clear_selection();
-                self.composer.delete();
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Left,
-                modifiers,
-                ..
-            } => {
+            Some(KeyAction::Accept) => self.accept_action(),
+            Some(KeyAction::Backspace) => self.backspace_action(),
+            Some(KeyAction::Delete) => self.delete_action(),
+            Some(KeyAction::MoveLeft) => {
                 self.composer
-                    .move_left(modifiers.contains(KeyModifiers::SHIFT));
+                    .move_left(key.modifiers.contains(KeyModifiers::SHIFT));
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Right,
-                modifiers,
-                ..
-            } => {
+            Some(KeyAction::MoveRight) => {
                 self.composer
-                    .move_right(modifiers.contains(KeyModifiers::SHIFT));
+                    .move_right(key.modifiers.contains(KeyModifiers::SHIFT));
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Home,
-                modifiers,
-                ..
-            } => {
+            Some(KeyAction::MoveHome) => {
                 self.composer
-                    .move_home(modifiers.contains(KeyModifiers::SHIFT));
+                    .move_home(key.modifiers.contains(KeyModifiers::SHIFT));
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::End,
-                modifiers,
-                ..
-            } => {
+            Some(KeyAction::MoveEnd) => {
                 self.composer
-                    .move_end(modifiers.contains(KeyModifiers::SHIFT));
+                    .move_end(key.modifiers.contains(KeyModifiers::SHIFT));
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Up,
-                modifiers,
-                ..
-            } if modifiers.is_empty()
-                && !self.composer_state().can_move_up()
-                && !self.input_queue.is_empty()
-                && self.input_queue.select_prev() =>
-            {
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Up,
-                modifiers,
-                ..
-            } => {
-                self.composer
-                    .move_up_or_history(modifiers.contains(KeyModifiers::SHIFT));
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                modifiers,
-                ..
-            } if modifiers.is_empty()
-                && self.input_queue.selected_index().is_some()
-                && self.input_queue.select_next_or_clear() =>
-            {
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                modifiers,
-                ..
-            } => {
-                self.composer
-                    .move_down_or_history(modifiers.contains(KeyModifiers::SHIFT));
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
+            Some(KeyAction::MoveUp) => self.move_up_action(key),
+            Some(KeyAction::MoveDown) => self.move_down_action(key),
+            Some(KeyAction::ScrollPageUp) => {
                 self.scroll_offset = self.scroll_offset.saturating_add(5);
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
+            Some(KeyAction::ScrollPageDown) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(5);
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                if self.selected_backtrack_index.is_some() && self.composer.is_empty() {
-                    self.clear_backtrack_selection();
-                }
-                self.input_queue.clear_selection();
-                self.composer.insert_char(ch, Instant::now());
+            Some(KeyAction::ToggleVimMode) => {
+                let enabled = self.vim.toggle();
+                let label = if enabled { "enabled" } else { "disabled" };
+                self.add_notice(format!("Composer vim mode {label}"));
                 AppAction::None
             }
-            _ => AppAction::None,
+            Some(_) => AppAction::None,
+            None => self.insert_dispatch_text(dispatch),
         }
     }
 
-    fn handle_approval_key(&mut self, key: KeyEvent) -> Option<AppAction> {
-        let action = {
-            let modal = self.approval_queue.front_mut()?;
-            modal.handle_key(key)
+    fn insert_dispatch_text(&mut self, dispatch: KeyDispatch) -> AppAction {
+        let Some(ch) = dispatch.text else {
+            return AppAction::None;
         };
-        match action {
-            ApprovalKeyAction::None
-            | ApprovalKeyAction::ToggleDetails
-            | ApprovalKeyAction::Back
-            | ApprovalKeyAction::ScrollDetails => Some(AppAction::None),
-            ApprovalKeyAction::ApproveOnce => self.pop_current_approval().map(|modal| {
-                self.push_history_item(TranscriptItem::Approval(
-                    modal.clone(),
-                    Some(ApprovalOutcome::ApprovedOnce),
-                ));
-                AppAction::SendToolDecisions {
-                    decisions: modal.decisions(true),
-                    patch: None,
+        if self.selected_backtrack_index.is_some() && self.composer.is_empty() {
+            self.clear_backtrack_selection();
+        }
+        self.input_queue.clear_selection();
+        self.composer.insert_char(ch, Instant::now());
+        AppAction::None
+    }
+
+    fn toggle_reasoning_items(&mut self) {
+        for item in &mut self.transcript {
+            if let TranscriptItem::Reasoning(_, collapsed) = item {
+                *collapsed = !*collapsed;
+            }
+        }
+    }
+
+    fn cancel_action(&mut self) -> AppAction {
+        if self.cancel_queue_edit() {
+            AppAction::None
+        } else if self.backtrack_pending.is_some() {
+            self.cancel_backtrack();
+            AppAction::None
+        } else if self.events_pane.open {
+            self.events_pane.open = false;
+            AppAction::None
+        } else if matches!(
+            self.session_state,
+            SessionState::Generating
+                | SessionState::ExecutingTools
+                | SessionState::Paused
+                | SessionState::WaitingUserInput
+        ) {
+            self.cancel_queue_edit();
+            self.session_state = SessionState::Idle;
+            self.add_notice("Cancel requested");
+            AppAction::Abort
+        } else {
+            self.handle_idle_escape()
+        }
+    }
+
+    fn accept_action(&mut self) -> AppAction {
+        if self.selected_backtrack_index.is_some() && self.composer.is_empty() {
+            return self.accept_backtrack_selection();
+        }
+        if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() {
+            return self.begin_queue_edit();
+        }
+        if self.composer.is_empty() && self.toggle_selected_tool() {
+            return AppAction::None;
+        }
+        match self.composer.enter(Instant::now()) {
+            EnterDecision::InsertedNewline => AppAction::None,
+            EnterDecision::Submit => self.submit_composer().unwrap_or(AppAction::None),
+        }
+    }
+
+    fn backspace_action(&mut self) -> AppAction {
+        if self.composer.is_empty()
+            && self.input_queue.selected_index().is_some()
+            && !self.input_queue.is_editing()
+        {
+            return self.remove_selected_queue_item();
+        }
+        self.input_queue.clear_selection();
+        self.composer.backspace();
+        AppAction::None
+    }
+
+    fn delete_action(&mut self) -> AppAction {
+        if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() {
+            return self.remove_selected_queue_item();
+        }
+        self.input_queue.clear_selection();
+        self.composer.delete();
+        AppAction::None
+    }
+
+    fn move_up_action(&mut self, key: KeyEvent) -> AppAction {
+        if key.modifiers.is_empty()
+            && !self.composer_state().can_move_up()
+            && !self.input_queue.is_empty()
+            && self.input_queue.select_prev()
+        {
+            return AppAction::None;
+        }
+        self.composer
+            .move_up_or_history(key.modifiers.contains(KeyModifiers::SHIFT));
+        AppAction::None
+    }
+
+    fn move_down_action(&mut self, key: KeyEvent) -> AppAction {
+        if key.modifiers.is_empty()
+            && self.input_queue.selected_index().is_some()
+            && self.input_queue.select_next_or_clear()
+        {
+            return AppAction::None;
+        }
+        self.composer
+            .move_down_or_history(key.modifiers.contains(KeyModifiers::SHIFT));
+        AppAction::None
+    }
+
+    fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> AppAction {
+        let Some(overlay) = self.transcript_overlay.as_mut() else {
+            return AppAction::None;
+        };
+        let context = if overlay.search_input().is_some() {
+            KeyContext::OverlaySearch
+        } else {
+            KeyContext::Overlay
+        };
+        let dispatch = self.keymap.dispatch(context, key);
+        if overlay.handle_dispatch(dispatch) == PagerAction::Close {
+            self.transcript_overlay = None;
+        }
+        AppAction::None
+    }
+
+    fn handle_approval_key(&mut self, key: KeyEvent) -> AppAction {
+        let dispatch = self.keymap.dispatch(KeyContext::Approval, key);
+        match dispatch.action {
+            Some(KeyAction::ApprovalApproveOnce) => self
+                .pop_current_approval()
+                .map(|modal| {
+                    self.push_history_item(TranscriptItem::Approval(
+                        modal.clone(),
+                        Some(ApprovalOutcome::ApprovedOnce),
+                    ));
+                    AppAction::SendToolDecisions {
+                        decisions: modal.decisions(true),
+                        patch: None,
+                    }
+                })
+                .unwrap_or(AppAction::None),
+            Some(KeyAction::ApprovalApproveForChat) => self
+                .pop_current_approval()
+                .map(|modal| {
+                    let patch = approval_patch(&modal);
+                    self.push_history_item(TranscriptItem::Approval(
+                        modal.clone(),
+                        Some(ApprovalOutcome::ApprovedForChat),
+                    ));
+                    AppAction::SendToolDecisions {
+                        patch: Some(patch),
+                        decisions: modal.decisions(true),
+                    }
+                })
+                .unwrap_or(AppAction::None),
+            Some(KeyAction::ApprovalDeny) => self
+                .pop_current_approval()
+                .map(|modal| {
+                    self.push_history_item(TranscriptItem::Approval(
+                        modal.clone(),
+                        Some(ApprovalOutcome::Denied),
+                    ));
+                    AppAction::SendToolDecisions {
+                        decisions: modal.decisions(false),
+                        patch: None,
+                    }
+                })
+                .unwrap_or(AppAction::None),
+            Some(KeyAction::ApprovalToggleDetails) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.toggle_details();
                 }
-            }),
-            ApprovalKeyAction::ApproveForChat => self.pop_current_approval().map(|modal| {
-                let patch = approval_patch(&modal);
-                self.push_history_item(TranscriptItem::Approval(
-                    modal.clone(),
-                    Some(ApprovalOutcome::ApprovedForChat),
-                ));
-                AppAction::SendToolDecisions {
-                    patch: Some(patch),
-                    decisions: modal.decisions(true),
+                AppAction::None
+            }
+            Some(KeyAction::Cancel) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.back_from_details();
                 }
-            }),
-            ApprovalKeyAction::Deny => self.pop_current_approval().map(|modal| {
-                self.push_history_item(TranscriptItem::Approval(
-                    modal.clone(),
-                    Some(ApprovalOutcome::Denied),
-                ));
-                AppAction::SendToolDecisions {
-                    decisions: modal.decisions(false),
-                    patch: None,
+                AppAction::None
+            }
+            Some(KeyAction::MoveUp) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.scroll_details_up(1);
                 }
-            }),
+                AppAction::None
+            }
+            Some(KeyAction::MoveDown) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.scroll_details_down(1);
+                }
+                AppAction::None
+            }
+            Some(KeyAction::ScrollPageUp) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.scroll_details_up(5);
+                }
+                AppAction::None
+            }
+            Some(KeyAction::ScrollPageDown) => {
+                if let Some(modal) = self.approval_queue.front_mut() {
+                    modal.scroll_details_down(5);
+                }
+                AppAction::None
+            }
+            _ => AppAction::None,
         }
     }
 
@@ -2748,51 +2790,37 @@ impl App {
     }
 
     fn handle_project_picker_key(&mut self, key: KeyEvent) -> AppAction {
-        match key {
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
+        let dispatch = self.keymap.dispatch(KeyContext::ProjectPicker, key);
+        match dispatch.action {
+            Some(KeyAction::Cancel) => {
                 self.composer_mode = ComposerMode::Chat;
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            } => self
+            Some(KeyAction::Accept) => self
                 .picker
                 .selected_project()
                 .map(|project| AppAction::OpenProject(project.root))
                 .unwrap_or(AppAction::None),
-            KeyEvent {
-                code: KeyCode::Up, ..
-            } => {
+            Some(KeyAction::MoveUp) => {
                 self.picker.selected = self.picker.selected.saturating_sub(1);
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            } => {
+            Some(KeyAction::MoveDown) => {
                 self.picker.selected = self.picker.selected.saturating_add(1);
                 self.picker.clamp_selection();
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
+            Some(KeyAction::Backspace) => {
                 self.picker.filter.pop();
                 self.picker.clamp_selection();
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                self.picker.filter.push(ch);
-                self.picker.selected = 0;
-                self.picker.clamp_selection();
+            None => {
+                if let Some(ch) = dispatch.text {
+                    self.picker.filter.push(ch);
+                    self.picker.selected = 0;
+                    self.picker.clamp_selection();
+                }
                 AppAction::None
             }
             _ => AppAction::None,
@@ -2800,61 +2828,42 @@ impl App {
     }
 
     fn handle_modal_picker_key(&mut self, key: KeyEvent) -> AppAction {
-        match key {
-            KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
+        let dispatch = self.keymap.dispatch(KeyContext::ModalPicker, key);
+        match dispatch.action {
+            Some(KeyAction::Cancel) => {
                 self.modal_picker = None;
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Enter,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Tab, ..
-            } => {
+            Some(KeyAction::Accept) => {
                 let Some(picker) = self.modal_picker.take() else {
                     return AppAction::None;
                 };
                 self.accept_modal_picker(picker.kind, picker.accept())
             }
-            KeyEvent {
-                code: KeyCode::Up, ..
-            } => {
+            Some(KeyAction::MoveUp) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_prev();
                 }
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            } => {
+            Some(KeyAction::MoveDown) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_next();
                 }
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            Some(KeyAction::ToggleSelectedTool) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     if picker.is_multi() {
                         picker.toggle_selected();
-                    } else {
-                        self.composer.insert_char(' ', Instant::now());
+                    } else if let Some(ch) = dispatch.text {
+                        self.composer.insert_char(ch, Instant::now());
                         self.update_slash_picker_filter();
                     }
                 }
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
+            Some(KeyAction::Backspace) => {
                 if self
                     .modal_picker
                     .as_ref()
@@ -2867,20 +2876,18 @@ impl App {
                 }
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                if self
-                    .modal_picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
-                {
-                    self.composer.insert_char(ch, Instant::now());
-                    self.update_slash_picker_filter();
-                } else if let Some(picker) = self.modal_picker.as_mut() {
-                    picker.push_filter(ch);
+            None => {
+                if let Some(ch) = dispatch.text {
+                    if self
+                        .modal_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
+                    {
+                        self.composer.insert_char(ch, Instant::now());
+                        self.update_slash_picker_filter();
+                    } else if let Some(picker) = self.modal_picker.as_mut() {
+                        picker.push_filter(ch);
+                    }
                 }
                 AppAction::None
             }
@@ -2916,6 +2923,17 @@ impl App {
     #[cfg(test)]
     pub fn test_history_render_count(&self) -> usize {
         self.history.render_count()
+    }
+
+    #[cfg(test)]
+    pub fn test_apply_tui_config_content(&mut self, content: &str) {
+        self.apply_tui_config_content(content);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_keymap(&mut self, keymap: KeymapRegistry) {
+        self.vim.set_enabled(keymap.vim_mode_enabled());
+        self.keymap = keymap;
     }
 }
 
@@ -3135,6 +3153,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let project = client.open_project(&root).await?;
     let history_path = history_path_for_root(&project.root);
     let mut app = App::with_history_path(project, Some(history_path));
+    if let Some(config_content) = load_tui_config_content() {
+        app.apply_tui_config_content(&config_content);
+    }
     let mut terminal = TerminalSession::start()?;
     apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
@@ -3307,6 +3328,11 @@ fn history_path_for_root(root: &std::path::Path) -> PathBuf {
         .join("refact")
         .join("tui_history")
         .join(format!("{hash}.json"))
+}
+
+fn load_tui_config_content() -> Option<String> {
+    let path = KeymapRegistry::default_config_path()?;
+    fs::read_to_string(path).ok()
 }
 
 fn stable_path_hash(path: &std::path::Path) -> String {
@@ -4219,6 +4245,7 @@ fn approval_patch(modal: &ApprovalModalState) -> Value {
 mod tests {
     use super::*;
     use crate::approvals::PauseReason;
+    use crossterm::event::KeyCode;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Condvar, Mutex};
@@ -4407,6 +4434,76 @@ mod tests {
         app.test_push_history_item(TranscriptItem::Notice("native".to_string()));
         assert_eq!(app.visible_transcript().len(), 0);
         assert_eq!(app.history_pending_count(), 2);
+    }
+
+    #[test]
+    fn app_config_enables_vim_theme_and_custom_binding() {
+        let mut app = App::new(project());
+        app.test_apply_tui_config_content(
+            r#"
+vim_mode = true
+
+[bindings]
+send = "ctrl-s"
+
+[theme]
+name = "plain"
+"#,
+        );
+        assert!(app.vim_enabled());
+        assert_eq!(app.vim_mode(), VimMode::Normal);
+        assert_eq!(app.theme().name(), "plain");
+        app.composer.set_text("hello");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "hello"
+        ));
+    }
+
+    #[test]
+    fn app_dispatches_through_active_registry_binding() {
+        let mut app = App::new(project());
+        let keymap = KeymapRegistry::from_toml_str(
+            r#"
+[bindings]
+new-chat = "ctrl-x"
+"#,
+        )
+        .unwrap();
+        app.test_set_keymap(keymap);
+        let old_chat_id = app.chat_id().to_string();
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            AppAction::SubscribeCurrent
+        );
+        assert_ne!(app.chat_id(), old_chat_id);
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+    }
+
+    #[test]
+    fn app_vim_mode_basic_motions_and_delete_line() {
+        let mut app = App::new(project());
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        assert!(app.vim_enabled());
+        assert_eq!(app.vim_mode(), VimMode::Normal);
+        app.composer.set_text("alpha beta");
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composer.cursor_char_offset(), 6);
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composer.cursor_char_offset(), 0);
+        app.composer.set_text("alpha beta\ngamma");
+        app.handle_key(key(KeyCode::Char('b')));
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(app.composer(), "alpha beta\n");
+        app.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(app.vim_mode(), VimMode::Insert);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.vim_mode(), VimMode::Normal);
     }
 
     #[test]

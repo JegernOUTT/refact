@@ -156,6 +156,28 @@ impl ComposerState {
         self.editor.move_line_end(select);
     }
 
+    pub fn move_word_forward(&mut self, select: bool) {
+        self.cancel_edit_tracking();
+        self.editor.move_word_forward(select);
+    }
+
+    pub fn move_word_backward(&mut self, select: bool) {
+        self.cancel_edit_tracking();
+        self.editor.move_word_backward(select);
+    }
+
+    pub fn delete_current_line(&mut self) {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.editor.delete_current_line();
+    }
+
+    pub fn open_line_below(&mut self) {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.editor.open_line_below();
+    }
+
     pub fn backspace(&mut self) {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
@@ -353,6 +375,57 @@ impl TextEditor {
             .map(|idx| self.cursor + idx)
             .unwrap_or(self.text.len());
         self.set_cursor(end, select);
+    }
+
+    pub fn move_word_forward(&mut self, select: bool) {
+        let target = next_word_start(&self.text, self.cursor).unwrap_or(self.text.len());
+        self.set_cursor(target, select);
+    }
+
+    pub fn move_word_backward(&mut self, select: bool) {
+        let target = previous_word_start(&self.text, self.cursor).unwrap_or(0);
+        self.set_cursor(target, select);
+    }
+
+    pub fn delete_current_line(&mut self) {
+        let start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        let mut end = self.text[self.cursor..]
+            .find('\n')
+            .map(|idx| self.cursor + idx + 1)
+            .unwrap_or(self.text.len());
+        if start == 0 && end == self.text.len() {
+            self.clear();
+            return;
+        }
+        if end == self.text.len() && start > 0 {
+            end = self.text.len();
+        }
+        self.text.replace_range(start..end, "");
+        self.cursor = start.min(self.text.len());
+        self.selection_anchor = None;
+    }
+
+    pub fn open_line_below(&mut self) {
+        let end = self.text[self.cursor..]
+            .find('\n')
+            .map(|idx| self.cursor + idx)
+            .unwrap_or(self.text.len());
+        let insert_at = end;
+        if insert_at == self.text.len() {
+            if self.text.is_empty() {
+                self.text.push('\n');
+            } else {
+                self.text.push('\n');
+            }
+            self.cursor = self.text.len();
+        } else {
+            self.text.insert(insert_at, '\n');
+            self.cursor = insert_at + 1;
+        }
+        self.selection_anchor = None;
     }
 
     pub fn can_move_up(&self) -> bool {
@@ -741,6 +814,37 @@ fn next_boundary(text: &str, cursor: usize) -> Option<usize> {
         .or(Some(text.len()))
 }
 
+fn next_word_start(text: &str, cursor: usize) -> Option<usize> {
+    let mut seen_word = false;
+    for (offset, ch) in text[cursor..].char_indices() {
+        let idx = cursor + offset;
+        if ch.is_alphanumeric() || ch == '_' {
+            if !seen_word && idx > cursor {
+                return Some(idx);
+            }
+            seen_word = true;
+        } else if seen_word {
+            seen_word = false;
+        }
+    }
+    None
+}
+
+fn previous_word_start(text: &str, cursor: usize) -> Option<usize> {
+    let before = &text[..cursor];
+    let mut in_word = false;
+    let mut start = None;
+    for (idx, ch) in before.char_indices().rev() {
+        if ch.is_alphanumeric() || ch == '_' {
+            in_word = true;
+            start = Some(idx);
+        } else if in_word {
+            return start;
+        }
+    }
+    start
+}
+
 fn clamp_boundary(text: &str, target: usize) -> usize {
     if target >= text.len() {
         return text.len();
@@ -841,6 +945,23 @@ mod tests {
         editor.insert_str("XY");
         assert_eq!(editor.text(), "abXY");
         assert_eq!(editor.cursor(), 4);
+    }
+
+    #[test]
+    fn vim_editor_helpers_move_words_and_delete_line() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.set_text("alpha beta");
+        composer.move_word_backward(false);
+        assert_eq!(composer.cursor_char_offset(), 6);
+        composer.move_word_backward(false);
+        assert_eq!(composer.cursor_char_offset(), 0);
+        composer.set_text("alpha beta\ngamma");
+        composer.move_word_backward(false);
+        composer.delete_current_line();
+        assert_eq!(composer.text(), "alpha beta\n");
+        composer.open_line_below();
+        composer.insert_text("delta");
+        assert_eq!(composer.text(), "alpha beta\n\ndelta");
     }
 
     #[test]

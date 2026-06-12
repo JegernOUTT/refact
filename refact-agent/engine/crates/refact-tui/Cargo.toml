@@ -16,6 +16,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 syntect = "5"
 textwrap = "0.16.2"
 thiserror = "2.0.12"
+toml = "0.8"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 unicode-width = "0.2"

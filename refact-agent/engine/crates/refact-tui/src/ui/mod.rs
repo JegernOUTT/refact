@@ -7,8 +7,10 @@ use ratatui::Frame;
 use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
 use crate::events_pane::{render_event_lines, render_worker_lines};
+use crate::keymap::{HelpRow, KeyAction, KeyContext};
 use crate::overlay::PagerMode;
 use crate::pickers::PickerState;
+use crate::theme::ThemeRole;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub mod footer;
@@ -65,7 +67,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_approval_modal(frame, modal, area);
     }
     if app.help_open() {
-        render_help(frame, area);
+        render_help(frame, app, area);
     }
 }
 
@@ -117,17 +119,37 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .current_project()
         .map(|project| project.slug.as_str())
         .unwrap_or("no project");
+    let new = app
+        .keymap()
+        .binding_label(KeyContext::Main, KeyAction::NewChat)
+        .unwrap_or_else(|| "Ctrl-N".to_string());
+    let projects = app
+        .keymap()
+        .binding_label(KeyContext::Main, KeyAction::OpenProjects)
+        .unwrap_or_else(|| "Ctrl-P".to_string());
+    let model = app
+        .keymap()
+        .binding_label(KeyContext::Main, KeyAction::OpenModels)
+        .unwrap_or_else(|| "Ctrl-M".to_string());
+    let mode = app
+        .keymap()
+        .binding_label(KeyContext::Main, KeyAction::OpenModes)
+        .unwrap_or_else(|| "Ctrl-O".to_string());
+    let help = app
+        .keymap()
+        .binding_label(KeyContext::Main, KeyAction::ShowHelp)
+        .unwrap_or_else(|| "?".to_string());
+    let vim = if app.vim_enabled() {
+        format!(" · vim {}", app.vim_mode().label())
+    } else {
+        String::new()
+    };
     let line = Line::from(vec![
-        Span::styled(
-            "refact ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("refact ", app.theme().style(ThemeRole::Accent)),
         Span::raw(project),
         Span::styled(
-            "  Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mode · F2 events · ? help",
-            Style::default().fg(Color::DarkGray),
+            format!("  {new} new · {projects} projects · {model} model · {mode} mode · {help} help{vim}"),
+            app.theme().style(ThemeRole::Muted),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -209,10 +231,11 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area
     };
     let title = match app.session_state() {
-        SessionState::Generating => " message (Enter queues · Esc cancels) ",
-        SessionState::Paused => " approval pending ",
-        SessionState::WaitingUserInput => " waiting for input ",
-        _ => " message ",
+        SessionState::Generating => " message (Enter queues · Esc cancels) ".to_string(),
+        SessionState::Paused => " approval pending ".to_string(),
+        SessionState::WaitingUserInput => " waiting for input ".to_string(),
+        _ if app.vim_enabled() => format!(" message · vim {} ", app.vim_mode().label()),
+        _ => " message ".to_string(),
     };
     let inner_width = input_area.width.saturating_sub(2).max(1);
     let max_rows = input_area.height.saturating_sub(2).max(1);
@@ -227,7 +250,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(Block::default().borders(Borders::ALL).title(title.as_str()))
             .wrap(Wrap { trim: false }),
         input_area,
     );
@@ -469,28 +492,50 @@ fn render_events_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
+fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let rows = app.keymap_help_rows();
+    let row_count = rows.len().min(24) as u16;
     let popup = centered(
         area,
-        area.width.saturating_sub(8).min(78),
-        15.min(area.height),
+        area.width.saturating_sub(8).min(92),
+        row_count.saturating_add(4).min(area.height),
     );
     frame.render_widget(Clear, popup);
-    let lines = vec![
-        Line::from("Enter send · Shift-Enter newline · Esc cancel/close"),
-        Line::from("During generation: Enter queues · empty Up selects queue · Enter edits · Delete removes"),
-        Line::from("Ctrl-N new chat · /resume sessions · /fork branch · /rename title · /archive remove"),
-        Line::from("Ctrl-P projects · Ctrl-M models · Ctrl-O modes"),
-        Line::from("F2 daemon events/workers · Tab select next tool · Enter/Space expand tool"),
-        Line::from("Approvals: y approve once · a approve for chat · n reject · v details · Esc back"),
-        Line::from("Ctrl-R toggle reasoning · PageUp/PageDown scroll · Ctrl-Q quit"),
-    ];
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("Theme ", app.theme().style(ThemeRole::Muted)),
+        Span::raw(app.theme().name().to_string()),
+        Span::styled(" · vim ", app.theme().style(ThemeRole::Muted)),
+        Span::raw(if app.vim_enabled() {
+            app.vim_mode().label().to_string()
+        } else {
+            "off".to_string()
+        }),
+    ]));
+    lines.push(Line::from(""));
+    for row in rows.into_iter().take(24) {
+        lines.push(help_row_line(row, app));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" help "))
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn help_row_line(row: HelpRow, app: &App) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:>12} ", row.context.label()),
+            app.theme().style(ThemeRole::Muted),
+        ),
+        Span::styled(
+            format!("{:<20}", row.bindings),
+            app.theme().style(ThemeRole::Highlight),
+        ),
+        Span::raw(row.description.to_string()),
+    ])
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -523,6 +568,24 @@ mod tests {
             worker: None,
             cron_pending: None,
         }
+    }
+
+    #[test]
+    fn help_rows_are_generated_from_active_keymap() {
+        let app = App::new(project());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_help(frame, &app, frame.area()))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("show generated keymap help"));
+        assert!(text.contains("Ctrl-N"));
     }
 
     #[test]
@@ -616,10 +679,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        modal.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('v'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
+        modal.toggle_details();
         app.test_set_approval(modal);
 
         let backend = TestBackend::new(100, 40);

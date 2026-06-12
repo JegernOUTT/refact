@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -130,17 +129,6 @@ fn find_diff_field(value: &Value) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalKeyAction {
-    None,
-    ApproveOnce,
-    ApproveForChat,
-    Deny,
-    ToggleDetails,
-    Back,
-    ScrollDetails,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApprovalQueueKey {
     scope: String,
@@ -258,41 +246,27 @@ impl ApprovalModalState {
             .collect()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> ApprovalKeyAction {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => ApprovalKeyAction::ApproveOnce,
-            KeyCode::Char('a') | KeyCode::Char('A') => ApprovalKeyAction::ApproveForChat,
-            KeyCode::Char('n') | KeyCode::Char('N') => ApprovalKeyAction::Deny,
-            KeyCode::Char('v') | KeyCode::Char('V') => {
-                self.details_open = !self.details_open;
-                self.detail_scroll = 0;
-                ApprovalKeyAction::ToggleDetails
-            }
-            KeyCode::Esc => {
-                if self.details_open {
-                    self.details_open = false;
-                    self.detail_scroll = 0;
-                }
-                ApprovalKeyAction::Back
-            }
-            KeyCode::Up if self.details_open => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(1);
-                ApprovalKeyAction::ScrollDetails
-            }
-            KeyCode::Down if self.details_open => {
-                self.detail_scroll = self.detail_scroll.saturating_add(1);
-                ApprovalKeyAction::ScrollDetails
-            }
-            KeyCode::PageUp if self.details_open => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(5);
-                ApprovalKeyAction::ScrollDetails
-            }
-            KeyCode::PageDown if self.details_open => {
-                self.detail_scroll = self.detail_scroll.saturating_add(5);
-                ApprovalKeyAction::ScrollDetails
-            }
-            KeyCode::Enter => ApprovalKeyAction::None,
-            _ => ApprovalKeyAction::None,
+    pub fn toggle_details(&mut self) {
+        self.details_open = !self.details_open;
+        self.detail_scroll = 0;
+    }
+
+    pub fn back_from_details(&mut self) {
+        if self.details_open {
+            self.details_open = false;
+            self.detail_scroll = 0;
+        }
+    }
+
+    pub fn scroll_details_up(&mut self, amount: usize) {
+        if self.details_open {
+            self.detail_scroll = self.detail_scroll.saturating_sub(amount);
+        }
+    }
+
+    pub fn scroll_details_down(&mut self, amount: usize) {
+        if self.details_open {
+            self.detail_scroll = self.detail_scroll.saturating_add(amount);
         }
     }
 
@@ -542,12 +516,7 @@ fn is_shell_like(tool_name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::render::wrapping::line_to_plain;
-    use crossterm::event::KeyModifiers;
     use serde_json::json;
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::empty())
-    }
 
     fn reason(id: &str) -> PauseReason {
         PauseReason {
@@ -571,52 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn approval_keymap_maps_decisions_without_enter_default() {
-        let mut modal = ApprovalModalState::new(vec![]);
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Char('y'))),
-            ApprovalKeyAction::ApproveOnce
-        );
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Char('a'))),
-            ApprovalKeyAction::ApproveForChat
-        );
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Char('n'))),
-            ApprovalKeyAction::Deny
-        );
-        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Enter)),
-            ApprovalKeyAction::None
-        );
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Char('v'))),
-            ApprovalKeyAction::ToggleDetails
-        );
-        assert!(modal.details_open());
-        assert!(modal.full_args());
-    }
-
-    #[test]
     fn detail_toggle_back_and_scroll_state_machine() {
         let mut modal = ApprovalModalState::new(vec![reason("call-1")]);
         assert!(!modal.details_open());
         assert_eq!(modal.detail_scroll(), 0);
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Char('v'))),
-            ApprovalKeyAction::ToggleDetails
-        );
+        modal.toggle_details();
         assert!(modal.details_open());
-        assert_eq!(
-            modal.handle_key(key(KeyCode::Down)),
-            ApprovalKeyAction::ScrollDetails
-        );
+        modal.scroll_details_down(1);
         assert_eq!(modal.detail_scroll(), 1);
-        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
+        modal.back_from_details();
         assert!(!modal.details_open());
         assert_eq!(modal.detail_scroll(), 0);
-        assert_eq!(modal.handle_key(key(KeyCode::Esc)), ApprovalKeyAction::Back);
+        modal.back_from_details();
         assert!(!modal.details_open());
     }
 
@@ -693,7 +628,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        modal.handle_key(key(KeyCode::Char('v')));
+        modal.toggle_details();
 
         let rendered = text(&render_modal_lines(&modal, 100));
         assert!(rendered.contains("shell command"));
