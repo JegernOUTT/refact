@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   CHAT_COMPANION_BUBBLE_GAP_MS,
+  CHAT_COMPANION_OPEN_QUIET_MS,
   CHAT_COMPANION_STARTUP_QUIET_MS,
   deriveChatQuietUntil,
   gateChatCompanionBubble,
+  initialChatQuietUntil,
   isChatCompanionWorthyRuntimeEvent,
+  opportunityContentKey,
+  runtimeEventContentKey,
+  speechContentKey,
+  suggestionContentKey,
   type ChatCompanionGateInput,
 } from "../features/Buddy/buddyChatCompanionPolicy";
 import type { BuddyRuntimeEvent } from "../features/Buddy/types";
@@ -158,6 +164,22 @@ describe("gateChatCompanionBubble", () => {
     expect(verdict.retryAtMs).toBeNull();
   });
 
+  it("queued messages mute even urgent and already-shown bubbles", () => {
+    expect(
+      gateChatCompanionBubble(
+        makeGateInput({ queuedMessageCount: 1, bypassGates: true }),
+      ),
+    ).toEqual({ allowed: false, reason: "queue_busy", retryAtMs: null });
+    expect(
+      gateChatCompanionBubble(
+        makeGateInput({
+          queuedMessageCount: 1,
+          candidateAlreadyImpressed: true,
+        }),
+      ),
+    ).toEqual({ allowed: false, reason: "queue_busy", retryAtMs: null });
+  });
+
   it("stays quiet during the startup minute and retries when it ends", () => {
     const quietUntilMs = 1_030_000;
     const verdict = gateChatCompanionBubble(makeGateInput({ quietUntilMs }));
@@ -212,7 +234,6 @@ describe("gateChatCompanionBubble", () => {
     const verdict = gateChatCompanionBubble(
       makeGateInput({
         bypassGates: true,
-        queuedMessageCount: 3,
         quietUntilMs: 2_000_000,
         lastAmbientImpressionAtMs: 999_999,
       }),
@@ -261,6 +282,91 @@ describe("deriveChatQuietUntil", () => {
         hasUserMessages: false,
         nowMs: 90_000,
       }),
+    ).toBeNull();
+  });
+
+  it("extends an existing window when the first user message lands inside it", () => {
+    expect(
+      deriveChatQuietUntil({
+        previousQuietUntilMs: 100_000,
+        hadUserMessages: false,
+        hasUserMessages: true,
+        nowMs: 90_000,
+      }),
+    ).toBe(90_000 + CHAT_COMPANION_STARTUP_QUIET_MS);
+    expect(
+      deriveChatQuietUntil({
+        previousQuietUntilMs: 500_000,
+        hadUserMessages: false,
+        hasUserMessages: true,
+        nowMs: 90_000,
+      }),
+    ).toBe(500_000);
+  });
+});
+
+describe("initialChatQuietUntil", () => {
+  it("starts the open-chat quiet window only for chats with history", () => {
+    expect(
+      initialChatQuietUntil({ hasUserMessages: true, nowMs: 10_000 }),
+    ).toBe(10_000 + CHAT_COMPANION_OPEN_QUIET_MS);
+    expect(
+      initialChatQuietUntil({ hasUserMessages: false, nowMs: 10_000 }),
+    ).toBeNull();
+  });
+});
+
+describe("notification content keys", () => {
+  it("derives stable speech keys from dedupe keys and skips ambient speech", () => {
+    expect(speechContentKey({ dedupe_key: "quest_prompt_start_setup" })).toBe(
+      "content:speech:quest_prompt_start_setup",
+    );
+    expect(speechContentKey({ dedupe_key: undefined })).toBeNull();
+    expect(
+      speechContentKey({ speech_intent: "humor", dedupe_key: "anything" }),
+    ).toBeNull();
+    expect(speechContentKey({ dedupe_key: "speech_chat_reaction" })).toBeNull();
+  });
+
+  it("derives runtime keys from dedupe keys with an error-text fallback", () => {
+    expect(
+      runtimeEventContentKey(
+        makeEvent({ dedupe_key: "llm_error:overloaded", status: "failed" }),
+        "LLM error: Overloaded",
+      ),
+    ).toBe("content:runtime:llm_error_overloaded");
+    expect(
+      runtimeEventContentKey(
+        makeEvent({ signal_type: "chat_error", status: "failed" }),
+        "LLM error:   Overloaded  ",
+      ),
+    ).toBe("content:runtime:error:llm error: overloaded");
+    expect(
+      runtimeEventContentKey(makeEvent({ status: "info" }), "Plain notice"),
+    ).toBeNull();
+    expect(
+      runtimeEventContentKey(
+        makeEvent({ signal_type: "speech_humor", dedupe_key: "stable" }),
+        "ha",
+      ),
+    ).toBeNull();
+  });
+
+  it("derives suggestion and opportunity keys from stable fields", () => {
+    expect(
+      suggestionContentKey({
+        suggestion_type: "quest_start_setup",
+        title: "Warm up this workspace",
+      }),
+    ).toBe("content:suggestion:quest_start_setup:warm up this workspace");
+    expect(
+      opportunityContentKey({
+        kind: "task_health",
+        cooldown_key: "task_health:stuck:global",
+      }),
+    ).toBe("content:opportunity:task_health:task_health:stuck:global");
+    expect(
+      opportunityContentKey({ kind: "task_health", cooldown_key: "  " }),
     ).toBeNull();
   });
 });

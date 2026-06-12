@@ -108,7 +108,13 @@ import {
   setIsWaitingForResponse,
   setPreventSend,
   setThreadPauseReasons,
+  applyChatEvent,
 } from "../features/Chat/Thread/actions";
+import { CHAT_COMPANION_OPEN_QUIET_MS } from "../features/Buddy/buddyChatCompanionPolicy";
+import type {
+  ChatEventEnvelope,
+  QueuedItem,
+} from "../services/refact/chatSubscription";
 import {
   addBuddyCrashBreadcrumb,
   beginBuddyCrashSession,
@@ -388,6 +394,39 @@ function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
     created_at: new Date().toISOString(),
     controls: [],
     ...overrides,
+  };
+}
+
+function makeChatThreadSnapshot(args?: {
+  queuedItems?: QueuedItem[];
+  withUserMessage?: boolean;
+}): ChatEventEnvelope {
+  return {
+    chat_id: "chat-a",
+    seq: "1",
+    type: "snapshot",
+    thread: {
+      id: "chat-a",
+      title: "Chat A",
+      model: "gpt-test",
+      mode: "AGENT",
+      tool_use: "agent",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: true,
+      checkpoints_enabled: true,
+      is_title_generated: false,
+    },
+    runtime: {
+      state: "idle",
+      paused: false,
+      error: null,
+      queue_size: args?.queuedItems?.length ?? 0,
+      pause_reasons: [],
+      queued_items: args?.queuedItems ?? [],
+    },
+    background_agents: [],
+    messages: args?.withUserMessage ? [{ role: "user", content: "Hello" }] : [],
   };
 }
 
@@ -1671,6 +1710,259 @@ describe("Buddy chat notification freshness", () => {
       );
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  test("queued user messages hide the chat companion bubble until the queue drains", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-queue-busy",
+      title: "Queue busy notice",
+      controls: [
+        {
+          id: "dismiss-queue-busy",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: "runtime-queue-busy",
+          style: "ghost",
+        },
+      ],
+    });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+    store.dispatch(
+      applyChatEvent(
+        makeChatThreadSnapshot({
+          queuedItems: [
+            {
+              client_request_id: "queued-1",
+              priority: false,
+              command_type: "user_message",
+              preview: "queued message",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(container, "runtime:runtime-queue-busy");
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "2",
+        type: "queue_updated",
+        queue_size: 0,
+        queued_items: [],
+      }),
+    );
+    await expectCompanionNotification(container, "runtime:runtime-queue-busy");
+  });
+
+  test("error runtime event with the same dedupe key is shown only once across re-emissions", async () => {
+    const store = setUpStore();
+    const firstError = makeChatRuntimeEvent({
+      id: "runtime-error-first",
+      signal_type: "chat_error",
+      title: "LLM error",
+      description: "upstream returned 429",
+      status: "failed",
+      dedupe_key: "llm_error:overloaded",
+      controls: [
+        {
+          id: "dismiss-error-first",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: "runtime-error-first",
+          style: "ghost",
+        },
+      ],
+    });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [firstError] })),
+    );
+
+    const rendered = renderBuddyChatCompanion(store, "chat-a");
+    await expectCompanionNotification(
+      rendered.container,
+      "runtime:runtime-error-first",
+    );
+    await waitFor(() => {
+      expect(
+        "content:runtime:llm_error_overloaded" in
+          selectSeenNotificationIds(store.getState()),
+      ).toBe(true);
+    });
+
+    rendered.unmount();
+    store.dispatch(
+      enqueueRuntimeEvent({
+        ...firstError,
+        id: "runtime-error-second",
+        created_at: new Date().toISOString(),
+      }),
+    );
+    const remounted = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(
+      remounted.container,
+      "runtime:runtime-error-second",
+    );
+  });
+
+  test("regenerated suggestion with the same type and title is shown only once", async () => {
+    const store = setUpStore();
+    const firstSuggestion: BuddySuggestion = {
+      id: "quest-suggestion-start_setup-100",
+      suggestion_type: "quest_start_setup",
+      title: "Warm up this workspace",
+      description: "Kick off setup so Buddy can help proactively.",
+      created_at: new Date().toISOString(),
+      dismissed: false,
+      controls: [],
+    };
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(addBuddySuggestion(firstSuggestion));
+
+    const rendered = renderBuddyChatCompanion(store, "chat-a");
+    await expectCompanionNotification(
+      rendered.container,
+      "suggestion:quest-suggestion-start_setup-100",
+    );
+    await waitFor(() => {
+      expect(
+        "content:suggestion:quest_start_setup:warm up this workspace" in
+          selectSeenNotificationIds(store.getState()),
+      ).toBe(true);
+    });
+
+    rendered.unmount();
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot({
+          state: {
+            ...makeState(),
+            suggestion_state: [
+              {
+                ...firstSuggestion,
+                id: "quest-suggestion-start_setup-200",
+                created_at: new Date().toISOString(),
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const remounted = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(
+      remounted.container,
+      "suggestion:quest-suggestion-start_setup-200",
+    );
+  });
+
+  test("opening a chat with history keeps the companion quiet for the open window", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      store.dispatch(
+        applyChatEvent(makeChatThreadSnapshot({ withUserMessage: true })),
+      );
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(
+        addBuddySuggestion({
+          id: "quiet-window-suggestion",
+          suggestion_type: "setup",
+          title: "Configure linting",
+          description: "Set up the linter for this repo.",
+          created_at: "2024-01-01T00:00:00Z",
+          dismissed: false,
+          controls: [],
+        }),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+
+      // Recomputing the gate inside the quiet window keeps the bubble hidden.
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS - 1_000);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-inside", kind: "actionable" }),
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+
+      // After the open window elapses the suggestion is allowed through.
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS + 1);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-after", kind: "actionable" }),
+      );
+      await expectCompanionNotification(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("companion stays quiet when the chat snapshot arrives after mount", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      store.dispatch(createChatWithId({ id: "chat-a" }));
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(
+        addBuddySuggestion({
+          id: "late-snapshot-suggestion",
+          suggestion_type: "setup",
+          title: "Configure linting",
+          description: "Set up the linter for this repo.",
+          created_at: "2024-01-01T00:00:00Z",
+          dismissed: false,
+          controls: [],
+        }),
+      );
+
+      // Thread exists but its snapshot has not arrived: history is unknown,
+      // so nothing may show yet.
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+
+      // The snapshot reveals existing user history: the open-chat quiet
+      // window arms from this moment.
+      store.dispatch(
+        applyChatEvent(makeChatThreadSnapshot({ withUserMessage: true })),
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS + 1);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-late", kind: "actionable" }),
+      );
+      await expectCompanionNotification(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 });

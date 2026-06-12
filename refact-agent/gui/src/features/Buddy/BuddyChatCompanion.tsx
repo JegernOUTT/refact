@@ -31,6 +31,8 @@ import {
 import {
   selectMessagesById,
   selectQueuedItemsById,
+  selectSnapshotReceivedById,
+  selectThreadById,
   startBuddyInvestigation,
 } from "../Chat/Thread";
 import { isUserMessage } from "../../services/refact/types";
@@ -77,11 +79,16 @@ import {
 import {
   deriveChatQuietUntil,
   gateChatCompanionBubble,
+  initialChatQuietUntil,
   isAmbientToken,
   isChatCompanionWorthyRuntimeEvent,
   isDurableSpeechToken,
   isLiveChatReactionEvent,
   normalizedPolicyToken,
+  opportunityContentKey,
+  runtimeEventContentKey,
+  speechContentKey,
+  suggestionContentKey,
 } from "./buddyChatCompanionPolicy";
 
 import styles from "./BuddyChatCompanion.module.css";
@@ -93,6 +100,7 @@ interface Props {
 interface NotificationItem {
   id: string;
   sourceId: string;
+  contentKey?: string | null;
   text: string;
   createdAt: string;
   source:
@@ -501,6 +509,14 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const hasUserMessages = useAppSelector((state) =>
     selectMessagesById(state, chatId).some(isUserMessage),
   );
+  // History is "known" when the chat thread either does not exist locally
+  // (standalone contexts) or has received its backend snapshot. Until then
+  // hasUserMessages is unreliable and the quiet window must not be skipped.
+  const historyKnown = useAppSelector(
+    (state) =>
+      selectThreadById(state, chatId) == null ||
+      selectSnapshotReceivedById(state, chatId),
+  );
 
   const buddy = useBuddyState();
   const triggerBuddySignal = buddy.signal;
@@ -532,19 +548,41 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const lastShownNotificationRef = useRef<NotificationItem | null>(null);
   const quietStateRef = useRef<{
     chatId: string;
+    historyKnown: boolean;
     hadUserMessages: boolean;
     quietUntilMs: number | null;
-  }>({ chatId, hadUserMessages: hasUserMessages, quietUntilMs: null });
+  }>({
+    chatId,
+    historyKnown,
+    hadUserMessages: hasUserMessages,
+    quietUntilMs: historyKnown
+      ? initialChatQuietUntil({ hasUserMessages, nowMs: Date.now() })
+      : null,
+  });
 
   if (quietStateRef.current.chatId !== chatId) {
     quietStateRef.current = {
       chatId,
+      historyKnown,
       hadUserMessages: hasUserMessages,
-      quietUntilMs: null,
+      quietUntilMs: historyKnown
+        ? initialChatQuietUntil({ hasUserMessages, nowMs: Date.now() })
+        : null,
+    };
+  } else if (!quietStateRef.current.historyKnown && historyKnown) {
+    quietStateRef.current = {
+      chatId,
+      historyKnown: true,
+      hadUserMessages: hasUserMessages,
+      quietUntilMs: initialChatQuietUntil({
+        hasUserMessages,
+        nowMs: Date.now(),
+      }),
     };
   } else {
     quietStateRef.current = {
       chatId,
+      historyKnown: quietStateRef.current.historyKnown,
       hadUserMessages: quietStateRef.current.hadUserMessages || hasUserMessages,
       quietUntilMs: deriveChatQuietUntil({
         previousQuietUntilMs: quietStateRef.current.quietUntilMs,
@@ -613,8 +651,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   );
 
   const dismissNotification = useCallback(
-    (id: string) => {
+    (id: string, contentKey?: string | null) => {
       dispatch(markBuddyNotificationSeen(id));
+      if (contentKey != null) {
+        dispatch(markBuddyNotificationSeen(contentKey));
+      }
       setDismissedNotificationIds((prev) => new Set(prev).add(id));
       setActiveNotificationId((current) => (current === id ? null : current));
       setPinnedReaction((current) =>
@@ -635,9 +676,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   }, []);
 
   const notificationCandidates = useMemo<NotificationCandidate[]>(() => {
-    const isEligible = (id: string) =>
+    const isEligible = (id: string, contentKey?: string | null) =>
       !dismissedNotificationIds.has(id) &&
-      (!(id in seenNotificationIds) || activeNotificationId === id);
+      ((!(id in seenNotificationIds) &&
+        (contentKey == null || !(contentKey in seenNotificationIds))) ||
+        activeNotificationId === id);
 
     const chatDiagnostic =
       diagnostics.find((d) => d.chat_id === chatId) ?? null;
@@ -650,13 +693,15 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       !isErrorAlertSpeech(activeSpeech)
     ) {
       const id = notificationIdentity("speech", activeSpeech.id);
-      if (isEligible(id)) {
+      const contentKey = speechContentKey(activeSpeech);
+      if (isEligible(id, contentKey)) {
         candidates.push({
           kind: classifySpeech(activeSpeech),
           rank: 10,
           notification: {
             id,
             sourceId: activeSpeech.id,
+            contentKey,
             text: activeSpeech.text,
             createdAt: activeSpeech.created_at,
             source: "speech",
@@ -686,7 +731,9 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         continue;
       }
       const id = notificationIdentity("runtime", event.id);
-      if (!isEligible(id)) continue;
+      const text = formatBuddyRuntimeEventText(event);
+      const contentKey = runtimeEventContentKey(event, text);
+      if (!isEligible(id, contentKey)) continue;
       candidates.push({
         kind: classifyRuntimeEvent(event),
         rank: runtimeEventRank(event, index),
@@ -694,7 +741,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         notification: {
           id,
           sourceId: event.id,
-          text: formatBuddyRuntimeEventText(event),
+          contentKey,
+          text,
           createdAt: event.created_at,
           source: "runtime",
           controls: runtimeEventControls(event, errorControls),
@@ -706,10 +754,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
     suggestions.forEach((suggestion: BuddySuggestion, index) => {
       const id = notificationIdentity("suggestion", suggestion.id);
+      const contentKey = suggestionContentKey(suggestion);
       if (
         suggestion.dismissed ||
         !isChatCompanionSuggestion(suggestion) ||
-        !isEligible(id)
+        !isEligible(id, contentKey)
       ) {
         return;
       }
@@ -719,6 +768,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         notification: {
           id,
           sourceId: suggestion.id,
+          contentKey,
           text: `${suggestion.title}: ${suggestion.description}`,
           createdAt: suggestion.created_at,
           source: "suggestion",
@@ -734,7 +784,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       .filter(
         (opportunity) =>
           isChatCompanionOpportunity(opportunity) &&
-          isEligible(notificationIdentity("opportunity", opportunity.id)),
+          isEligible(
+            notificationIdentity("opportunity", opportunity.id),
+            opportunityContentKey(opportunity),
+          ),
       )
       .sort(
         (left, right) =>
@@ -747,6 +800,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           notification: {
             id: notificationIdentity("opportunity", opportunity.id),
             sourceId: opportunity.id,
+            contentKey: opportunityContentKey(opportunity),
             text: opportunitySpeechText(opportunity),
             createdAt: opportunity.created_at,
             source: "opportunity",
@@ -775,6 +829,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const gatedSelection = useMemo(() => {
     void gateTick;
+    void historyKnown;
     const impressedIds = new Set(
       chatBubbleImpressions.map((impression) => impression.id),
     );
@@ -801,6 +856,16 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         (candidate.notification.source === "speech" &&
           activeSpeech?.persistent === true &&
           activeSpeech.id === candidate.notification.sourceId);
+      // Until the chat snapshot reveals whether this chat has history, only
+      // live reactions and urgent bubbles may show; stale backlog waits so
+      // the open-chat quiet window can arm correctly.
+      if (
+        !quietStateRef.current.historyKnown &&
+        !bypassGates &&
+        !(event != null && isLiveChatReactionEvent(event))
+      ) {
+        return false;
+      }
       const verdict = gateChatCompanionBubble({
         nowMs: Date.now(),
         quietUntilMs: quietStateRef.current.quietUntilMs,
@@ -824,6 +889,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     chatBubbleImpressions,
     gateTick,
     hasUserMessages,
+    historyKnown,
     notificationCandidates,
     nowPlaying,
     queuedMessageCount,
@@ -902,6 +968,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       return null;
     }
     if (
+      queuedMessageCount === 0 &&
       isPinnedReactionVisible(
         pinnedReaction,
         chatId,
@@ -929,6 +996,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     nowPlaying,
     pickedCandidate,
     pinnedReaction,
+    queuedMessageCount,
     runtimeQueue,
   ]);
 
@@ -960,12 +1028,19 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     const lastShown = lastShownNotificationRef.current;
     if (!lastShown) return;
     lastShownNotificationRef.current = null;
+    if (queuedMessageCount > 0) return;
     setDepartingNotification(lastShown);
     const timer = window.setTimeout(() => {
       setDepartingNotification(null);
     }, COMPANION_LEAVE_MS);
     return () => window.clearTimeout(timer);
-  }, [notification]);
+  }, [notification, queuedMessageCount]);
+
+  useEffect(() => {
+    if (queuedMessageCount > 0) {
+      setDepartingNotification(null);
+    }
+  }, [queuedMessageCount]);
 
   useLayoutEffect(() => {
     if (!selectedCandidate) return;
@@ -1018,9 +1093,17 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   useEffect(() => {
     if (!activeNotificationId) return;
-    if (activeNotificationId in seenNotificationIds) return;
-    dispatch(markBuddyNotificationSeen(activeNotificationId));
-  }, [activeNotificationId, dispatch, seenNotificationIds]);
+    if (!(activeNotificationId in seenNotificationIds)) {
+      dispatch(markBuddyNotificationSeen(activeNotificationId));
+    }
+    const contentKey =
+      notification?.id === activeNotificationId
+        ? notification.contentKey
+        : null;
+    if (contentKey != null && !(contentKey in seenNotificationIds)) {
+      dispatch(markBuddyNotificationSeen(contentKey));
+    }
+  }, [activeNotificationId, dispatch, notification, seenNotificationIds]);
 
   useEffect(() => {
     if (!selectedCandidate) return;
@@ -1088,7 +1171,12 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             );
             if (dismissedOpportunityIds.length > 0) {
               for (const oppId of dismissedOpportunityIds) {
-                dismissNotification(notificationIdentity("opportunity", oppId));
+                dismissNotification(
+                  notificationIdentity("opportunity", oppId),
+                  oppId === notification.sourceId
+                    ? notification.contentKey
+                    : null,
+                );
               }
               completeBubbleInteraction();
             }
@@ -1107,7 +1195,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             notification.opportunity,
             actionIndex,
           );
-          dismissNotification(notification.id);
+          dismissNotification(notification.id, notification.contentKey);
           completeBubbleInteraction();
         } catch (error) {
           restoreNotification(notification.id);
@@ -1121,7 +1209,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
       if (ctrl.action === "dismiss" || ctrl.action === "dismiss_speech") {
         completeBubbleInteraction();
-        dismissNotification(notification.id);
+        dismissNotification(notification.id, notification.contentKey);
         setActionError(null);
         if (notification.source === "speech") {
           dispatch(clearActiveSpeech());
@@ -1151,7 +1239,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           "runtime",
           runtimeEventId,
         );
-        dismissNotification(notification.id);
+        dismissNotification(notification.id, notification.contentKey);
         setActionError(null);
         if (notification.id !== runtimeNotificationId) {
           dismissNotification(runtimeNotificationId);
@@ -1165,7 +1253,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
       if (ctrl.action === "open_buddy") {
         completeBubbleInteraction();
-        dismissNotification(notification.id);
+        dismissNotification(notification.id, notification.contentKey);
         dispatch(push({ name: "buddy" }));
         return;
       }
@@ -1173,7 +1261,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       if (ctrl.action.startsWith("care_")) {
         completeBubbleInteraction();
         await executeBuddyAction(ctrl, dispatch);
-        dismissNotification(notification.id);
+        dismissNotification(notification.id, notification.contentKey);
         return;
       }
 
@@ -1188,7 +1276,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         if (notification.source === "suggestion") {
           dispatch(dismissBuddySuggestion(notification.sourceId));
         }
-        dismissNotification(notification.id);
+        dismissNotification(notification.id, notification.contentKey);
         return;
       }
 
@@ -1199,7 +1287,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         setActionError(null);
         try {
           if (notification.source === "suggestion") {
-            dismissNotification(notification.id);
+            dismissNotification(notification.id, notification.contentKey);
             await dismissMutation(notification.sourceId).unwrap();
             dispatch(dismissBuddySuggestion(notification.sourceId));
           } else if (notification.source === "runtime") {
@@ -1217,7 +1305,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             }),
           ).unwrap();
           if (notification.source !== "suggestion") {
-            dismissNotification(notification.id);
+            dismissNotification(notification.id, notification.contentKey);
           }
           completeBubbleInteraction();
         } catch (error) {

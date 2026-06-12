@@ -2,6 +2,7 @@ import type { BuddyRuntimeEvent } from "./types";
 import { isErrorRuntimeEvent } from "./buddyRuntimeEvents";
 
 export const CHAT_COMPANION_STARTUP_QUIET_MS = 60_000;
+export const CHAT_COMPANION_OPEN_QUIET_MS = 120_000;
 export const CHAT_COMPANION_BUBBLE_GAP_MS = 90_000;
 
 export const AMBIENT_SIGNALS = new Set<string>([
@@ -126,6 +127,76 @@ export function isChatCompanionWorthyRuntimeEvent(
   return (event.controls?.length ?? 0) > 0;
 }
 
+const CONTENT_KEY_TEXT_LIMIT = 200;
+
+function normalizedContentText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .slice(0, CONTENT_KEY_TEXT_LIMIT);
+}
+
+/**
+ * Stable content identity for notifications whose backend ids change between
+ * re-emissions (quest prompts, repeated errors, regenerated suggestions).
+ * A non-null key marks "the same message" so it is shown only once even when
+ * the source object is recreated with a fresh id. Ambient chatter returns
+ * null on purpose: it is throttled by the ambient gap, not by identity.
+ */
+export function speechContentKey(speech: {
+  dedupe_key?: string;
+  speech_intent?: string;
+}): string | null {
+  if (
+    isAmbientToken(speech.speech_intent) ||
+    isAmbientToken(speech.dedupe_key)
+  ) {
+    return null;
+  }
+  const token = normalizedPolicyToken(speech.dedupe_key);
+  return token ? `content:speech:${token}` : null;
+}
+
+export function runtimeEventContentKey(
+  event: BuddyRuntimeEvent,
+  formattedText: string,
+): string | null {
+  if (
+    isAmbientPolicyEvent(event) ||
+    (isLiveChatReactionEvent(event) && !isErrorRuntimeEvent(event))
+  ) {
+    return null;
+  }
+  const token = normalizedPolicyToken(event.dedupe_key);
+  if (token) return `content:runtime:${token}`;
+  if (isErrorRuntimeEvent(event)) {
+    const text = normalizedContentText(formattedText);
+    return text ? `content:runtime:error:${text}` : null;
+  }
+  return null;
+}
+
+export function suggestionContentKey(suggestion: {
+  suggestion_type: string;
+  title: string;
+}): string {
+  return `content:suggestion:${normalizedPolicyToken(
+    suggestion.suggestion_type,
+  )}:${normalizedContentText(suggestion.title)}`;
+}
+
+export function opportunityContentKey(opportunity: {
+  kind: string;
+  cooldown_key?: string | null;
+}): string | null {
+  const key = opportunity.cooldown_key?.trim();
+  if (!key) return null;
+  return `content:opportunity:${normalizedContentText(
+    `${opportunity.kind}:${key}`,
+  )}`;
+}
+
 export type ChatCompanionGateReason =
   | "shown"
   | "startup_quiet"
@@ -151,14 +222,14 @@ export interface ChatCompanionGateResult {
 export function gateChatCompanionBubble(
   input: ChatCompanionGateInput,
 ): ChatCompanionGateResult {
+  if (input.queuedMessageCount > 0) {
+    return { allowed: false, reason: "queue_busy", retryAtMs: null };
+  }
   if (input.bypassGates) {
     return { allowed: true, reason: "shown", retryAtMs: null };
   }
   if (input.candidateAlreadyImpressed) {
     return { allowed: true, reason: "shown", retryAtMs: null };
-  }
-  if (input.queuedMessageCount > 0) {
-    return { allowed: false, reason: "queue_busy", retryAtMs: null };
   }
   if (
     input.quietUntilMs != null &&
@@ -191,9 +262,26 @@ export function deriveChatQuietUntil(args: {
   hasUserMessages: boolean;
   nowMs: number;
 }): number | null {
-  if (args.previousQuietUntilMs != null) return args.previousQuietUntilMs;
-  if (!args.hadUserMessages && args.hasUserMessages) {
-    return args.nowMs + CHAT_COMPANION_STARTUP_QUIET_MS;
-  }
-  return null;
+  const firstMessageQuietUntilMs =
+    !args.hadUserMessages && args.hasUserMessages
+      ? args.nowMs + CHAT_COMPANION_STARTUP_QUIET_MS
+      : null;
+  if (args.previousQuietUntilMs == null) return firstMessageQuietUntilMs;
+  if (firstMessageQuietUntilMs == null) return args.previousQuietUntilMs;
+  return Math.max(args.previousQuietUntilMs, firstMessageQuietUntilMs);
+}
+
+/**
+ * Opening a chat that already holds a conversation starts a quiet window so
+ * the companion does not pounce the moment an existing chat is opened. Brand
+ * new empty chats stay null: their quiet window starts with the first user
+ * message via deriveChatQuietUntil.
+ */
+export function initialChatQuietUntil(args: {
+  hasUserMessages: boolean;
+  nowMs: number;
+}): number | null {
+  return args.hasUserMessages
+    ? args.nowMs + CHAT_COMPANION_OPEN_QUIET_MS
+    : null;
 }

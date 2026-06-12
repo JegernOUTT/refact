@@ -22,6 +22,10 @@ const BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY = "refact.buddy.chatBubblePolicy.v1";
 const CHAT_BUBBLE_COOLDOWN_MIN_MS = 5 * 60 * 1000;
 const CHAT_BUBBLE_COOLDOWN_MAX_MS = 10 * 60 * 1000;
 const CHAT_BUBBLE_IMPRESSION_LIMIT = 20;
+const SEEN_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
+// Content-identity keys ("content:...") suppress re-emitted copies of the
+// same message (quest nags, repeated errors), so they outlive per-id entries.
+const SEEN_CONTENT_KEY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type BuddyChatBubbleClass = "ambient" | "actionable" | "event_once";
 
@@ -77,10 +81,17 @@ function persistSeenNotificationIds(seen: Record<string, number>): void {
 function pruneSeenNotificationIds(
   seen: Record<string, number>,
 ): Record<string, number> {
-  const cutoff = nowMs() - 24 * 60 * 60 * 1000;
+  const now = nowMs();
   return Object.fromEntries(
     Object.entries(seen)
-      .filter(([, value]) => value >= cutoff)
+      .filter(
+        ([id, value]) =>
+          value >=
+          now -
+            (id.startsWith("content:")
+              ? SEEN_CONTENT_KEY_RETENTION_MS
+              : SEEN_ID_RETENTION_MS),
+      )
       .sort((left, right) => right[1] - left[1])
       .slice(0, 200),
   );
