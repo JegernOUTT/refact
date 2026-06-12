@@ -115,6 +115,12 @@ pub struct WorkerInfo {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct AtCommandCompletionResponse {
+    #[serde(default)]
+    completions: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatEvent {
     pub chat_id: Option<String>,
@@ -287,6 +293,33 @@ impl DaemonClient {
     pub async fn get_chat_modes(&self, project_id: &str) -> Result<Value, ClientError> {
         let path = format!("/p/{}/v1/chat-modes", encode_path_segment(project_id));
         self.get_json(&path).await
+    }
+
+    pub async fn at_command_completion(
+        &self,
+        project_id: &str,
+        query: &str,
+        cursor: i64,
+        top_n: usize,
+    ) -> Result<Vec<String>, ClientError> {
+        let path = format!(
+            "/p/{}/v1/at-command-completion",
+            encode_path_segment(project_id)
+        );
+        let response = self
+            .with_auth(self.client.post(self.url(&path)))
+            .json(&json!({
+                "query": query,
+                "cursor": cursor,
+                "top_n": top_n,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                ClientError::Http(format!("failed to load at-command completions: {error}"))
+            })?;
+        let response: AtCommandCompletionResponse = decode_response(response).await?;
+        Ok(response.completions)
     }
 
     pub async fn subscribe_daemon_events(&self) -> Result<DaemonEventStream, ClientError> {

@@ -8,7 +8,7 @@ use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
 use crate::approvals::render_modal_lines;
 use crate::client::worker_state_label;
 use crate::events_pane::{render_event_lines, render_worker_lines};
-use crate::pickers::{PickerKind, PickerState};
+use crate::pickers::PickerState;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -37,19 +37,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_header(frame, app, chunks[0]);
     render_transcript(frame, app, chunks[1]);
+    let composer_area = if app.events_pane().open {
+        chunks[3]
+    } else {
+        chunks[2]
+    };
     if app.events_pane().open {
         render_events_pane(frame, app, chunks[2]);
-        render_composer(frame, app, chunks[3]);
+        render_composer(frame, app, composer_area);
         render_status(frame, app, chunks[4]);
     } else {
-        render_composer(frame, app, chunks[2]);
+        render_composer(frame, app, composer_area);
         render_status(frame, app, chunks[3]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
         render_project_picker(frame, app.project_picker(), area);
     }
     if let Some(picker) = app.modal_picker() {
-        render_modal_picker(frame, picker, area);
+        render_modal_picker(frame, picker, area, composer_area);
     }
     if let Some(modal) = app.approval_modal() {
         render_approval_modal(frame, modal, area);
@@ -243,36 +248,61 @@ fn render_project_picker(frame: &mut Frame<'_>, picker: &ProjectPickerState, are
     };
     frame.render_widget(list, inner);
 }
-
-fn render_modal_picker(frame: &mut Frame<'_>, picker: &PickerState, area: Rect) {
+fn render_modal_picker(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, composer: Rect) {
     let width = area.width.saturating_sub(8).min(86);
-    let height = area.height.saturating_sub(6).min(22);
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let title = match picker.kind {
-        PickerKind::Model => " models ",
-        PickerKind::Mode => " modes ",
+    let filtered = picker.filtered_items();
+    let rows = filtered.len().max(1).min(8) as u16;
+    let height = rows
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2).max(1));
+    let max_y = area.y.saturating_add(area.height.saturating_sub(height));
+    let wanted_y = composer.y.saturating_sub(height);
+    let y = wanted_y.min(max_y);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y,
+        width,
+        height,
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!("{title}{} ", picker.filter));
+    frame.render_widget(Clear, popup);
+    let title = if picker.is_multi() {
+        format!(
+            " {}: {} selected · {} ",
+            picker.title(),
+            picker.selected_count(),
+            picker.filter
+        )
+    } else {
+        format!(" {}: {} ", picker.title(), picker.filter)
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let items: Vec<ListItem<'_>> = picker
-        .filtered_items()
+    let items: Vec<ListItem<'_>> = filtered
         .iter()
         .enumerate()
         .map(|(idx, item)| {
-            let marker = if idx == picker.selected { "›" } else { " " };
+            let cursor = if idx == picker.selected { "›" } else { " " };
+            let checked = if picker.is_multi() {
+                if picker.is_selected(&item.id) {
+                    "☑"
+                } else {
+                    "☐"
+                }
+            } else {
+                ""
+            };
+            let title = if checked.is_empty() {
+                item.title.clone()
+            } else {
+                format!("{checked} {}", item.title)
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(cursor, Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
+                Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    item.title.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  {}", item.id),
+                    format!("  {}", item.description),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]))

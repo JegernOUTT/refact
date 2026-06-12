@@ -1,9 +1,18 @@
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
     Model,
     Mode,
+    SlashCommand,
+    FileMention,
+    MultiSelect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerSelectionMode {
+    Single,
+    Multi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,20 +23,42 @@ pub struct PickerItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerAccept {
+    Single(Option<PickerItem>),
+    Multi(Vec<PickerItem>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerState {
     pub kind: PickerKind,
     items: Vec<PickerItem>,
     pub filter: String,
     pub selected: usize,
+    selection_mode: PickerSelectionMode,
+    selected_ids: Vec<String>,
 }
 
 impl PickerState {
     pub fn new(kind: PickerKind, items: Vec<PickerItem>) -> Self {
+        Self::with_selection_mode(kind, items, PickerSelectionMode::Single)
+    }
+
+    pub fn multi(kind: PickerKind, items: Vec<PickerItem>) -> Self {
+        Self::with_selection_mode(kind, items, PickerSelectionMode::Multi)
+    }
+
+    fn with_selection_mode(
+        kind: PickerKind,
+        items: Vec<PickerItem>,
+        selection_mode: PickerSelectionMode,
+    ) -> Self {
         Self {
             kind,
             items,
             filter: String::new(),
             selected: 0,
+            selection_mode,
+            selected_ids: Vec::new(),
         }
     }
 
@@ -35,24 +66,62 @@ impl PickerState {
         &self.items
     }
 
-    pub fn filtered_items(&self) -> Vec<PickerItem> {
-        if self.filter.trim().is_empty() {
-            return self.items.clone();
+    pub fn selection_mode(&self) -> PickerSelectionMode {
+        self.selection_mode
+    }
+
+    pub fn is_multi(&self) -> bool {
+        self.selection_mode == PickerSelectionMode::Multi
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self.kind {
+            PickerKind::Model => "models",
+            PickerKind::Mode => "modes",
+            PickerKind::SlashCommand => "commands",
+            PickerKind::FileMention => "files",
+            PickerKind::MultiSelect => "select",
         }
-        let needle = self.filter.to_ascii_lowercase();
-        self.items
+    }
+
+    pub fn filtered_items(&self) -> Vec<PickerItem> {
+        let mut matched = self
+            .items
             .iter()
-            .filter(|item| {
-                item.id.to_ascii_lowercase().contains(&needle)
-                    || item.title.to_ascii_lowercase().contains(&needle)
-                    || item.description.to_ascii_lowercase().contains(&needle)
+            .enumerate()
+            .filter_map(|(index, item)| {
+                match_rank(item, &self.filter).map(|rank| (rank, index, item))
             })
-            .cloned()
+            .collect::<Vec<_>>();
+        matched.sort_by(|(left_rank, left_index, _), (right_rank, right_index, _)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| left_index.cmp(right_index))
+        });
+        matched
+            .into_iter()
+            .map(|(_, _, item)| item.clone())
             .collect()
     }
 
     pub fn selected_item(&self) -> Option<PickerItem> {
         self.filtered_items().get(self.selected).cloned()
+    }
+
+    pub fn selected_items(&self) -> Vec<PickerItem> {
+        self.items
+            .iter()
+            .filter(|item| self.selected_ids.iter().any(|id| id == &item.id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selected_ids.len()
+    }
+
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.selected_ids.iter().any(|selected| selected == id)
     }
 
     pub fn clamp_selection(&mut self) {
@@ -83,6 +152,66 @@ impl PickerState {
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
+
+    pub fn toggle_selected(&mut self) {
+        if self.selection_mode != PickerSelectionMode::Multi {
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if let Some(index) = self.selected_ids.iter().position(|id| id == &item.id) {
+            self.selected_ids.remove(index);
+        } else {
+            self.selected_ids.push(item.id);
+        }
+    }
+
+    pub fn accept(&self) -> PickerAccept {
+        match self.selection_mode {
+            PickerSelectionMode::Single => PickerAccept::Single(self.selected_item()),
+            PickerSelectionMode::Multi => PickerAccept::Multi(self.selected_items()),
+        }
+    }
+}
+
+fn match_rank(item: &PickerItem, filter: &str) -> Option<usize> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let fields = [
+        item.id.to_ascii_lowercase(),
+        item.title.to_ascii_lowercase(),
+        item.title.trim_start_matches('/').to_ascii_lowercase(),
+        item.description.to_ascii_lowercase(),
+    ];
+    if fields.iter().any(|field| field.starts_with(&needle)) {
+        return Some(0);
+    }
+    if fields.iter().any(|field| field.contains(&needle)) {
+        return Some(1);
+    }
+    fields
+        .iter()
+        .any(|field| fuzzy_subsequence_match(field, &needle))
+        .then_some(2)
+}
+
+fn fuzzy_subsequence_match(field: &str, needle: &str) -> bool {
+    let mut chars = needle.chars();
+    let Some(mut wanted) = chars.next() else {
+        return true;
+    };
+    for ch in field.chars() {
+        if ch == wanted {
+            match chars.next() {
+                Some(next) => wanted = next,
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 pub fn model_items_from_caps(caps: &Value) -> Vec<PickerItem> {
@@ -141,6 +270,25 @@ pub fn mode_items_from_response(response: &Value) -> Vec<PickerItem> {
     out
 }
 
+pub fn file_mention_items_from_completions(completions: Vec<String>) -> Vec<PickerItem> {
+    let mut out = Vec::new();
+    for completion in completions {
+        let path = completion.trim().trim_start_matches('@').trim();
+        if path.is_empty() || completion.trim_start().starts_with('/') {
+            continue;
+        }
+        if out.iter().any(|item: &PickerItem| item.id == path) {
+            continue;
+        }
+        out.push(PickerItem {
+            id: path.to_string(),
+            title: path.to_string(),
+            description: "file mention".to_string(),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +312,101 @@ mod tests {
         );
         picker.filter = "reason".to_string();
         assert_eq!(picker.filtered_items()[0].id, "b");
+    }
+
+    #[test]
+    fn picker_filter_prefers_prefix_before_fuzzy() {
+        let mut picker = PickerState::new(
+            PickerKind::SlashCommand,
+            vec![
+                PickerItem {
+                    id: "review".to_string(),
+                    title: "/review".to_string(),
+                    description: "workflow".to_string(),
+                },
+                PickerItem {
+                    id: "raw".to_string(),
+                    title: "/raw".to_string(),
+                    description: "inspect response wires".to_string(),
+                },
+            ],
+        );
+        picker.filter = "rw".to_string();
+        assert_eq!(picker.filtered_items()[0].id, "raw");
+        picker.filter = "rv".to_string();
+        assert_eq!(picker.filtered_items()[0].id, "review");
+    }
+
+    #[test]
+    fn picker_navigation_clamps_to_filtered_items() {
+        let mut picker = PickerState::new(
+            PickerKind::SlashCommand,
+            vec![
+                PickerItem {
+                    id: "new".to_string(),
+                    title: "/new".to_string(),
+                    description: String::new(),
+                },
+                PickerItem {
+                    id: "model".to_string(),
+                    title: "/model".to_string(),
+                    description: String::new(),
+                },
+            ],
+        );
+        picker.select_next();
+        picker.select_next();
+        assert_eq!(picker.selected, 1);
+        picker.push_filter('n');
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.selected_item().unwrap().id, "new");
+    }
+
+    #[test]
+    fn multi_select_returns_original_item_order() {
+        let mut picker = PickerState::multi(
+            PickerKind::MultiSelect,
+            vec![
+                PickerItem {
+                    id: "a".to_string(),
+                    title: "Alpha".to_string(),
+                    description: String::new(),
+                },
+                PickerItem {
+                    id: "b".to_string(),
+                    title: "Beta".to_string(),
+                    description: String::new(),
+                },
+                PickerItem {
+                    id: "c".to_string(),
+                    title: "Gamma".to_string(),
+                    description: String::new(),
+                },
+            ],
+        );
+        picker.selected = 2;
+        picker.toggle_selected();
+        picker.selected = 0;
+        picker.toggle_selected();
+        let accepted = match picker.accept() {
+            PickerAccept::Multi(items) => items,
+            other => panic!("unexpected accept: {other:?}"),
+        };
+        assert_eq!(
+            accepted.into_iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+    }
+
+    #[test]
+    fn parses_file_mentions_from_at_completions() {
+        let items = file_mention_items_from_completions(vec![
+            "@src/main.rs ".to_string(),
+            "/model".to_string(),
+            "@src/main.rs".to_string(),
+        ]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "src/main.rs");
     }
 
     #[test]

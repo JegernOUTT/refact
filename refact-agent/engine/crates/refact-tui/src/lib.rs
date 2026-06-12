@@ -1,6 +1,7 @@
 pub mod app;
 pub mod approvals;
 pub mod client;
+pub mod commands;
 pub mod composer;
 pub mod events_pane;
 pub mod history;

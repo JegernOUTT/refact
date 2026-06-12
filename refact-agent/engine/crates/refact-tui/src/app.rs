@@ -12,11 +12,18 @@ use crate::client::{
     ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ProjectEntry,
     ToolDecision, WorkerInfo,
 };
+use crate::commands::{
+    command_by_name, command_picker_items, CommandAction, CommandContext, CommandPicker, InfoTopic,
+    LocalToggle,
+};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::ApprovalOutcome;
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion};
-use crate::pickers::{model_items_from_caps, mode_items_from_response, PickerKind, PickerState};
+use crate::pickers::{
+    file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
+    PickerAccept, PickerItem, PickerKind, PickerState,
+};
 use crate::protocol::{
     content_text, DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
 };
@@ -494,6 +501,192 @@ impl App {
         } else {
             self.modal_picker = Some(PickerState::new(PickerKind::Mode, items));
             self.composer_mode = ComposerMode::Chat;
+        }
+    }
+
+    fn open_slash_command_picker(&mut self) {
+        let items = command_picker_items(CommandContext {
+            active_turn: self.is_chat_active(),
+        });
+        self.modal_picker = Some(PickerState::new(PickerKind::SlashCommand, items));
+        self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn open_file_mention_picker(&mut self, items: Vec<PickerItem>) {
+        if items.is_empty() {
+            self.modal_picker = Some(PickerState::new(
+                PickerKind::FileMention,
+                vec![PickerItem {
+                    id: String::new(),
+                    title: "No file completions loaded".to_string(),
+                    description:
+                        "Type after @ or use /mention again when backend search returns files"
+                            .to_string(),
+                }],
+            ));
+        } else {
+            self.modal_picker = Some(PickerState::new(PickerKind::FileMention, items));
+        }
+        self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn open_permissions_picker(&mut self) {
+        self.modal_picker = Some(PickerState::multi(
+            PickerKind::MultiSelect,
+            vec![
+                PickerItem {
+                    id: "editing_tools".to_string(),
+                    title: "Editing tools".to_string(),
+                    description: "Patch and text-edit tools".to_string(),
+                },
+                PickerItem {
+                    id: "dangerous_commands".to_string(),
+                    title: "Dangerous commands".to_string(),
+                    description: "Shell and external command approvals".to_string(),
+                },
+                PickerItem {
+                    id: "network_tools".to_string(),
+                    title: "Network tools".to_string(),
+                    description: "Browser, fetch, and integration calls".to_string(),
+                },
+            ],
+        ));
+        self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn start_file_mention_lookup(&mut self) -> AppAction {
+        self.open_file_mention_picker(vec![PickerItem {
+            id: String::new(),
+            title: "Loading file mentions…".to_string(),
+            description: "via /v1/at-command-completion".to_string(),
+        }]);
+        AppAction::LoadFileMentions {
+            query: self.composer.text().to_string(),
+            cursor: self.composer.cursor_char_offset(),
+        }
+    }
+
+    fn accept_modal_picker(&mut self, kind: PickerKind, accept: PickerAccept) -> AppAction {
+        match (kind, accept) {
+            (PickerKind::Model, PickerAccept::Single(Some(item))) => {
+                self.pending_model = Some(item.id.clone());
+                self.model = Some(item.id.clone());
+                self.add_notice(format!("Model selected for next message: {}", item.title));
+                AppAction::None
+            }
+            (PickerKind::Mode, PickerAccept::Single(Some(item))) => {
+                self.pending_mode = Some(item.id.clone());
+                self.mode = Some(item.id.clone());
+                self.add_notice(format!("Mode selected for next message: {}", item.title));
+                AppAction::None
+            }
+            (PickerKind::SlashCommand, PickerAccept::Single(Some(item))) => {
+                self.execute_command_name(&item.id)
+            }
+            (PickerKind::FileMention, PickerAccept::Single(Some(item))) => {
+                if item.id.is_empty() {
+                    self.add_notice("File mention search did not return a selectable file");
+                } else {
+                    self.composer
+                        .replace_current_token('@', &format!("@{} ", item.id));
+                }
+                AppAction::None
+            }
+            (PickerKind::MultiSelect, PickerAccept::Multi(items)) => {
+                if items.is_empty() {
+                    self.add_notice("No permissions selected");
+                } else {
+                    let selected = items
+                        .iter()
+                        .map(|item| item.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.add_notice(format!(
+                        "Permissions picker selected {selected}; backend wiring is not yet implemented"
+                    ));
+                }
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    fn execute_command_name(&mut self, name: &str) -> AppAction {
+        let Some(command) = command_by_name(name) else {
+            self.add_notice(format!("/{name} is not registered"));
+            return AppAction::None;
+        };
+        match command.action {
+            CommandAction::SendPrompt { prompt } => {
+                self.composer.set_text(prompt);
+                self.submit_composer()
+                    .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
+                    .unwrap_or(AppAction::None)
+            }
+            CommandAction::BackendCommand { command } => {
+                if command == "stop" && self.is_chat_active() {
+                    self.session_state = SessionState::Idle;
+                    self.clear_approvals();
+                    AppAction::Abort
+                } else {
+                    self.composer.clear();
+                    self.add_notice(format!("/{command} is not yet implemented in the TUI"));
+                    AppAction::None
+                }
+            }
+            CommandAction::OpenPicker { picker } => self.execute_picker_command(picker),
+            CommandAction::LocalToggle { toggle } => self.execute_local_toggle(toggle),
+            CommandAction::ShowInfo { topic } => {
+                self.show_info_topic(topic);
+                AppAction::None
+            }
+        }
+    }
+
+    fn execute_picker_command(&mut self, picker: CommandPicker) -> AppAction {
+        self.composer.clear();
+        match picker {
+            CommandPicker::Model => AppAction::LoadModels,
+            CommandPicker::Mode => AppAction::LoadModes,
+            CommandPicker::FileMention => self.start_file_mention_lookup(),
+            CommandPicker::Permissions => {
+                self.open_permissions_picker();
+                AppAction::None
+            }
+        }
+    }
+
+    fn execute_local_toggle(&mut self, toggle: LocalToggle) -> AppAction {
+        self.composer.clear();
+        match toggle {
+            LocalToggle::NewChat => {
+                self.new_chat();
+                AppAction::SubscribeCurrent
+            }
+            LocalToggle::ClearTranscript => {
+                self.replace_with_notice("Transcript cleared".to_string());
+                AppAction::None
+            }
+            LocalToggle::Quit => self.quit_action(),
+        }
+    }
+
+    fn show_info_topic(&mut self, topic: InfoTopic) {
+        self.composer.clear();
+        match topic {
+            InfoTopic::Help => self.help_open = true,
+            InfoTopic::Status => {
+                let project = self
+                    .current_project()
+                    .map(|project| project.slug.as_str())
+                    .unwrap_or("-");
+                let model = self.model().unwrap_or("default");
+                let mode = self.mode().unwrap_or("agent");
+                self.add_notice(format!(
+                    "Status: project {project}, model {model}, mode {mode}, state {}",
+                    self.session_state().as_str()
+                ));
+            }
         }
     }
 
@@ -1233,6 +1426,25 @@ impl App {
                 AppAction::None
             }
             KeyEvent {
+                code: KeyCode::Char('/'),
+                modifiers,
+                ..
+            } if self.composer.is_empty()
+                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+            {
+                self.composer.insert_text("/");
+                self.open_slash_command_picker();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('@'),
+                modifiers,
+                ..
+            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                self.composer.insert_text("@");
+                self.start_file_mention_lookup()
+            }
+            KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -1476,9 +1688,6 @@ impl App {
     }
 
     fn handle_modal_picker_key(&mut self, key: KeyEvent) -> AppAction {
-        let Some(picker) = self.modal_picker.as_mut() else {
-            return AppAction::None;
-        };
         match key {
             KeyEvent {
                 code: KeyCode::Esc, ..
@@ -1489,48 +1698,53 @@ impl App {
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
+            }
+            | KeyEvent {
+                code: KeyCode::Tab, ..
             } => {
-                if let Some(item) = picker.selected_item() {
-                    match picker.kind {
-                        PickerKind::Model => {
-                            self.pending_model = Some(item.id.clone());
-                            self.model = Some(item.id.clone());
-                            self.add_notice(format!(
-                                "Model selected for next message: {}",
-                                item.title
-                            ));
-                        }
-                        PickerKind::Mode => {
-                            self.pending_mode = Some(item.id.clone());
-                            self.mode = Some(item.id.clone());
-                            self.add_notice(format!(
-                                "Mode selected for next message: {}",
-                                item.title
-                            ));
-                        }
-                    }
-                }
-                self.modal_picker = None;
-                AppAction::None
+                let Some(picker) = self.modal_picker.take() else {
+                    return AppAction::None;
+                };
+                self.accept_modal_picker(picker.kind, picker.accept())
             }
             KeyEvent {
                 code: KeyCode::Up, ..
             } => {
-                picker.select_prev();
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_prev();
+                }
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Down,
                 ..
             } => {
-                picker.select_next();
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_next();
+                }
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers,
+                ..
+            } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    if picker.is_multi() {
+                        picker.toggle_selected();
+                    } else {
+                        picker.push_filter(' ');
+                    }
+                }
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             } => {
-                picker.pop_filter();
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.pop_filter();
+                }
                 AppAction::None
             }
             KeyEvent {
@@ -1538,7 +1752,9 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-                picker.push_filter(ch);
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.push_filter(ch);
+                }
                 AppAction::None
             }
             _ => AppAction::None,
@@ -1575,6 +1791,10 @@ pub enum AppAction {
     LoadProjects,
     LoadModels,
     LoadModes,
+    LoadFileMentions {
+        query: String,
+        cursor: i64,
+    },
     RefreshWorkers,
     OpenProject(PathBuf),
     SubscribeCurrent,
@@ -1631,6 +1851,7 @@ enum RuntimeEvent {
     ProjectOpened(Result<OpenProjectResponse, String>),
     ModelsLoaded(Result<Value, String>),
     ModesLoaded(Result<Value, String>),
+    FileMentionsLoaded(Result<Vec<String>, String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     CommandFinished(Result<(), String>),
 }
@@ -1846,6 +2067,13 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::ModesLoaded(Err(error)) => {
                 app.add_notice(format!("Failed to load modes: {error}"))
             }
+            RuntimeEvent::FileMentionsLoaded(Ok(completions)) => {
+                app.open_file_mention_picker(file_mention_items_from_completions(completions))
+            }
+            RuntimeEvent::FileMentionsLoaded(Err(error)) => {
+                app.add_notice(format!("Failed to load file mentions: {error}"));
+                app.open_file_mention_picker(Vec::new());
+            }
             RuntimeEvent::WorkersLoaded(Ok(workers)) => app.set_workers(workers),
             RuntimeEvent::WorkersLoaded(Err(error)) => {
                 if app.events_pane.open {
@@ -1928,6 +2156,19 @@ async fn run_action(
                         .await
                         .map_err(|error| error.to_string());
                     let _ = tx.send(RuntimeEvent::ModesLoaded(result)).await;
+                });
+            }
+        }
+        AppAction::LoadFileMentions { query, cursor } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .at_command_completion(&project_id, &query, cursor, 20)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::FileMentionsLoaded(result)).await;
                 });
             }
         }
@@ -2487,6 +2728,59 @@ mod tests {
             action,
             AppAction::SendMessage { prompt, .. } if prompt == "a\nb"
         ));
+    }
+
+    #[test]
+    fn slash_popup_filters_and_executes_local_command() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty())),
+            AppAction::None
+        );
+        assert_eq!(app.composer(), "/");
+        assert!(app.modal_picker().is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.filtered_items()[0].id, "status");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Notice(text) if text.contains("Status:"))));
+    }
+
+    #[test]
+    fn at_opens_file_popup_and_accept_inserts_mention() {
+        let mut app = App::new(project());
+        app.composer.set_text("read ");
+        assert!(matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::empty())),
+            AppAction::LoadFileMentions { query, .. } if query == "read @"
+        ));
+        app.open_file_mention_picker(vec![PickerItem {
+            id: "src/lib.rs".to_string(),
+            title: "src/lib.rs".to_string(),
+            description: "file mention".to_string(),
+        }]);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.composer(), "read @src/lib.rs ");
+    }
+
+    #[test]
+    fn permissions_command_uses_multi_select_picker() {
+        let mut app = App::new(project());
+        app.execute_command_name("permissions");
+        assert!(app.modal_picker().unwrap().is_multi());
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Notice(text) if text.contains("Dangerous commands") && text.contains("Network tools"))));
     }
 
     #[test]

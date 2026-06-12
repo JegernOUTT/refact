@@ -92,6 +92,13 @@ impl ComposerState {
         self.editor.insert_str(text);
     }
 
+    pub fn insert_text(&mut self, text: &str) {
+        self.flush_pending_paste_force();
+        self.paste.reset();
+        self.history.reset_navigation();
+        self.editor.insert_str(text);
+    }
+
     pub fn flush_pending_paste(&mut self, now: Instant) -> bool {
         if let Some(text) = self.paste.take_if_expired(now) {
             self.editor.insert_str(&text);
@@ -191,6 +198,26 @@ impl ComposerState {
         self.editor
             .selection_range()
             .map(|range| &self.editor.text()[range])
+    }
+
+    pub fn cursor_char_offset(&self) -> i64 {
+        self.editor.text()[..self.editor.cursor()].chars().count() as i64
+    }
+
+    pub fn replace_current_token(&mut self, marker: char, replacement: &str) {
+        self.flush_pending_paste_force();
+        self.paste.reset();
+        self.history.reset_navigation();
+        let cursor = self.editor.cursor();
+        let prefix = &self.editor.text()[..cursor];
+        let start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(idx, ch)| (ch == marker).then_some(idx));
+        if let Some(start) = start {
+            self.editor.remove_range(start..cursor);
+        }
+        self.editor.insert_str(replacement);
     }
 
     pub fn height(&self, width: u16, max_rows: u16) -> u16 {
@@ -855,6 +882,26 @@ mod tests {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_paste("one\ntwo\n");
         assert_eq!(composer.text(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn insert_text_flushes_paste_and_inserts_at_cursor() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.insert_char('a', t(0));
+        composer.insert_char('b', t(1));
+        assert!(composer.flush_pending_paste(t(100)));
+        composer.move_left(false);
+        composer.insert_text("@src/lib.rs ");
+        assert_eq!(composer.text(), "a@src/lib.rs b");
+    }
+
+    #[test]
+    fn replace_current_token_inserts_file_mention() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.insert_paste("read @sr");
+        composer.replace_current_token('@', "@src/lib.rs ");
+        assert_eq!(composer.text(), "read @src/lib.rs ");
+        assert_eq!(composer.cursor_char_offset(), 17);
     }
 
     #[test]
