@@ -98,17 +98,19 @@ function WorktreeBadge({ node }: { node: HistoryTreeNode }) {
 
   return (
     <Tooltip content={`Worktree: ${fullLabel}`}>
-      <Badge tone="success" className={styles.worktreeBadge}>
-        <span className={styles.worktreeName}>{label}</span>
-        {hasDiffStats(node) && (
-          <span className={styles.diffStatsBadge}>
-            <span>(</span>
-            <span className={styles.diffStatsAdd}>+{added}</span>
-            <span className={styles.diffStatsRemove}>-{removed}</span>
-            <span>)</span>
-          </span>
-        )}
-      </Badge>
+      <span>
+        <Badge tone="success" className={styles.worktreeBadge}>
+          <span className={styles.worktreeName}>{label}</span>
+          {hasDiffStats(node) && (
+            <span className={styles.diffStatsBadge}>
+              <span>(</span>
+              <span className={styles.diffStatsAdd}>+{added}</span>
+              <span className={styles.diffStatsRemove}>-{removed}</span>
+              <span>)</span>
+            </span>
+          )}
+        </Badge>
+      </span>
     </Tooltip>
   );
 }

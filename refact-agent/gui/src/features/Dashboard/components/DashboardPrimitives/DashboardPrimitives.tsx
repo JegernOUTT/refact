@@ -217,17 +217,18 @@ export interface DashboardBadgeProps
   size?: string;
 }
 
-export const DashboardBadge = React.forwardRef<
-  React.ElementRef<typeof KitBadge>,
-  DashboardBadgeProps
->(({ color, size, variant, tone, ...props }, ref) => {
+export function DashboardBadge({
+  color,
+  size,
+  variant,
+  tone,
+  ...props
+}: DashboardBadgeProps) {
   void color;
   void size;
   void variant;
-  return <KitBadge ref={ref} tone={tone ?? "accent"} {...props} />;
-});
-
-DashboardBadge.displayName = "DashboardBadge";
+  return <KitBadge tone={tone ?? "accent"} {...props} />;
+}
 
 export function DashboardTooltip({
   content,
