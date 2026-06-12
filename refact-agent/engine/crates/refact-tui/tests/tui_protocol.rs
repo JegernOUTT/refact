@@ -158,7 +158,9 @@ fn run_fixture(name: &str) -> FixtureRun {
     for raw in fixture_events(name) {
         let event = chat_event_from_fixture(raw, &chat_id);
         match tracker.observe(&event) {
-            ChatSeqDecision::Apply => app.apply_chat_event(event),
+            ChatSeqDecision::Apply => {
+                app.apply_chat_event(event);
+            }
             ChatSeqDecision::Resubscribe(message) => {
                 return FixtureRun {
                     app,

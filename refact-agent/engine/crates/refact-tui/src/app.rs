@@ -18,6 +18,7 @@ use crate::commands::{
     command_by_name, command_picker_items, workflow, CommandAction, CommandContext, CommandPicker,
     InfoTopic, LocalToggle,
 };
+use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::ApprovalOutcome;
@@ -219,6 +220,9 @@ pub struct App {
     transcript: Vec<TranscriptItem>,
     transcript_state: TranscriptState,
     composer: ComposerState,
+    input_queue: InputQueue,
+    server_queue_size: usize,
+    server_queue_previews: Vec<String>,
     history_path: Option<PathBuf>,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
@@ -274,6 +278,9 @@ impl App {
                 project.root.display()
             )),
             composer: ComposerState::new(history_entries),
+            input_queue: InputQueue::new(),
+            server_queue_size: 0,
+            server_queue_previews: Vec::new(),
             history_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
@@ -314,6 +321,9 @@ impl App {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             composer: ComposerState::new(Vec::new()),
+            input_queue: InputQueue::new(),
+            server_queue_size: 0,
+            server_queue_previews: Vec::new(),
             history_path: None,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
@@ -354,6 +364,18 @@ impl App {
 
     pub fn composer_state(&self) -> &ComposerState {
         &self.composer
+    }
+
+    pub fn input_queue(&self) -> &InputQueue {
+        &self.input_queue
+    }
+
+    pub fn server_queue_size(&self) -> usize {
+        self.server_queue_size
+    }
+
+    pub fn server_queue_previews(&self) -> &[String] {
+        &self.server_queue_previews
     }
 
     pub fn composer_mode(&self) -> ComposerMode {
@@ -527,7 +549,15 @@ impl App {
     }
 
     pub fn composer_height(&self, width: u16) -> u16 {
-        self.composer.height(width.saturating_sub(2).max(1), 8)
+        self.composer.height(width.saturating_sub(2).max(1), 8) + self.queue_preview_height()
+    }
+
+    pub fn queue_preview_height(&self) -> u16 {
+        if self.input_queue.is_empty() && self.server_queue_size == 0 {
+            0
+        } else {
+            1
+        }
     }
 
     fn open_project_picker(&mut self, projects: Vec<ProjectEntry>) {
@@ -720,12 +750,11 @@ impl App {
         match command.action {
             CommandAction::SendPrompt { prompt } => {
                 self.composer.set_text(prompt);
-                self.submit_composer()
-                    .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
-                    .unwrap_or(AppAction::None)
+                self.submit_composer().unwrap_or(AppAction::None)
             }
             CommandAction::BackendCommand { command } => {
                 if command == "stop" && self.is_chat_active() {
+                    self.cancel_queue_edit();
                     self.session_state = SessionState::Idle;
                     self.clear_approvals();
                     AppAction::Abort
@@ -826,6 +855,9 @@ impl App {
             .map(load_history)
             .unwrap_or_default();
         self.composer = ComposerState::new(history_entries);
+        self.input_queue.clear();
+        self.server_queue_size = 0;
+        self.server_queue_previews.clear();
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_state = SessionState::Idle;
@@ -849,6 +881,9 @@ impl App {
 
     fn new_chat(&mut self) {
         self.chat_id = uuid::Uuid::new_v4().to_string();
+        self.input_queue.clear();
+        self.server_queue_size = 0;
+        self.server_queue_previews.clear();
         self.replace_with_session("New chat started".to_string(), None);
         self.session_state = SessionState::Idle;
         self.stream_controller.clear();
@@ -860,12 +895,26 @@ impl App {
         self.retry_hint = None;
     }
 
-    fn submit_composer(&mut self) -> Option<(String, Value)> {
+    fn submit_composer(&mut self) -> Option<AppAction> {
         if self.current_project.is_none() {
             return None;
         }
+        if self.input_queue.is_editing() {
+            return self.finish_queue_edit();
+        }
         let prompt = self.composer.submit_text()?;
         self.persist_history();
+        let params = self.take_pending_params();
+        if self.is_chat_active() {
+            self.input_queue.enqueue(prompt, params);
+            self.input_queue.clear_selection();
+            Some(AppAction::None)
+        } else {
+            Some(self.start_prompt_turn(prompt, params))
+        }
+    }
+
+    fn start_prompt_turn(&mut self, prompt: String, params: Value) -> AppAction {
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
@@ -873,8 +922,49 @@ impl App {
         self.stream_controller.clear();
         self.usage = None;
         self.retry_hint = None;
-        let params = self.take_pending_params();
-        Some((prompt, params))
+        AppAction::SendMessage { prompt, params }
+    }
+
+    fn dispatch_next_queued_input(&mut self) -> AppAction {
+        let Some(QueuedInput { text, params, .. }) = self.input_queue.pop_next_ready() else {
+            return AppAction::None;
+        };
+        self.start_prompt_turn(text, params)
+    }
+
+    fn begin_queue_edit(&mut self) -> AppAction {
+        let draft = self.composer.text().to_string();
+        match self.input_queue.begin_edit_selected(draft) {
+            Some(text) => {
+                self.composer.set_text(text);
+                AppAction::None
+            }
+            None => AppAction::None,
+        }
+    }
+
+    fn finish_queue_edit(&mut self) -> Option<AppAction> {
+        let text = self.composer.submit_text()?;
+        let draft = self.input_queue.finish_edit(text).unwrap_or_default();
+        self.composer.set_text(draft);
+        if self.is_chat_active() {
+            Some(AppAction::None)
+        } else {
+            Some(self.dispatch_next_queued_input())
+        }
+    }
+
+    fn cancel_queue_edit(&mut self) -> bool {
+        let Some(draft) = self.input_queue.cancel_edit() else {
+            return false;
+        };
+        self.composer.set_text(draft);
+        true
+    }
+
+    fn remove_selected_queue_item(&mut self) -> AppAction {
+        self.input_queue.remove_selected();
+        AppAction::None
     }
 
     fn persist_history(&self) {
@@ -1133,21 +1223,21 @@ impl App {
         }
     }
 
-    pub fn apply_chat_event(&mut self, event: ChatEvent) {
-        self.handle_chat_event(event);
+    pub fn apply_chat_event(&mut self, event: ChatEvent) -> AppAction {
+        self.handle_chat_event(event)
     }
 
     pub fn apply_stream_commit_tick(&mut self) {
         self.run_stream_commit_tick();
     }
 
-    fn handle_chat_event(&mut self, event: ChatEvent) {
+    fn handle_chat_event(&mut self, event: ChatEvent) -> AppAction {
         if event
             .chat_id
             .as_deref()
             .is_some_and(|chat_id| chat_id != self.chat_id)
         {
-            return;
+            return AppAction::None;
         }
         self.daemon_online = true;
         self.subscription_status = SubscriptionStatus::Online;
@@ -1179,8 +1269,15 @@ impl App {
                 if self.session_state != SessionState::Paused {
                     self.session_state = SessionState::Idle;
                 }
+                if !self.is_chat_active() {
+                    return self.dispatch_next_queued_input();
+                }
             }
             SseEvent::RuntimeUpdated => self.handle_runtime_updated(&raw),
+            SseEvent::QueueUpdated {
+                queue_size,
+                queued_items,
+            } => self.update_server_queue(queue_size, queued_items),
             SseEvent::PauseRequired => self.handle_pause_required(&raw, event.seq),
             SseEvent::PauseCleared => self.handle_pause_cleared(),
             SseEvent::MessageAdded { message } => {
@@ -1188,6 +1285,7 @@ impl App {
             }
             SseEvent::Unknown { .. } => {}
         }
+        AppAction::None
     }
 
     fn handle_snapshot(&mut self, raw: &Value) {
@@ -1224,6 +1322,7 @@ impl App {
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
             self.update_usage(runtime);
+            self.update_server_queue_from_runtime(runtime);
             self.clear_approvals();
             if let Some(modal) =
                 ApprovalModalState::from_event_in_scope(self.approval_scope(runtime, None), runtime)
@@ -1235,6 +1334,32 @@ impl App {
 
     fn handle_runtime_updated(&mut self, raw: &Value) {
         self.apply_runtime_state(raw);
+        self.update_server_queue_from_runtime(raw);
+    }
+
+    fn update_server_queue_from_runtime(&mut self, raw: &Value) {
+        if raw.get("queue_size").is_none() && raw.get("queued_items").is_none() {
+            return;
+        }
+        let queue_size = raw
+            .get("queue_size")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize;
+        let queued_items = raw
+            .get("queued_items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.update_server_queue(queue_size, queued_items);
+    }
+
+    fn update_server_queue(&mut self, queue_size: usize, queued_items: Vec<Value>) {
+        self.server_queue_size = queue_size;
+        self.server_queue_previews = queued_items
+            .iter()
+            .filter_map(|item| item.get("preview").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
     }
 
     fn update_usage(&mut self, raw: &Value) {
@@ -1637,13 +1762,16 @@ impl App {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if self.events_pane.open {
+                if self.cancel_queue_edit() {
+                    AppAction::None
+                } else if self.events_pane.open {
                     self.events_pane.open = false;
                     AppAction::None
                 } else if matches!(
                     self.session_state,
                     SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
                 ) {
+                    self.cancel_queue_edit();
                     self.session_state = SessionState::Idle;
                     self.add_notice("Cancel requested");
                     AppAction::Abort
@@ -1674,6 +1802,7 @@ impl App {
             } if self.composer.is_empty()
                 && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
             {
+                self.input_queue.clear_selection();
                 self.composer.insert_text("/");
                 self.open_slash_command_picker();
                 AppAction::None
@@ -1683,6 +1812,7 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                self.input_queue.clear_selection();
                 self.composer.insert_text("@");
                 self.start_file_mention_lookup()
             }
@@ -1707,28 +1837,48 @@ impl App {
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
+            } if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() => {
+                self.begin_queue_edit()
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
             } if self.composer.is_empty() && self.toggle_selected_tool() => AppAction::None,
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
             } => match self.composer.enter(Instant::now()) {
                 EnterDecision::InsertedNewline => AppAction::None,
-                EnterDecision::Submit => self
-                    .submit_composer()
-                    .map(|(prompt, params)| AppAction::SendMessage { prompt, params })
-                    .unwrap_or(AppAction::None),
+                EnterDecision::Submit => self.submit_composer().unwrap_or(AppAction::None),
             },
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
+            } if self.composer.is_empty()
+                && self.input_queue.selected_index().is_some()
+                && !self.input_queue.is_editing() =>
+            {
+                self.remove_selected_queue_item()
+            }
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
             } => {
+                self.input_queue.clear_selection();
                 self.composer.backspace();
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Delete,
                 ..
+            } if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() => {
+                self.remove_selected_queue_item()
+            }
+            KeyEvent {
+                code: KeyCode::Delete,
+                ..
             } => {
+                self.input_queue.clear_selection();
                 self.composer.delete();
                 AppAction::None
             }
@@ -1772,9 +1922,30 @@ impl App {
                 code: KeyCode::Up,
                 modifiers,
                 ..
+            } if modifiers.is_empty()
+                && !self.composer_state().can_move_up()
+                && !self.input_queue.is_empty()
+                && self.input_queue.select_prev() =>
+            {
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers,
+                ..
             } => {
                 self.composer
                     .move_up_or_history(modifiers.contains(KeyModifiers::SHIFT));
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } if modifiers.is_empty()
+                && self.input_queue.selected_index().is_some()
+                && self.input_queue.select_next_or_clear() =>
+            {
                 AppAction::None
             }
             KeyEvent {
@@ -1805,6 +1976,7 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+                self.input_queue.clear_selection();
                 self.composer.insert_char(ch, Instant::now());
                 AppAction::None
             }
@@ -1858,6 +2030,7 @@ impl App {
             self.session_state,
             SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
         ) {
+            self.cancel_queue_edit();
             self.session_state = SessionState::Idle;
             self.clear_approvals();
             self.add_notice("Cancel requested");
@@ -2175,13 +2348,14 @@ impl SubscriptionManager {
             .is_some_and(|current| current.generation == generation)
     }
 
-    fn apply_chat_event(&self, app: &mut App, generation: u64, event: ChatEvent) -> bool {
-        if self.is_current(generation) {
-            app.handle_chat_event(event);
-            true
-        } else {
-            false
-        }
+    fn apply_chat_event(
+        &self,
+        app: &mut App,
+        generation: u64,
+        event: ChatEvent,
+    ) -> Option<AppAction> {
+        self.is_current(generation)
+            .then(|| app.handle_chat_event(event))
     }
 
     fn start(
@@ -2280,7 +2454,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             }
             RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
-                subscriptions.apply_chat_event(&mut app, generation, event);
+                if let Some(action) = subscriptions.apply_chat_event(&mut app, generation, event) {
+                    run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+                }
             }
             RuntimeEvent::ChatResubscribe {
                 generation,
@@ -3261,6 +3437,121 @@ mod tests {
     }
 
     #[test]
+    fn queue_while_generating_dispatches_in_order_after_finish() {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        app.composer.set_text("second");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        app.composer.set_text("third");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.input_queue().len(), 2);
+
+        let action = app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "second"
+        ));
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.input_queue().items()[0].text, "third");
+        assert_eq!(app.session_state(), SessionState::Generating);
+    }
+
+    #[test]
+    fn queued_item_can_be_edited_and_removed() {
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+        app.composer.set_text("draft");
+        app.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("keep draft");
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.input_queue().selected_index(), Some(0));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.composer(), "draft");
+        app.composer.set_text("edited");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.composer(), "keep draft");
+        assert_eq!(app.input_queue().items()[0].text, "edited");
+
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.handle_key(key(KeyCode::Delete)), AppAction::None);
+        assert!(app.input_queue().is_empty());
+    }
+
+    #[test]
+    fn abort_retains_queue_and_restores_edit_draft() {
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+        app.composer.set_text("queued");
+        app.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("draft");
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.composer(), "queued");
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            AppAction::None
+        );
+        assert_eq!(app.composer(), "draft");
+        assert_eq!(app.input_queue().len(), 1);
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            AppAction::Abort
+        );
+        assert_eq!(app.composer(), "draft");
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.session_state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn finishing_queue_edit_while_idle_dispatches_next_item() {
+        let mut app = App::new(project());
+        app.session_state = SessionState::Generating;
+        app.composer.set_text("queued");
+        app.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("draft");
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Enter));
+        app.session_state = SessionState::Idle;
+        app.composer.set_text("edited");
+
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "edited"
+        ));
+        assert!(app.input_queue().is_empty());
+        assert_eq!(app.composer(), "draft");
+    }
+
+    #[test]
+    fn queue_updated_events_are_passive_server_state() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "queue_updated".to_string(),
+            raw: json!({"queue_size": 1, "queued_items": [{"preview": "server-side"}]}),
+        });
+
+        assert_eq!(app.server_queue_size(), 1);
+        assert_eq!(app.server_queue_previews(), &["server-side".to_string()]);
+        assert!(app.input_queue().is_empty());
+    }
+
+    #[test]
     fn slash_popup_filters_and_executes_local_command() {
         let mut app = App::new(project());
         assert_eq!(
@@ -3950,7 +4241,7 @@ mod tests {
             "stream_delta",
             json!({"ops": [{"op": "append_content", "text": "stale"}]}),
         );
-        assert!(!subscriptions.apply_chat_event(&mut app, 1, stale));
+        assert!(subscriptions.apply_chat_event(&mut app, 1, stale).is_none());
         assert!(matches!(
             app.visible_transcript(),
             [TranscriptItem::Notice(_)]
@@ -3961,7 +4252,7 @@ mod tests {
             "stream_delta",
             json!({"ops": [{"op": "append_content", "text": "fresh\n"}]}),
         );
-        assert!(subscriptions.apply_chat_event(&mut app, 2, fresh));
+        assert!(subscriptions.apply_chat_event(&mut app, 2, fresh).is_some());
         assert_eq!(assistant_text(&app), "fresh\n");
     }
     #[tokio::test]

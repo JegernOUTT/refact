@@ -1,3 +1,5 @@
+pub mod queue;
+
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
@@ -192,6 +194,14 @@ impl ComposerState {
         if let Some(text) = self.history.next(current) {
             self.editor.set_text(text);
         }
+    }
+
+    pub fn can_move_up(&self) -> bool {
+        self.editor.can_move_up()
+    }
+
+    pub fn can_move_down(&self) -> bool {
+        self.editor.can_move_down()
     }
 
     pub fn selected_text(&self) -> Option<&str> {

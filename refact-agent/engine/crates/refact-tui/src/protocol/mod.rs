@@ -21,6 +21,10 @@ pub enum SseEvent {
         finish_reason: Option<Value>,
     },
     RuntimeUpdated,
+    QueueUpdated {
+        queue_size: usize,
+        queued_items: Vec<Value>,
+    },
     PauseRequired,
     PauseCleared,
     MessageAdded {
@@ -68,6 +72,17 @@ impl SseEvent {
                 finish_reason: raw.get("finish_reason").cloned(),
             },
             "runtime_updated" => Self::RuntimeUpdated,
+            "queue_updated" => Self::QueueUpdated {
+                queue_size: raw
+                    .get("queue_size")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default() as usize,
+                queued_items: raw
+                    .get("queued_items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
             "pause_required" => Self::PauseRequired,
             "pause_cleared" => Self::PauseCleared,
             "message_added" => Self::MessageAdded {

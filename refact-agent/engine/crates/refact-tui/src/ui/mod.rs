@@ -149,13 +149,24 @@ fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let queue_height = app.queue_preview_height().min(area.height);
+    let input_area = if queue_height > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(queue_height), Constraint::Min(1)])
+            .split(area);
+        render_queue_preview(frame, app, chunks[0]);
+        chunks[1]
+    } else {
+        area
+    };
     let title = match app.session_state() {
-        SessionState::Generating => " message (Esc cancels) ",
+        SessionState::Generating => " message (Enter queues · Esc cancels) ",
         SessionState::Paused => " approval pending ",
         _ => " message ",
     };
-    let inner_width = area.width.saturating_sub(2).max(1);
-    let max_rows = area.height.saturating_sub(2).max(1);
+    let inner_width = input_area.width.saturating_sub(2).max(1);
+    let max_rows = input_area.height.saturating_sub(2).max(1);
     let view = app.composer_state().view(inner_width, max_rows);
     let lines = if app.composer().is_empty() {
         vec![Line::from(Span::styled(
@@ -169,19 +180,73 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false }),
-        area,
+        input_area,
     );
     if !app.composer().is_empty() {
-        let x = area
+        let x = input_area
             .x
             .saturating_add(1)
             .saturating_add(view.cursor_col.min(inner_width.saturating_sub(1)));
-        let y = area
+        let y = input_area
             .y
             .saturating_add(1)
             .saturating_add(view.cursor_row.min(max_rows.saturating_sub(1)));
         frame.set_cursor_position((x, y));
     }
+}
+
+fn render_queue_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let local_len = app.input_queue().len();
+    let mut spans = vec![Span::styled(
+        format!(" queued ({local_len}) "),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (idx, item) in app.input_queue().items().iter().enumerate().take(3) {
+        let selected = app.input_queue().selected_index() == Some(idx);
+        let editing = app.input_queue().editing_index() == Some(idx);
+        let marker = if editing {
+            "✎"
+        } else if selected {
+            "›"
+        } else {
+            "•"
+        };
+        let text = item.text.replace('\n', " ⏎ ");
+        spans.push(Span::styled(
+            format!("{marker}{} ", idx + 1),
+            Style::default().fg(if selected || editing {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
+        ));
+        spans.push(Span::raw(text));
+        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+    }
+    if local_len > 3 {
+        spans.push(Span::styled(
+            format!("+{} more  ", local_len - 3),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if app.server_queue_size() > 0 {
+        let preview = app
+            .server_queue_previews()
+            .first()
+            .map(|value| format!(": {}", value.replace('\n', " ⏎ ")))
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            format!(" server queued ({}){preview} ", app.server_queue_size()),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let line = truncate_line_with_ellipsis_if_overflow(Line::from(spans), area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_project_picker(frame: &mut Frame<'_>, picker: &ProjectPickerState, area: Rect) {
@@ -339,6 +404,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     let lines = vec![
         Line::from("Enter send · Shift-Enter newline · Esc cancel/close"),
+        Line::from("During generation: Enter queues · empty Up selects queue · Enter edits · Delete removes"),
         Line::from("Ctrl-N new chat · Ctrl-P projects · Ctrl-M models · Ctrl-O modes"),
         Line::from("F2 daemon events/workers · Tab select next tool · Enter/Space expand tool"),
         Line::from("Approvals: y approve once · a approve for chat · n/Esc deny · v full args"),
