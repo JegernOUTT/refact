@@ -6,6 +6,8 @@ import * as path from "path";
 
 export const DEFAULT_DAEMON_PORT = 8488;
 export const DAEMON_POLL_TIMEOUT_MS = 15000;
+export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10000;
+export const DAEMON_SHUTDOWN_POLL_MS = 200;
 
 export type WorkerState =
     | "stopped"
@@ -56,11 +58,17 @@ export type DaemonClientOptions = {
 };
 
 type ReadDaemonInfo = (port: number) => Promise<DaemonStatus | undefined>;
+type ShutdownDaemon = (port: number, reason: string) => Promise<void>;
+type IsProcessRunning = (pid: number) => boolean;
 
 export type EnsureDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
     spawnDaemon?: (binPath: string) => void;
     readDaemonInfo?: ReadDaemonInfo;
+    shutdownDaemon?: ShutdownDaemon;
+    isProcessRunning?: IsProcessRunning;
+    shutdownTimeoutMs?: number;
+    shutdownPollMs?: number;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 };
@@ -173,10 +181,14 @@ export async function readDaemonInfo(port: number = DEFAULT_DAEMON_PORT, timeout
 export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions = {}): Promise<DaemonStatus> {
     const port = normalizeDaemonPort(options.port);
     const timeoutMs = options.timeoutMs ?? DAEMON_POLL_TIMEOUT_MS;
+    const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DAEMON_SHUTDOWN_TIMEOUT_MS;
+    const shutdownPollMs = Math.max(1, Math.trunc(options.shutdownPollMs ?? DAEMON_SHUTDOWN_POLL_MS));
     const sleep = options.sleep ?? delay;
     const now = options.now ?? Date.now;
     const spawnDaemon = options.spawnDaemon ?? defaultSpawnDaemon;
     const readInfo = options.readDaemonInfo ?? readDaemonInfo;
+    const requestShutdown = options.shutdownDaemon ?? shutdownDaemon;
+    const isProcessRunning = options.isProcessRunning ?? defaultIsProcessRunning;
     ensureDaemonSpawnTarget(binPath);
     const current = await readInfo(port);
 
@@ -185,8 +197,8 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
     }
 
     if (current) {
-        await shutdownDaemon(port, "upgrade").catch(error => console.log(["shutdownDaemon", error]));
-        await sleep(500);
+        await requestShutdown(port, "upgrade").catch(error => console.log(["shutdownDaemon", error]));
+        await waitForOldDaemonExit(port, current.pid, shutdownTimeoutMs, shutdownPollMs, sleep, now, readInfo, isProcessRunning);
     }
 
     spawnDaemon(binPath);
@@ -227,6 +239,35 @@ async function shutdownDaemon(port: number, reason: string): Promise<void> {
     );
 }
 
+async function waitForOldDaemonExit(
+    port: number,
+    oldPid: number,
+    timeoutMs: number,
+    pollMs: number,
+    sleep: (ms: number) => Promise<void>,
+    now: () => number,
+    readInfo: ReadDaemonInfo,
+    isProcessRunning: IsProcessRunning,
+): Promise<void> {
+    const deadline = now() + timeoutMs;
+    while (true) {
+        const status = await readInfo(port);
+        if (!status || !isProcessRunning(oldPid)) {
+            return;
+        }
+        const remainingMs = deadline - now();
+        if (remainingMs <= 0) {
+            throw new Error(daemonShutdownTimeoutMessage(port, oldPid, timeoutMs));
+        }
+        await sleep(Math.min(pollMs, remainingMs));
+    }
+}
+
+function daemonShutdownTimeoutMessage(port: number, pid: number, timeoutMs: number): string {
+    const seconds = Math.ceil(timeoutMs / 1000);
+    return `Refact daemon on port ${port} did not exit within ${seconds}s after shutdown. Retry shortly, or stop process ${pid} before retrying.`;
+}
+
 async function pollDaemon(
     port: number,
     timeoutMs: number,
@@ -247,11 +288,29 @@ async function pollDaemon(
 }
 
 function defaultSpawnDaemon(binPath: string): void {
-    const child = spawn(binPath, ["daemon"], {
+    const command = daemonSpawnCommand(binPath);
+    const child = spawn(command.command, command.args, {
         detached: true,
         stdio: "ignore",
     });
     child.unref();
+}
+
+export function daemonSpawnCommand(binPath: string): { command: string; args: string[] } {
+    return { command: binPath, args: ["daemon"] };
+}
+
+function defaultIsProcessRunning(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) {
+        return false;
+    }
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code === "EPERM";
+    }
 }
 
 function delay(ms: number): Promise<void> {
