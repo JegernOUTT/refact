@@ -738,7 +738,7 @@ function drawSeasonPetals(args: DrawBuddyWorldBaseArgs): void {
         wave(frame, 30 + index, index, 7, args.reducedMotion) +
         width) %
       width;
-    const y = (seededUnit(211, index) * height + fall) % (height * 0.78);
+    const y = (seededUnit(211, index) * height + fall) % (height * 0.94);
     const alpha = alphaForMotion(
       0.32 + seededUnit(223, index) * 0.3,
       args.reducedMotion,
@@ -772,7 +772,7 @@ function drawSeasonLeaves(args: DrawBuddyWorldBaseArgs): void {
         fall * 0.3 +
         width) %
       width;
-    const y = (seededUnit(233, index) * height + fall) % (height * 0.82);
+    const y = (seededUnit(233, index) * height + fall) % (height * 0.96);
     const alpha = alphaForMotion(
       0.36 + seededUnit(239, index) * 0.3,
       args.reducedMotion,
@@ -796,7 +796,7 @@ function drawSeasonSnow(args: DrawBuddyWorldBaseArgs): void {
         wave(frame, 44 + index, index, 6, args.reducedMotion) +
         width) %
       width;
-    const y = (seededUnit(257, index) * height + fall) % (height * 0.86);
+    const y = (seededUnit(257, index) * height + fall) % (height * 0.98);
     const size = index % 5 === 0 ? 2.4 : 1.7;
     const alpha = alphaForMotion(
       0.4 + seededUnit(263, index) * 0.3,
@@ -881,8 +881,9 @@ export function drawAmbientLayers(args: DrawBuddyWorldBaseArgs): void {
 function drawRain(args: DrawBuddyWorldBaseArgs): void {
   const x = pctX(args.width, args.world.weatherX);
   const y = pctY(args.height, args.world.weatherY);
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const count = countForMotion(18, args.compact, args.reducedMotion);
 
   drawCloud(
     args.ctx,
@@ -892,10 +893,21 @@ function drawRain(args: DrawBuddyWorldBaseArgs): void {
     "#94A3B8",
     0.84,
   );
-  for (let index = 0; index < count; index += 1) {
-    const rx = x - 54 + ((index * 13 + frame) % 112);
-    const ry = y + 18 + ((index * 19 + frame * 2) % 72);
-    fillPixelRect(args.ctx, rx, ry, 2, 7, "#38BDF8", 0.72);
+  const overcastCount = countForMotion(3, args.compact, args.reducedMotion);
+  for (let index = 0; index < overcastCount; index += 1) {
+    const drift = args.reducedMotion ? 0 : frame * (0.16 + index * 0.07);
+    const cx = ((seededUnit(283, index) * width + drift) % (width + 180)) - 90;
+    const cy =
+      height * (0.06 + seededUnit(293, index) * 0.14) +
+      wave(frame, 64, index, 2, args.reducedMotion);
+    drawCloud(
+      args.ctx,
+      cx,
+      cy,
+      args.compact ? 0.88 : 1.18,
+      index % 2 === 0 ? "#64748B" : "#94A3B8",
+      0.46 + seededUnit(307, index) * 0.22,
+    );
   }
 }
 
@@ -970,14 +982,9 @@ function drawDreamLetters(args: DrawBuddyWorldBaseArgs): void {
 function drawProviderStorm(args: DrawBuddyWorldBaseArgs): void {
   const x = pctX(args.width, args.world.weatherX);
   const y = pctY(args.height, args.world.weatherY);
-  const width = safeDimension(args.width, 720);
-  const height = safeDimension(args.height, 260);
-  const frame = safeFrame(args.frame);
   const intensity = worldIntensity(args.world);
-  const rainCount = countForMotion(18, args.compact, args.reducedMotion);
   const boltAlpha = alphaForMotion(0.68 + intensity * 0.22, args.reducedMotion);
 
-  fillRect(args.ctx, 0, 0, width, height, "#020617", 0.12 + intensity * 0.08);
   drawCloud(
     args.ctx,
     x - 42,
@@ -996,12 +1003,6 @@ function drawProviderStorm(args: DrawBuddyWorldBaseArgs): void {
     2,
     boltAlpha * 0.64,
   );
-
-  for (let index = 0; index < rainCount; index += 1) {
-    const rx = x - 60 + ((index * 17 + frame * 2) % 130);
-    const ry = y + 18 + ((index * 11 + frame) % 64);
-    fillPixelRect(args.ctx, rx, ry, 2, 8, "#7DD3FC", 0.72);
-  }
 }
 
 function drawDreamMist(args: DrawBuddyWorldBaseArgs): void {
@@ -1269,6 +1270,121 @@ export function drawWeatherAtmosphere(args: DrawBuddyWorldBaseArgs): void {
   if (hasWorldLayer(args.world, "rainbow")) drawRainbow(args);
   if (hasWorldLayer(args.world, "morning_fog")) drawMorningFog(args);
   if (hasWorldLayer(args.world, "summer_shimmer")) drawSummerShimmer(args);
+}
+
+function drawRainLayers(args: DrawBuddyWorldBaseArgs, heavy: boolean): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const farCount = countForMotion(
+    heavy ? 30 : 24,
+    args.compact,
+    args.reducedMotion,
+  );
+  const nearCount = countForMotion(
+    heavy ? 18 : 12,
+    args.compact,
+    args.reducedMotion,
+  );
+  const fallSpeed = heavy ? 6.4 : 4.6;
+  const slant = heavy ? 1.9 : 1.1;
+
+  for (let index = 0; index < farCount; index += 1) {
+    const lane = seededUnit(311, index) * width;
+    const drop = args.reducedMotion
+      ? 0
+      : frame * (fallSpeed * 0.55 + seededUnit(317, index) * 1.2);
+    const ry = ((seededUnit(313, index) * height + drop) % (height + 24)) - 12;
+    const rx = (((lane - ry * slant * 0.5) % width) + width) % width;
+    fillPixelRect(
+      args.ctx,
+      rx,
+      ry,
+      1.5,
+      8,
+      "#7DD3FC",
+      alphaForMotion(0.36 + seededUnit(331, index) * 0.16, args.reducedMotion),
+    );
+  }
+
+  for (let index = 0; index < nearCount; index += 1) {
+    const lane = seededUnit(337, index) * width;
+    const drop = args.reducedMotion
+      ? 0
+      : frame * (fallSpeed + seededUnit(349, index) * 1.6);
+    const ry = ((seededUnit(347, index) * height + drop) % (height + 30)) - 15;
+    const rx = (((lane - ry * slant) % width) + width) % width;
+    fillPixelRect(
+      args.ctx,
+      rx,
+      ry,
+      2,
+      12,
+      "#0EA5E9",
+      alphaForMotion(0.52 + seededUnit(353, index) * 0.18, args.reducedMotion),
+    );
+  }
+
+  const splashCount = countForMotion(
+    heavy ? 9 : 7,
+    args.compact,
+    args.reducedMotion,
+  );
+  for (let slot = 0; slot < splashCount; slot += 1) {
+    const sx = width * (0.04 + seededUnit(359, slot) * 0.92);
+    const sy = height * (0.88 + seededUnit(367, slot) * 0.08);
+    const period = 22 + (slot % 4) * 5;
+    const phase = args.reducedMotion
+      ? (slot % period) / period
+      : ((frame + slot * 9) % period) / period;
+    if (phase < 0.3) {
+      fillPixelRect(
+        args.ctx,
+        sx,
+        sy - 3,
+        1.6,
+        3.4,
+        "#BAE6FD",
+        alphaForMotion(0.5, args.reducedMotion),
+      );
+    } else {
+      const grow = (phase - 0.3) / 0.7;
+      strokeEllipse(
+        args.ctx,
+        sx,
+        sy,
+        1.5 + grow * 5.5,
+        0.7 + grow * 1.9,
+        "#BAE6FD",
+        1,
+        alphaForMotion(0.42 * (1 - grow), args.reducedMotion),
+      );
+    }
+  }
+}
+
+export function drawPrecipitation(args: DrawBuddyWorldBaseArgs): void {
+  const weather = worldWeather(args.world);
+  const stormy =
+    weather === "storm" || hasWorldLayer(args.world, "provider_storm");
+
+  if (stormy) {
+    const width = safeDimension(args.width, 720);
+    const height = safeDimension(args.height, 260);
+    fillRect(
+      args.ctx,
+      0,
+      0,
+      width,
+      height,
+      "#020617",
+      0.12 + worldIntensity(args.world) * 0.08,
+    );
+    drawRainLayers(args, true);
+  } else if (weather === "rain") {
+    drawRainLayers(args, false);
+  }
+
   if (hasWorldLayer(args.world, "season_petals")) drawSeasonPetals(args);
   if (hasWorldLayer(args.world, "season_leaves")) drawSeasonLeaves(args);
   if (hasWorldLayer(args.world, "season_snow")) drawSeasonSnow(args);

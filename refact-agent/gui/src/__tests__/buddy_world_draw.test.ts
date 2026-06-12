@@ -982,6 +982,81 @@ describe("drawBuddyWorld", () => {
     expect(fillRectStyleCount(ctx, "#FACC15")).toBeGreaterThanOrEqual(2);
     expectHealthyDraw(ctx);
   });
+
+  it("pours deterministic scene-wide rain that reaches the meadow", () => {
+    const world = makeWorld({
+      now: new Date("2024-01-01T14:00:00"),
+      pulse: makePulse({
+        memory: { total: 12, orphan: 4, stale_conflicts: 1 },
+      }),
+    });
+    expect(world.weather).toBe("rain");
+
+    const ctx = drawWorld(world);
+    const repeatCtx = drawWorld(world);
+    const reducedCtx = drawWorldWithOptions(world, { reducedMotion: true });
+
+    const rainStreaks = ctx.drawOps
+      .map(parseFillRectOperation)
+      .filter((operation): operation is CanvasDrawOp => operation !== null)
+      .filter(
+        (operation) =>
+          operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+      );
+    const reducedStreaks = reducedCtx.drawOps
+      .map(parseFillRectOperation)
+      .filter((operation): operation is CanvasDrawOp => operation !== null)
+      .filter(
+        (operation) =>
+          operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+      );
+
+    expect(rainStreaks.length).toBeGreaterThanOrEqual(30);
+    expect(rainStreaks.some((operation) => operation.y > 260 * 0.82)).toBe(
+      true,
+    );
+    expect(rainStreaks.some((operation) => operation.y < 260 * 0.3)).toBe(true);
+    expect(rainStreaks.some((operation) => operation.x < 720 * 0.2)).toBe(true);
+    expect(rainStreaks.some((operation) => operation.x > 720 * 0.8)).toBe(true);
+    const splashOps = ctx.drawOps.filter(
+      (operation) =>
+        operation.startsWith("stroke:#BAE6FD:") ||
+        (operation.startsWith("fillRect:") && operation.includes("#BAE6FD")),
+    );
+    expect(splashOps.length).toBeGreaterThanOrEqual(3);
+    expect(fullCanvasOverlays(ctx)).toHaveLength(0);
+    expect(repeatCtx.drawOps).toEqual(ctx.drawOps);
+    expect(reducedStreaks.length).toBeLessThan(rainStreaks.length);
+    expectHealthyDraw(ctx);
+    expectHealthyDraw(reducedCtx);
+  });
+
+  it("pours heavier rain during provider storms than memory rain", () => {
+    const rainWorld = makeWorld({
+      now: new Date("2024-01-01T14:00:00"),
+      pulse: makePulse({
+        memory: { total: 12, orphan: 4, stale_conflicts: 1 },
+      }),
+    });
+    const stormWorld = makeWorld({
+      pulse: makePulse({
+        providers: { defaults_ok: true, broken_refs: 2, quota_warnings: 0 },
+      }),
+    });
+
+    const countStreaks = (world: BuddyWorldState) =>
+      drawWorld(world)
+        .drawOps.map(parseFillRectOperation)
+        .filter((operation): operation is CanvasDrawOp => operation !== null)
+        .filter(
+          (operation) =>
+            operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+        ).length;
+
+    expect(stormWorld.weather).toBe("storm");
+    expect(countStreaks(stormWorld)).toBeGreaterThan(countStreaks(rainWorld));
+  });
+
   it("emits parallax translate bands for standard motion only", () => {
     const world = makeWorld({ now: new Date("2024-01-01T23:00:00") });
     const standardCtx = drawWorldWithOptions(world, { frame: 240 });

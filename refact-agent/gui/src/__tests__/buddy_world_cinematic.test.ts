@@ -178,6 +178,43 @@ describe("foreground depth canvas", () => {
     }
   });
 
+  it("rains in front of the buddy for rainy worlds", () => {
+    const clear = recordingContext();
+    drawBuddyWorldForeground(drawArgsFor(clear, day));
+
+    const rainyWorld = {
+      ...buildBuddyWorldState({
+        now: day,
+        pulse: null,
+        pet: undefined,
+        nowPlaying: null,
+        activeQuest: null,
+      }),
+      weather: "rain" as const,
+    };
+    const rainy = recordingContext();
+    const rainyRepeat = recordingContext();
+    drawBuddyWorldForeground(drawArgsFor(rainy, day, { world: rainyWorld }));
+    drawBuddyWorldForeground(
+      drawArgsFor(rainyRepeat, day, { world: rainyWorld }),
+    );
+    const reduced = recordingContext();
+    drawBuddyWorldForeground(
+      drawArgsFor(reduced, day, { world: rainyWorld, reducedMotion: true }),
+    );
+
+    const streakCount = rainy.fillRectStyles.filter(
+      (style) => style === "#0284C7",
+    ).length;
+    const reducedCount = reduced.fillRectStyles.filter(
+      (style) => style === "#0284C7",
+    ).length;
+    expect(streakCount).toBeGreaterThanOrEqual(5);
+    expect(clear.fillRectStyles).not.toContain("#0284C7");
+    expect(rainyRepeat.ops).toEqual(rainy.ops);
+    expect(reducedCount).toBeLessThan(streakCount);
+  });
+
   it("stays finite with hostile inputs", () => {
     const recording = recordingContext();
     drawBuddyWorldForeground(

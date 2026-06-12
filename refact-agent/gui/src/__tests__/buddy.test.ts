@@ -828,6 +828,7 @@ describe("Buddy chat notification freshness", () => {
     const store = setUpStore();
     const runtime = makeChatRuntimeEvent({
       id: "runtime-description",
+      signal_type: "speech_chat_reaction",
       title: "Setup ready",
       description: "Connect GitHub to enable issue sync.",
       controls: [],
@@ -853,6 +854,7 @@ describe("Buddy chat notification freshness", () => {
     const store = setUpStore();
     const runtime = makeChatRuntimeEvent({
       id: "runtime-speech-text",
+      signal_type: "speech_chat_reaction",
       title: "Hidden title",
       description: "Hidden description",
       speech_text: "  Server says this instead.  ",
@@ -878,7 +880,7 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-noisy-prefix",
       title: "generic: LLM error",
-      signal_type: "ordinary_status",
+      signal_type: "speech_chat_reaction",
       status: "completed",
       description: "LLM error: upstream returned 429",
       controls: [],
@@ -903,7 +905,7 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-context-window",
       title: "generic: LLM error",
-      signal_type: "ordinary_status",
+      signal_type: "speech_chat_reaction",
       status: "completed",
       description:
         "LLM error: Your input exceeds the context window of this model.",
@@ -1201,6 +1203,7 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const epochRuntime = makeChatRuntimeEvent({
         id: "runtime-epoch-fresh",
+        signal_type: "speech_chat_reaction",
         title: "Epoch gremlin status",
         status: "completed",
         priority: "normal",
@@ -1432,6 +1435,7 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const runtime = makeChatRuntimeEvent({
         id: "runtime-impression-once",
+        signal_type: "speech_chat_reaction",
         title: "Impression once",
         created_at: "2024-01-01T00:00:00Z",
       });
@@ -1480,6 +1484,14 @@ describe("Buddy chat notification freshness", () => {
         id: "runtime-actionable-no-ambient",
         title: "Actionable runtime",
         created_at: "2024-01-01T00:00:00Z",
+        controls: [
+          {
+            id: "open-actionable-runtime",
+            label: "Open",
+            action: "open_buddy",
+            style: "primary",
+          },
+        ],
       });
       store.dispatch(
         setBuddySnapshot(makeSnapshot({ runtime_queue: [actionableRuntime] })),
@@ -4693,7 +4705,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test("fresh persistent active progress event beats fresh chat reaction", async () => {
+  test("persistent progress chatter never bubbles while fresh chat reactions show", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -4728,11 +4740,11 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       await expectCompanionNotification(
         container,
-        "runtime:fresh-persistent-progress",
+        "runtime:reaction-under-progress",
       );
       expectNoCompanionNotificationNow(
         container,
-        "runtime:reaction-under-progress",
+        "runtime:fresh-persistent-progress",
       );
     } finally {
       vi.useRealTimers();
@@ -4870,7 +4882,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     },
   );
 
-  test("high-priority completed task event has no default investigate controls", async () => {
+  test("high-priority completed task chatter stays out of the chat companion", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -4891,7 +4903,7 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       const { container } = renderBuddyChatCompanion(store, "chat-a");
 
-      await expectCompanionNotification(
+      await expectNoCompanionNotification(
         container,
         "runtime:runtime-task-completed-high",
       );

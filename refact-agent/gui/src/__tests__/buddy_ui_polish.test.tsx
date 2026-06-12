@@ -327,8 +327,8 @@ describe("buddy UI polish", () => {
     const utilSource = await readGuiSource("features/Buddy/buddyWorldUtils.ts");
 
     expect(utilSource).toContain("function bubblePositionForSceneX");
-    expect(utilSource).toContain("LONG_COMPACT_SPEECH_LENGTH");
-    expect(utilSource).toContain("compact && (speechText?.length ?? 0)");
+    expect(utilSource).toContain("COMPACT_SIDE_PREFERRED_SPEECH_LENGTH");
+    expect(utilSource).toContain("length > sidePreferredLength");
     expect(utilSource).toContain('if (x < 42) return "right"');
     expect(utilSource).toContain('if (x > 58) return "left"');
     expect(utilSource).toContain('return "top"');

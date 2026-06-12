@@ -2103,18 +2103,21 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
-  it("keeps side bubbles for ordinary speech but lifts long compact speech", () => {
+  it("keeps side bubbles for ordinary speech and long compact speech", () => {
     const longSpeech =
-      "The observatory has a very long update that should avoid narrow side clipping in compact scenes.";
+      "The observatory has a very long update that should avoid short-scene top clipping in compact scenes.";
 
     expect(bubblePositionForSceneX(67, false, longSpeech)).toBe("left");
     expect(bubblePositionForSceneX(67, true, "Short update.")).toBe("left");
     expect(bubblePositionForSceneX(38, true, "Short update.")).toBe("right");
-    expect(bubblePositionForSceneX(67, true, longSpeech)).toBe("top");
-    expect(bubblePositionForSceneX(38, true, longSpeech)).toBe("top");
+    expect(bubblePositionForSceneX(67, true, longSpeech)).toBe("left");
+    expect(bubblePositionForSceneX(38, true, longSpeech)).toBe("right");
+    expect(
+      bubblePositionForSceneX(50, true, "A medium compact line here"),
+    ).toBe("right");
   });
 
-  it("keeps compact long active speech on top after moving to a side target", async () => {
+  it("keeps compact long active speech beside the buddy after moving to a side target", async () => {
     const longSpeech =
       "The observatory has a very long update that should avoid narrow side clipping in compact scenes.";
     const onOpenPage = vi.fn();
@@ -2156,7 +2159,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     });
     expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
       "data-bubble-position",
-      "top",
+      "left",
     );
     expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
       "data-compact-bubble",
@@ -4415,11 +4418,14 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
   it("main grid bounds redesigned panel rows", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
     const mainGridBlock = readCssBlock(css, ".mainGrid");
+    const panelSlotBlock = readCssBlock(css, ".panelSlot");
 
-    expect(mainGridBlock).toContain(
-      "grid-auto-rows: clamp(300px, 36vh, 420px)",
-    );
-    expect(mainGridBlock).toContain("align-items: stretch");
+    expect(mainGridBlock).toContain("repeat(3, minmax(0, 1fr))");
+    expect(mainGridBlock).toContain("align-items: start");
+    expect(panelSlotBlock).toContain("overflow: hidden");
+    expect(panelSlotBlock).toContain("min-height: 0");
+    expect(css).toContain("height: clamp(300px, 34vh, 360px)");
+    expect(css).toContain("height: clamp(230px, 27vh, 290px)");
     expect(css).not.toContain("max-height: 860px");
   });
 
@@ -4483,8 +4489,10 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     );
 
     expect(homeWideStackBlock).toContain("repeat(2, minmax(0, 1fr))");
-    expect(homeIdeStackBlock).toContain("grid-auto-rows: minmax(0, 420px)");
-    expect(homeIdeStackBlock).not.toContain("grid-auto-rows: auto");
+    expect(homeIdeStackBlock).toContain(
+      "grid-template-columns: minmax(0, 1fr)",
+    );
+    expect(homeIdeStackBlock).toContain("height: min(420px, 70vh)");
     expect(homeIdeStackBlock).not.toContain("overflow-y: visible");
     expect(activityCss).not.toContain("overflow-y: visible");
     expect(recentErrorsCss).not.toContain("overflow-y: visible");

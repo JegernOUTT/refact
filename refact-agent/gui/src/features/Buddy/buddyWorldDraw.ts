@@ -5,6 +5,7 @@ import {
   drawCelestial,
   drawHorizonHaze,
   drawObservatoryStructures,
+  drawPrecipitation,
   drawSkyGradient,
   drawStarField,
   drawWeatherAtmosphere,
@@ -181,6 +182,7 @@ export function drawBuddyWorld(args: DrawBuddyWorldArgs): void {
   if (args.companions && args.companions.length > 0) {
     drawBuddyWorldCompanions(drawArgs, args.companions, args.actor?.nowMs ?? 0);
   }
+  drawPrecipitation(drawArgs);
   withParallaxBand(ctx, camera.pan * 0.32, 0, () => {
     drawForegroundCozyDetails(drawArgs);
     drawWindStreaks(drawArgs);

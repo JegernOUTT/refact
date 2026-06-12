@@ -3,13 +3,17 @@ import {
   countForMotion,
   fillCircle,
   fillEllipse,
+  fillPixelRect,
+  hasWorldLayer,
   pctX,
   pctY,
   safeDimension,
   safeFrame,
   seededUnit,
   strokeBezier,
+  wave,
   worldPhase,
+  worldWeather,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
@@ -112,6 +116,74 @@ function drawForegroundDrift(args: DrawBuddyWorldBaseArgs): void {
   }
 }
 
+function drawForegroundPrecipitation(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const weather = worldWeather(args.world);
+  const stormy =
+    weather === "storm" || hasWorldLayer(args.world, "provider_storm");
+
+  if (stormy || weather === "rain") {
+    const count = countForMotion(
+      stormy ? 10 : 7,
+      args.compact,
+      args.reducedMotion,
+    );
+    const slant = stormy ? 2.2 : 1.4;
+    const speed = stormy ? 7.4 : 5.4;
+    for (let index = 0; index < count; index += 1) {
+      const lane = seededUnit(401, index) * width;
+      const drop = args.reducedMotion
+        ? 0
+        : frame * (speed + seededUnit(409, index) * 1.8);
+      const ry =
+        ((seededUnit(419, index) * height + drop) % (height + 34)) - 17;
+      const rx = (((lane - ry * slant) % width) + width) % width;
+      fillPixelRect(
+        args.ctx,
+        rx,
+        ry,
+        2.4,
+        14,
+        "#0284C7",
+        alphaForMotion(
+          0.38 + seededUnit(421, index) * 0.16,
+          args.reducedMotion,
+        ),
+      );
+    }
+  }
+
+  if (hasWorldLayer(args.world, "season_snow")) {
+    const flakeCount = countForMotion(5, args.compact, args.reducedMotion);
+    for (let index = 0; index < flakeCount; index += 1) {
+      const drop = args.reducedMotion
+        ? 0
+        : frame * (0.55 + seededUnit(431, index) * 0.5);
+      const fy =
+        ((seededUnit(433, index) * height + drop) % (height + 20)) - 10;
+      const fx =
+        (((seededUnit(439, index) * width +
+          wave(frame, 34 + index, index, 9, args.reducedMotion)) %
+          width) +
+          width) %
+        width;
+      fillCircle(
+        args.ctx,
+        fx,
+        fy,
+        2.8 + seededUnit(443, index) * 1.5,
+        "#F8FAFC",
+        alphaForMotion(
+          0.42 + seededUnit(449, index) * 0.16,
+          args.reducedMotion,
+        ),
+      );
+    }
+  }
+}
+
 export function drawBuddyWorldForeground(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
@@ -121,4 +193,5 @@ export function drawBuddyWorldForeground(args: DrawBuddyWorldBaseArgs): void {
   ctx.clearRect(0, 0, width, height);
   drawForegroundTufts(args);
   drawForegroundDrift(args);
+  drawForegroundPrecipitation(args);
 }
