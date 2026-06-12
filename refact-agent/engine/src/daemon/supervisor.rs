@@ -93,6 +93,7 @@ pub struct Supervisor {
     workers: RwLock<HashMap<String, Arc<WorkerSlot>>>,
     events: EventBus,
     daemon_dir: PathBuf,
+    daemon_auth_token: Option<String>,
     daemon_port: RwLock<u16>,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
@@ -109,6 +110,7 @@ impl Supervisor {
             daemon_port,
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
+            None,
         )
     }
 
@@ -118,11 +120,13 @@ impl Supervisor {
         daemon_port: u16,
         cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
         idle_timeout_secs: u64,
+        daemon_auth_token: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             workers: RwLock::new(HashMap::new()),
             events,
             daemon_dir,
+            daemon_auth_token,
             daemon_port: RwLock::new(daemon_port),
             cron_pending,
             project_liveness: RwLock::new(HashMap::new()),
@@ -490,15 +494,7 @@ impl Supervisor {
         ports: PortPair,
         nonce: &str,
     ) -> Result<Child, String> {
-        let mut command = self.worker_command_base()?;
-        command.args(worker_args(
-            spec,
-            ports,
-            nonce,
-            *self.daemon_port.read().await,
-            self.daemon_dir.clone(),
-        ));
-        command.current_dir(&spec.root);
+        let mut command = self.worker_command(spec, ports, nonce).await?;
         let log_path = self
             .daemon_dir
             .join("logs")
@@ -527,6 +523,27 @@ impl Supervisor {
         command
             .spawn()
             .map_err(|error| format!("failed to spawn worker command: {error}"))
+    }
+
+    async fn worker_command(
+        &self,
+        spec: &WorkerLaunchSpec,
+        ports: PortPair,
+        nonce: &str,
+    ) -> Result<tokio::process::Command, String> {
+        let mut command = self.worker_command_base()?;
+        command.args(worker_args(
+            spec,
+            ports,
+            nonce,
+            *self.daemon_port.read().await,
+            self.daemon_dir.clone(),
+        ));
+        if let Some(token) = &self.daemon_auth_token {
+            command.env("REFACT_DAEMON_TOKEN", token);
+        }
+        command.current_dir(&spec.root);
+        Ok(command)
     }
 
     fn worker_command_base(&self) -> Result<tokio::process::Command, String> {
@@ -1053,6 +1070,15 @@ fn runtime_restart_delay(delay: Duration) -> Duration {
 mod tests {
     use super::*;
 
+    fn test_launch_spec(root: PathBuf) -> WorkerLaunchSpec {
+        WorkerLaunchSpec {
+            project_id: "project".to_string(),
+            slug: "project".to_string(),
+            root,
+            settings: ProjectSettings::default(),
+        }
+    }
+
     #[test]
     fn restart_delay_follows_backoff_schedule() {
         assert_eq!(next_restart_delay(&[], 100), Some(Duration::from_secs(1)));
@@ -1098,6 +1124,65 @@ mod tests {
         assert!(is_port_busy_exit(Some(48)));
         assert!(is_port_busy_exit(Some(98)));
         assert!(is_port_busy_exit(Some(10048)));
+    }
+
+    #[test]
+    fn worker_args_omits_daemon_auth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "secret-token-never-in-args";
+        let spec = test_launch_spec(dir.path().join("project"));
+        let args = worker_args(
+            &spec,
+            PortPair {
+                http_port: 8111,
+                lsp_port: 8112,
+            },
+            "nonce",
+            8488,
+            dir.path().join("daemon"),
+        );
+
+        assert!(!args.iter().any(|arg| arg.contains(token)));
+        assert!(!args.iter().any(|arg| arg == "REFACT_DAEMON_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn worker_command_sets_daemon_auth_token_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new_with_cron_pending(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+            Arc::new(SyncRwLock::new(HashMap::new())),
+            crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
+            Some("secret-token".to_string()),
+        );
+        let spec = test_launch_spec(dir.path().join("project"));
+        let command = supervisor
+            .worker_command(
+                &spec,
+                PortPair {
+                    http_port: 8111,
+                    lsp_port: 8112,
+                },
+                "nonce",
+            )
+            .await
+            .unwrap();
+
+        let token = command.as_std().get_envs().find_map(|(key, value)| {
+            (key == "REFACT_DAEMON_TOKEN")
+                .then(|| value.map(|value| value.to_string_lossy().to_string()))
+                .flatten()
+        });
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(token.as_deref(), Some("secret-token"));
+        assert!(!args.iter().any(|arg| arg.contains("secret-token")));
     }
 
     #[tokio::test]

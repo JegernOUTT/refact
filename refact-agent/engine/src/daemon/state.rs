@@ -113,6 +113,7 @@ impl DaemonState {
             daemon_port,
             cron_pending.clone(),
             config.idle_timeout_secs,
+            auth_token.clone(),
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))

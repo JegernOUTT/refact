@@ -134,13 +134,14 @@ async fn post_worker_status(
     url: &str,
     report: &WorkerStatusReport,
 ) -> Result<(), String> {
-    let response = tokio::time::timeout(
-        DAEMON_LINK_POST_TIMEOUT,
-        gcx.http_client.post(url).json(report).send(),
-    )
-    .await
-    .map_err(|_| "request timed out".to_string())?
-    .map_err(|error| error.to_string())?;
+    let mut request = gcx.http_client.post(url).json(report);
+    if let Some(token) = &gcx.cmdline.daemon_auth_token {
+        request = request.bearer_auth(token);
+    }
+    let response = tokio::time::timeout(DAEMON_LINK_POST_TIMEOUT, request.send())
+        .await
+        .map_err(|_| "request timed out".to_string())?
+        .map_err(|error| error.to_string())?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -161,6 +162,9 @@ mod tests {
     use super::*;
     use crate::chat::types::ChatSession;
     use crate::exec::{ExecMode, ExecProcessMeta, ExecStatus};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
     use tokio::sync::Mutex as AMutex;
 
     #[test]
@@ -219,5 +223,55 @@ mod tests {
         assert_eq!(report.busy_chats, 1);
         assert_eq!(report.exec_running, 1);
         assert!(report.last_activity_ts > 0);
+    }
+
+    #[tokio::test]
+    async fn post_worker_status_sends_bearer_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/daemon/v1/worker-status",
+            post(
+                |headers: axum::http::HeaderMap, Json(_): Json<WorkerStatusReport>| async move {
+                    if headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer secret-token")
+                    {
+                        (axum::http::StatusCode::OK, Json(json!({"success": true})))
+                    } else {
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            Json(json!({"error": "Unauthorized"})),
+                        )
+                    }
+                },
+            ),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().cmdline.daemon_auth_token =
+            Some("secret-token".to_string());
+        let report = WorkerStatusReport {
+            project_id: "project".to_string(),
+            pid: 42,
+            lsp_clients: 0,
+            busy_chats: 0,
+            exec_running: 0,
+            last_activity_ts: 1,
+        };
+
+        let result = post_worker_status(
+            gcx,
+            &format!("http://127.0.0.1:{port}/daemon/v1/worker-status"),
+            &report,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        task.abort();
     }
 }

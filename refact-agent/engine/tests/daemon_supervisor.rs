@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use refact_lsp::daemon::config::DaemonConfig;
 use refact_lsp::daemon::events::EventBus;
 use refact_lsp::daemon::projects::{ProjectEntry, ProjectSettings};
+use refact_lsp::daemon::state::DaemonState;
 use refact_lsp::daemon::supervisor::{Supervisor, WorkerInfo, WorkerState};
 use serial_test::serial;
 use tempfile::tempdir;
@@ -42,6 +44,10 @@ impl EnvGuard {
                 "FAKE_WORKER_PORT_BUSY_EXIT",
                 std::env::var("FAKE_WORKER_PORT_BUSY_EXIT").ok(),
             ),
+            (
+                "FAKE_WORKER_PUSH_STATUS",
+                std::env::var("FAKE_WORKER_PUSH_STATUS").ok(),
+            ),
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
@@ -57,6 +63,7 @@ impl EnvGuard {
             Some(code) => std::env::set_var("FAKE_WORKER_PORT_BUSY_EXIT", code),
             None => std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT"),
         }
+        std::env::remove_var("FAKE_WORKER_PUSH_STATUS");
         Some(Self { keys: previous })
     }
 }
@@ -148,6 +155,7 @@ async fn ensure_worker_reaches_ready() {
     let Some(_env) = EnvGuard::set(false) else {
         return;
     };
+    std::env::set_var("FAKE_WORKER_PUSH_STATUS", "1");
     let dir = tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
@@ -299,4 +307,48 @@ async fn stop_all_stops_children_for_daemon_shutdown() {
     let stopped = supervisor.worker_info(&entry.id).await.unwrap();
     assert_eq!(stopped.state, WorkerState::Stopped);
     assert_eq!(supervisor.worker_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn auth_enabled_daemon_accepts_fake_worker_status() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = DaemonState::new_with_daemon_dir(
+        DaemonConfig::default(),
+        EventBus::new(dir.path().join("events.jsonl")),
+        Some("secret-token".to_string()),
+        dir.path().join("daemon"),
+        port,
+    );
+    let server = axum::Server::from_tcp(listener.into_std().unwrap())
+        .unwrap()
+        .serve(refact_lsp::daemon::server::make_router(state.clone(), port).into_make_service());
+    let server_task = tokio::spawn(server);
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "auth-status-project");
+
+    let info = state.supervisor.ensure_worker(&entry).await.unwrap();
+    assert_eq!(info.state, WorkerState::Ready);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(report) = state.latest_worker_status(&entry.id).await {
+            assert_eq!(report.project_id, entry.id);
+            assert_eq!(report.pid, info.pid.unwrap_or_default());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker status was not accepted in time"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    state.supervisor.stop_all().await;
+    server_task.abort();
 }

@@ -37,6 +37,12 @@ use crate::yaml_configs::customization_registry::RegistryCacheManager;
 use crate::knowledge_index::KnowledgeIndex;
 use refact_context_api::{HttpClientAccess, PathsAccess, ShutdownAccess};
 
+fn daemon_auth_token_from_env() -> Option<String> {
+    std::env::var("REFACT_DAEMON_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
 #[derive(Debug, StructOpt, Clone)]
 pub struct CommandLine {
     #[structopt(
@@ -202,12 +208,21 @@ pub struct CommandLine {
         help = "Daemon endpoint for managed workers."
     )]
     pub daemon_endpoint: String,
+    #[structopt(skip = daemon_auth_token_from_env())]
+    pub daemon_auth_token: Option<String>,
     #[structopt(
         long,
         default_value = "",
         help = "Daemon project id for managed workers."
     )]
     pub project_id: String,
+}
+
+impl CommandLine {
+    fn with_daemon_auth_token_from_env(mut self) -> Self {
+        self.daemon_auth_token = self.daemon_auth_token.or_else(daemon_auth_token_from_env);
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -688,6 +703,7 @@ pub async fn create_global_context(
     cmdline: CommandLine,
 ) -> (Arc<GlobalContext>, std::sync::mpsc::Receiver<String>) {
     let (ask_shutdown_sender, ask_shutdown_receiver) = std::sync::mpsc::channel::<String>();
+    let cmdline = cmdline.with_daemon_auth_token_from_env();
     let mut http_client_builder = build_shared_http_client_builder();
     if cmdline.insecure {
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
@@ -889,6 +905,7 @@ pub mod tests {
             privacy_yaml: String::new(),
             no_scheduler: false,
             daemon_endpoint: String::new(),
+            daemon_auth_token: None,
             project_id: String::new(),
         };
 

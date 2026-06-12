@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib import request
 from urllib.parse import parse_qs, urlparse
 
 
@@ -196,6 +197,43 @@ class WorkerServer(ThreadingHTTPServer):
         self.chat_cond = threading.Condition()
 
 
+def worker_status_payload(project_id):
+    return {
+        "project_id": project_id,
+        "pid": os.getpid(),
+        "lsp_clients": 0,
+        "busy_chats": 0,
+        "exec_running": 0,
+        "last_activity_ts": int(time.time() * 1000),
+    }
+
+
+def start_status_pusher(args):
+    endpoint = (args.daemon_endpoint or "").rstrip("/")
+    project_id = args.project_id or ""
+    if not endpoint or not project_id:
+        return
+    url = endpoint + "/daemon/v1/worker-status"
+    token = os.environ.get("REFACT_DAEMON_TOKEN")
+    if os.environ.get("FAKE_WORKER_PUSH_STATUS") != "1" and token is None:
+        return
+
+    def run():
+        while True:
+            body = json.dumps(worker_status_payload(project_id)).encode("utf-8")
+            headers = {"content-type": "application/json"}
+            if token:
+                headers["Authorization"] = "Bearer " + token
+            req = request.Request(url, data=body, headers=headers, method="POST")
+            try:
+                request.urlopen(req, timeout=0.5).read()
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--http-port", type=int, required=True)
@@ -221,6 +259,7 @@ def main():
         sys.exit(1)
 
     server = WorkerServer(("127.0.0.1", args.http_port), WorkerHandler, args.ping_message)
+    start_status_pusher(args)
 
     def stop(_signum, _frame):
         server.shutdown()
