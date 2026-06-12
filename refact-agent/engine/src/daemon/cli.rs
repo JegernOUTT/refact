@@ -630,14 +630,35 @@ async fn restart_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, C
 }
 
 async fn stop_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
-    let info = ensure_daemon().await?;
+    let Some(info) = client::read_daemon_json().await else {
+        return print_daemon_not_running(json_output, out, "missing");
+    };
+    if !client::ping_daemon(&info).await {
+        return print_daemon_not_running(json_output, out, "stale");
+    }
     client::shutdown_daemon(&info, "stop")
+        .await
+        .map_err(CliError::runtime)?;
+    client::wait_for_daemon_stop(&info, Duration::from_secs(15))
         .await
         .map_err(CliError::runtime)?;
     if json_output {
         print_json(out, &json!({"stopped": true}))?;
     } else {
         writeln!(out, "daemon stopped").map_err(write_error)?;
+    }
+    Ok(0)
+}
+
+fn print_daemon_not_running(
+    json_output: bool,
+    out: &mut dyn Write,
+    reason: &str,
+) -> Result<i32, CliError> {
+    if json_output {
+        print_json(out, &json!({"stopped": false, "reason": reason}))?;
+    } else {
+        writeln!(out, "no daemon running ({reason})").map_err(write_error)?;
     }
     Ok(0)
 }
@@ -1136,6 +1157,22 @@ mod tests {
         assert_eq!(events[0].kind, "worker_ready");
     }
 
+    fn daemon_info(port: u16) -> DaemonInfo {
+        DaemonInfo {
+            pid: 1,
+            port,
+            bind: "127.0.0.1".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            auth_token: Some("secret".to_string()),
+            started_at_ms: 0,
+            hostname_local: "test.local".to_string(),
+            urls: crate::daemon::state::DaemonUrls {
+                loopback: format!("http://127.0.0.1:{port}"),
+                mdns: String::new(),
+            },
+        }
+    }
+
     struct EnvGuard {
         cache: Option<String>,
         config: Option<String>,
@@ -1192,6 +1229,16 @@ mod tests {
         }
     }
 
+    async fn wait_for_daemon_info(path: &Path) -> crate::daemon::state::DaemonInfo {
+        for _ in 0..100 {
+            if let Ok(Some(info)) = crate::daemon::state::read_daemon_info(path).await {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("daemon did not start")
+    }
+
     async fn start_test_daemon(
         cache_dir: &tempfile::TempDir,
     ) -> (
@@ -1208,13 +1255,7 @@ mod tests {
             crate::daemon::run_daemon_entry_with_paths(config, paths, false, false).await
         });
         let daemon_json = cache_dir.path().join("daemon").join("daemon.json");
-        for _ in 0..100 {
-            if let Ok(Some(info)) = crate::daemon::state::read_daemon_info(&daemon_json).await {
-                return (info, task);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("daemon did not start")
+        (wait_for_daemon_info(&daemon_json).await, task)
     }
 
     async fn shutdown_test_daemon(
@@ -1222,6 +1263,81 @@ mod tests {
         task: tokio::task::JoinHandle<i32>,
     ) {
         client::shutdown_daemon(info, "test").await.unwrap();
+        assert_eq!(task.await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_daemon_missing_file_does_not_spawn() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
+            return;
+        };
+        let mut out = Vec::new();
+        assert_eq!(stop_daemon(false, &mut out).await.unwrap(), 0);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "no daemon running (missing)\n"
+        );
+        assert!(!crate::daemon::paths::daemon_json_path().exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_daemon_stale_file_does_not_spawn() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
+            return;
+        };
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(9),
+        )
+        .await
+        .unwrap();
+        let mut out = Vec::new();
+        assert_eq!(stop_daemon(true, &mut out).await.unwrap(), 0);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out).unwrap(),
+            json!({"stopped": false, "reason": "stale"})
+        );
+        let info =
+            crate::daemon::state::read_daemon_info(&crate::daemon::paths::daemon_json_path())
+                .await
+                .unwrap();
+        assert!(info.is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_daemon_auth_enabled_live_daemon_shuts_down() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
+            return;
+        };
+        let paths = crate::daemon::RuntimePaths::in_dir(&crate::daemon::paths::daemon_dir());
+        let config = crate::daemon::config::DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            auth: crate::daemon::config::AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+            },
+            ..crate::daemon::config::DaemonConfig::default()
+        };
+        let task = tokio::spawn(async move {
+            crate::daemon::run_daemon_entry_with_paths(config, paths, false, false).await
+        });
+        let daemon_json = cache_dir.path().join("daemon").join("daemon.json");
+        let info = wait_for_daemon_info(&daemon_json).await;
+        assert_eq!(info.auth_token.as_deref(), Some("secret"));
+
+        let mut out = Vec::new();
+        assert_eq!(stop_daemon(false, &mut out).await.unwrap(), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "daemon stopped\n");
         assert_eq!(task.await.unwrap(), 0);
     }
 

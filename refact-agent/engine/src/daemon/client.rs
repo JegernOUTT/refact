@@ -49,15 +49,7 @@ impl std::fmt::Display for DaemonClientError {
 impl std::error::Error for DaemonClientError {}
 
 pub async fn ping_daemon(info: &DaemonInfo) -> bool {
-    let url = format!(
-        "http://{}:{}/daemon/v1/status",
-        connect_host(&info.bind),
-        info.port
-    );
-    match control_client().get(url).send().await {
-        Ok(response) if response.status().is_success() => true,
-        _ => false,
-    }
+    get_json::<Value>(info, "/daemon/v1/status").await.is_ok()
 }
 
 pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
@@ -281,37 +273,20 @@ async fn wait_until_dead(info: &DaemonInfo, timeout: Duration) -> Result<(), Str
 }
 
 async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
-    let url = format!(
-        "http://{}:{}/daemon/v1/shutdown",
-        connect_host(&info.bind),
-        info.port
-    );
-    let request = control_client()
-        .post(url)
-        .json(&serde_json::json!({"reason": reason}));
-    let request = match &info.auth_token {
-        Some(token) => request.bearer_auth(token),
-        None => request,
-    };
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("failed to request daemon shutdown: {error}"))?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "daemon shutdown failed with status {}",
-            response.status()
-        ))
-    }
-}
-
-fn connect_host(bind: &str) -> String {
-    match bind {
-        "0.0.0.0" | "::" => "127.0.0.1".to_string(),
-        other => other.to_string(),
-    }
+    post_json::<_, Value>(
+        info,
+        "/daemon/v1/shutdown",
+        &serde_json::json!({"reason": reason}),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| match error {
+        DaemonClientError::Http(message) => format!("failed to request daemon shutdown: {message}"),
+        DaemonClientError::Status { status, .. } => {
+            format!("daemon shutdown failed with status {status}")
+        }
+        DaemonClientError::Json(message) => message,
+    })
 }
 
 fn version_is_older(current: &str, mine: &str) -> bool {
@@ -391,6 +366,56 @@ mod tests {
         let path = dir.path().join("daemon.json");
         tokio::fs::write(&path, b"not json").await.unwrap();
         assert!(read_daemon_json_path(&path).await.is_none());
+    }
+
+    fn daemon_info(port: u16, auth_token: Option<&str>) -> DaemonInfo {
+        DaemonInfo {
+            pid: 1,
+            port,
+            bind: "127.0.0.1".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            auth_token: auth_token.map(str::to_string),
+            started_at_ms: 0,
+            hostname_local: "test.local".to_string(),
+            urls: crate::daemon::state::DaemonUrls {
+                loopback: format!("http://127.0.0.1:{port}"),
+                mdns: String::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn ping_daemon_sends_bearer_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().route(
+            "/daemon/v1/status",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                if headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer secret")
+                {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({"ok": true})),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                    )
+                }
+            }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+
+        assert!(ping_daemon(&daemon_info(port, Some("secret"))).await);
+        assert!(!ping_daemon(&daemon_info(port, Some("wrong"))).await);
+        task.abort();
     }
 
     #[tokio::test]
