@@ -246,6 +246,10 @@ export function executeBuddyNavigation(
       dispatch(push({ name: "stats dashboard" }));
       break;
 
+    case "settings":
+      dispatch(push({ name: "general settings" }));
+      break;
+
     case "customization":
       dispatch(push({ name: "customization" }));
       break;

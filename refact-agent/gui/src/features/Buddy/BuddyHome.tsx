@@ -944,7 +944,6 @@ export const BuddyHome: React.FC = () => {
             </div>
           </div>
         </section>
-
       </main>
     </div>
   );

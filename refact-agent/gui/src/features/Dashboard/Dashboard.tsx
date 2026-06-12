@@ -1,7 +1,6 @@
 import React, { useRef } from "react";
 import { TasksSection } from "./components/TasksSection/TasksSection";
 import { ChatsSection } from "./components/ChatsSection/ChatsSection";
-import { NavBar } from "./components/NavBar/NavBar";
 import { ResizeDivider } from "./components/ResizeDivider/ResizeDivider";
 import { useDashboardLayout } from "./hooks/useDashboardLayout";
 import { useDashboardCollapseState } from "./hooks/useDashboardCollapseState";
@@ -115,8 +114,6 @@ export const Dashboard: React.FC = () => {
           </div>
         </>
       )}
-
-      <NavBar />
     </div>
   );
 };

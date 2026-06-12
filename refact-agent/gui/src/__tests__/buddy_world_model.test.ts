@@ -771,7 +771,38 @@ describe("buddy world semantic model", () => {
       "mcp",
       "git",
       "market",
+      "stats",
+      "settings",
     ]);
+  });
+
+  it("places navigation landmarks for stats, settings and marketplace", () => {
+    const world = buildWorld({ pulse: makePulse() });
+
+    const stats = world.objects.find((item) => item.id === "stats");
+    expect(stats).toMatchObject({
+      sprite: "stats_totem",
+      label: "Stats totem",
+      page: { type: "stats" },
+      x: 90,
+      y: 74,
+    });
+
+    const settings = world.objects.find((item) => item.id === "settings");
+    expect(settings).toMatchObject({
+      sprite: "gear_mill",
+      label: "Settings mill",
+      page: { type: "settings" },
+      x: 63,
+      y: 74,
+    });
+
+    const market = world.objects.find((item) => item.id === "market");
+    expect(market).toMatchObject({
+      sprite: "market_comet",
+      label: "Marketplace comet",
+      page: { type: "marketplace_hub" },
+    });
   });
 
   it("keeps malformed pulse numbers finite and clamped", () => {

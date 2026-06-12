@@ -934,6 +934,80 @@ function drawMarketComet(
   );
 }
 
+function drawStatsTotem(
+  args: DrawBuddyWorldBaseArgs,
+  x: number,
+  y: number,
+  tone: string,
+): void {
+  const materials = objectMaterials(args);
+  const frame = safeFrame(args.frame);
+
+  fillEllipse(args.ctx, x, y + 13, 11, 3.2, "#1A2E20", 0.3);
+  fillPixelRect(args.ctx, x - 6, y + 9.6, 12, 3.2, materials.stone, 0.92);
+  fillPixelRect(args.ctx, x - 8.4, y - 9, 16.8, 19, materials.stoneDark, 0.95);
+  fillPixelRect(args.ctx, x - 7, y - 7.6, 14, 16.2, materials.paper, 0.92);
+  fillPixelRect(args.ctx, x - 7, y - 7.6, 14, 2, materials.paperShade, 0.9);
+
+  const lift = wave(frame, 46, 1, 1.4, args.reducedMotion);
+  const bars = [
+    { dx: -4.6, h: 4.6 + lift * 0.4, color: "#74B06A" },
+    { dx: -0.8, h: 7.2 - lift * 0.5, color: tone },
+    { dx: 3, h: 5.4 + lift * 0.6, color: "#FDE68A" },
+  ];
+  for (const bar of bars) {
+    const barHeight = Math.max(2, bar.h);
+    fillPixelRect(
+      args.ctx,
+      x + bar.dx,
+      y + 6 - barHeight,
+      2.6,
+      barHeight,
+      bar.color,
+      0.95,
+    );
+  }
+
+  fillPixelRect(args.ctx, x - 2, y - 13.6, 4, 4.6, materials.stone, 0.95);
+  fillPixelRect(args.ctx, x - 1, y - 15, 2, 1.6, tone, 0.95);
+}
+
+function drawGearMill(
+  args: DrawBuddyWorldBaseArgs,
+  x: number,
+  y: number,
+  tone: string,
+): void {
+  const materials = objectMaterials(args);
+  const frame = safeFrame(args.frame);
+  const spin = args.reducedMotion ? Math.PI / 4 : frame / 38;
+
+  fillEllipse(args.ctx, x, y + 13, 12, 3.4, "#1A2E20", 0.3);
+  fillPixelRect(args.ctx, x - 8, y - 1, 16, 12, materials.wood, 0.95);
+  fillPixelRect(args.ctx, x - 8, y - 1, 16, 2.2, materials.woodDark, 0.9);
+  fillPixelRect(args.ctx, x - 9.4, y - 4.6, 18.8, 4, materials.stoneDark, 0.94);
+  fillPixelRect(args.ctx, x - 1.6, y + 4.4, 3.6, 6.6, materials.woodDark, 0.95);
+  fillPixelRect(args.ctx, x + 4, y + 1.6, 2.6, 2.6, "#FDE68A", 0.85);
+
+  const gearY = y - 10;
+  strokeEllipse(args.ctx, x, gearY, 6, 6, materials.stoneDark, 2.4, 0.95);
+  for (let i = 0; i < 4; i += 1) {
+    const angle = spin + (i * Math.PI) / 2;
+    const toothX = x + Math.cos(angle) * 7.4;
+    const toothY = gearY + Math.sin(angle) * 7.4;
+    fillPixelRect(
+      args.ctx,
+      toothX - 1.4,
+      toothY - 1.4,
+      2.8,
+      2.8,
+      materials.stone,
+      0.95,
+    );
+  }
+  fillCircle(args.ctx, x, gearY, 2.2, tone, 0.95);
+}
+
 function drawSeed(args: DrawBuddyWorldBaseArgs, x: number, y: number): void {
   const frame = safeFrame(args.frame);
   const sway = wave(frame, 40, 0, 1.6, args.reducedMotion);
@@ -997,6 +1071,12 @@ export function drawWorldObject(
       break;
     case "market_comet":
       drawMarketComet(args, x, y, pulse);
+      break;
+    case "stats_totem":
+      drawStatsTotem(args, x, y, tone);
+      break;
+    case "gear_mill":
+      drawGearMill(args, x, y, tone);
       break;
     case "seed":
       drawSeed(args, x, y);

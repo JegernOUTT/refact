@@ -1,6 +1,5 @@
-/* NavBar-style bottom toolbar — mirrors features/Dashboard/components
- * /NavBar/NavBar.module.css so the Buddy home and the dashboard home
- * share an identical bottom action bar. */
+/* Bottom toolbar for the Buddy home: icon-on-top buttons in a single
+ * full-width glass row. */
 
 .workshop {
   display: flex;

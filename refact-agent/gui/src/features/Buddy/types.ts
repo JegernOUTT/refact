@@ -833,6 +833,7 @@ export type PulseScope =
 export type BuddyPage =
   | { type: "buddy" }
   | { type: "stats" }
+  | { type: "settings" }
   | { type: "customization" }
   | { type: "providers" }
   | { type: "default_models" }

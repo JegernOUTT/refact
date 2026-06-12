@@ -271,6 +271,7 @@ describe("buddy UI polish", () => {
     const cases: [BuddyPage, string][] = [
       [{ type: "buddy" }, "buddy"],
       [{ type: "stats" }, "stats dashboard"],
+      [{ type: "settings" }, "general settings"],
       [{ type: "customization" }, "customization"],
       [{ type: "providers" }, "providers page"],
       [{ type: "default_models" }, "default models"],

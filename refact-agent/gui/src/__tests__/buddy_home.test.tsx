@@ -1159,7 +1159,7 @@ describe("BuddyHome_renders_all_sections", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
 
     const settingsSection = await screen.findByTestId(
       "buddy-home-settings-section",
@@ -3511,7 +3511,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("switch", { name: /buddy enabled/i }));
 
     await waitFor(() => {
@@ -4049,7 +4049,7 @@ describe("BuddyHome_disabled_state", () => {
     const { user } = render(<BuddyHome />, { store });
 
     const settingsBtn = await screen.findByRole("button", {
-      name: /settings/i,
+      name: "Settings",
     });
     expect(settingsBtn).toBeInTheDocument();
 
@@ -4140,7 +4140,7 @@ describe("BuddyHome_disabled_state", () => {
     ).toBeInTheDocument();
     expect(screen.queryByTestId("buddy-home-content")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
 
     const enabledSwitch = await screen.findByRole("switch", {
       name: /buddy enabled/i,

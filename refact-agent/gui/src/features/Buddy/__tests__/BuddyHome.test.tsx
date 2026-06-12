@@ -357,7 +357,7 @@ describe("BuddyHome", () => {
       screen.queryByTestId("buddy-home-settings-section"),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
 
     expect(
       await screen.findByTestId("buddy-home-settings-section"),

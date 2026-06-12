@@ -3943,6 +3943,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
   test("BuddyPage discriminated union type check", () => {
     const pages: BuddyPage[] = [
       { type: "buddy" },
+      { type: "settings" },
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
       { type: "worktrees" },
@@ -3950,6 +3951,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
     ];
     const types = pages.map((p) => p.type);
     expect(types).toContain("buddy");
+    expect(types).toContain("settings");
     expect(types).toContain("task_workspace");
     expect(types).toContain("knowledge_graph");
     expect(types).toContain("worktrees");
@@ -3970,6 +3972,7 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
     const cases: [BuddyPage, string][] = [
       [{ type: "buddy" }, "buddy"],
       [{ type: "stats" }, "stats dashboard"],
+      [{ type: "settings" }, "general settings"],
       [{ type: "customization" }, "customization"],
       [{ type: "providers" }, "providers page"],
       [{ type: "default_models" }, "default models"],

@@ -2,14 +2,11 @@ import React, { useMemo } from "react";
 import {
   BarChart3,
   Bug,
-  CheckSquare,
   FileText,
   Gauge,
   Menu as MenuIcon,
-  Moon,
   Settings,
   SlidersHorizontal,
-  Sun,
 } from "lucide-react";
 
 import { selectHost, type Config } from "../../features/Config/configSlice";
@@ -27,9 +24,6 @@ export type DropdownNavigationOptions =
 
 type DropdownProps = {
   handleNavigation: (to: DropdownNavigationOptions) => void;
-  isDarkMode?: boolean;
-  onCreateNewTask?: () => void;
-  onToggleDarkMode?: () => void;
   triggerClassName?: string;
   useGhostTrigger?: boolean;
 };
@@ -40,18 +34,12 @@ function linkForBugReports(_host: Config["host"]): string {
 
 export const Dropdown: React.FC<DropdownProps> = ({
   handleNavigation,
-  isDarkMode = false,
-  onCreateNewTask,
-  onToggleDarkMode,
   triggerClassName,
 }: DropdownProps) => {
   const host = useAppSelector(selectHost);
   const bugUrl = linkForBugReports(host);
   const openUrl = useOpenUrl();
   const { openPrivacyFile } = useEventsBusForIDE();
-  const hasSecondaryActions = [onCreateNewTask, onToggleDarkMode].some(
-    (action) => action !== undefined,
-  );
 
   const refactProductType = useMemo(() => {
     if (host === "jetbrains") return "Plugin";
@@ -75,17 +63,6 @@ export const Dropdown: React.FC<DropdownProps> = ({
       </Tooltip>
 
       <Menu.Content>
-        {onCreateNewTask && (
-          <Menu.Item onSelect={() => onCreateNewTask()}>
-            <Icon icon={CheckSquare} size="sm" /> New Task
-          </Menu.Item>
-        )}
-        {onToggleDarkMode && (
-          <Menu.Item onSelect={() => onToggleDarkMode()}>
-            <Icon icon={isDarkMode ? Moon : Sun} size="sm" /> Toggle Dark Mode
-          </Menu.Item>
-        )}
-        {hasSecondaryActions && <Menu.Separator />}
         <Menu.Item onSelect={() => handleNavigation("general settings")}>
           <Icon icon={Settings} size="sm" /> Settings
         </Menu.Item>

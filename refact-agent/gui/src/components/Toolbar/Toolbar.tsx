@@ -779,22 +779,28 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         </a>
       </div>
 
-      <div className={styles.toolbarDivider} />
+      {activeTab.type !== "dashboard" && (
+        <>
+          <div className={styles.toolbarDivider} />
 
-      <div className={classNames(styles.toolbarSection, styles.actionSection)}>
-        <ToolbarIconButton
-          label="New Chat"
-          icon={Plus}
-          onClick={onCreateNewChat}
-        />
+          <div
+            className={classNames(styles.toolbarSection, styles.actionSection)}
+          >
+            <ToolbarIconButton
+              label="New Chat"
+              icon={Plus}
+              onClick={onCreateNewChat}
+            />
 
-        <ToolbarIconButton
-          label="New Task"
-          icon={CheckSquare}
-          className={styles.newTaskAction}
-          onClick={onCreateNewTask}
-        />
-      </div>
+            <ToolbarIconButton
+              label="New Task"
+              icon={CheckSquare}
+              className={styles.newTaskAction}
+              onClick={onCreateNewTask}
+            />
+          </div>
+        </>
+      )}
 
       <div className={styles.toolbarDivider} />
 
@@ -808,13 +814,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           />
         )}
 
-        <Dropdown
-          handleNavigation={handleNavigation}
-          isDarkMode={isDarkMode}
-          onCreateNewTask={onCreateNewTask}
-          onToggleDarkMode={host === "web" ? toggleDarkMode : undefined}
-          useGhostTrigger
-        />
+        <Dropdown handleNavigation={handleNavigation} useGhostTrigger />
       </div>
     </div>
   );

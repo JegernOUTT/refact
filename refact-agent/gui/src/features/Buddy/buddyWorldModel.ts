@@ -80,6 +80,8 @@ export type BuddyWorldSprite =
   | "satellite"
   | "git_vane"
   | "market_comet"
+  | "stats_totem"
+  | "gear_mill"
   | "seed";
 
 export type BuddyWorldObjectState =
@@ -885,7 +887,7 @@ function buildObjects(
       {
         id: "market",
         sprite: "market_comet",
-        label: "Upgrade comet",
+        label: "Marketplace comet",
         value: `${customizationTools} tools`,
         description: `${safeCount(
           pulse.customization.modes,
@@ -905,7 +907,53 @@ function buildObjects(
         interactionX: 43,
         interactionY: 70,
         depthScale: 0.82,
-        magicalLabel: "Upgrade comet",
+        magicalLabel: "Marketplace comet",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "stats",
+        sprite: "stats_totem",
+        label: "Stats totem",
+        value: `${safeCount(pulse.trajectories.total)} chats`,
+        description: "Usage, costs and activity charts.",
+        page: { type: "stats" },
+        tone: "neutral",
+        x: 90,
+        y: 74,
+        size: 12,
+      },
+      {
+        state: "calm",
+        intensity: 0.24,
+        animation: "breathe",
+        interactionX: 87,
+        interactionY: 79,
+        depthScale: 1.04,
+        magicalLabel: "Score totem",
+      },
+    ),
+    buildWorldObject(
+      {
+        id: "settings",
+        sprite: "gear_mill",
+        label: "Settings mill",
+        value: "Preferences",
+        description: `Tune ${name}'s home, looks and controls.`,
+        page: { type: "settings" },
+        tone: "neutral",
+        x: 63,
+        y: 74,
+        size: 14,
+      },
+      {
+        state: "calm",
+        intensity: 0.24,
+        animation: "breathe",
+        interactionX: 61,
+        interactionY: 78,
+        depthScale: 0.94,
+        magicalLabel: "Tinker mill",
       },
     ),
   ];
