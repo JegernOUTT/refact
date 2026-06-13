@@ -506,6 +506,9 @@ fn is_valid_file_for_scan(
     if path_is_refact_import_internal(path) {
         return Err(".refact/imports is internal".into());
     }
+    if crate::file_filter::is_generated_index_path(path) {
+        return Err(".refact/**/index.json is a generated index".into());
+    }
     is_valid_file(path, true, ignore_size_thresholds)?;
     if !allow_hidden_folders {
         let rel_path = path.strip_prefix(scan_root).unwrap_or(path.as_path());
@@ -1164,6 +1167,9 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
                 // important to filter BEFORE canonical_path
                 continue;
             }
+            if crate::file_filter::is_generated_index_path(p) {
+                continue;
+            }
 
             // If it's a removed file or a valid existing file, then we can enqueue it
             if (!p.exists() && p.extension().is_some()) || is_valid_file(p, false, false).is_ok() {
@@ -1413,6 +1419,24 @@ mod tests {
         let files = scan_workspace(temp.path()).await;
 
         assert!(files.contains(&normalized(&skill)));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_excludes_refact_generated_index_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let regular = temp.path().join("docs").join("index.json");
+        let generated = temp
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join("index.json");
+        write_file(&regular, "{\"user\":true}\n");
+        write_file(&generated, "{\"schema_version\":1}\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&regular)));
+        assert!(!files.contains(&normalized(&generated)));
     }
 
     #[tokio::test]

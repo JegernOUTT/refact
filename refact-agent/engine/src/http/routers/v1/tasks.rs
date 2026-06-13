@@ -213,7 +213,7 @@ pub async fn handle_create_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let meta = storage::create_task(gcx.clone(), &req.name)
+    let mut meta = storage::create_task(gcx.clone(), &req.name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !req.target_files.is_empty() {
@@ -247,7 +247,10 @@ pub async fn handle_create_task(
             scope_guard_mode: Default::default(),
             team_members: vec![],
         });
-        storage::save_board(gcx, &meta.id, &board)
+        storage::save_board(gcx.clone(), &meta.id, &board)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        meta = storage::update_task_stats(gcx.clone(), &meta.id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
@@ -1107,6 +1110,18 @@ pub async fn handle_delete_planner_chat(
     tokio::fs::remove_file(&file_path)
         .await
         .map_err(|e| delete_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(dir) = file_path.parent() {
+        if let Err(e) =
+            crate::chat::trajectory_index::remove_trajectory_index_entry(dir, &chat_id).await
+        {
+            tracing::warn!(
+                "Failed to remove planner trajectory {} from index {:?}: {}",
+                chat_id,
+                dir,
+                e
+            );
+        }
+    }
 
     let removed_session = {
         let sessions = gcx.chat_sessions.clone();
@@ -1430,6 +1445,36 @@ mod tests {
 
     fn app(gcx: Arc<GlobalContext>) -> AppState {
         gcx.app_state(gcx.clone())
+    }
+
+    #[tokio::test]
+    async fn handle_create_task_with_target_files_returns_updated_card_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+
+        let Json(meta) = handle_create_task(
+            State(app(gcx.clone())),
+            Json(CreateTaskRequest {
+                name: "Task with targets".to_string(),
+                target_files: vec!["src/lib.rs".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(meta.cards_total, 1);
+        let tasks_dir = temp.path().join(".refact/tasks");
+        let index = crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        let entry = index
+            .entries
+            .iter()
+            .find(|entry| entry.id == meta.id)
+            .unwrap();
+        assert_eq!(entry.meta.cards_total, 1);
     }
 
     fn snapshot(

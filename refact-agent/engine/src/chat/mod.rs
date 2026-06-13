@@ -33,6 +33,7 @@ mod tool_call_recovery;
 mod tool_call_recovery_oss;
 pub mod tools;
 pub mod trajectories;
+pub mod trajectory_index;
 pub mod trajectory_ops;
 pub mod types;
 pub mod verifier;

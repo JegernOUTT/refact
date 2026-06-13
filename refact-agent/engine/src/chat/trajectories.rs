@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
 use axum::extract::State;
@@ -91,6 +91,7 @@ use super::types::{
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
+use super::trajectory_index;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 #[cfg(test)]
@@ -249,7 +250,7 @@ pub struct TrajectoryMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
     #[serde(skip)]
-    source: TrajectorySourceIdentity,
+    pub(crate) source: TrajectorySourceIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,18 +268,22 @@ pub struct TrajectoryData {
 }
 
 #[derive(Debug, Deserialize)]
-struct TrajectoryListData {
-    id: String,
-    updated_at: String,
-    mode: Option<String>,
+#[allow(dead_code)]
+pub(crate) struct TrajectoryListData {
+    pub(crate) id: String,
+    pub(crate) updated_at: String,
+    pub(crate) mode: Option<String>,
     #[serde(flatten)]
-    extra: serde_json::Map<String, serde_json::Value>,
+    pub(crate) extra: serde_json::Map<String, serde_json::Value>,
 }
 
-struct TrajectoryListCandidate {
-    id: String,
-    updated_at: String,
-    path: PathBuf,
+pub(crate) struct TrajectoryListCandidate {
+    pub(crate) id: String,
+    pub(crate) updated_at: String,
+    pub(crate) path: PathBuf,
+    pub(crate) indexed_meta: Option<TrajectoryMeta>,
+    pub(crate) indexed_file_len: Option<u64>,
+    pub(crate) indexed_file_modified_unix_ms: Option<i64>,
 }
 
 fn trajectory_list_main_link_type(link_type: Option<&str>) -> bool {
@@ -299,7 +304,7 @@ pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
     true
 }
 
-fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData) -> bool {
+pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData) -> bool {
     if data.extra.get("buddy_meta").is_some_and(|v| !v.is_null()) {
         return false;
     }
@@ -808,6 +813,34 @@ async fn trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> V
     candidates
 }
 
+async fn indexed_trajectory_candidate_paths(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for dir in list_trajectory_dirs(&gcx).await {
+        let entries =
+            match trajectory_index::list_trajectory_entries_from_index_or_rebuild(&dir, None).await
+            {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!("Failed to read trajectory index {:?}: {}", dir, e);
+                    continue;
+                }
+            };
+        for entry in entries {
+            if entry.id == chat_id
+                && trajectory_index::trajectory_index_entry_is_fresh(&dir, &entry).await
+            {
+                paths.push(trajectory_index::trajectory_file_path_for_entry(
+                    &dir, &entry,
+                ));
+            }
+        }
+    }
+    paths
+}
+
 struct ValidTrajectoryCandidate {
     path: PathBuf,
     content: String,
@@ -881,7 +914,13 @@ async fn find_trajectory_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    first_valid_trajectory_candidate(trajectory_candidate_paths(gcx, chat_id).await, chat_id).await
+    let mut candidates = indexed_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    for path in trajectory_candidate_paths(gcx, chat_id).await {
+        if !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    }
+    first_valid_trajectory_candidate(candidates, chat_id).await
 }
 
 async fn find_normal_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
@@ -1535,7 +1574,7 @@ fn trajectory_candidate_has_minimum_schema(
     false
 }
 
-fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
+pub(crate) fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
     let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
         return false;
     };
@@ -2201,6 +2240,23 @@ pub async fn save_trajectory_snapshot(
         file_path
     );
 
+    if let Some(dir) = file_path.parent() {
+        let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
+            Some(TrajectorySourceIdentity::from_task_meta(task_meta))
+        } else if snapshot.buddy_meta.is_some() {
+            Some(TrajectorySourceIdentity::Buddy)
+        } else {
+            Some(TrajectorySourceIdentity::Normal)
+        };
+        trajectory_index::upsert_trajectory_index_entry_from_value(
+            dir,
+            &file_path,
+            &trajectory,
+            source_hint,
+        )
+        .await?;
+    }
+
     let vec_db = app.workspace.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
@@ -2507,6 +2563,19 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
         Some("Failed to write trajectory"),
     )
     .await?;
+    if let Some(dir) = file_path.parent() {
+        let source_hint = Some(trajectory_index::source_from_hint_or_value(
+            &trajectory,
+            None,
+        ));
+        trajectory_index::upsert_trajectory_index_entry_from_value(
+            dir,
+            file_path,
+            &trajectory,
+            source_hint,
+        )
+        .await?;
+    }
     Ok(updated_at)
 }
 
@@ -2966,6 +3035,51 @@ pub async fn check_external_reload_pending(
     }
 }
 
+async fn refresh_trajectory_index_entry_for_path(
+    path: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("Trajectory path has no parent: {}", path.display()))?;
+    let content = fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Failed to read trajectory for index refresh: {}", e))?;
+    let value = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|e| format!("Failed to parse trajectory for index refresh: {}", e))?;
+    trajectory_index::upsert_trajectory_index_entry_from_value(dir, path, &value, source_hint).await
+}
+
+async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
+    for dir in list_trajectory_dirs(&gcx).await {
+        let index = match trajectory_index::read_trajectory_index(&dir).await {
+            Ok(Some(index)) => index,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!("Failed to read trajectory index {:?}: {}", dir, e);
+                continue;
+            }
+        };
+        let mut should_remove = false;
+        for entry in &index.entries {
+            if entry.id == chat_id
+                && !trajectory_index::trajectory_index_entry_is_fresh(&dir, entry).await
+            {
+                should_remove = true;
+                break;
+            }
+        }
+        if should_remove {
+            if let Err(e) = trajectory_index::remove_trajectory_index_entry(&dir, chat_id).await {
+                warn!(
+                    "Failed to remove stale trajectory {} from index {:?}: {}",
+                    chat_id, dir, e
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_remove: bool) {
     process_trajectory_change_for_source(gcx, chat_id, is_remove, None).await;
@@ -2981,6 +3095,7 @@ async fn process_trajectory_change_for_source(
     let sessions = app.chat.sessions.clone();
 
     if is_remove {
+        remove_stale_trajectory_index_entries(gcx.clone(), chat_id).await;
         let session_arc = {
             let sessions_read = sessions.read().await;
             sessions_read.get(chat_id).cloned()
@@ -3048,6 +3163,22 @@ async fn process_trajectory_change_for_source(
         }
         None => load_generic_trajectory_for_chat(gcx.clone(), chat_id).await,
     };
+
+    if let Some(loaded_for_index) = loaded.as_ref() {
+        let source_hint = changed_source.clone().or_else(|| {
+            Some(TrajectorySourceIdentity::from_session_parts(
+                &loaded_for_index.thread,
+            ))
+        });
+        if let Err(e) =
+            refresh_trajectory_index_entry_for_path(&loaded_for_index.source_path, source_hint)
+                .await
+        {
+            warn!("Failed to refresh trajectory index for {}: {}", chat_id, e);
+        }
+    } else {
+        remove_stale_trajectory_index_entries(gcx.clone(), chat_id).await;
+    }
 
     let session_arc = {
         let sessions_read = sessions.read().await;
@@ -3907,7 +4038,7 @@ fn spawn_task_name_generation_task(
     });
 }
 
-fn calculate_line_changes_from_messages(messages: &[serde_json::Value]) -> (i64, i64) {
+pub(crate) fn calculate_line_changes_from_messages(messages: &[serde_json::Value]) -> (i64, i64) {
     let mut total_added: i64 = 0;
     let mut total_removed: i64 = 0;
 
@@ -3941,7 +4072,9 @@ fn calculate_line_changes_from_messages(messages: &[serde_json::Value]) -> (i64,
     (total_added, total_removed)
 }
 
-fn calculate_task_progress_from_messages(messages: &[serde_json::Value]) -> (i32, i32, i32) {
+pub(crate) fn calculate_task_progress_from_messages(
+    messages: &[serde_json::Value],
+) -> (i32, i32, i32) {
     // Build a set of successful tool call IDs (tool messages without tool_failed=true)
     let mut successful_tool_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -4114,16 +4247,16 @@ fn calculate_task_progress_from_chat_messages(messages: &[ChatMessage]) -> (i32,
     (0, 0, 0)
 }
 
-struct TokenTotals {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-    cost_usd: Option<f64>,
+pub(crate) struct TokenTotals {
+    pub(crate) prompt_tokens: u64,
+    pub(crate) completion_tokens: u64,
+    pub(crate) total_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_creation_tokens: u64,
+    pub(crate) cost_usd: Option<f64>,
 }
 
-fn calculate_token_totals_from_messages(messages: &[serde_json::Value]) -> TokenTotals {
+pub(crate) fn calculate_token_totals_from_messages(messages: &[serde_json::Value]) -> TokenTotals {
     let mut prompt_tokens: u64 = 0;
     let mut completion_tokens: u64 = 0;
     let mut total_tokens: u64 = 0;
@@ -4505,6 +4638,34 @@ async fn hydrate_trajectory_list_candidate(
     candidate: &TrajectoryListCandidate,
     task_roots: &[PathBuf],
 ) -> Option<TrajectoryMeta> {
+    if let (Some(indexed_len), Some(indexed_modified_ms)) = (
+        candidate.indexed_file_len,
+        candidate.indexed_file_modified_unix_ms,
+    ) {
+        let fresh = fs::symlink_metadata(&candidate.path)
+            .await
+            .ok()
+            .and_then(|metadata| {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return None;
+                }
+                let modified = metadata.modified().ok()?;
+                let ms = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+                let modified_ms = i64::try_from(ms).ok()?;
+                Some(metadata.len() == indexed_len && modified_ms == indexed_modified_ms)
+            })
+            .unwrap_or(false);
+        if !fresh {
+            return None;
+        }
+    }
+    if let Some(mut meta) = candidate.indexed_meta.clone() {
+        if let Some(worktree) = meta.worktree.clone() {
+            meta.worktree = validate_loaded_worktree_strict(app.clone(), &meta.id, worktree).await;
+        }
+        apply_task_trajectory_context(&candidate.path, task_roots, &mut meta);
+        return Some(meta);
+    }
     let content = fs::read_to_string(&candidate.path).await.ok()?;
     let data = serde_json::from_str::<TrajectoryData>(&content).ok()?;
     if !trajectory_list_candidate_matches_hydrated_data(candidate, &data) {
@@ -4550,49 +4711,43 @@ async fn collect_trajectory_list_candidates(
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let mut entries = match fs::read_dir(&trajectories_dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
+        let entries = match trajectory_index::list_trajectory_entries_from_index_or_rebuild(
+            &trajectories_dir,
+            None,
+        )
+        .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(
+                    "Failed to list trajectory index {:?}: {}",
+                    trajectories_dir, e
+                );
+                continue;
+            }
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        for entry in entries {
+            if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
-            if !is_real_file(&path).await {
+            if displayable_only && !entry.displayable_chat {
                 continue;
             }
-            let Ok(content) = fs::read_to_string(&path).await else {
-                continue;
-            };
-            let Ok(data) = serde_json::from_str::<TrajectoryListData>(&content) else {
-                continue;
-            };
-            if data.extra.get("buddy_meta").map_or(false, |v| !v.is_null()) {
-                continue;
-            }
-            if displayable_only && !trajectory_list_data_is_displayable_chat(&data) {
-                continue;
-            }
-            if !trajectory_path_stem_matches_id(&path, &data.id) {
-                continue;
-            }
-            if !seen_ids.insert(data.id.clone()) {
+            if !seen_ids.insert(entry.id.clone()) {
                 continue;
             }
             if let Some((cursor_updated_at, cursor_id)) = cursor_filter {
                 if !cursor_precedes_item(
-                    (data.updated_at.as_str(), data.id.as_str()),
+                    (entry.updated_at.as_str(), entry.id.as_str()),
                     (cursor_updated_at.as_str(), cursor_id.as_str()),
                 ) {
                     continue;
                 }
             }
-            candidates.push(TrajectoryListCandidate {
-                id: data.id,
-                updated_at: data.updated_at,
-                path,
-            });
+            candidates.push(trajectory_index::list_candidate_from_entry(
+                &trajectories_dir,
+                &entry,
+            ));
         }
     }
 
@@ -4852,32 +5007,37 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let mut entries = match fs::read_dir(&trajectories_dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
+        let entries = match trajectory_index::list_trajectory_entries_from_index_or_rebuild(
+            &trajectories_dir,
+            None,
+        )
+        .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(
+                    "Failed to list trajectory index {:?}: {}",
+                    trajectories_dir, e
+                );
+                continue;
+            }
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        for entry in entries {
+            if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
-            if !is_real_file(&path).await {
-                continue;
-            }
-            if let Ok(content) = fs::read_to_string(&path).await {
-                if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                    if data.extra.get("buddy_meta").map_or(false, |v| !v.is_null()) {
-                        continue;
-                    }
-                    if !trajectory_path_stem_matches_id(&path, &data.id) {
-                        continue;
-                    }
-                    if seen_ids.insert(data.id.clone()) {
-                        let mut meta = trajectory_data_to_meta_validated(app.clone(), &data).await;
-                        apply_task_trajectory_context(&path, &task_roots, &mut meta);
-                        result.push(meta);
-                    }
+            if seen_ids.insert(entry.id.clone()) {
+                let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, &entry);
+                if let Some(worktree) = meta.worktree.clone() {
+                    meta.worktree =
+                        validate_loaded_worktree_strict(app.clone(), &meta.id, worktree).await;
                 }
+                apply_task_trajectory_context(
+                    &trajectory_index::trajectory_file_path_for_entry(&trajectories_dir, &entry),
+                    &task_roots,
+                    &mut meta,
+                );
+                result.push(meta);
             }
         }
     }
@@ -5134,6 +5294,14 @@ pub async fn handle_v1_trajectories_delete(
     fs::remove_file(&file_path)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(dir) = file_path.parent() {
+        if let Err(e) = trajectory_index::remove_trajectory_index_entry(dir, &id).await {
+            warn!(
+                "Failed to remove trajectory {} from index {:?}: {}",
+                id, dir, e
+            );
+        }
+    }
 
     let sessions = app.chat.sessions.clone();
     let fallback = match find_trajectory_file(gcx.clone(), &id).await {
@@ -5973,16 +6141,25 @@ mod tests {
                 id: "top-chat".to_string(),
                 updated_at: "2024-01-01T00:00:03Z".to_string(),
                 path: root.join("top-chat.json"),
+                indexed_meta: None,
+                indexed_file_len: None,
+                indexed_file_modified_unix_ms: None,
             },
             TrajectoryListCandidate {
                 id: "skip-chat".to_string(),
                 updated_at: "2024-01-01T00:00:02Z".to_string(),
                 path: root.join("skip-chat.json"),
+                indexed_meta: None,
+                indexed_file_len: None,
+                indexed_file_modified_unix_ms: None,
             },
             TrajectoryListCandidate {
                 id: "backfill-chat".to_string(),
                 updated_at: "2024-01-01T00:00:01Z".to_string(),
                 path: root.join("backfill-chat.json"),
+                indexed_meta: None,
+                indexed_file_len: None,
+                indexed_file_modified_unix_ms: None,
             },
         ];
         let task_roots = Vec::new();
@@ -8706,6 +8883,9 @@ mod tests {
             id: "hydration-chat".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             path: PathBuf::from("hydration-chat.json"),
+            indexed_meta: None,
+            indexed_file_len: None,
+            indexed_file_modified_unix_ms: None,
         };
         let data = TrajectoryData {
             id: "other-chat".to_string(),
@@ -8722,6 +8902,34 @@ mod tests {
         assert!(!trajectory_list_candidate_matches_hydrated_data(
             &candidate, &data
         ));
+    }
+
+    #[tokio::test]
+    async fn trajectory_list_rebuilds_corrupt_index_and_skips_index_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        write_trajectory_file(
+            &root.join("indexed-chat.json"),
+            "indexed-chat",
+            "Indexed",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+        tokio::fs::write(root.join("index.json"), "not-json")
+            .await
+            .unwrap();
+
+        let page = list_trajectories_page(app, 10, None, false).await.unwrap();
+
+        assert!(page.items.iter().any(|item| item.id == "indexed-chat"));
+        let index = crate::chat::trajectory_index::read_trajectory_index(&root)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].file_name, "indexed-chat.json");
     }
 
     #[tokio::test]

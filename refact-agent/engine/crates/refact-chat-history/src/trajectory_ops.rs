@@ -630,10 +630,60 @@ pub fn is_memory_path(path: &str) -> bool {
     })
 }
 
+pub fn is_generated_refact_index_path(path: &str) -> bool {
+    let normalized = normalize_path_text(path);
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some(refact_pos) = parts.iter().position(|part| *part == ".refact") else {
+        return false;
+    };
+    let rest = &parts[refact_pos..];
+    matches!(rest, [".refact", "trajectories", "index.json"])
+        || matches!(rest, [".refact", "tasks", "index.json"])
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "planner",
+                "index.json"
+            ]
+        )
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "agents",
+                "index.json"
+            ]
+        )
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "agents",
+                _agent_id,
+                "index.json"
+            ]
+        )
+}
+
 fn filter_memory_context_files(files: &[ContextFile]) -> (Vec<ContextFile>, usize) {
     let remaining: Vec<_> = files
         .iter()
-        .filter(|cf| !is_memory_path(&cf.file_name))
+        .filter(|cf| {
+            !is_memory_path(&cf.file_name) && !is_generated_refact_index_path(&cf.file_name)
+        })
         .cloned()
         .collect();
     let removed = files.len() - remaining.len();
@@ -652,7 +702,9 @@ fn context_file_count(content: &ChatContent) -> usize {
 
 fn simple_text_contains_memory_context_path(text: &str) -> bool {
     if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
-        return files.iter().any(|cf| is_memory_path(&cf.file_name));
+        return files.iter().any(|cf| {
+            is_memory_path(&cf.file_name) || is_generated_refact_index_path(&cf.file_name)
+        });
     }
 
     text.lines().any(|line| {
@@ -2704,6 +2756,29 @@ mod tests {
         assert!(messages.iter().any(|m| {
             m.role == "context_file"
                 && matches!(&m.content, ChatContent::SimpleText(text) if text.contains("mentions_refact.rs"))
+        }));
+    }
+
+    #[test]
+    fn test_drop_all_memories_removes_generated_refact_index_files() {
+        let mut messages = vec![
+            make_context_file_msg(".refact/trajectories/index.json", "{}"),
+            make_context_file_msg(".refact/tasks/task-1/trajectories/planner/index.json", "{}"),
+            make_context_file_msg("src/index.json", "{\"user\":true}"),
+        ];
+        let opts = CompressOptions {
+            drop_all_memories: true,
+            ..Default::default()
+        };
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+
+        assert_eq!(stats.context_messages_modified, 2);
+        assert!(messages.iter().any(|m| {
+            if let ChatContent::ContextFiles(files) = &m.content {
+                files.iter().any(|file| file.file_name == "src/index.json")
+            } else {
+                false
+            }
         }));
     }
 
