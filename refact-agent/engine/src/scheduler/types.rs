@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 pub const DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -280,15 +281,51 @@ pub enum AgentTarget {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Delivery {
     Chat,
-    Webhook {
-        url: String,
-        token: Option<String>,
-    },
-    Notifier {
-        integration_id: String,
-        target: Option<String>,
-    },
+    Webhook { url: String, token: Option<String> },
     None,
+}
+
+pub fn delivery_from_value(value: &Value) -> Result<Delivery, String> {
+    match value {
+        Value::String(kind) => delivery_from_kind(kind, None, None),
+        Value::Object(map) => {
+            let kind = map
+                .get("kind")
+                .or_else(|| map.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("webhook");
+            let url = map.get("url").and_then(Value::as_str);
+            let token = map.get("token").and_then(Value::as_str);
+            delivery_from_kind(kind, url, token)
+        }
+        Value::Null => Ok(Delivery::Chat),
+        other => Err(format!("argument `delivery` is invalid: {other:?}")),
+    }
+}
+
+fn delivery_from_kind(
+    kind: &str,
+    url: Option<&str>,
+    token: Option<&str>,
+) -> Result<Delivery, String> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "chat" => Ok(Delivery::Chat),
+        "none" => Ok(Delivery::None),
+        "webhook" => {
+            let url = url
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| "delivery webhook requires `url`".to_string())?;
+            Ok(Delivery::Webhook {
+                url: url.to_string(),
+                token: token
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_string),
+            })
+        }
+        other => Err(format!("unsupported delivery `{other}`")),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

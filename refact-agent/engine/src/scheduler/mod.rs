@@ -1,4 +1,5 @@
 pub mod cron_expr;
+pub mod delivery;
 pub mod exec_action;
 pub mod jitter;
 pub mod runner;
@@ -14,7 +15,7 @@ pub use types::{
     Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, Delivery,
     DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job,
     RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger,
-    cron_create_policy,
+    cron_create_policy, delivery_from_value,
 };
 
 pub fn scheduler_timezone() -> chrono_tz::Tz {

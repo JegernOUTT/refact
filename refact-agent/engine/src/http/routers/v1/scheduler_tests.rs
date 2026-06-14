@@ -369,6 +369,71 @@ async fn scheduler_cron_http_post_command_creates_command_job() {
 }
 
 #[tokio::test]
+async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
+    let (_temp, _app_state, app) = test_app().await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/5 * * * *",
+                    "command": "printf 'hi frog'",
+                    "description": "Print frog",
+                    "delivery": {"kind": "webhook", "url": "http://127.0.0.1/hook", "token": "secret"}
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["action_kind"], json!("command"));
+    assert_eq!(created["delivery"]["kind"], json!("webhook"));
+    assert_eq!(created["delivery"]["url"], json!("http://127.0.0.1/hook"));
+    assert_eq!(created["delivery"]["has_token"], json!(true));
+    assert_eq!(created["delivery"].get("token"), None);
+    let id = created["id"].as_str().unwrap();
+
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(
+        task.delivery,
+        Delivery::Webhook {
+            url: "http://127.0.0.1/hook".to_string(),
+            token: Some("secret".to_string()),
+        }
+    );
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["delivery"]["kind"], json!("webhook"));
+    assert_eq!(
+        listed_task["delivery"]["url"],
+        json!("http://127.0.0.1/hook")
+    );
+    assert_eq!(listed_task["delivery"]["has_token"], json!(true));
+    assert_eq!(listed_task["delivery"].get("token"), None);
+}
+
+#[tokio::test]
 async fn scheduler_cron_http_post_rejects_prompt_plus_command() {
     let (_temp, app_state, app) = test_app().await;
     add_open_session(&app_state, "command-chat").await;

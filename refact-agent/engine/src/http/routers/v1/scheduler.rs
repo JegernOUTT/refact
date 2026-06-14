@@ -11,7 +11,7 @@ use crate::custom_error::ScratchError;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    Action, AgentTarget, CronRunRecord, CronStore, Job, Trigger,
+    Action, AgentTarget, CronRunRecord, CronStore, Delivery, Job, Trigger, delivery_from_value,
 };
 use crate::tools::tool_cron_create::MAX_CRON_JOBS;
 
@@ -39,9 +39,18 @@ pub struct CronTaskResponse {
     pub last_error: Option<String>,
     pub recent_runs: Vec<CronRunRecord>,
     pub action_kind: String,
+    pub delivery: DeliveryResponse,
     pub chat_id: Option<String>,
     pub target: String,
     pub isolated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryResponse {
+    Chat,
+    Webhook { url: String, has_token: bool },
+    None,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,11 +64,13 @@ pub struct CronCreateRequest {
     pub command_argv: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub delivery: Option<serde_json::Value>,
     #[serde(default)]
     pub recurring: Option<bool>,
     #[serde(default)]
     pub durable: bool,
     pub description: String,
+    #[serde(default)]
     pub chat_id: String,
     pub mode: Option<String>,
 }
@@ -71,6 +82,7 @@ pub struct CronCreateResponse {
     pub recurring: bool,
     pub durable: bool,
     pub action_kind: String,
+    pub delivery: DeliveryResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,7 +153,7 @@ pub async fn handle_v1_scheduler_cron_post(
     State(app): State<AppState>,
     Json(request): Json<CronCreateRequest>,
 ) -> Result<Json<CronCreateResponse>, ScratchError> {
-    validate_chat_target(&app, &request.chat_id).await?;
+    validate_create_target(&app, &request).await?;
     let durable_store = active_durable_cron_store(app.gcx.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -150,6 +162,7 @@ pub async fn handle_v1_scheduler_cron_post(
         .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
     let human = job_human_schedule(&task);
     let action_kind = task.action_kind().to_string();
+    let delivery = delivery_response(&task.delivery);
 
     Ok(Json(CronCreateResponse {
         id: task.id,
@@ -157,6 +170,7 @@ pub async fn handle_v1_scheduler_cron_post(
         recurring: task.recurring,
         durable: task.durable,
         action_kind,
+        delivery,
     }))
 }
 
@@ -247,6 +261,7 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
     let (trigger_kind, tz, every_ms, at_ms) = trigger_response_fields(&task.trigger);
     let paused = task.is_paused();
     let action_kind = task.action_kind().to_string();
+    let delivery = delivery_response(&task.delivery);
     let chat_id = task.chat_id().map(str::to_string);
     let isolated = job_is_isolated(&task);
     let target = if isolated {
@@ -276,6 +291,7 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
         last_error: task.last_error,
         recent_runs: task.recent_runs,
         action_kind,
+        delivery,
         chat_id,
         target,
         isolated,
@@ -311,6 +327,7 @@ async fn create_http_cron_job(
         now_ms,
     );
     task.trigger = trigger;
+    task.delivery = request_delivery(&request)?;
     apply_http_action(&mut task, &request)?;
     validate_next_fire(&task, now_ms)?;
 
@@ -339,6 +356,13 @@ async fn create_http_cron_job(
 }
 
 fn validate_http_action_args(request: &CronCreateRequest) -> Result<(), String> {
+    if request
+        .command_argv
+        .as_ref()
+        .is_some_and(|argv| argv.iter().any(|item| item.trim().is_empty()))
+    {
+        return Err("command_argv contains an empty argument".to_string());
+    }
     let agent_turn = request
         .prompt
         .as_ref()
@@ -351,11 +375,35 @@ fn validate_http_action_args(request: &CronCreateRequest) -> Result<(), String> 
         .command_argv
         .as_ref()
         .is_some_and(|argv| !argv.is_empty());
+    let delivery = request_delivery(request)?;
+    if agent_turn && !matches!(delivery, Delivery::Chat) {
+        return Err("non-chat delivery is only supported for command jobs".to_string());
+    }
     match (agent_turn, usize::from(command) + usize::from(command_argv)) {
         (true, 0) | (false, 1) => Ok(()),
         (false, 0) => Err("one of `prompt`, `command`, or `command_argv` is required".to_string()),
         (true, _) => Err("exactly one action is allowed: prompt XOR command".to_string()),
         (false, _) => Err("exactly one of `command` or `command_argv` is allowed".to_string()),
+    }
+}
+
+fn request_delivery(request: &CronCreateRequest) -> Result<Delivery, String> {
+    request
+        .delivery
+        .as_ref()
+        .map(delivery_from_value)
+        .transpose()
+        .map(|delivery| delivery.unwrap_or(Delivery::Chat))
+}
+
+fn delivery_response(delivery: &Delivery) -> DeliveryResponse {
+    match delivery {
+        Delivery::Chat => DeliveryResponse::Chat,
+        Delivery::Webhook { url, token } => DeliveryResponse::Webhook {
+            url: url.clone(),
+            has_token: token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        },
+        Delivery::None => DeliveryResponse::None,
     }
 }
 
@@ -578,6 +626,22 @@ async fn validate_chat_target(app: &AppState, chat_id: &str) -> Result<(), Scrat
             StatusCode::BAD_REQUEST,
             format!("chat session `{chat_id}` is closed"),
         ));
+    }
+    Ok(())
+}
+
+async fn validate_create_target(
+    app: &AppState,
+    request: &CronCreateRequest,
+) -> Result<(), ScratchError> {
+    let delivery = request_delivery(request)
+        .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
+    let agent_turn = request
+        .prompt
+        .as_ref()
+        .is_some_and(|prompt| !prompt.trim().is_empty());
+    if agent_turn || matches!(delivery, Delivery::Chat) {
+        validate_chat_target(app, &request.chat_id).await?;
     }
     Ok(())
 }

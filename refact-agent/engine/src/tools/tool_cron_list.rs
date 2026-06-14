@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    Action, AgentTarget, CronStore, Job,
+    Action, AgentTarget, CronStore, Delivery, Job,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -188,6 +188,7 @@ fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "description": task.description,
         "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
         "action_kind": task.action_kind(),
+        "delivery": delivery_value(&task.delivery),
         "chat_id": task.chat_id(),
         "target": if job_is_isolated(task) { "isolated" } else { "existing_chat" },
         "isolated": job_is_isolated(task),
@@ -198,6 +199,18 @@ fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "fire_count": task.fire_count,
         "created_at_ms": task.created_at_ms,
     })
+}
+
+fn delivery_value(delivery: &Delivery) -> Value {
+    match delivery {
+        Delivery::Chat => json!({"kind": "chat"}),
+        Delivery::Webhook { url, token } => json!({
+            "kind": "webhook",
+            "url": url,
+            "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        }),
+        Delivery::None => json!({"kind": "none"}),
+    }
 }
 
 fn job_is_isolated(task: &Job) -> bool {

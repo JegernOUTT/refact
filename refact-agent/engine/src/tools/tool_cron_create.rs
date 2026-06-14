@@ -16,7 +16,7 @@ use crate::files_correction::get_active_project_path;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
     human_schedule, next_run_ms, scheduler_timezone, session_cron_store, Action, AgentTarget,
-    CronStore, Job, JsonFileCronStore, Trigger,
+    CronStore, Delivery, Job, JsonFileCronStore, Trigger, delivery_from_value,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -44,6 +44,7 @@ pub(crate) struct CronCreateInput {
     pub(crate) command_argv: Option<Vec<String>>,
     pub(crate) cwd: Option<String>,
     pub(crate) timeout_secs: Option<u64>,
+    pub(crate) delivery: Delivery,
     pub(crate) recurring: Option<bool>,
     pub(crate) durable: bool,
     pub(crate) isolated: bool,
@@ -94,6 +95,21 @@ impl Tool for ToolCronCreate {
                     "command_argv": { "type": "array", "items": { "type": "string" }, "description": "Command argv to run without an agent turn. Mutually exclusive with prompt and command." },
                     "cwd": { "type": "string", "description": "Optional command working directory, resolved under the active project." },
                     "timeout_secs": { "type": "integer", "description": "Optional command timeout in seconds." },
+                    "delivery": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["chat", "none"] },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "type": "string", "enum": ["webhook"] },
+                                    "url": { "type": "string" },
+                                    "token": { "type": "string" }
+                                },
+                                "required": ["url"]
+                            }
+                        ],
+                        "description": "Delivery target: chat (default), none, or webhook {url, token?}."
+                    },
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "default": false },
                     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
@@ -132,6 +148,7 @@ impl Tool for ToolCronCreate {
             "recurring": outcome.task.recurring,
             "durable": outcome.task.durable,
             "action_kind": outcome.task.action_kind(),
+            "delivery": delivery_output(&outcome.task.delivery),
             "isolated": job_is_isolated(&outcome.task),
         });
 
@@ -149,6 +166,18 @@ impl Tool for ToolCronCreate {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+fn delivery_output(delivery: &Delivery) -> Value {
+    match delivery {
+        Delivery::Chat => json!({"kind": "chat"}),
+        Delivery::Webhook { url, token } => json!({
+            "kind": "webhook",
+            "url": url,
+            "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        }),
+        Delivery::None => json!({"kind": "none"}),
     }
 }
 
@@ -178,11 +207,19 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         command_argv,
         cwd: optional_string_arg(args, "cwd")?,
         timeout_secs: optional_u64_arg(args, "timeout_secs")?,
+        delivery: delivery_arg(args)?,
         recurring: optional_bool_arg(args, "recurring")?,
         durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
         isolated: optional_bool_arg(args, "isolated")?.unwrap_or(false),
         description,
     })
+}
+
+fn delivery_arg(args: &HashMap<String, Value>) -> Result<Delivery, String> {
+    args.get("delivery")
+        .map(delivery_from_value)
+        .transpose()
+        .map(|delivery| delivery.unwrap_or(Delivery::Chat))
 }
 
 fn required_string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -273,6 +310,16 @@ fn validate_action_args(
     }
 }
 
+fn validate_delivery(input: &CronCreateInput) -> Result<(), String> {
+    if input.prompt.is_some() && !matches!(input.delivery, Delivery::Chat) {
+        return Err("non-chat delivery is only supported for command jobs".to_string());
+    }
+    if input.isolated && !matches!(input.delivery, Delivery::Chat) {
+        return Err("isolated jobs only support chat delivery".to_string());
+    }
+    Ok(())
+}
+
 fn runtime_for_project(
     project_root: Option<PathBuf>,
     chat_id: Option<String>,
@@ -344,6 +391,7 @@ pub(crate) async fn create_cron_job(
     input: CronCreateInput,
     runtime: CronCreateRuntime,
 ) -> Result<CronCreateOutcome, String> {
+    validate_delivery(&input)?;
     let trigger = parse_create_schedule(&input, runtime.now_ms)?;
     let recurring = if matches!(trigger, Trigger::Once { .. }) {
         false
@@ -374,6 +422,7 @@ pub(crate) async fn create_cron_job(
         runtime.now_ms,
     );
     task.trigger = trigger;
+    task.delivery = input.delivery.clone();
     apply_cron_create_action(&mut task, &input, runtime.chat_id, runtime.model)?;
     task.set_mode(runtime.mode);
     validate_next_run(&task, runtime.now_ms, runtime.timezone)?;
@@ -873,6 +922,58 @@ mod tests {
             }
             _ => panic!("expected command action"),
         }
+    }
+
+    #[tokio::test]
+    async fn webhook_delivery_creates_command_job() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("command", json!("printf hi")),
+                ("description", json!("Print frog")),
+                (
+                    "delivery",
+                    json!({"kind": "webhook", "url": "http://127.0.0.1/hook", "token": "secret"}),
+                ),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.task.action_kind(), "command");
+        assert_eq!(
+            outcome.task.delivery,
+            Delivery::Webhook {
+                url: "http://127.0.0.1/hook".to_string(),
+                token: Some("secret".to_string()),
+            }
+        );
+        let output = delivery_output(&outcome.task.delivery);
+        assert_eq!(output["has_token"], json!(true));
+        assert_eq!(output.get("token"), None);
+    }
+
+    #[tokio::test]
+    async fn webhook_delivery_rejects_prompt_job() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let err = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+                (
+                    "delivery",
+                    json!({"kind": "webhook", "url": "http://127.0.0.1/hook"}),
+                ),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "non-chat delivery is only supported for command jobs");
     }
 
     #[tokio::test]

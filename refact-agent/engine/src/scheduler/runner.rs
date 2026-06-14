@@ -22,10 +22,8 @@ use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
 use crate::scheduler::scheduler_timezone;
 
-use super::exec_action::{
-    command_error_notice_message, command_error_summary, command_output_message, run_command,
-    CommandRunResult,
-};
+use super::delivery::deliver;
+use super::exec_action::{command_error_summary, run_command, CommandRunResult};
 use super::jitter::{jittered_next_run_ms_for, one_shot_jittered_next_run_ms_for, JitterConfig};
 use super::schedule::next_run_ms;
 use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
@@ -126,7 +124,7 @@ impl CronRunner {
                     );
                     continue;
                 }
-            } else if !job_is_isolated(&task) {
+            } else if !job_is_isolated(&task) && !command_job_has_non_chat_delivery(&task) {
                 continue;
             }
             match self.fire_with_missed(&task, true, now, true).await {
@@ -371,65 +369,67 @@ impl CronRunner {
             self.handle_unfireable_task(&task, now, reason).await;
             return;
         }
-        if let AgentTarget::ExistingChat { chat_id } = &cmd.target {
-            if chat_id.is_empty() {
-                self.handle_unfireable_task(&task, now, "missing chat_id")
-                    .await;
-                return;
-            }
-            match chat_fire_status(&self.gcx, chat_id).await {
-                ChatFireStatus::Fireable => {}
-                ChatFireStatus::Busy => {
-                    if let Err(error) =
-                        record_run(&self.store, &task.id, "deferred", None, now).await
-                    {
-                        tracing::warn!(
-                            "failed to record deferred scheduled task {}: {}",
-                            task.id,
-                            error
-                        );
-                    }
-                    self.defer_task(&task, now);
+        if matches!(task.delivery, Delivery::Chat) {
+            if let AgentTarget::ExistingChat { chat_id } = &cmd.target {
+                if chat_id.is_empty() {
+                    self.handle_unfireable_task(&task, now, "missing chat_id")
+                        .await;
                     return;
                 }
-                ChatFireStatus::Missing => {
-                    if task.durable {
-                        let app = AppState::from_gcx(self.gcx.clone()).await;
-                        let restored = try_restore_session_if_trajectory_exists(
-                            app,
-                            &self.gcx.chat_sessions,
-                            chat_id,
-                        )
-                        .await;
-                        if !restored {
-                            if let Err(error) = record_run(
-                                &self.store,
-                                &task.id,
-                                "deferred",
-                                Some("no trajectory found".to_string()),
-                                now,
+                match chat_fire_status(&self.gcx, chat_id).await {
+                    ChatFireStatus::Fireable => {}
+                    ChatFireStatus::Busy => {
+                        if let Err(error) =
+                            record_run(&self.store, &task.id, "deferred", None, now).await
+                        {
+                            tracing::warn!(
+                                "failed to record deferred scheduled task {}: {}",
+                                task.id,
+                                error
+                            );
+                        }
+                        self.defer_task(&task, now);
+                        return;
+                    }
+                    ChatFireStatus::Missing => {
+                        if task.durable {
+                            let app = AppState::from_gcx(self.gcx.clone()).await;
+                            let restored = try_restore_session_if_trajectory_exists(
+                                app,
+                                &self.gcx.chat_sessions,
+                                chat_id,
                             )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "failed to record deferred scheduled task {}: {}",
-                                    task.id,
-                                    error
-                                );
+                            .await;
+                            if !restored {
+                                if let Err(error) = record_run(
+                                    &self.store,
+                                    &task.id,
+                                    "deferred",
+                                    Some("no trajectory found".to_string()),
+                                    now,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "failed to record deferred scheduled task {}: {}",
+                                        task.id,
+                                        error
+                                    );
+                                }
+                                self.defer_invalid_target_task(&task, now);
+                                return;
                             }
-                            self.defer_invalid_target_task(&task, now);
+                        } else {
+                            self.handle_unfireable_task(&task, now, "chat session not found")
+                                .await;
                             return;
                         }
-                    } else {
-                        self.handle_unfireable_task(&task, now, "chat session not found")
+                    }
+                    ChatFireStatus::Closed => {
+                        self.handle_unfireable_task(&task, now, "chat session is closed")
                             .await;
                         return;
                     }
-                }
-                ChatFireStatus::Closed => {
-                    self.handle_unfireable_task(&task, now, "chat session is closed")
-                        .await;
-                    return;
                 }
             }
         }
@@ -741,9 +741,19 @@ impl CronRunner {
             )
         })?;
         let app = AppState::from_gcx(self.gcx.clone()).await;
-        let result = run_command(&app, task, cmd).await;
-        self.deliver_command_result(&app, task, cmd, final_fire, fired_at_ms, missed, &result)
-            .await?;
+        let mut result = run_command(&app, task, cmd).await;
+        if let Err(error) = self
+            .deliver_command_result(&app, task, cmd, final_fire, fired_at_ms, missed, &result)
+            .await
+        {
+            result.status = "error".to_string();
+            if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+                result.stderr.push('\n');
+            }
+            result
+                .stderr
+                .push_str(&format!("Delivery failed: {error}\n"));
+        }
         Ok(result)
     }
 
@@ -751,45 +761,23 @@ impl CronRunner {
         &self,
         app: &AppState,
         task: &Job,
-        cmd: &CommandSpec,
-        final_fire: bool,
+        _cmd: &CommandSpec,
+        _final_fire: bool,
         fired_at_ms: u64,
-        missed: bool,
+        _missed: bool,
         result: &CommandRunResult,
     ) -> Result<(), String> {
-        let mut messages = Vec::new();
-        if result.status == "error" {
-            messages.push(command_error_notice_message(task, result));
-        } else if !result.stdout.is_empty() {
-            messages.push(if missed {
-                cron_fire_message_with_missed(task, final_fire, true)
-            } else {
-                cron_fire_message(task, final_fire)
-            });
-            messages.push(command_output_message(task, result));
-        }
-        if messages.is_empty() {
-            return Ok(());
-        }
-        let session_arc = match &cmd.target {
-            AgentTarget::ExistingChat { chat_id } => {
-                let sessions = self.gcx.chat_sessions.read().await;
-                sessions
-                    .get(chat_id)
-                    .cloned()
-                    .ok_or_else(|| format!("Chat session {chat_id} not found"))?
-            }
-            AgentTarget::Isolated => {
-                let chat_id = format!("cron_{}_{}", task.id, fired_at_ms);
-                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
-                    .await
-            }
+        let mut delivery_job = task.clone();
+        delivery_job.last_status = Some(result.status.clone());
+        delivery_job.last_error = (result.status == "error").then(|| command_record_error(result));
+        delivery_job.last_fired_at_ms = Some(fired_at_ms);
+        delivery_job.fire_count = task.fire_count;
+        let output = if result.status == "error" {
+            command_error_summary(result)
+        } else {
+            result.stdout.clone()
         };
-        let mut session = session_arc.lock().await;
-        for message in messages {
-            session.add_message(message);
-        }
-        Ok(())
+        deliver(app, &delivery_job, &output).await
     }
 
     async fn fire_isolated_with_missed(
@@ -1025,9 +1013,7 @@ fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
         return Err("trigger is not supported by the command runner yet");
     }
     match (&job.action, &job.delivery) {
-        (Action::Command { argv, .. }, Delivery::Chat) if argv.is_empty() => {
-            Err("command argv is empty")
-        }
+        (Action::Command { argv, .. }, _) if argv.is_empty() => Err("command argv is empty"),
         (
             Action::Command {
                 target: AgentTarget::ExistingChat { chat_id },
@@ -1036,7 +1022,7 @@ fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
             Delivery::Chat,
         ) if chat_id.is_empty() => Err("missing chat_id"),
         (Action::Command { .. }, Delivery::Chat) => Ok(()),
-        (Action::Command { .. }, _) => Err("non-chat delivery is not supported yet"),
+        (Action::Command { .. }, _) => Ok(()),
         (Action::AgentTurn { .. }, _) => Err("action is not command"),
     }
 }
@@ -1067,6 +1053,10 @@ fn job_is_isolated(task: &Job) -> bool {
             ..
         }
     )
+}
+
+fn command_job_has_non_chat_delivery(task: &Job) -> bool {
+    matches!(&task.action, Action::Command { .. }) && !matches!(task.delivery, Delivery::Chat)
 }
 
 fn job_model(task: &Job) -> Option<&str> {
