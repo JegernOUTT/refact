@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from "react";
 import classNames from "classnames";
-import { VirtuosoGrid } from "react-virtuoso";
 import { ArrowLeft, Info, Search } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -25,22 +24,6 @@ import { MarketplaceInstallDialog } from "./MarketplaceInstallDialog";
 import { MarketplaceSourceSelector } from "./MarketplaceSourceSelector";
 import { MarketplaceSourceSettings } from "./MarketplaceSourceSettings";
 import styles from "./ExtensionsMarketplace.module.css";
-
-function renderMarketplaceGridList(
-  props: React.HTMLAttributes<HTMLDivElement>,
-  ref: React.ForwardedRef<HTMLDivElement>,
-) {
-  const { className, ...rest } = props;
-  return (
-    <div
-      {...rest}
-      ref={ref}
-      className={classNames(className, styles.grid, "rf-stagger")}
-    />
-  );
-}
-
-const MarketplaceGridList = React.forwardRef(renderMarketplaceGridList);
 
 type ExtensionsMarketplaceProps = {
   host: Config["host"];
@@ -250,36 +233,22 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
       )}
 
       {!isLoading && filteredItems.length > 0 && (
-        <div className={styles.virtualGridShell}>
-          <VirtuosoGrid
-            className={styles.virtualGrid}
-            data={filteredItems}
-            components={{
-              List: MarketplaceGridList,
-              Item: ({ children, ...props }) => (
-                <div {...props} className={styles.virtualGridItem}>
-                  {children}
-                </div>
-              ),
-            }}
-            itemContent={(index, item) => (
-              <div className={index < 12 ? "rf-enter" : undefined}>
-                <MarketplaceItemCard
-                  item={item}
-                  isInstalling={
-                    isInstalling &&
-                    installingItem?.id === item.id &&
-                    installingItem.source_id === item.source_id
-                  }
-                  onInstall={(next) => {
-                    setInstallError(null);
-                    setInstallingItem(next);
-                  }}
-                />
-              </div>
-            )}
-            computeItemKey={(_, item) => `${item.source_id}:${item.id}`}
-          />
+        <div className={`${styles.grid} rf-stagger`}>
+          {filteredItems.map((item) => (
+            <MarketplaceItemCard
+              key={`${item.source_id}:${item.id}`}
+              item={item}
+              isInstalling={
+                isInstalling &&
+                installingItem?.id === item.id &&
+                installingItem.source_id === item.source_id
+              }
+              onInstall={(next) => {
+                setInstallError(null);
+                setInstallingItem(next);
+              }}
+            />
+          ))}
         </div>
       )}
     </div>

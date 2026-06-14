@@ -130,29 +130,11 @@
   color: var(--rf-color-danger);
 }
 
-.virtualGridShell {
-  min-width: 0;
-  height: min(72dvh, 980px);
-}
-
-.virtualGrid {
-  height: 100%;
-}
-
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
   gap: var(--rf-space-3);
   min-width: 0;
-}
-
-.virtualGridItem {
-  display: flex;
-  min-width: 0;
-}
-
-.virtualGridItem > * {
-  width: 100%;
 }
 
 .card {

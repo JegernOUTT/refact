@@ -126,18 +126,10 @@
 }
 
 .listPanel {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  max-height: min(
-    calc(100dvh - 15 * var(--rf-space-4)),
-    calc(16 * var(--rf-control-h-lg))
-  );
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
 }
 
 .listPanel * {
@@ -373,11 +365,6 @@
   .deleteBtn {
     grid-row: 1 / span 2;
     grid-column: 2;
-  }
-
-  .listPanel {
-    max-height: none;
-    overflow: visible;
   }
 
   .editorHeader,
