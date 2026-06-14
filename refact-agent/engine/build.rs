@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../gui/package-lock.json");
     println!("cargo:rerun-if-changed=../gui/src");
     println!("cargo:rerun-if-changed=assets/chat/index.html");
+    println!("cargo:rerun-if-changed=src/daemon/web_picker.html");
 
     if env::var("REFACT_SKIP_GUI_BUILD").ok().as_deref() != Some("1") {
         build_gui_assets();

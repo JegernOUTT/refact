@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -36,6 +36,12 @@ use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
 use crate::knowledge_index::KnowledgeIndex;
 use refact_context_api::{HttpClientAccess, PathsAccess, ShutdownAccess};
+
+fn daemon_auth_token_from_env() -> Option<String> {
+    std::env::var("REFACT_DAEMON_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+}
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct CommandLine {
@@ -196,6 +202,27 @@ pub struct CommandLine {
     pub privacy_yaml: String,
     #[structopt(long, help = "Disable the scheduler runner and cron scheduling tools.")]
     pub no_scheduler: bool,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon endpoint for managed workers."
+    )]
+    pub daemon_endpoint: String,
+    #[structopt(skip = daemon_auth_token_from_env())]
+    pub daemon_auth_token: Option<String>,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon project id for managed workers."
+    )]
+    pub project_id: String,
+}
+
+impl CommandLine {
+    fn with_daemon_auth_token_from_env(mut self) -> Self {
+        self.daemon_auth_token = self.daemon_auth_token.or_else(daemon_auth_token_from_env);
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,6 +270,7 @@ impl AtCommandsPreviewCache {
 
 pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
+    pub lsp_tcp_client_count: Arc<AtomicUsize>,
     pub exec_registry: Arc<ExecRegistry>,
     pub cmdline: CommandLine,
     pub http_client: reqwest::Client,
@@ -672,13 +700,10 @@ fn build_shared_http_client_builder() -> reqwest::ClientBuilder {
 pub async fn create_global_context(
     cache_dir: PathBuf,
     config_dir: PathBuf,
-) -> (
-    Arc<GlobalContext>,
-    std::sync::mpsc::Receiver<String>,
-    CommandLine,
-) {
-    let cmdline = CommandLine::from_args();
+    cmdline: CommandLine,
+) -> (Arc<GlobalContext>, std::sync::mpsc::Receiver<String>) {
     let (ask_shutdown_sender, ask_shutdown_receiver) = std::sync::mpsc::channel::<String>();
+    let cmdline = cmdline.with_daemon_auth_token_from_env();
     let mut http_client_builder = build_shared_http_client_builder();
     if cmdline.insecure {
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
@@ -706,6 +731,7 @@ pub async fn create_global_context(
         .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
+        lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
         exec_registry: Arc::new(ExecRegistry::new()),
         cmdline: cmdline.clone(),
         http_client: http_client.clone(),
@@ -767,7 +793,7 @@ pub async fn create_global_context(
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     crate::chat::start_session_cleanup_task(app_state);
     crate::chat::start_trajectory_watcher(gcx.clone());
-    (gcx, ask_shutdown_receiver, cmdline)
+    (gcx, ask_shutdown_receiver)
 }
 
 #[cfg(test)]
@@ -878,6 +904,9 @@ pub mod tests {
             indexing_yaml: String::new(),
             privacy_yaml: String::new(),
             no_scheduler: false,
+            daemon_endpoint: String::new(),
+            daemon_auth_token: None,
+            project_id: String::new(),
         };
 
         let http_client = build_shared_http_client_builder()
@@ -887,6 +916,7 @@ pub mod tests {
 
         let cx = GlobalContext {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
             cmdline,
             http_client,

@@ -1,7 +1,6 @@
 package com.smallcloud.refactai.lsp
 
 data class LSPConfig(
-    var port: Int? = null,
     var ast: Boolean = true,
     var astFileLimit: Int? = null,
     var vecdb: Boolean = true,
@@ -10,49 +9,19 @@ data class LSPConfig(
     val experimental: Boolean = false,
     val httpHost: String = "0.0.0.0"
 ) {
-    fun toArgs(): List<String> {
-        val params = mutableListOf<String>()
-        if (port != null) {
-            params.add("--http-port")
-            params.add("$port")
-            params.add("--http-host")
-            params.add(httpHost.ifBlank { "0.0.0.0" })
-        }
-        return params + toCommonArgs()
+    fun toOpenProjectSettings(): Map<String, Any> {
+        return mapOf(
+            "ast" to ast,
+            "vecdb" to vecdb,
+            "ast_max_files" to (astFileLimit ?: DEFAULT_AST_MAX_FILES),
+            "vecdb_max_files" to (vecdbFileLimit ?: DEFAULT_VECDB_MAX_FILES),
+        )
     }
 
     fun toSafeLogString(): String {
-        val safe = mutableListOf<String>()
-        port?.let {
-            safe.add("--http-port $it")
-            safe.add("--http-host ${httpHost.ifBlank { "0.0.0.0" }}")
-        }
-        return (safe + toCommonArgs()).joinToString(" ")
-    }
-
-    private fun toCommonArgs(): List<String> {
-        val params = mutableListOf<String>()
-        if (ast) {
-            params.add("--ast")
-        }
-        if (ast && astFileLimit != null) {
-            params.add("--ast-max-files")
-            params.add("$astFileLimit")
-        }
-        if (vecdb) {
-            params.add("--vecdb")
-        }
-        if (vecdb && vecdbFileLimit != null) {
-            params.add("--vecdb-max-files")
-            params.add("$vecdbFileLimit")
-        }
-        if (insecureSSL) {
-            params.add("--insecure")
-        }
-        if (experimental) {
-            params.add("--experimental")
-        }
-        return params
+        return toOpenProjectSettings()
+            .entries
+            .joinToString(" ") { "${it.key}=${it.value}" }
     }
 
     fun sameRuntimeSettings(other: LSPConfig?): Boolean {
@@ -61,15 +30,16 @@ data class LSPConfig(
             && vecdb == other.vecdb
             && astFileLimit == other.astFileLimit
             && vecdbFileLimit == other.vecdbFileLimit
-            && insecureSSL == other.insecureSSL
-            && experimental == other.experimental
-            && httpHost == other.httpHost
     }
 
     val isValid: Boolean
         get() {
-            return port != null
-                && (!ast || (astFileLimit != null && astFileLimit!! > 0))
-                && (!vecdb || (vecdbFileLimit != null && vecdbFileLimit!! > 0))
+            return (!ast || astFileLimit == null || astFileLimit!! > 0)
+                && (!vecdb || vecdbFileLimit == null || vecdbFileLimit!! > 0)
         }
+
+    companion object {
+        const val DEFAULT_AST_MAX_FILES = 50000
+        const val DEFAULT_VECDB_MAX_FILES = 15000
+    }
 }

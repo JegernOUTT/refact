@@ -49,6 +49,9 @@ pub mod app_state;
 pub mod background_tasks;
 pub mod buddy;
 pub mod caps;
+pub mod cli_dispatch;
+pub mod daemon;
+pub mod daemon_link;
 pub mod global_context;
 pub mod indexing_utils;
 pub mod json_utils;
@@ -107,7 +110,7 @@ pub mod voice;
 
 const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn run() {
+pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
 
@@ -138,8 +141,12 @@ pub async fn run() {
     tokio::fs::create_dir_all(&config_dir)
         .await
         .expect("failed to create cache dir");
-    let (gcx, ask_shutdown_receiver, cmdline) =
-        global_context::create_global_context(cache_dir.clone(), config_dir.clone()).await;
+    let (gcx, ask_shutdown_receiver) = global_context::create_global_context(
+        cache_dir.clone(),
+        config_dir.clone(),
+        cmdline.clone(),
+    )
+    .await;
     let mut writer_is_stderr = false;
     let (logs_writer, _guard) = if cmdline.logs_stderr {
         writer_is_stderr = true;

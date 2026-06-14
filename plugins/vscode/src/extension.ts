@@ -327,7 +327,7 @@ export function activate(context: vscode.ExtensionContext)
             e.affectsConfiguration("refactai.astFileLimit") ||
             e.affectsConfiguration("refactai.vecdb") ||
             e.affectsConfiguration("refactai.vecdbFileLimit") ||
-            e.affectsConfiguration("refactai.httpHost") ||
+            e.affectsConfiguration("refactai.daemonPort") ||
             e.affectsConfiguration("refactai.xperimental")
         ) {
             if (config_debounce) {
@@ -354,6 +354,15 @@ export function activate(context: vscode.ExtensionContext)
             if(hasVecdb) {
                 fetchAPI.maybe_show_rag_status();
             }
+        }
+
+        if (
+            e.affectsConfiguration("refactai.ast") ||
+            e.affectsConfiguration("refactai.astFileLimit") ||
+            e.affectsConfiguration("refactai.vecdb") ||
+            e.affectsConfiguration("refactai.vecdbFileLimit")
+        ) {
+            vscode.window.showInformationMessage("Refact indexing setting changes are sent to the daemon. Existing workers may need `refact restart <project>` to apply them.");
         }
     }));
 

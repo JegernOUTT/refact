@@ -30,6 +30,7 @@ members = [
     "crates/refact-voice",
     "crates/refact-context-api",
     "crates/refact-runtime-api",
+    "crates/refact-tui",
 ]
 resolver = "2"
 
@@ -95,6 +96,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "refact"
+path = "src/bin/refact.rs"
+test = false
+bench = false
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]
@@ -140,6 +147,7 @@ refact-caps-core = { path = "crates/refact-caps-core" }
 refact-voice = { path = "crates/refact-voice" }
 refact-context-api = { path = "crates/refact-context-api", features = ["http-client"] }
 refact-runtime-api = { path = "crates/refact-runtime-api" }
+refact-tui = { path = "crates/refact-tui" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }
@@ -153,6 +161,7 @@ cron = "0.12"
 iana-time-zone = "0.1"
 diff = "0.1.13"
 dunce = "1.0.5"
+fd-lock = "4.0.4"
 dyn_partial_eq = "=0.1.2"
 filetime = "0.2.25"
 futures = "0.3"
@@ -225,6 +234,7 @@ tree-sitter-python = "0.23"
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 typetag = "0.2"
+unicode-width = "0.2"
 url = "2.4.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3"

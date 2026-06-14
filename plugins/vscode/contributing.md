@@ -16,7 +16,7 @@ npm run compile
 npm run lint
 ```
 
-For local packaging, build or copy the engine binary into `plugins/vscode/assets/`.
+For local packaging, build or copy the engine binary into `plugins/vscode/assets/refact`.
 
 ## Issues
 

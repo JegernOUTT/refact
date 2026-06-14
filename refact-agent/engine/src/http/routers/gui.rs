@@ -11,10 +11,10 @@ use crate::http::GuiPublicOriginCandidates;
 
 #[derive(RustEmbed)]
 #[folder = "assets/chat/"]
-struct ChatGuiAsset;
+pub(crate) struct ChatGuiAsset;
 
-const INDEX_PATH: &str = "index.html";
-const ASSET_PREFIX: &str = "dist/chat/";
+pub(crate) const INDEX_PATH: &str = "index.html";
+pub(crate) const ASSET_PREFIX: &str = "dist/chat/";
 const CACHE_CONTROL: &str = "no-cache";
 
 pub async fn handle_gui_index(
@@ -32,7 +32,7 @@ pub async fn handle_gui_index(
     }
 }
 
-fn inject_gui_origin_candidates(
+pub(crate) fn inject_gui_origin_candidates(
     body: Cow<'static, [u8]>,
     candidates: &GuiPublicOriginCandidates,
 ) -> Cow<'static, [u8]> {
@@ -88,15 +88,19 @@ pub(crate) fn content_type_for_path(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, body: Cow<'static, [u8]>, status: StatusCode) -> Response<BoxBody> {
+pub(crate) fn asset_response(
+    path: &str,
+    body: Cow<'static, [u8]>,
+    status: StatusCode,
+) -> Response<BoxBody> {
     response_with_body(status, content_type_for_path(path), body)
 }
 
-fn html_response(status: StatusCode, body: Cow<'static, [u8]>) -> Response<BoxBody> {
+pub(crate) fn html_response(status: StatusCode, body: Cow<'static, [u8]>) -> Response<BoxBody> {
     response_with_body(status, "text/html; charset=utf-8", body)
 }
 
-fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
+pub(crate) fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
     response_with_body(
         status,
         "text/plain; charset=utf-8",
@@ -104,7 +108,7 @@ fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
     )
 }
 
-type BoxBody = axum::body::BoxBody;
+pub(crate) type BoxBody = axum::body::BoxBody;
 
 fn response_with_body(
     status: StatusCode,
@@ -123,7 +127,7 @@ fn response_with_body(
     response
 }
 
-fn missing_gui_index_html() -> &'static str {
+pub(crate) fn missing_gui_index_html() -> &'static str {
     r#"<!doctype html>
 <html lang="en">
   <head>

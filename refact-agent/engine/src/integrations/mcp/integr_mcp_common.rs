@@ -628,7 +628,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             let tools_len = tools.len();
 
             let peer = client.peer().clone();
-            let server_info = client.peer_info().map(|info| (*info).clone());
+            let server_info = client.peer_info().as_deref().cloned();
             *peer_arc.lock().await = Some(peer.clone());
 
             let capabilities = server_info

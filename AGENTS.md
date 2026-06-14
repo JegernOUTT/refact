@@ -11,6 +11,7 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | VSCode Extension | `plugins/vscode/` | TypeScript | — |
 | JetBrains Plugin | `plugins/intellij/` | Kotlin, Gradle | — |
 | Documentation | GitHub Wiki | https://github.com/JegernOUTT/refact/wiki | — |
+| Project pitch | `README.md` | Markdown | user-facing overview (local-first engine, Buddy, task planner, providers); defer to Wiki for setup, architecture, and per-mode details |
 | IDE metadata | `.idea/` | IntelliJ project config | keep local/editor files out of commits; `.idea/workspace.xml` is ignored by `.gitignore` |
 | Agent notes | `.agents/` | onboarding notes | checked for repo-specific guidance when present |
 | Codex workspace | `.codex/` | Codex config/data | checked for repo-specific guidance when present |

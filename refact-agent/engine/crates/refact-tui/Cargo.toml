@@ -1,0 +1,28 @@
+[package]
+name = "refact-tui"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+base64 = "0.22.1"
+chrono = { version = "0.4.31", features = ["serde"] }
+crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
+futures = "0.3"
+pulldown-cmark = "0.10"
+ratatui = { version = "0.29.0", features = ["unstable-widget-ref"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+syntect = "5"
+textwrap = "0.16.2"
+thiserror = "2.0.12"
+toml = "0.8"
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+unicode-width = "0.2"
+url = "2.4.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

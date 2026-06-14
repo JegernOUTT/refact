@@ -1,0 +1,4 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"stream_started","message_id":"assistant-1"}
+{"chat_id":"chat-fixture","seq":"2","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"set_thinking_blocks","blocks":[{"type":"thinking","text":"private reasoning","signature":"sig-demo"}]},{"op":"append_content","text":"answer\n"}]}
+{"chat_id":"chat-fixture","seq":"3","type":"stream_finished","message_id":"assistant-1"}
