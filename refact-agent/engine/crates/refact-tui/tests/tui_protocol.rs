@@ -268,14 +268,17 @@ fn fixture_directory_covers_required_protocol_cases() {
         names,
         vec![
             "approvals.jsonl",
+            "assistant_message_added_dedup.jsonl",
             "assistant_streaming.jsonl",
             "citations.jsonl",
             "extra_updates.jsonl",
+            "protocol_mutations.jsonl",
             "reasoning.jsonl",
             "seq_gap.jsonl",
             "server_content_blocks.jsonl",
             "snapshot_recovery_content.jsonl",
             "snapshot_resume.jsonl",
+            "subchat_turn_cleanup.jsonl",
             "thinking_blocks.jsonl",
             "tool_calls.jsonl",
             "unknown_delta_ops.jsonl",
@@ -360,6 +363,58 @@ fn golden_fixtures_drive_app_state_machine_offline() {
     assert!(resumed_text.contains("assistant:old answer"));
     assert!(resumed_text.contains("tool:resume-call:cat:file body"));
     assert_eq!(resumed.app.session_state(), SessionState::Idle);
+}
+
+#[test]
+fn mutation_fixtures_update_thread_and_transcript_state() {
+    let run = run_fixture("protocol_mutations.jsonl");
+    assert!(run.recovery.is_none());
+
+    assert_eq!(run.app.session_title(), Some("Renamed"));
+    assert_eq!(run.app.model(), Some("gpt-new"));
+    assert_eq!(run.app.mode(), Some("ask"));
+    assert_eq!(run.app.reasoning_effort_label(), "high");
+    assert!(run.app.permission_policy().auto_approve_editing_tools);
+
+    let text = transcript_text(&run.app);
+    assert!(text.contains("session:Renamed:"));
+    assert!(text.contains("user:first"));
+    assert!(text.contains("assistant:edited answer"));
+    assert!(!text.contains("old answer"));
+    assert!(!text.contains("remove me"));
+    assert!(!text.contains("truncate me"));
+    assert_eq!(run.app.transcript_state().messages().len(), 2);
+}
+
+#[test]
+fn persisted_assistant_message_added_dedups_streamed_turn() {
+    let run = run_fixture("assistant_message_added_dedup.jsonl");
+    assert!(run.recovery.is_none());
+
+    let text = transcript_text(&run.app);
+    assert_eq!(text.matches("assistant:hello once").count(), 1);
+    assert_eq!(run.app.transcript_state().messages().len(), 1);
+}
+
+#[test]
+fn subchat_running_card_is_cleaned_at_turn_end() {
+    let run = run_fixture("subchat_turn_cleanup.jsonl");
+    assert!(run.recovery.is_none());
+
+    let cards = run
+        .app
+        .visible_transcript()
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Tool(card) => Some(card),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].id, "call-sub");
+    assert_eq!(cards[0].status, refact_tui::tools::ToolStatus::Success);
+    assert!(!cards[0].subchat_active);
+    assert_eq!(cards[0].attached_files, vec!["src/lib.rs".to_string()]);
 }
 
 #[test]

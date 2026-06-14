@@ -3296,6 +3296,7 @@ impl App {
                 self.finalize_assistant_stream();
                 self.transcript_state
                     .finish_assistant(message_id.as_deref(), usage.clone());
+                self.finalize_tool_cards_for_turn();
                 if self.native_scrollback {
                     self.flush_finalized_state_assistant_to_history(message_id.as_deref());
                 }
@@ -3323,8 +3324,19 @@ impl App {
             } => self.update_server_queue(queue_size, queued_items),
             SseEvent::PauseRequired => self.handle_pause_required(&raw, event.seq),
             SseEvent::PauseCleared => self.handle_pause_cleared(&raw),
+            SseEvent::ThreadUpdated { params } => self.handle_thread_updated(&params),
             SseEvent::MessageAdded { message } => {
                 self.handle_message_added_payload(message.as_ref())
+            }
+            SseEvent::MessageUpdated {
+                message_id,
+                message,
+            } => self.handle_message_updated_payload(message_id.as_deref(), message.as_ref()),
+            SseEvent::MessageRemoved { message_id } => {
+                self.handle_message_removed(message_id.as_deref())
+            }
+            SseEvent::MessagesTruncated { from_index } => {
+                self.handle_messages_truncated(from_index)
             }
             SseEvent::SubchatUpdate {
                 tool_call_id,
@@ -3413,6 +3425,81 @@ impl App {
             self.update_usage(runtime);
             self.update_server_queue_from_runtime(runtime);
             self.sync_runtime_approvals(runtime);
+        }
+    }
+
+    fn handle_thread_updated(&mut self, raw: &Value) {
+        let params = thread_update_params(raw);
+        if let Some(title) = params
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            self.session_title = Some(title.to_string());
+            self.show_session_header = true;
+        }
+        if params.get("model").is_some() {
+            self.model = params
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        if params.get("mode").is_some() || params.get("tool_use").is_some() {
+            self.mode = params
+                .get("mode")
+                .or_else(|| params.get("tool_use"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        if let Some(value) = params.get("boost_reasoning").and_then(Value::as_bool) {
+            self.boost_reasoning = value;
+        }
+        if params.get("reasoning_effort").is_some() {
+            self.reasoning_effort = params
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        if let Some(value) = params
+            .get("auto_approve_editing_tools")
+            .and_then(Value::as_bool)
+        {
+            self.permission_policy.auto_approve_editing_tools = value;
+        }
+        if let Some(value) = params
+            .get("auto_approve_dangerous_commands")
+            .and_then(Value::as_bool)
+        {
+            self.permission_policy.auto_approve_dangerous_commands = value;
+        }
+        self.refresh_session_header_item();
+    }
+
+    fn refresh_session_header_item(&mut self) {
+        let include_header = self.show_session_header || self.session_title.is_some();
+        if !include_header {
+            return;
+        }
+        let next = self.session_header_item();
+        if let Some(existing) = self
+            .transcript
+            .iter_mut()
+            .find(|item| matches!(item, TranscriptItem::Session { .. }))
+        {
+            *existing = next;
+        } else if !self.native_scrollback {
+            self.transcript.insert(0, next);
+        }
+    }
+
+    fn rebuild_remote_transcript_from_state(&mut self) {
+        let include_header = self.show_session_header || self.session_title.is_some();
+        self.rebuild_render_transcript_from_state();
+        if include_header && !self.native_scrollback {
+            self.transcript.insert(0, self.session_header_item());
         }
     }
 
@@ -3582,7 +3669,10 @@ impl App {
         let Some(message) = message else {
             return;
         };
-        self.transcript_state.add_message(message);
+        let added = self.transcript_state.add_message(message);
+        if !added && message.get("role").and_then(Value::as_str) == Some("assistant") {
+            return;
+        }
         match message
             .get("role")
             .and_then(Value::as_str)
@@ -3595,6 +3685,29 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_message_updated_payload(
+        &mut self,
+        message_id: Option<&str>,
+        message: Option<&Value>,
+    ) {
+        let Some(message) = message else {
+            return;
+        };
+        self.transcript_state.update_message(message_id, message);
+        self.rebuild_remote_transcript_from_state();
+    }
+
+    fn handle_message_removed(&mut self, message_id: Option<&str>) {
+        if self.transcript_state.remove_message(message_id) {
+            self.rebuild_remote_transcript_from_state();
+        }
+    }
+
+    fn handle_messages_truncated(&mut self, from_index: usize) {
+        self.transcript_state.truncate_messages(from_index);
+        self.rebuild_remote_transcript_from_state();
     }
 
     fn handle_tool_message(&mut self, message: &Value) {
@@ -3713,7 +3826,7 @@ impl App {
         }
         let depth = depth.clamp(1, MAX_SUBCHAT_DEPTH);
         let (progress, progress_truncated) = truncate_subchat_progress(subchat_id);
-        self.update_state_subchat(
+        let state_updated = self.update_state_subchat(
             tool_call_id,
             subchat_id,
             &progress,
@@ -3729,7 +3842,7 @@ impl App {
             depth,
             progress_truncated,
         );
-        if !updated && !subchat_id.is_empty() {
+        if !updated && !state_updated && !subchat_id.is_empty() {
             let mut card =
                 ToolCard::from_tool_call(&json!({"id": tool_call_id, "name": "subagent"}));
             apply_subchat_update_to_card(
@@ -3790,8 +3903,14 @@ impl App {
         attached_files: &[String],
         depth: usize,
         progress_truncated: bool,
-    ) {
+    ) -> bool {
+        let mut updated = false;
         for message in self.transcript_state.messages_mut() {
+            if message.role == TranscriptRole::Tool
+                && message.tool_call_id.as_deref() == Some(tool_call_id)
+            {
+                updated = true;
+            }
             if message.role != TranscriptRole::Assistant {
                 continue;
             }
@@ -3804,6 +3923,7 @@ impl App {
                 {
                     continue;
                 }
+                updated = true;
                 apply_subchat_update_to_tool_value(
                     tool,
                     subchat_id,
@@ -3814,6 +3934,7 @@ impl App {
                 );
             }
         }
+        updated
     }
 
     fn complete_tool(
@@ -3831,21 +3952,7 @@ impl App {
                     card.subchat_active = false;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
                     let detail = card.summary();
-                    if self.native_scrollback {
-                        let item = self.transcript.remove(idx);
-                        self.history.enqueue(item);
-                        self.selected_tool_index = self.selected_tool_index.and_then(|selected| {
-                            if selected == idx {
-                                None
-                            } else if selected > idx {
-                                Some(selected - 1)
-                            } else {
-                                Some(selected)
-                            }
-                        });
-                    } else {
-                        self.selected_tool_index = Some(idx);
-                    }
+                    self.selected_tool_index = Some(idx);
                     if self.session_state.shows_working_indicator() && !detail.is_empty() {
                         self.working_detail = Some(detail);
                     }
@@ -3859,14 +3966,53 @@ impl App {
         card.status = status;
         card.duration_ms = Some(0);
         let item = TranscriptItem::Tool(card);
-        if self.native_scrollback {
-            self.history.enqueue(item);
-            self.selected_tool_index = None;
-        } else {
-            self.push_live_item(item);
-            self.selected_tool_index = Some(self.transcript.len() - 1);
-        }
+        self.push_live_item(item);
+        self.selected_tool_index = Some(self.transcript.len() - 1);
         self.finalize_matching_tool_messages(id);
+    }
+
+    fn finalize_tool_cards_for_turn(&mut self) {
+        let completed_at_ms = now_ms();
+        for item in &mut self.transcript {
+            let TranscriptItem::Tool(card) = item else {
+                continue;
+            };
+            if card.subchat_active {
+                card.subchat_active = false;
+                if card.status == ToolStatus::Running {
+                    card.status = ToolStatus::Success;
+                    card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                }
+            }
+        }
+        if self.native_scrollback {
+            self.move_completed_tool_cards_to_history();
+        }
+    }
+
+    fn move_completed_tool_cards_to_history(&mut self) {
+        let mut idx = 0usize;
+        while idx < self.transcript.len() {
+            let completed = matches!(
+                self.transcript.get(idx),
+                Some(TranscriptItem::Tool(card)) if card.status != ToolStatus::Running
+            );
+            if !completed {
+                idx += 1;
+                continue;
+            }
+            let item = self.transcript.remove(idx);
+            self.history.enqueue(item);
+            self.selected_tool_index = self.selected_tool_index.and_then(|selected| {
+                if selected == idx {
+                    None
+                } else if selected > idx {
+                    Some(selected - 1)
+                } else {
+                    Some(selected)
+                }
+            });
+        }
     }
 
     fn finalize_matching_tool_messages(&mut self, id: &str) {
@@ -6383,6 +6529,12 @@ fn notice_transcript_state(text: String) -> TranscriptState {
     state
 }
 
+fn thread_update_params(raw: &Value) -> &Value {
+    raw.get("params")
+        .filter(|value| value.is_object())
+        .unwrap_or(raw)
+}
+
 fn token_count(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|key| value.get(*key)?.as_u64())
 }
@@ -7396,6 +7548,18 @@ mod tests {
         assert_eq!(tool_cards(&app).len(), 1);
 
         app.complete_tool("call-1", "done".to_string(), ToolStatus::Success, now_ms());
+
+        assert_eq!(tool_cards(&app).len(), 1);
+        assert_eq!(tool_cards(&app)[0].status, ToolStatus::Success);
+        assert_eq!(app.selected_tool_index(), Some(0));
+        assert_eq!(app.history_pending_count(), 0);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
 
         assert_eq!(tool_cards(&app).len(), 0);
         assert_eq!(app.selected_tool_index(), None);

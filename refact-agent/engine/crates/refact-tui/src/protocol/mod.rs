@@ -29,8 +29,21 @@ pub enum SseEvent {
     },
     PauseRequired,
     PauseCleared,
+    ThreadUpdated {
+        params: Value,
+    },
     MessageAdded {
         message: Option<Value>,
+    },
+    MessageUpdated {
+        message_id: Option<String>,
+        message: Option<Value>,
+    },
+    MessageRemoved {
+        message_id: Option<String>,
+    },
+    MessagesTruncated {
+        from_index: usize,
     },
     SubchatUpdate {
         tool_call_id: String,
@@ -93,8 +106,25 @@ impl SseEvent {
             },
             "pause_required" => Self::PauseRequired,
             "pause_cleared" => Self::PauseCleared,
+            "thread_updated" => Self::ThreadUpdated {
+                params: raw.clone(),
+            },
             "message_added" => Self::MessageAdded {
                 message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
+            },
+            "message_updated" => Self::MessageUpdated {
+                message_id: message_id(raw),
+                message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
+            },
+            "message_removed" => Self::MessageRemoved {
+                message_id: message_id(raw),
+            },
+            "messages_truncated" => Self::MessagesTruncated {
+                from_index: raw
+                    .get("from_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(usize::MAX),
             },
             "subchat_update" => Self::SubchatUpdate {
                 tool_call_id: raw
@@ -447,7 +477,7 @@ impl TranscriptState {
         self.active_assistant_index = None;
     }
 
-    pub fn add_message(&mut self, raw: &Value) {
+    pub fn add_message(&mut self, raw: &Value) -> bool {
         let mut message = TranscriptMessage::from_wire(raw);
         if matches!(
             message.role,
@@ -458,6 +488,57 @@ impl TranscriptState {
             .is_none()
         {
             message.stream_finished = true;
+        }
+        self.add_transcript_message(message)
+    }
+
+    pub fn update_message(&mut self, message_id: Option<&str>, raw: &Value) -> bool {
+        let mut message = TranscriptMessage::from_wire(raw);
+        if message.message_id.is_none() {
+            message.message_id = message_id
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        if matches!(
+            message.role,
+            TranscriptRole::Assistant | TranscriptRole::Tool
+        ) && raw
+            .get("stream_finished")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            message.stream_finished = true;
+        }
+        let lookup_id = message.message_id.as_deref().or(message_id);
+        if let Some(idx) = self.message_index_by_id(lookup_id) {
+            if let Some(usage) = message.usage.clone() {
+                self.usage = Some(usage);
+            }
+            self.messages[idx] = message;
+            self.refresh_cached_indexes();
+            true
+        } else {
+            self.add_transcript_message(message)
+        }
+    }
+
+    pub fn remove_message(&mut self, message_id: Option<&str>) -> bool {
+        let Some(idx) = self.message_index_by_id(message_id) else {
+            return false;
+        };
+        self.messages.remove(idx);
+        self.refresh_cached_indexes();
+        true
+    }
+
+    fn add_transcript_message(&mut self, message: TranscriptMessage) -> bool {
+        if let Some(idx) = self.message_index_by_id(message.message_id.as_deref()) {
+            if let Some(usage) = message.usage.clone() {
+                self.usage = Some(usage);
+            }
+            self.messages[idx] = message;
+            self.refresh_cached_indexes();
+            return false;
         }
         if let Some(usage) = message.usage.clone() {
             self.usage = Some(usage);
@@ -474,6 +555,14 @@ impl TranscriptState {
             self.active_assistant_id = self.messages[idx].message_id.clone();
             self.active_assistant_index = Some(idx);
         }
+        true
+    }
+
+    fn message_index_by_id(&self, message_id: Option<&str>) -> Option<usize> {
+        let message_id = message_id.filter(|value| !value.is_empty())?;
+        self.messages
+            .iter()
+            .position(|message| message.message_id.as_deref() == Some(message_id))
     }
 
     pub fn start_assistant(&mut self, message_id: Option<&str>) {
