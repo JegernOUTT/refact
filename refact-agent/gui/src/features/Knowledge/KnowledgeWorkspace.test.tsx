@@ -335,7 +335,7 @@ describe("KnowledgeWorkspace", () => {
 
     await user.click(screen.getByRole("tab", { name: "Graph" }));
 
-    expect(screen.getByTestId("graph-view")).toHaveTextContent("Nodes: 1");
+    expect(screen.getByTestId("graph-view")).toHaveTextContent("Nodes: 0");
     expect(screen.getByTestId("graph-view")).toHaveTextContent("Edges: 0");
   });
 
@@ -449,5 +449,71 @@ describe("KnowledgeWorkspace", () => {
     expect(screen.getByText("Memories: 2")).toBeInTheDocument();
     expect(screen.getAllByText("Plain Doc Memory").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Code Memory").length).toBeGreaterThan(0);
+  });
+
+  it("shows a loading state in the Memories tab while loading", () => {
+    mockIsLoading = true;
+    renderWorkspace();
+
+    expect(screen.getByText("Loading memories...")).toBeInTheDocument();
+    expect(screen.queryByTestId("memory-list")).not.toBeInTheDocument();
+  });
+
+  it("excludes isolated (unlinked) memories from the graph", async () => {
+    const user = userEvent.setup();
+    mockGraphResponse = {
+      nodes: [
+        {
+          id: "docA",
+          node_type: "doc_code",
+          label: "Linked A",
+          title: "Linked A",
+          content: "",
+          tags: [],
+          created: "2024-01-10T10:00:00Z",
+          kind: "code",
+        },
+        {
+          id: "docB",
+          node_type: "doc_code",
+          label: "Linked B",
+          title: "Linked B",
+          content: "",
+          tags: [],
+          created: "2024-01-09T10:00:00Z",
+          kind: "code",
+        },
+        {
+          id: "docC",
+          node_type: "doc_code",
+          label: "Isolated C",
+          title: "Isolated C",
+          content: "",
+          tags: [],
+          created: "2024-01-08T10:00:00Z",
+          kind: "code",
+        },
+      ],
+      edges: [{ source: "docA", target: "docB", edge_type: "relates_to" }],
+      stats: {
+        doc_count: 3,
+        tag_count: 0,
+        file_count: 0,
+        entity_count: 0,
+        edge_count: 1,
+        active_docs: 3,
+        deprecated_docs: 0,
+        trajectory_count: 0,
+      },
+    };
+    renderWorkspace();
+
+    expect(screen.getByText("Memories: 3")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Graph" }));
+
+    expect(screen.getByTestId("graph-view")).toHaveTextContent("Nodes: 2");
+    expect(screen.getByTestId("graph-view")).toHaveTextContent("Edges: 1");
+    expect(screen.queryByText("Isolated C")).not.toBeInTheDocument();
   });
 });

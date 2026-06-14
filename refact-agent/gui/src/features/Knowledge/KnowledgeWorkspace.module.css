@@ -168,6 +168,12 @@
   color: var(--rf-color-fg);
 }
 
+.loadingState {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
 .error {
   display: grid;
   height: 100%;

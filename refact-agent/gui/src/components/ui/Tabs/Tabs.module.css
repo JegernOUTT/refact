@@ -79,6 +79,10 @@
   font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
 }
 
+.content[hidden] {
+  display: none;
+}
+
 .content:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-space-1);

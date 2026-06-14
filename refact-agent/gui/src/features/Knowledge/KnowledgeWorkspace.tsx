@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import { Chip, Select, Surface, Tabs } from "../../components/ui";
+import { Chip, LoadingState, Select, Surface, Tabs } from "../../components/ui";
 import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
@@ -129,6 +129,11 @@ export function KnowledgeWorkspace() {
     return ids;
   }, [docDocEdges]);
 
+  const linkedDocNodes = useMemo(
+    () => filteredDocNodes.filter((node) => linkedIds.has(node.id)),
+    [filteredDocNodes, linkedIds],
+  );
+
   const selectedMemory = useMemo((): KnowledgeMemoRecord | null => {
     if (!selectedId) return null;
     const node = allDocNodes.find((n) => n.id === selectedId);
@@ -197,93 +202,100 @@ export function KnowledgeWorkspace() {
         </Tabs.List>
 
         <Tabs.Content className={styles.tabContent} value="memories">
-          <div className={styles.memoriesPanel}>
-            <Surface className={styles.listSection} variant="plain">
-              <div className={styles.controls}>
-                <div className={styles.sortControl}>
-                  <span className={styles.controlLabel}>Sort</span>
-                  <Select
-                    value={sortKey}
-                    onValueChange={(value) =>
-                      setSortKey(value as MemorySortKey)
-                    }
-                  >
-                    <Select.Trigger
-                      aria-label="Sort memories"
-                      className={styles.sortTrigger}
-                    />
-                    <Select.Content maxWidth="220px">
-                      {Object.entries(sortLabels).map(([value, label]) => (
-                        <Select.Item key={value} value={value}>
-                          {label}
-                        </Select.Item>
-                      ))}
-                    </Select.Content>
-                  </Select>
+          {isLoading ? (
+            <LoadingState
+              className={styles.loadingState}
+              label="Loading memories..."
+            />
+          ) : (
+            <div className={styles.memoriesPanel}>
+              <Surface className={styles.listSection} variant="plain">
+                <div className={styles.controls}>
+                  <div className={styles.sortControl}>
+                    <span className={styles.controlLabel}>Sort</span>
+                    <Select
+                      value={sortKey}
+                      onValueChange={(value) =>
+                        setSortKey(value as MemorySortKey)
+                      }
+                    >
+                      <Select.Trigger
+                        aria-label="Sort memories"
+                        className={styles.sortTrigger}
+                      />
+                      <Select.Content maxWidth="220px">
+                        {Object.entries(sortLabels).map(([value, label]) => (
+                          <Select.Item key={value} value={value}>
+                            {label}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select>
+                  </div>
+
+                  {allTags.length > 0 ? (
+                    <div
+                      className={styles.tagFilters}
+                      aria-label="Filter by tags"
+                    >
+                      <span className={styles.controlLabel}>Tags</span>
+                      <div className={styles.tagList}>
+                        {allTags.map((tag) => {
+                          const selected = selectedTags.has(tag);
+                          return (
+                            <button
+                              key={tag}
+                              className={styles.tagButton}
+                              type="button"
+                              onClick={() => handleToggleTag(tag)}
+                              aria-pressed={selected}
+                            >
+                              <Chip
+                                className={styles.tagChip}
+                                radius="chip"
+                                selected={selected}
+                              >
+                                {tag}
+                              </Chip>
+                            </button>
+                          );
+                        })}
+                        {selectedTags.size > 0 ? (
+                          <button
+                            className={styles.clearTagsButton}
+                            type="button"
+                            onClick={handleClearTags}
+                          >
+                            Clear
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
-                {allTags.length > 0 ? (
-                  <div
-                    className={styles.tagFilters}
-                    aria-label="Filter by tags"
-                  >
-                    <span className={styles.controlLabel}>Tags</span>
-                    <div className={styles.tagList}>
-                      {allTags.map((tag) => {
-                        const selected = selectedTags.has(tag);
-                        return (
-                          <button
-                            key={tag}
-                            className={styles.tagButton}
-                            type="button"
-                            onClick={() => handleToggleTag(tag)}
-                            aria-pressed={selected}
-                          >
-                            <Chip
-                              className={styles.tagChip}
-                              radius="chip"
-                              selected={selected}
-                            >
-                              {tag}
-                            </Chip>
-                          </button>
-                        );
-                      })}
-                      {selectedTags.size > 0 ? (
-                        <button
-                          className={styles.clearTagsButton}
-                          type="button"
-                          onClick={handleClearTags}
-                        >
-                          Clear
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+                <MemoryListView
+                  memories={filteredMemoryRecords}
+                  selectedId={selectedId}
+                  onSelectId={handleSelectMemory}
+                  linkedIds={linkedIds}
+                />
+              </Surface>
 
-              <MemoryListView
-                memories={filteredMemoryRecords}
-                selectedId={selectedId}
-                onSelectId={handleSelectMemory}
-                linkedIds={linkedIds}
-              />
-            </Surface>
-
-            <Surface className={styles.editorSection} variant="plain">
-              <MemoryDetailsEditor
-                memory={selectedMemory}
-                onMemoryDeleted={handleMemoryDeleted}
-              />
-            </Surface>
-          </div>
+              <Surface className={styles.editorSection} variant="plain">
+                <MemoryDetailsEditor
+                  memory={selectedMemory}
+                  onMemoryDeleted={handleMemoryDeleted}
+                />
+              </Surface>
+            </div>
+          )}
         </Tabs.Content>
 
         <Tabs.Content className={styles.tabContent} value="graph">
           <Surface className={styles.graphSection} variant="plain">
             <KnowledgeGraphView
-              nodes={filteredDocNodes}
+              nodes={linkedDocNodes}
               edges={docDocEdges}
               selectedId={selectedId}
               onSelectId={handleSelectMemory}

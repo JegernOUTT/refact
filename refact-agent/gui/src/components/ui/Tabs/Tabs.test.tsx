@@ -38,6 +38,16 @@ describe("Tabs", () => {
     expect(trigger).toContain("overflow: hidden;");
   });
 
+  it("collapses inactive (hidden) tab panels regardless of consumer display overrides", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "Tabs.module.css"),
+      "utf8",
+    );
+    const hiddenRule = css.match(/\.content\[hidden\]\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(hiddenRule).toContain("display: none;");
+  });
+
   it("renders an empty tab list without an indicator", () => {
     const { container } = render(
       <Tabs defaultValue="missing">
