@@ -17,7 +17,7 @@ import { Button, FieldText, Surface } from "../../../components/ui";
 
 import styles from "./ProviderOAuth.module.css";
 
-const PROVIDERS_WITH_AUTO_CALLBACK = ["openai_codex"];
+const PROVIDERS_WITH_AUTO_CALLBACK = ["claude_code", "openai_codex"];
 
 const PROVIDER_LOGIN_LABELS: Partial<Record<string, string>> = {
   claude_code: "Login with Anthropic",

@@ -2255,14 +2255,57 @@ pub async fn handle_v1_provider_oauth_start(
     match base_provider.as_str() {
         "claude_code" => {
             let mode = crate::providers::claude_code_oauth::OAuthMode::Max;
+            let (callback_listener, callback_port) =
+                crate::providers::claude_code_oauth::bind_callback_listener()
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let (session_id, authorize_url) =
-                crate::providers::claude_code_oauth::start_oauth_session(mode, params.name.clone())
-                    .await;
+                crate::providers::claude_code_oauth::start_oauth_session(
+                    mode,
+                    callback_port,
+                    params.name.clone(),
+                )
+                .await;
+
+            let http_client = gcx.http_client.clone();
+            let gcx_for_save = gcx.clone();
+            let listener_handle = crate::providers::claude_code_oauth::start_callback_listener(
+                callback_listener,
+                http_client,
+                move |tokens, provider_instance_id| {
+                    let gcx_for_save = gcx_for_save.clone();
+                    async move {
+                        let config_dir = gcx_for_save.config_dir.clone();
+                        let tokens_value = serde_yaml::to_value(&tokens)
+                            .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
+                        save_provider_oauth_tokens(
+                            &gcx_for_save,
+                            &config_dir,
+                            &provider_instance_id,
+                            "claude_code",
+                            &tokens_value,
+                        )
+                        .await
+                        .map_err(|e| format!("{:?}", e))?;
+                        tracing::info!(
+                            "Claude Code: OAuth tokens saved successfully from callback listener"
+                        );
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            tokio::spawn(async move {
+                let _ = listener_handle.await;
+            });
+
             json_response(
                 StatusCode::OK,
                 &json!({
                     "session_id": session_id,
                     "authorize_url": authorize_url,
+                    "mode": "callback",
                 }),
             )
         }
