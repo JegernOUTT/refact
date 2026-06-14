@@ -24,6 +24,18 @@ pub enum TaskEvent {
         rev: u64,
         board: TaskBoard,
     },
+    TaskCommentsChanged {
+        task_id: String,
+        card_id: String,
+    },
+    TaskDocumentChanged {
+        task_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slug: Option<String>,
+    },
+    TaskMemoriesChanged {
+        task_id: String,
+    },
     Heartbeat {
         ts: String,
     },
@@ -136,6 +148,62 @@ mod tests {
                 assert_eq!(board.columns.len(), 5);
             }
             _ => panic!("unexpected event variant"),
+        }
+    }
+
+    #[test]
+    fn task_subresource_events_roundtrip_with_scoped_payloads() {
+        let events = [
+            (
+                TaskEvent::TaskCommentsChanged {
+                    task_id: "task-1".into(),
+                    card_id: "T-7".into(),
+                },
+                "task_comments_changed",
+                Some(("card_id", "T-7")),
+            ),
+            (
+                TaskEvent::TaskDocumentChanged {
+                    task_id: "task-1".into(),
+                    slug: Some("main-plan".into()),
+                },
+                "task_document_changed",
+                Some(("slug", "main-plan")),
+            ),
+            (
+                TaskEvent::TaskMemoriesChanged {
+                    task_id: "task-1".into(),
+                },
+                "task_memories_changed",
+                None,
+            ),
+        ];
+
+        for (event, expected_type, extra) in events {
+            let json = serde_json::to_string(&TaskEventEnvelope { seq: 9, event }).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let decoded: TaskEventEnvelope = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(value["seq"], 9);
+            assert_eq!(value["type"], expected_type);
+            assert_eq!(value["task_id"], "task-1");
+            if let Some((key, expected)) = extra {
+                assert_eq!(value[key], expected);
+            }
+            match decoded.event {
+                TaskEvent::TaskCommentsChanged { task_id, card_id } => {
+                    assert_eq!(task_id, "task-1");
+                    assert_eq!(card_id, "T-7");
+                }
+                TaskEvent::TaskDocumentChanged { task_id, slug } => {
+                    assert_eq!(task_id, "task-1");
+                    assert_eq!(slug.as_deref(), Some("main-plan"));
+                }
+                TaskEvent::TaskMemoriesChanged { task_id } => {
+                    assert_eq!(task_id, "task-1");
+                }
+                _ => panic!("unexpected event variant"),
+            }
         }
     }
 }

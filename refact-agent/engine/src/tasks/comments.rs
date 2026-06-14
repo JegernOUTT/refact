@@ -61,11 +61,13 @@ pub(crate) async fn create_card_comment(
     task_id: &str,
     request: CreateCardComment,
 ) -> Result<(TaskBoard, CardComment), String> {
-    let (board, comment) = storage::update_board_atomic(gcx, task_id, move |board| {
+    let card_id = request.card_id.clone();
+    let (board, comment) = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
         Ok(Some(add_comment_to_board(board, request)?))
     })
     .await?;
     let comment = comment.ok_or_else(|| "comment was not created".to_string())?;
+    crate::tasks::events::emit_task_comments_changed(gcx, task_id, &card_id).await;
     Ok((board, comment))
 }
 

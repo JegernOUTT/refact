@@ -96,6 +96,8 @@ import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import { isToolMessage, modelsApi, providersApi } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
+import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
+import { taskMemoriesApi } from "../services/refact/taskMemoriesApi";
 import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
@@ -1492,6 +1494,38 @@ startListening({
         void listenerApi.dispatch(
           tasksApi.util.invalidateTags([
             { type: "TaskTrajectories", id: `${event.task_id}/planner` },
+          ]),
+        );
+        break;
+      case "task_comments_changed":
+        void listenerApi.dispatch(
+          tasksApi.util.invalidateTags([{ type: "Board", id: event.task_id }]),
+        );
+        break;
+      case "task_document_changed":
+        void listenerApi.dispatch(
+          taskDocumentsApi.util.invalidateTags(
+            event.slug
+              ? [
+                  { type: "TaskDocuments", id: event.task_id },
+                  {
+                    type: "TaskDocuments",
+                    id: `${event.task_id}:${event.slug}:detail`,
+                  },
+                  {
+                    type: "TaskDocuments",
+                    id: `${event.task_id}:${event.slug}:history`,
+                  },
+                ]
+              : [{ type: "TaskDocuments", id: event.task_id }],
+          ),
+        );
+        break;
+      case "task_memories_changed":
+        void listenerApi.dispatch(
+          taskMemoriesApi.util.invalidateTags([
+            { type: "TaskMemories", id: event.task_id },
+            { type: "TaskMemories", id: `${event.task_id}:facets` },
           ]),
         );
         break;

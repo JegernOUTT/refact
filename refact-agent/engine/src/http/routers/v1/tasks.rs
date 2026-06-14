@@ -476,6 +476,10 @@ pub async fn handle_patch_board(
     let gcx = app.gcx.clone();
     let expected_rev = req.rev;
     let patch = req.patch;
+    let comment_card_id = match &patch {
+        BoardPatch::AddComment { card_id, .. } => Some(card_id.clone()),
+        _ => None,
+    };
     let now = Utc::now().to_rfc3339();
 
     let update_result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
@@ -651,6 +655,9 @@ pub async fn handle_patch_board(
     storage::update_task_stats(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Some(card_id) = comment_card_id {
+        crate::tasks::events::emit_task_comments_changed(app.gcx.clone(), &task_id, &card_id).await;
+    }
 
     Ok(Json(board))
 }

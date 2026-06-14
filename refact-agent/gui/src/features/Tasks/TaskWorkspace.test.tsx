@@ -1583,6 +1583,157 @@ describe("TaskWorkspace SSE invalidation", () => {
     await screen.findByText("Planning complete! You can now spawn agents.");
   });
 
+  it("task_comments_changed_event_refetches_board_comments", async () => {
+    const card = makeCard({ comments: [] });
+    const updatedCard = makeCard({
+      comments: [
+        {
+          id: "comment-2",
+          author_role: "agents",
+          author_id: "agent-2",
+          timestamp: "2026-01-03T00:00:00Z",
+          body: "External agent comment",
+          reply_to: null,
+        },
+      ],
+    });
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json(makeBoard(returnUpdated ? updatedCard : card)),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+    expect(
+      screen.queryByText("External agent comment"),
+    ).not.toBeInTheDocument();
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_comments_changed",
+        task_id: TASK_ID,
+        card_id: CARD_ID,
+      }),
+    );
+
+    await screen.findByText("External agent comment");
+  });
+
+  it("task_document_changed_event_refetches_open_documents_panel", async () => {
+    const card = makeCard();
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/task/:id/documents", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          documents: returnUpdated
+            ? [
+                {
+                  slug: "main-plan",
+                  name: "Main Plan",
+                  kind: "plan",
+                  pinned: true,
+                  version: 1,
+                  updated_at: "2026-01-03T00:00:00Z",
+                  created_at: "2026-01-03T00:00:00Z",
+                  author_role: "planner",
+                  relevant_cards: [],
+                },
+              ]
+            : [],
+        }),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("tab", { name: "Documents" }));
+    await screen.findByText(/No documents yet/);
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_document_changed",
+        task_id: TASK_ID,
+        slug: "main-plan",
+      }),
+    );
+
+    await screen.findByText("Main Plan");
+  });
+
+  it("task_memories_changed_event_refetches_open_memories_panel", async () => {
+    const card = makeCard();
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/task/:id/memories", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          since: "",
+          new_count: returnUpdated ? 1 : 0,
+          memories: returnUpdated
+            ? [
+                {
+                  filename: "decision.md",
+                  created_at: "2026-01-03T00:00:00Z",
+                  created_at_known: true,
+                  title: "External memory",
+                  content: "Remember the refresh path.",
+                  tags: ["refresh-tag"],
+                  kind: "decision",
+                  namespace: "task",
+                  pinned: false,
+                  status: "active",
+                },
+              ]
+            : [],
+          warnings: [],
+        }),
+      ),
+      http.get("*/v1/task/:id/memories/facets", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          namespaces: ["task"],
+          tags: returnUpdated ? ["refresh-tag"] : [],
+          kinds: ["decision"],
+          total_count: returnUpdated ? 1 : 0,
+          pinned_count: 0,
+        }),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
+    await screen.findByText(/No memories match/);
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_memories_changed",
+        task_id: TASK_ID,
+      }),
+    );
+
+    await screen.findByText("External memory");
+    await screen.findByText(/Show all 1 tags/);
+  });
+
   it("visibilitychange_to_visible_invalidates_board", async () => {
     const card = makeCard();
     let boardFetchCount = 0;
