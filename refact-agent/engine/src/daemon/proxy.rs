@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
@@ -15,6 +16,10 @@ use crate::daemon::state::DaemonState;
 use crate::daemon::supervisor::{WorkerInfo, WorkerState};
 
 pub const PROXY_BODY_LIMIT: usize = 15 * 1024 * 1024;
+#[cfg(not(test))]
+const PROXY_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PROXY_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const PROJECT_HEADER: &str = "x-refact-project-id";
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
@@ -95,20 +100,23 @@ async fn proxy_to_worker(
     } else {
         &state.proxy_client
     };
-    let response = client
+    let request = client
         .request(method, url)
         .headers(headers)
-        .body(body.to_vec())
-        .send()
-        .await;
+        .body(body.to_vec());
+    let response = send_worker_request(request, use_stream_client).await;
 
     match response {
         Ok(response) => worker_response(state, entry, response, guard).await,
-        Err(error) if error.is_timeout() => json_response(
+        Err(ProxySendError::StreamHeaderTimeout) => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({"error": "worker stream response headers timed out"}),
+        ),
+        Err(ProxySendError::Request(error)) if error.is_timeout() => json_response(
             StatusCode::GATEWAY_TIMEOUT,
             json!({"error": "worker request timed out"}),
         ),
-        Err(error) => {
+        Err(ProxySendError::Request(error)) => {
             worker_unreachable(
                 state,
                 entry,
@@ -116,6 +124,26 @@ async fn proxy_to_worker(
             )
             .await
         }
+    }
+}
+
+#[derive(Debug)]
+enum ProxySendError {
+    StreamHeaderTimeout,
+    Request(reqwest::Error),
+}
+
+async fn send_worker_request(
+    request: reqwest::RequestBuilder,
+    stream: bool,
+) -> Result<reqwest::Response, ProxySendError> {
+    if stream {
+        match tokio::time::timeout(PROXY_STREAM_HEADER_TIMEOUT, request.send()).await {
+            Ok(result) => result.map_err(ProxySendError::Request),
+            Err(_) => Err(ProxySendError::StreamHeaderTimeout),
+        }
+    } else {
+        request.send().await.map_err(ProxySendError::Request)
     }
 }
 
@@ -404,6 +432,8 @@ mod tests {
     use super::*;
     use axum::http::header::HeaderValue;
     use axum::http::Method;
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn worker_v1_path_preserves_raw_suffix() {
@@ -539,6 +569,65 @@ mod tests {
         let headers = HeaderMap::new();
 
         assert!(!is_sse_request(&headers, "/v1/chat/completions"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_request_times_out_waiting_for_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .no_proxy()
+            .build()
+            .unwrap();
+        let request = client.get(format!("http://127.0.0.1:{port}/v1/chats/subscribe"));
+        let task = tokio::spawn(send_worker_request(request, true));
+
+        accepted_rx.await.unwrap();
+        tokio::time::advance(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_millis(1)).await;
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(ProxySendError::StreamHeaderTimeout)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_request_keeps_body_unbounded_after_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_secs(2)).await;
+            socket.write_all(b"data: late\n\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .no_proxy()
+            .build()
+            .unwrap();
+        let request = client.get(format!("http://127.0.0.1:{port}/v1/chats/subscribe"));
+        let response = send_worker_request(request, true).await.unwrap();
+        let mut stream = response.bytes_stream();
+        let next = tokio::spawn(async move { stream.next().await });
+
+        tokio::time::advance(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_secs(2)).await;
+        let chunk = next.await.unwrap().unwrap().unwrap();
+        assert_eq!(&chunk[..], b"data: late\n\n");
+        server.abort();
     }
 
     #[test]

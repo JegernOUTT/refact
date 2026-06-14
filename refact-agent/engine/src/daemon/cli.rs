@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr;
 
-use crate::daemon::client::{self, DaemonClientError};
+use crate::daemon::client::{self, DaemonClientError, DaemonPingStatus};
 use crate::daemon::events::DaemonEvent;
 use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{DaemonInfo, WorkerRow};
+use crate::daemon::supervisor::WorkerState;
 
 #[cfg(not(test))]
 const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -112,6 +113,11 @@ pub struct DaemonStatus {
 struct PsOutput {
     daemon: DaemonStatus,
     workers: Vec<WorkerRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectsOutput {
+    projects: Vec<ProjectEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -403,7 +409,7 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
         }
         CliCommand::Projects { command, json } => run_projects(command, json, out).await,
         CliCommand::Restart { target, json, .. } => {
-            let daemon = ensure_daemon().await?;
+            let daemon = existing_daemon().await?;
             let projects = list_projects(&daemon).await?;
             let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
             let worker: Value =
@@ -412,7 +418,7 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             Ok(0)
         }
         CliCommand::Stop { target, json, .. } => {
-            let daemon = ensure_daemon().await?;
+            let daemon = existing_daemon().await?;
             let projects = list_projects(&daemon).await?;
             let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
             let worker: Value =
@@ -441,7 +447,7 @@ async fn run_projects(
         ProjectsCommand::List => {
             let projects = list_projects(&daemon).await?;
             if json_output {
-                print_json(out, &projects)?;
+                print_json(out, &ProjectsOutput { projects })?;
             } else {
                 write_projects(out, &projects)?;
             }
@@ -549,9 +555,21 @@ async fn log_source(
     ))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const LOG_HEAD_FINGERPRINT_LEN: u64 = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LogFollowState {
     offset: u64,
+    identity: Option<LogFileIdentity>,
+    head: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogFileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
 }
 
 async fn follow_logs(
@@ -573,12 +591,30 @@ async fn follow_logs(
 }
 
 async fn initial_log_follow_state(path: &Path) -> LogFollowState {
-    LogFollowState {
-        offset: tokio::fs::metadata(path)
-            .await
-            .map(|metadata| metadata.len())
-            .unwrap_or(0),
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => LogFollowState {
+            offset: metadata.len(),
+            identity: Some(log_file_identity(&metadata)),
+            head: read_log_head(path).await,
+        },
+        Err(_) => LogFollowState {
+            offset: 0,
+            identity: None,
+            head: None,
+        },
     }
+}
+
+async fn read_log_head(path: &Path) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let mut buf = Vec::new();
+    file.take(LOG_HEAD_FINGERPRINT_LEN)
+        .read_to_end(&mut buf)
+        .await
+        .ok()?;
+    Some(buf)
 }
 
 async fn read_log_delta(path: &Path, state: &mut LogFollowState) -> Result<String, CliError> {
@@ -588,6 +624,8 @@ async fn read_log_delta(path: &Path, state: &mut LogFollowState) -> Result<Strin
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             state.offset = 0;
+            state.identity = None;
+            state.head = None;
             return Ok(String::new());
         }
         Err(error) => {
@@ -597,14 +635,27 @@ async fn read_log_delta(path: &Path, state: &mut LogFollowState) -> Result<Strin
             )))
         }
     };
-    let len = file
+    let metadata = file
         .metadata()
         .await
-        .map_err(|error| CliError::runtime(format!("failed to stat log file: {error}")))?
-        .len();
-    if state.offset > len {
+        .map_err(|error| CliError::runtime(format!("failed to stat log file: {error}")))?;
+    let identity = log_file_identity(&metadata);
+    let len = metadata.len();
+    let head = read_log_head(path).await;
+    let head_changed = match (&state.head, &head) {
+        (Some(prev), Some(cur)) => {
+            let n = prev.len().min(cur.len());
+            prev[..n] != cur[..n]
+        }
+        _ => false,
+    };
+    if state.identity != Some(identity) || head_changed {
+        state.offset = 0;
+    } else if state.offset > len {
         state.offset = 0;
     }
+    state.identity = Some(identity);
+    state.head = head;
     file.seek(std::io::SeekFrom::Start(state.offset))
         .await
         .map_err(|error| CliError::runtime(format!("failed to seek log file: {error}")))?;
@@ -621,6 +672,21 @@ async fn read_log_delta(path: &Path, state: &mut LogFollowState) -> Result<Strin
         .to_string();
     state.offset = state.offset.saturating_add(valid_len as u64);
     Ok(text)
+}
+
+#[cfg(unix)]
+fn log_file_identity(metadata: &std::fs::Metadata) -> LogFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    LogFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(not(unix))]
+fn log_file_identity(_: &std::fs::Metadata) -> LogFileIdentity {
+    LogFileIdentity {}
 }
 
 fn valid_utf8_prefix_len(bytes: &[u8]) -> usize {
@@ -768,7 +834,7 @@ async fn run_status(json_output: bool, out: &mut dyn Write) -> Result<i32, CliEr
 
 async fn run_version(json_output: bool, out: &mut dyn Write) -> Result<i32, CliError> {
     let daemon = match client::read_daemon_json().await {
-        Ok(Some(info)) if client::ping_daemon(&info).await => Some(info.version),
+        Ok(Some(info)) if client::ping_daemon(&info).await.is_alive() => Some(info.version),
         Ok(_) => None,
         Err(error) => return Err(CliError::runtime(error.to_string())),
     };
@@ -794,13 +860,21 @@ async fn restart_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, C
         .await
         .map_err(|error| CliError::runtime(error.to_string()))?
     {
-        if client::ping_daemon(&info).await {
-            client::shutdown_daemon(&info, "restart")
-                .await
-                .map_err(CliError::runtime)?;
-            client::wait_for_daemon_stop(&info, Duration::from_secs(15))
-                .await
-                .map_err(CliError::runtime)?;
+        match client::ping_daemon(&info).await {
+            DaemonPingStatus::Alive => {
+                client::shutdown_daemon(&info, "restart")
+                    .await
+                    .map_err(CliError::runtime)?;
+                client::wait_for_daemon_stop(&info, Duration::from_secs(15))
+                    .await
+                    .map_err(CliError::runtime)?;
+            }
+            DaemonPingStatus::NotRunning { .. } => {}
+            DaemonPingStatus::Error { message } => {
+                return Err(CliError::runtime(format!(
+                    "daemon reachable but unhealthy: {message}"
+                )));
+            }
         }
     }
     let daemon = ensure_daemon().await?;
@@ -824,8 +898,16 @@ async fn stop_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, CliE
     else {
         return print_daemon_not_running(json_output, out, "missing");
     };
-    if !client::ping_daemon(&info).await {
-        return print_daemon_not_running(json_output, out, "stale");
+    match client::ping_daemon(&info).await {
+        DaemonPingStatus::Alive => {}
+        DaemonPingStatus::NotRunning { .. } => {
+            return print_daemon_not_running(json_output, out, "stale");
+        }
+        DaemonPingStatus::Error { message } => {
+            return Err(CliError::runtime(format!(
+                "daemon reachable but unhealthy: {message}"
+            )));
+        }
     }
     client::shutdown_daemon(&info, "stop")
         .await
@@ -917,7 +999,11 @@ async fn doctor_report() -> DoctorReport {
             match client::get_json::<Vec<WorkerRow>>(info, "/daemon/v1/workers").await {
                 Ok(workers) => {
                     let status_workers = status.as_ref().map(|status| status.workers).unwrap_or(0);
-                    let responsive = workers_responsive(info, &workers).await;
+                    let active_workers = workers
+                        .iter()
+                        .filter(|row| !matches!(row.state, WorkerState::Stopped))
+                        .count() as u64;
+                    let responsive = workers_responsive(&workers).await;
                     let missing = workers
                         .iter()
                         .filter(|row| !row.root.exists())
@@ -926,12 +1012,12 @@ async fn doctor_report() -> DoctorReport {
                     checks.push(check(
                         "workers responsive",
                         responsive,
-                        format!("{} workers", workers.len()),
+                        format!("{} active workers", active_workers),
                     ));
                     checks.push(check(
                         "worker count",
-                        status_workers == workers.len() as u64,
-                        format!("status {status_workers}, listed {}", workers.len()),
+                        status_workers == active_workers,
+                        format!("status {status_workers}, active listed {active_workers}"),
                     ));
                     checks.push(check(
                         "project roots",
@@ -987,13 +1073,30 @@ fn binary_path_check() -> DoctorCheck {
     }
 }
 
-async fn workers_responsive(info: &DaemonInfo, workers: &[WorkerRow]) -> bool {
+async fn workers_responsive(workers: &[WorkerRow]) -> bool {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(200))
+        .timeout(Duration::from_millis(500))
+        .build();
+    let Ok(client) = client else {
+        return false;
+    };
     for worker in workers {
-        if worker.http_port.is_some()
-            && client::get_text(info, &format!("/p/{}/v1/ping", worker.project_id))
-                .await
-                .is_err()
+        if !matches!(worker.state, WorkerState::Ready) {
+            continue;
+        }
+        let Some(port) = worker.http_port else {
+            return false;
+        };
+        let ok = match client
+            .get(format!("http://127.0.0.1:{port}/v1/ping"))
+            .send()
+            .await
         {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        };
+        if !ok {
             return false;
         }
     }
@@ -1012,6 +1115,26 @@ async fn ensure_daemon() -> Result<DaemonInfo, CliError> {
     client::ensure_daemon_running()
         .await
         .map_err(|error| CliError::runtime(format!("daemon unavailable after auto-start: {error}")))
+}
+
+async fn existing_daemon() -> Result<DaemonInfo, CliError> {
+    let Some(info) = client::read_daemon_json()
+        .await
+        .map_err(|error| CliError::runtime(error.to_string()))?
+    else {
+        return Err(CliError::runtime(
+            "daemon not running: daemon.json not found",
+        ));
+    };
+    match client::ping_daemon(&info).await {
+        DaemonPingStatus::Alive => Ok(info),
+        DaemonPingStatus::NotRunning { .. } => {
+            Err(CliError::runtime("daemon not running: stale daemon.json"))
+        }
+        DaemonPingStatus::Error { message } => Err(CliError::runtime(format!(
+            "daemon reachable but unhealthy: {message}"
+        ))),
+    }
 }
 
 async fn client_get<T: for<'de> Deserialize<'de>>(
@@ -1426,6 +1549,15 @@ mod tests {
         assert_eq!(doctor_exit_code(&[check("bad", false, "no")]), 1);
     }
 
+    #[tokio::test]
+    async fn workers_responsive_ignores_stopped_workers() {
+        let mut row = worker("abcdef123456", "demo");
+        row.state = WorkerState::Stopped;
+        row.http_port = Some(unused_loopback_port().await);
+
+        assert!(workers_responsive(&[row]).await);
+    }
+
     #[test]
     fn parses_events_sse_snapshot() {
         let text =
@@ -1532,6 +1664,12 @@ mod tests {
             .await
             .unwrap();
         let mut state = initial_log_follow_state(&path).await;
+
+        let rotated = format!("{}new-after-rotation\n", "x".repeat(state.offset as usize));
+        std::fs::remove_file(&path).unwrap();
+        tokio::fs::write(&path, &rotated).await.unwrap();
+        assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), rotated);
+        assert_eq!(state.offset, rotated.len() as u64);
 
         tokio::fs::write(&path, b"new\n").await.unwrap();
         assert_eq!(read_log_delta(&path, &mut state).await.unwrap(), "new\n");
@@ -1726,6 +1864,41 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn project_stop_and_restart_missing_daemon_do_not_spawn() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache_dir.path(), config_dir.path());
+
+        for command in [
+            CliCommand::Stop {
+                target: Some("project".to_string()),
+                daemon: false,
+                json: true,
+            },
+            CliCommand::Restart {
+                target: Some("project".to_string()),
+                daemon: false,
+                json: true,
+            },
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_with_io(CliOptions { command }, &mut stdout, &mut stderr).await;
+
+            assert_eq!(code, 1);
+            assert!(stderr.is_empty());
+            let value = serde_json::from_slice::<Value>(&stdout).unwrap();
+            assert_eq!(value["ok"], false);
+            assert!(value["error"]
+                .as_str()
+                .unwrap()
+                .contains("daemon not running"));
+            assert!(!crate::daemon::paths::daemon_json_path().exists());
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn run_with_io_json_error_uses_stdout_and_silent_stderr() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -1883,6 +2056,29 @@ mod tests {
         let opened: Value = serde_json::from_slice(&out).unwrap();
         let project_id = opened["project_id"].as_str().unwrap().to_string();
         let slug = opened["slug"].as_str().unwrap().to_string();
+
+        out.clear();
+        assert_eq!(
+            run_inner(
+                CliOptions {
+                    command: CliCommand::Projects {
+                        command: ProjectsCommand::List,
+                        json: true
+                    }
+                },
+                &mut out
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let projects = serde_json::from_slice::<Value>(&out).unwrap();
+        assert!(projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| { project["id"].as_str() == Some(project_id.as_str()) }));
+        assert!(projects.as_array().is_none());
 
         out.clear();
         let daemon_marker = "daemon-log-marker-B2\n";

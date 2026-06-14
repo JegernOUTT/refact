@@ -132,6 +132,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     emit(3, {"type": "pause_cleared"})
                     emit(4, {"type": "runtime_updated", "state": "idle", "error": None, "is_compressing": False})
             return
+        if script == "stall":
+            emit(1, {"type": "stream_started", "message_id": "assistant-1"})
+            time.sleep(60)
+            return
         self.emit_chat_answer(emit, 1, "hello world")
 
     def emit_chat_answer(self, emit, seq, text):

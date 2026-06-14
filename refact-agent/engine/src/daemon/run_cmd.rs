@@ -387,42 +387,49 @@ where
     }
 }
 
+async fn with_run_deadline<T, F>(
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+    step: &str,
+    future: F,
+) -> Result<T, RunFailure>
+where
+    F: Future<Output = Result<T, RunFailure>>,
+{
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => Err(RunFailure {
+            kind: RunErrorKind::Timeout,
+            message: format!("refact run timed out after {timeout_secs} seconds while {step}"),
+        }),
+    }
+}
+
 async fn drive_chat(
     client: &ProxyChatClient,
     options: &RunOptions,
     chat_id: String,
-    setup_deadline: tokio::time::Instant,
+    deadline: tokio::time::Instant,
     io: &mut dyn RunIo,
 ) -> Result<RunJsonSummary, RunFailure> {
-    let mut stream =
-        with_setup_deadline(setup_deadline, options.timeout_secs, "subscribe", async {
-            client.subscribe(&chat_id).await.map_err(map_client_error)
-        })
-        .await?;
-    let patch = set_params_patch(options);
-    with_setup_deadline(
-        setup_deadline,
-        options.timeout_secs,
-        "send set_params",
-        async {
-            client
-                .send_set_params(&chat_id, request_id("set-params"), patch)
-                .await
-                .map_err(map_client_error)
-        },
-    )
+    let mut stream = with_setup_deadline(deadline, options.timeout_secs, "subscribe", async {
+        client.subscribe(&chat_id).await.map_err(map_client_error)
+    })
     .await?;
-    with_setup_deadline(
-        setup_deadline,
-        options.timeout_secs,
-        "send user message",
-        async {
-            client
-                .send_user_message(&chat_id, request_id("user-message"), &options.prompt)
-                .await
-                .map_err(map_client_error)
-        },
-    )
+    let patch = set_params_patch(options);
+    with_setup_deadline(deadline, options.timeout_secs, "send set_params", async {
+        client
+            .send_set_params(&chat_id, request_id("set-params"), patch)
+            .await
+            .map_err(map_client_error)
+    })
+    .await?;
+    with_setup_deadline(deadline, options.timeout_secs, "send user message", async {
+        client
+            .send_user_message(&chat_id, request_id("user-message"), &options.prompt)
+            .await
+            .map_err(map_client_error)
+    })
     .await?;
 
     let mut state = RunState::new(chat_id.clone());
@@ -444,6 +451,19 @@ async fn drive_chat(
         }
 
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                let abort_client = client.clone();
+                let abort_chat_id = chat_id.clone();
+                tokio::spawn(async move {
+                    let _ = abort_client
+                        .send_abort(&abort_chat_id, request_id("timeout-abort"))
+                        .await;
+                });
+                return Err(RunFailure {
+                    kind: RunErrorKind::Timeout,
+                    message: format!("refact run timed out after {} seconds", options.timeout_secs),
+                });
+            }
             _ = ctrl_c(options.listen_ctrl_c) => {
                 let _ = client.send_abort(&chat_id, request_id("ctrl-c-abort")).await;
                 return Err(RunFailure {
@@ -454,7 +474,7 @@ async fn drive_chat(
             event = stream.next() => {
                 match event {
                     Some(Ok(event)) => {
-                        match handle_event(client, options, &mut state, event, io).await? {
+                        match handle_event(client, options, &mut state, event, deadline, io).await? {
                             EventOutcome::Continue => {}
                             EventOutcome::Denied => {
                                 return Err(RunFailure {
@@ -469,7 +489,10 @@ async fn drive_chat(
                             return Err(map_client_error(error));
                         }
                         retried_subscribe = true;
-                        stream = client.subscribe(&chat_id).await.map_err(map_client_error)?;
+                        stream = with_run_deadline(deadline, options.timeout_secs, "resubscribe", async {
+                            client.subscribe(&chat_id).await.map_err(map_client_error)
+                        })
+                        .await?;
                     }
                     None => {
                         if retried_subscribe {
@@ -479,7 +502,10 @@ async fn drive_chat(
                             });
                         }
                         retried_subscribe = true;
-                        stream = client.subscribe(&chat_id).await.map_err(map_client_error)?;
+                        stream = with_run_deadline(deadline, options.timeout_secs, "resubscribe", async {
+                            client.subscribe(&chat_id).await.map_err(map_client_error)
+                        })
+                        .await?;
                     }
                 }
             }
@@ -498,6 +524,7 @@ async fn handle_event(
     options: &RunOptions,
     state: &mut RunState,
     event: Value,
+    deadline: tokio::time::Instant,
     io: &mut dyn RunIo,
 ) -> Result<EventOutcome, RunFailure> {
     match event
@@ -526,7 +553,7 @@ async fn handle_event(
         }
         "runtime_updated" => handle_runtime_updated(state, &event)?,
         "pause_required" => {
-            return handle_pause_required(client, options, state, &event, io).await;
+            return handle_pause_required(client, options, state, &event, deadline, io).await;
         }
         "ack" => {
             if event.get("accepted").and_then(Value::as_bool) == Some(false) {
@@ -655,6 +682,7 @@ async fn handle_pause_required(
     options: &RunOptions,
     state: &mut RunState,
     event: &Value,
+    deadline: tokio::time::Instant,
     io: &mut dyn RunIo,
 ) -> Result<EventOutcome, RunFailure> {
     let reasons = event
@@ -663,7 +691,7 @@ async fn handle_pause_required(
         .cloned()
         .unwrap_or_default();
     let tty = io.stdin_is_tty();
-    let answer = if matches!(options.approve, ApprovalPolicy::Ask) && tty {
+    let answer = if matches!(options.approve, ApprovalPolicy::Ask) && tty && !options.json {
         io.write_stderr(&format!("Approve {} tool call(s)? [y/N] ", reasons.len()));
         io.read_stdin_line()
     } else {
@@ -671,31 +699,47 @@ async fn handle_pause_required(
     };
     match approval_decision(options.approve, tty, answer.as_deref()) {
         ApprovalDecision::Approve => {
-            if matches!(options.approve, ApprovalPolicy::Auto) && !state.auto_banner_printed {
+            if matches!(options.approve, ApprovalPolicy::Auto)
+                && !state.auto_banner_printed
+                && !options.json
+            {
                 io.write_stderr("warning: --approve auto approves all requested tools\n");
                 state.auto_banner_printed = true;
             }
             let decisions = tool_decisions(&reasons, true);
-            client
-                .send_tool_decisions(&state.chat_id, request_id("approve-tools"), decisions)
-                .await
-                .map_err(map_client_error)?;
+            with_run_deadline(
+                deadline,
+                options.timeout_secs,
+                "send tool approval",
+                async {
+                    client
+                        .send_tool_decisions(&state.chat_id, request_id("approve-tools"), decisions)
+                        .await
+                        .map_err(map_client_error)
+                },
+            )
+            .await?;
             Ok(EventOutcome::Continue)
         }
         ApprovalDecision::Deny => {
-            for reason in &reasons {
-                io.write_stderr(&format!(
-                    "denied {}: {}\n",
-                    tool_name(reason),
-                    deny_reason(reason)
-                ));
+            if !options.json {
+                for reason in &reasons {
+                    io.write_stderr(&format!(
+                        "denied {}: {}\n",
+                        tool_name(reason),
+                        deny_reason(reason)
+                    ));
+                }
             }
             let decisions = tool_decisions(&reasons, false);
             if !decisions.is_empty() {
-                client
-                    .send_tool_decisions(&state.chat_id, request_id("deny-tools"), decisions)
-                    .await
-                    .map_err(map_client_error)?;
+                with_run_deadline(deadline, options.timeout_secs, "send tool denial", async {
+                    client
+                        .send_tool_decisions(&state.chat_id, request_id("deny-tools"), decisions)
+                        .await
+                        .map_err(map_client_error)
+                })
+                .await?;
             }
             Ok(EventOutcome::Denied)
         }
@@ -1053,6 +1097,18 @@ mod tests {
         }
     }
 
+    fn options_with_timeout(
+        project: PathBuf,
+        approve: ApprovalPolicy,
+        json: bool,
+        timeout_secs: u64,
+    ) -> RunOptions {
+        RunOptions {
+            timeout_secs,
+            ..options(project, approve, json)
+        }
+    }
+
     #[test]
     fn parse_run_args_full_matrix() {
         let opts = parse_run_args(&[
@@ -1111,7 +1167,9 @@ mod tests {
         assert_eq!(RunErrorKind::Unreachable.as_str(), "unreachable");
         assert_eq!(RunErrorKind::ProjectOpen.as_str(), "project_open");
         assert_eq!(RunErrorKind::Chat.as_str(), "chat");
+        assert_eq!(RunErrorKind::ApprovalDenied.as_str(), "approval_denied");
         assert_eq!(RunErrorKind::Timeout.as_str(), "timeout");
+        assert_eq!(RunErrorKind::Interrupted.as_str(), "interrupted");
     }
 
     #[test]
@@ -1129,7 +1187,9 @@ mod tests {
             RunErrorKind::Unreachable,
             RunErrorKind::ProjectOpen,
             RunErrorKind::Chat,
+            RunErrorKind::ApprovalDenied,
             RunErrorKind::Timeout,
+            RunErrorKind::Interrupted,
         ] {
             let mut io = BufferIo::new();
             let exit_code = finish_result(
@@ -1324,9 +1384,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(summary.final_text, "approved path");
-        assert!(io.stderr.contains("--approve auto"));
+        assert!(io.stderr.is_empty());
         let emitted: RunJsonSummary = serde_json::from_str(io.stdout.trim()).unwrap();
         assert_eq!(emitted.final_text, "approved path");
+        stop_daemon(&info, task).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn run_json_stalled_stream_times_out_with_failure_contract() {
+        let Some(_env) = EnvGuard::set("stall") else {
+            return;
+        };
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (info, task, _paths) = start_daemon(&dir).await;
+        let mut io = BufferIo::new();
+        let code = finish_result(
+            run_with_daemon_info(
+                options_with_timeout(project, ApprovalPolicy::Deny, true, 3),
+                info.clone(),
+                &mut io,
+            )
+            .await,
+            true,
+            &mut io,
+        );
+
+        assert_eq!(code, exit_code_for(RunErrorKind::Timeout));
+        assert!(io.stderr.is_empty());
+        let failure: RunJsonFailure = serde_json::from_str(io.stdout.trim()).unwrap();
+        assert!(!failure.ok);
+        assert_eq!(failure.kind, "timeout");
+        assert_eq!(failure.exit_code, exit_code_for(RunErrorKind::Timeout));
         stop_daemon(&info, task).await;
     }
 }

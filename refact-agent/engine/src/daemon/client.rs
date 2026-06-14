@@ -83,8 +83,63 @@ impl std::fmt::Display for DaemonClientError {
 
 impl std::error::Error for DaemonClientError {}
 
-pub async fn ping_daemon(info: &DaemonInfo) -> bool {
-    get_json::<Value>(info, "/daemon/v1/status").await.is_ok()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonPingStatus {
+    Alive,
+    NotRunning { message: String },
+    Error { message: String },
+}
+
+impl DaemonPingStatus {
+    pub fn is_alive(&self) -> bool {
+        matches!(self, Self::Alive)
+    }
+
+    pub fn is_not_running(&self) -> bool {
+        matches!(self, Self::NotRunning { .. })
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Alive => None,
+            Self::NotRunning { message } | Self::Error { message } => Some(message),
+        }
+    }
+}
+
+pub async fn ping_daemon(info: &DaemonInfo) -> DaemonPingStatus {
+    let response = match daemon_request(info, reqwest::Method::GET, "/daemon/v1/status")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() => {
+            return DaemonPingStatus::NotRunning {
+                message: crate::daemon::auth::redact_daemon_token(&format!(
+                    "failed to contact daemon: {error}"
+                )),
+            };
+        }
+        Err(error) => {
+            return DaemonPingStatus::Error {
+                message: crate::daemon::auth::redact_daemon_token(&format!(
+                    "failed to contact daemon: {error}"
+                )),
+            };
+        }
+    };
+    if !response.status().is_success() {
+        let error = response_status_error(response).await;
+        return DaemonPingStatus::Error {
+            message: error.to_string(),
+        };
+    }
+    match response.json::<Value>().await {
+        Ok(_) => DaemonPingStatus::Alive,
+        Err(error) => DaemonPingStatus::Error {
+            message: format!("invalid daemon JSON: {error}"),
+        },
+    }
 }
 
 pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
@@ -104,9 +159,15 @@ pub async fn shutdown_for_upgrade_if_older(my_version: &str) -> Result<Option<Da
     if !version_is_older(&info.version, my_version) {
         return Ok(None);
     }
-    if ping_daemon(&info).await {
-        post_shutdown(&info, "upgrade").await?;
-        wait_until_dead(&info, STARTUP_TIMEOUT).await?;
+    match ping_daemon(&info).await {
+        DaemonPingStatus::Alive => {
+            post_shutdown(&info, "upgrade").await?;
+            wait_until_dead(&info, STARTUP_TIMEOUT).await?;
+        }
+        DaemonPingStatus::NotRunning { .. } => {}
+        DaemonPingStatus::Error { message } => {
+            return Err(format!("daemon reachable but unhealthy: {message}"));
+        }
     }
     let upgraded = ensure_daemon_running_with_starter(spawn_detached_daemon).await?;
     Ok(Some(upgraded))
@@ -255,11 +316,15 @@ where
     F: FnOnce() -> Result<(), String>,
 {
     match read_daemon_json().await {
-        Ok(Some(info)) => {
-            if ping_daemon(&info).await {
+        Ok(Some(info)) => match ping_daemon(&info).await {
+            DaemonPingStatus::Alive => {
                 return Ok(info);
             }
-        }
+            DaemonPingStatus::NotRunning { .. } => {}
+            DaemonPingStatus::Error { message } => {
+                return Err(format!("daemon reachable but unhealthy: {message}"));
+            }
+        },
         Ok(None) => {}
         Err(error) => return Err(error.to_string()),
     }
@@ -311,11 +376,13 @@ async fn poll_daemon(timeout: Duration) -> Result<DaemonInfo, String> {
     let started = Instant::now();
     loop {
         match read_daemon_json().await {
-            Ok(Some(info)) => {
-                if ping_daemon(&info).await {
+            Ok(Some(info)) => match ping_daemon(&info).await {
+                DaemonPingStatus::Alive => {
                     return Ok(info);
                 }
-            }
+                DaemonPingStatus::NotRunning { .. } => {}
+                DaemonPingStatus::Error { message } => return Err(message),
+            },
             Ok(None) => {}
             Err(error) => return Err(error.to_string()),
         }
@@ -329,7 +396,7 @@ async fn poll_daemon(timeout: Duration) -> Result<DaemonInfo, String> {
 async fn wait_until_dead(info: &DaemonInfo, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     loop {
-        if !ping_daemon(info).await {
+        if ping_daemon(info).await.is_not_running() {
             return Ok(());
         }
         if started.elapsed() >= timeout {
@@ -608,9 +675,46 @@ mod tests {
             .serve(app.into_make_service());
         let task = tokio::spawn(server);
 
-        assert!(ping_daemon(&daemon_info(port, Some("secret"))).await);
-        assert!(!ping_daemon(&daemon_info(port, Some("wrong"))).await);
+        assert!(ping_daemon(&daemon_info(port, Some("secret")))
+            .await
+            .is_alive());
+        let wrong = ping_daemon(&daemon_info(port, Some("wrong"))).await;
+        assert!(matches!(wrong, DaemonPingStatus::Error { .. }));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn ping_daemon_classifies_malformed_json_as_live_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().route(
+            "/daemon/v1/status",
+            axum::routing::get(|| async move { "not json" }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+
+        let status = ping_daemon(&daemon_info(port, None)).await;
+
+        assert!(matches!(status, DaemonPingStatus::Error { .. }));
+        assert!(status
+            .message()
+            .unwrap_or_default()
+            .contains("invalid daemon JSON"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn ping_daemon_classifies_connection_refused_as_not_running() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let status = ping_daemon(&daemon_info(port, None)).await;
+
+        assert!(matches!(status, DaemonPingStatus::NotRunning { .. }));
     }
 
     #[tokio::test]
@@ -639,7 +743,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(ping_daemon(&info).await);
+        assert!(ping_daemon(&info).await.is_alive());
         post_shutdown(&info, "test").await.unwrap();
         let handle = handle_slot.lock().unwrap().take().unwrap();
         assert_eq!(handle.await.unwrap(), 0);

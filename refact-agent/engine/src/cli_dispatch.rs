@@ -27,6 +27,8 @@ pub struct CliDispatchError {
     pub message: String,
     pub exit_code: i32,
     pub use_stderr: bool,
+    pub kind: Option<&'static str>,
+    pub json: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +44,18 @@ pub enum DispatchResult {
 
 impl CliDispatchError {
     pub fn exit(self) -> ! {
-        if self.use_stderr {
+        if self.json {
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                match self.kind {
+                    Some(kind) =>
+                        serde_json::json!({"ok": false, "error": self.message, "kind": kind, "exit_code": self.exit_code}),
+                    None =>
+                        serde_json::json!({"ok": false, "error": self.message, "exit_code": self.exit_code}),
+                }
+            );
+        } else if self.use_stderr {
             let _ = writeln!(std::io::stderr(), "{}", self.message);
         } else {
             let _ = writeln!(std::io::stdout(), "{}", self.message);
@@ -74,7 +87,11 @@ where
         | "version" => parse_control(&args),
         "--version" | "-V" => parse_control(&[OsString::from("refact"), OsString::from("version")]),
         "help" | "--help" | "-h" => Ok(RefactCliCommand::Help(help_text())),
-        other => Err(usage_error(format!("unknown subcommand `{}`", other))),
+        other => Err(if contains_json(args.iter().skip(1)) {
+            json_usage_error(format!("unknown subcommand `{}`", other))
+        } else {
+            usage_error(format!("unknown subcommand `{}`", other))
+        }),
     }
 }
 
@@ -155,7 +172,13 @@ fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
     }
     crate::daemon::run_cmd::parse_run_args(&args.iter().skip(2).cloned().collect::<Vec<_>>())
         .map(RefactCliCommand::Run)
-        .map_err(usage_error)
+        .map_err(|message| {
+            if contains_json(args.iter().skip(2)) {
+                json_usage_error(message)
+            } else {
+                usage_error(message)
+            }
+        })
 }
 
 fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
@@ -199,12 +222,23 @@ fn parse_control(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError
     }
     crate::daemon::cli::parse_cli_args(&args.iter().skip(1).cloned().collect::<Vec<_>>())
         .map(RefactCliCommand::Control)
-        .map_err(usage_error)
+        .map_err(|message| {
+            if contains_json(args.iter().skip(2)) {
+                json_usage_error(message)
+            } else {
+                usage_error(message)
+            }
+        })
 }
 
 fn contains_help<'a>(args: impl Iterator<Item = &'a OsString>) -> bool {
     args.filter_map(|arg| arg.to_str())
         .any(|arg| arg == "--help" || arg == "-h")
+}
+
+fn contains_json<'a>(args: impl Iterator<Item = &'a OsString>) -> bool {
+    args.filter_map(|arg| arg.to_str())
+        .any(|arg| arg == "--json")
 }
 
 fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
@@ -217,6 +251,8 @@ fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
         message: error.message,
         exit_code,
         use_stderr,
+        kind: None,
+        json: false,
     }
 }
 
@@ -225,6 +261,18 @@ fn usage_error(message: String) -> CliDispatchError {
         message: format!("error: {}\n\n{}", message, help_text()),
         exit_code: 2,
         use_stderr: true,
+        kind: None,
+        json: false,
+    }
+}
+
+fn json_usage_error(message: String) -> CliDispatchError {
+    CliDispatchError {
+        message: format!("error: {}\n\n{}", message, help_text()),
+        exit_code: 2,
+        use_stderr: false,
+        kind: Some("usage"),
+        json: true,
     }
 }
 
@@ -388,6 +436,19 @@ mod tests {
         let error = parse_from(["refact", "bogus"]).unwrap_err();
         assert_eq!(error.exit_code, 2);
         assert!(error.message.contains("unknown subcommand `bogus`"));
+    }
+
+    #[test]
+    fn json_usage_errors_are_marked_for_machine_output() {
+        let run = parse_from(["refact", "run", "--json"]).unwrap_err();
+        assert_eq!(run.exit_code, 2);
+        assert!(run.json);
+        assert_eq!(run.kind, Some("usage"));
+
+        let control = parse_from(["refact", "logs", "--json", "-f"]).unwrap_err();
+        assert_eq!(control.exit_code, 2);
+        assert!(control.json);
+        assert_eq!(control.kind, Some("usage"));
     }
 
     #[test]
