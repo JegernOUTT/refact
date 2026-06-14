@@ -32,6 +32,7 @@ use crate::history::{insert_history, HistoryBuffer, HistoryInsertion, RESIZE_REF
 use crate::keymap::{
     HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
 };
+use crate::notifications::{NotificationConfig, NotificationKind, NotificationManager};
 use crate::overlay::{PagerAction, PagerOverlay};
 use crate::pickers::{
     file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
@@ -337,6 +338,7 @@ pub struct App {
     working_tick: u64,
     working_detail: Option<String>,
     stream_controller: StreamController,
+    notifications: NotificationManager,
     history: HistoryBuffer,
     native_scrollback: bool,
     rendered_message_count: usize,
@@ -416,6 +418,7 @@ impl App {
             working_tick: 0,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
             native_scrollback: false,
             rendered_message_count: 0,
@@ -478,6 +481,7 @@ impl App {
             working_tick: 0,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
             native_scrollback: false,
             rendered_message_count: 0,
@@ -532,6 +536,12 @@ impl App {
         match TuiTheme::from_config_file_content(Some(content)) {
             Ok(theme) => self.theme = theme,
             Err(error) => self.add_notice(format!("Failed to load TUI theme config: {error}")),
+        }
+        match NotificationConfig::from_config_file_content(Some(content)) {
+            Ok(config) => self.notifications.set_config(config),
+            Err(error) => {
+                self.add_notice(format!("Failed to load TUI notification config: {error}"))
+            }
         }
     }
 
@@ -1271,6 +1281,7 @@ impl App {
                     "off"
                 }
             ),
+            format!("Notifications: {}", self.notification_status_label()),
             format!(
                 "Commands: {} registered",
                 crate::commands::command_registry().len()
@@ -2426,6 +2437,29 @@ impl App {
         }
     }
 
+    fn queue_notification(&mut self, kind: NotificationKind) {
+        self.notifications.queue(kind);
+    }
+
+    fn set_terminal_focus(&mut self, focused: bool) {
+        self.notifications.set_focused(focused);
+    }
+
+    fn take_pending_notifications(&mut self) -> Vec<Vec<u8>> {
+        self.notifications.drain_pending()
+    }
+
+    fn notification_status_label(&self) -> &'static str {
+        let config = self.notifications.config();
+        if !config.enabled() {
+            "off"
+        } else if config.bell() {
+            "OSC9 + BEL"
+        } else {
+            "OSC9"
+        }
+    }
+
     fn clear_approvals(&mut self) {
         self.approval_queue.clear();
         self.pending_approval_clears.clear();
@@ -2435,7 +2469,9 @@ impl App {
         if self.approval_scope_pending_clear(modal.scope()) {
             return;
         }
-        self.approval_queue.push(modal);
+        if self.approval_queue.push(modal) {
+            self.queue_notification(NotificationKind::ApprovalNeeded);
+        }
     }
 
     fn pop_current_approval(&mut self) -> Option<ApprovalModalState> {
@@ -2550,6 +2586,7 @@ impl App {
                 } else {
                     self.update_usage(&raw);
                 }
+                self.queue_notification(NotificationKind::TurnComplete);
                 if self.session_state != SessionState::Paused {
                     if self.ask_questions_form.is_some() {
                         self.set_session_state(SessionState::WaitingUserInput);
@@ -3835,6 +3872,21 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_take_pending_notifications(&mut self) -> Vec<Vec<u8>> {
+        self.take_pending_notifications()
+    }
+
+    #[cfg(test)]
+    pub fn test_set_terminal_focus(&mut self, focused: bool) {
+        self.set_terminal_focus(focused);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_notifications_config(&mut self, config: NotificationConfig) {
+        self.notifications.set_config(config);
+    }
+
+    #[cfg(test)]
     pub fn test_set_keymap(&mut self, keymap: KeymapRegistry) {
         self.vim.set_enabled(keymap.vim_mode_enabled());
         self.keymap = keymap;
@@ -4136,7 +4188,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 }
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
-            RuntimeEvent::Input(Event::FocusGained | Event::FocusLost) => {}
+            RuntimeEvent::Input(Event::FocusGained) => app.set_terminal_focus(true),
+            RuntimeEvent::Input(Event::FocusLost) => app.set_terminal_focus(false),
             RuntimeEvent::Input(Event::Resize(_, _)) => {}
             RuntimeEvent::Tick => {
                 app.run_stream_commit_tick();
@@ -4246,6 +4299,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::DiffLoaded(Err(error)) => {
                 app.add_notice(format!("Failed to load git diff: {error}"))
             }
+        }
+        for bytes in app.take_pending_notifications() {
+            terminal.write_notification(&bytes)?;
         }
     }
     Ok(())
@@ -5816,6 +5872,95 @@ name = "plain"
             action,
             AppAction::SendMessage { prompt, .. } if prompt == "hello"
         ));
+    }
+
+    #[test]
+    fn app_config_applies_notification_settings() {
+        let mut app = App::new(project());
+        app.test_apply_tui_config_content(
+            r#"
+[notifications]
+enabled = true
+bell = false
+"#,
+        );
+
+        assert_eq!(app.notification_status_label(), "OSC9");
+    }
+
+    #[test]
+    fn app_notification_gate_disables_pending_notifications() {
+        let mut app = App::new(project());
+        app.test_set_notifications_config(NotificationConfig::new(false, true, Duration::ZERO));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+
+        assert!(app.test_take_pending_notifications().is_empty());
+        assert_eq!(app.notification_status_label(), "off");
+    }
+
+    #[test]
+    fn stream_finished_and_approval_queue_notifications_when_unfocused() {
+        let mut app = App::new(project());
+        app.test_set_terminal_focus(false);
+        app.test_set_notifications_config(NotificationConfig::new(true, true, Duration::ZERO));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+
+        let pending = app.test_take_pending_notifications();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0], b"\x1b]9;Refact: response ready\x07\x07");
+        assert_eq!(pending[1], b"\x1b]9;Refact: approval needed\x07\x07");
+    }
+
+    #[test]
+    fn app_notifications_debounce_duplicate_turn_complete() {
+        let mut app = App::new(project());
+        app.test_set_terminal_focus(false);
+        app.test_set_notifications_config(NotificationConfig::new(
+            true,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        for _ in 0..2 {
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "stream_finished".to_string(),
+                raw: json!({}),
+            });
+        }
+
+        assert_eq!(app.test_take_pending_notifications().len(), 1);
+    }
+
+    #[test]
+    fn notifications_suppress_when_focused() {
+        let mut app = App::new(project());
+        app.test_set_terminal_focus(true);
+        app.test_set_notifications_config(NotificationConfig::new(true, true, Duration::ZERO));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+
+        assert!(app.test_take_pending_notifications().is_empty());
     }
 
     #[test]

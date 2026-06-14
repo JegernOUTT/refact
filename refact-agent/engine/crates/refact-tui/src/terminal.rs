@@ -3,7 +3,8 @@ use std::panic;
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -225,6 +226,12 @@ impl TerminalSession {
         )
     }
 
+    pub fn write_notification(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let writer = self.terminal.backend_mut();
+        writer.write_all(bytes)?;
+        writer.flush()
+    }
+
     pub fn mode(&self) -> TerminalMode {
         self.guard.mode
     }
@@ -273,6 +280,7 @@ struct RestoreState {
     raw_mode: bool,
     alternate_screen: bool,
     mouse_capture: bool,
+    focus_change: bool,
     bracketed_paste: bool,
     cursor_hidden: bool,
     title_pushed: bool,
@@ -284,6 +292,7 @@ impl RestoreState {
             raw_mode: true,
             alternate_screen: mode == TerminalMode::AlternateScreen,
             mouse_capture: true,
+            focus_change: true,
             bracketed_paste: true,
             cursor_hidden: true,
             title_pushed,
@@ -296,10 +305,12 @@ enum TerminalStep {
     EnableRawMode,
     EnterAlternateScreen,
     EnableMouseCapture,
+    EnableFocusChange,
     EnableBracketedPaste,
     HideCursor,
     ShowCursor,
     DisableBracketedPaste,
+    DisableFocusChange,
     DisableMouseCapture,
     LeaveAlternateScreen,
     DisableRawMode,
@@ -328,10 +339,12 @@ impl<W: Write> TerminalOps for CrosstermTerminalOps<W> {
             TerminalStep::EnableRawMode => crossterm_enable_raw_mode(),
             TerminalStep::EnterAlternateScreen => execute!(self.writer, EnterAlternateScreen),
             TerminalStep::EnableMouseCapture => execute!(self.writer, EnableMouseCapture),
+            TerminalStep::EnableFocusChange => execute!(self.writer, EnableFocusChange),
             TerminalStep::EnableBracketedPaste => execute!(self.writer, EnableBracketedPaste),
             TerminalStep::HideCursor => execute!(self.writer, Hide),
             TerminalStep::ShowCursor => execute!(self.writer, Show),
             TerminalStep::DisableBracketedPaste => execute!(self.writer, DisableBracketedPaste),
+            TerminalStep::DisableFocusChange => execute!(self.writer, DisableFocusChange),
             TerminalStep::DisableMouseCapture => execute!(self.writer, DisableMouseCapture),
             TerminalStep::LeaveAlternateScreen => execute!(self.writer, LeaveAlternateScreen),
             TerminalStep::DisableRawMode => crossterm_disable_raw_mode(),
@@ -389,6 +402,7 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             self.apply_start_step(TerminalStep::EnterAlternateScreen)?;
         }
         self.apply_start_step(TerminalStep::EnableMouseCapture)?;
+        self.apply_start_step(TerminalStep::EnableFocusChange)?;
         self.apply_start_step(TerminalStep::EnableBracketedPaste)?;
         self.apply_start_step(TerminalStep::HideCursor)
     }
@@ -399,11 +413,13 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             TerminalStep::EnableRawMode => self.state.raw_mode = true,
             TerminalStep::EnterAlternateScreen => self.state.alternate_screen = true,
             TerminalStep::EnableMouseCapture => self.state.mouse_capture = true,
+            TerminalStep::EnableFocusChange => self.state.focus_change = true,
             TerminalStep::EnableBracketedPaste => self.state.bracketed_paste = true,
             TerminalStep::HideCursor => self.state.cursor_hidden = true,
             TerminalStep::PushTitle => self.state.title_pushed = true,
             TerminalStep::ShowCursor
             | TerminalStep::DisableBracketedPaste
+            | TerminalStep::DisableFocusChange
             | TerminalStep::DisableMouseCapture
             | TerminalStep::LeaveAlternateScreen
             | TerminalStep::DisableRawMode
@@ -454,6 +470,9 @@ fn restore_terminal_state<O: TerminalOps>(ops: &mut O, state: RestoreState) {
     if state.bracketed_paste {
         let _ = ops.apply(TerminalStep::DisableBracketedPaste);
     }
+    if state.focus_change {
+        let _ = ops.apply(TerminalStep::DisableFocusChange);
+    }
     if state.mouse_capture {
         let _ = ops.apply(TerminalStep::DisableMouseCapture);
     }
@@ -474,6 +493,7 @@ pub fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
         writer,
         Show,
         DisableBracketedPaste,
+        DisableFocusChange,
         DisableMouseCapture,
         LeaveAlternateScreen
     )
@@ -529,6 +549,7 @@ mod tests {
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("?1049l"));
         assert!(rendered.contains("?2004l"));
+        assert!(rendered.contains("?1004l"));
         assert!(rendered.contains("?1000l") || rendered.contains("?1002l"));
     }
 
@@ -554,12 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn partial_init_failure_after_bracketed_paste_disables_it() {
+    fn partial_init_failure_after_focus_change_disables_it() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
-                fail_on: Some(TerminalStep::HideCursor),
+                fail_on: Some(TerminalStep::EnableBracketedPaste),
             };
             let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::Inline);
             assert!(guard.initialize().is_err());
@@ -569,9 +590,9 @@ mod tests {
             vec![
                 TerminalStep::EnableRawMode,
                 TerminalStep::EnableMouseCapture,
+                TerminalStep::EnableFocusChange,
                 TerminalStep::EnableBracketedPaste,
-                TerminalStep::HideCursor,
-                TerminalStep::DisableBracketedPaste,
+                TerminalStep::DisableFocusChange,
                 TerminalStep::DisableMouseCapture,
                 TerminalStep::DisableRawMode,
             ]
@@ -592,6 +613,8 @@ mod tests {
         let calls = calls.lock().unwrap().clone();
         assert!(calls.contains(&TerminalStep::EnterAlternateScreen));
         assert!(calls.contains(&TerminalStep::LeaveAlternateScreen));
+        assert!(calls.contains(&TerminalStep::EnableFocusChange));
+        assert!(calls.contains(&TerminalStep::DisableFocusChange));
         assert!(calls.contains(&TerminalStep::EnableBracketedPaste));
         assert!(calls.contains(&TerminalStep::DisableBracketedPaste));
     }
@@ -613,10 +636,12 @@ mod tests {
             vec![
                 TerminalStep::EnableRawMode,
                 TerminalStep::EnableMouseCapture,
+                TerminalStep::EnableFocusChange,
                 TerminalStep::EnableBracketedPaste,
                 TerminalStep::HideCursor,
                 TerminalStep::ShowCursor,
                 TerminalStep::DisableBracketedPaste,
+                TerminalStep::DisableFocusChange,
                 TerminalStep::DisableMouseCapture,
                 TerminalStep::DisableRawMode,
             ]

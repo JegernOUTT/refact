@@ -8,6 +8,7 @@ pub mod composer;
 pub mod events_pane;
 pub mod history;
 pub mod keymap;
+pub mod notifications;
 pub mod overlay;
 pub mod pickers;
 pub mod protocol;
