@@ -156,7 +156,8 @@ impl DaemonState {
 
     pub fn request_shutdown(&self, reason: String) {
         self.shutdown_requested.store(true, Ordering::Relaxed);
-        let _ = self.shutdown_tx.send(reason);
+        let _ = self.shutdown_tx.send(reason.clone());
+        self.supervisor.request_shutdown(reason);
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -270,12 +271,16 @@ impl DaemonState {
 
     pub async fn update_proxy_activity(&self, project_id: &str) {
         let now = now_ms();
-        self.supervisor.note_project_activity(project_id, now).await;
-        let mut activity = self.proxy_activity.write();
-        activity
-            .entry(project_id.to_string())
-            .or_default()
-            .last_proxy_activity_ms = now;
+        self.supervisor
+            .with_project_op_lock(project_id, || async {
+                self.supervisor.note_project_activity(project_id, now).await;
+                let mut activity = self.proxy_activity.write();
+                activity
+                    .entry(project_id.to_string())
+                    .or_default()
+                    .last_proxy_activity_ms = now;
+            })
+            .await;
     }
 
     pub async fn increment_live_proxy_stream(&self, project_id: &str) {
@@ -289,6 +294,32 @@ impl DaemonState {
         let mut activity = self.proxy_activity.write();
         let activity = activity.entry(project_id.to_string()).or_default();
         activity.live_proxy_streams = activity.live_proxy_streams.saturating_sub(1);
+    }
+
+    pub(crate) async fn worker_idle_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Option<WorkerIdleSnapshot> {
+        let entry = {
+            let registry = self.projects.read().await;
+            registry.get(project_id).cloned()
+        }?;
+        let status = self.worker_statuses.read().await.get(project_id).cloned();
+        let activity = self
+            .proxy_activity
+            .read()
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default();
+        let cron_next_fire_ms = self.cron_pending(project_id).await;
+        let info = self.supervisor.worker_info(project_id).await?;
+        Some(worker_idle_snapshot_from(
+            &entry,
+            &info,
+            status.as_ref(),
+            &activity,
+            cron_next_fire_ms,
+        ))
     }
 
     pub(crate) async fn worker_idle_snapshots(&self) -> Vec<(String, WorkerIdleSnapshot)> {
@@ -308,28 +339,41 @@ impl DaemonState {
             let activity = activity.get(&entry.id).cloned().unwrap_or_default();
             snapshots.push((
                 entry.id.clone(),
-                WorkerIdleSnapshot {
-                    state: info.state,
-                    pinned: entry.pinned,
-                    live_proxy_streams: activity.live_proxy_streams.min(u64::from(u32::MAX)) as u32,
-                    last_proxy_activity_ms: activity
-                        .last_proxy_activity_ms
-                        .max(entry.last_active_ms),
-                    lsp_clients: status
-                        .map(|status| status.report.lsp_clients.min(u32::MAX as usize) as u32)
-                        .unwrap_or(0),
-                    busy_chats: status
-                        .map(|status| status.report.busy_chats.min(u32::MAX as usize) as u32)
-                        .unwrap_or(0),
-                    exec_running: status
-                        .map(|status| status.report.exec_running.min(u32::MAX as usize) as u32)
-                        .unwrap_or(0),
-                    last_status_report_ms: status.map(|status| status.received_ms).unwrap_or(0),
-                    cron_next_fire_ms: cron_pending.get(&entry.id).copied(),
-                },
+                worker_idle_snapshot_from(
+                    &entry,
+                    &info,
+                    status,
+                    &activity,
+                    cron_pending.get(&entry.id).copied(),
+                ),
             ));
         }
         snapshots
+    }
+
+    pub(crate) async fn stop_worker_if_idle(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<WorkerInfo>, String> {
+        self.supervisor
+            .stop_worker_if(project_id, || async {
+                self.worker_idle_snapshot(project_id)
+                    .await
+                    .map(|snapshot| {
+                        crate::daemon::idle::idle_decision(now_ms(), &snapshot, &self.config)
+                            == crate::daemon::idle::IdleDecision::Stop
+                    })
+                    .unwrap_or(false)
+            })
+            .await
+    }
+
+    pub(crate) async fn purge_project_runtime(&self, project_id: &str) -> Result<(), String> {
+        self.supervisor.forget_worker(project_id).await?;
+        self.worker_statuses.write().await.remove(project_id);
+        self.proxy_activity.write().remove(project_id);
+        self.set_cron_pending(project_id, None).await;
+        Ok(())
     }
 
     pub async fn proxy_activity(&self, project_id: &str) -> ProxyActivity {
@@ -417,6 +461,39 @@ impl DaemonState {
                 mdns: format!("http://{}:{port}/", host_local),
             },
         }
+    }
+}
+
+fn worker_idle_snapshot_from(
+    entry: &crate::daemon::projects::ProjectEntry,
+    info: &WorkerInfo,
+    status: Option<&StoredWorkerStatus>,
+    activity: &ProxyActivity,
+    cron_next_fire_ms: Option<u64>,
+) -> WorkerIdleSnapshot {
+    WorkerIdleSnapshot {
+        state: info.state.clone(),
+        pinned: entry.pinned,
+        live_proxy_streams: activity.live_proxy_streams.min(u64::from(u32::MAX)) as u32,
+        last_proxy_activity_ms: activity
+            .last_proxy_activity_ms
+            .max(entry.last_active_ms)
+            .max(
+                status
+                    .map(|status| status.report.last_activity_ts)
+                    .unwrap_or(0),
+            ),
+        lsp_clients: status
+            .map(|status| status.report.lsp_clients.min(u32::MAX as usize) as u32)
+            .unwrap_or(0),
+        busy_chats: status
+            .map(|status| status.report.busy_chats.min(u32::MAX as usize) as u32)
+            .unwrap_or(0),
+        exec_running: status
+            .map(|status| status.report.exec_running.min(u32::MAX as usize) as u32)
+            .unwrap_or(0),
+        last_status_report_ms: status.map(|status| status.received_ms).unwrap_or(0),
+        cron_next_fire_ms,
     }
 }
 

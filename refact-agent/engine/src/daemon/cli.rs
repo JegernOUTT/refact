@@ -6,7 +6,6 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use unicode_width::UnicodeWidthStr;
 
 use crate::daemon::client::{self, DaemonClientError};
@@ -1056,9 +1055,8 @@ fn resolve_target(projects: &[ProjectEntry], target: &str) -> Result<String, Cli
         )));
     }
     let root = canonicalize_existing_dir(Path::new(target))?;
-    let id = project_id_for_path(&root);
-    if projects.iter().any(|project| project.id == id) {
-        Ok(id)
+    if let Some(project) = projects.iter().find(|project| project.root == root) {
+        Ok(project.id.clone())
     } else {
         Err(CliError::runtime(format!(
             "project not registered: {}",
@@ -1082,12 +1080,6 @@ fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf, CliError> {
         )));
     }
     Ok(root)
-}
-
-fn project_id_for_path(root: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(root.to_string_lossy().as_bytes());
-    hex::encode(&hasher.finalize()[..6])
 }
 
 pub fn format_worker_table(rows: &[WorkerRow]) -> String {
@@ -1409,11 +1401,11 @@ mod tests {
     }
 
     #[test]
-    fn path_resolution_uses_canonical_hash() {
+    fn path_resolution_uses_registered_root() {
         let dir = tempfile::tempdir().unwrap();
         let root =
             crate::files_correction::canonical_path(dir.path().to_string_lossy().to_string());
-        let id = project_id_for_path(&root);
+        let id = "persisted-project-id".to_string();
         let projects = vec![ProjectEntry {
             id: id.clone(),
             slug: "demo".to_string(),

@@ -5,6 +5,7 @@
 //! exercise readiness, graceful shutdown, and crash-loop handling without launching the full engine.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use parking_lot::RwLock as SyncRwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::daemon::events::EventBus;
@@ -100,6 +101,7 @@ pub struct Supervisor {
     proxy_restart_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
     client: reqwest::Client,
+    shutdown_tx: broadcast::Sender<String>,
 }
 
 impl Supervisor {
@@ -122,6 +124,7 @@ impl Supervisor {
         idle_timeout_secs: u64,
         daemon_auth_token: Option<String>,
     ) -> Arc<Self> {
+        let (shutdown_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             workers: RwLock::new(HashMap::new()),
             events,
@@ -136,7 +139,12 @@ impl Supervisor {
                 .timeout(Duration::from_secs(2))
                 .build()
                 .expect("failed to build daemon supervisor http client"),
+            shutdown_tx,
         })
+    }
+
+    pub fn request_shutdown(&self, reason: String) {
+        let _ = self.shutdown_tx.send(reason);
     }
 
     pub async fn set_daemon_port(&self, port: u16) {
@@ -151,11 +159,13 @@ impl Supervisor {
             .await;
         let spec = WorkerLaunchSpec::from(entry);
         let slot = self.slot_for(&spec.project_id).await;
-        let _guard = slot.op_lock.lock().await;
-        if let Some(info) = self.reusable_info(&slot).await {
-            return Ok(info);
+        {
+            let _guard = slot.op_lock.lock().await;
+            if let Some(info) = self.reusable_info(&slot).await {
+                return Ok(info);
+            }
         }
-        self.spawn_worker_locked(slot.clone(), spec, "ensure").await
+        self.spawn_worker(slot.clone(), spec, "ensure").await
     }
 
     pub async fn restart_worker(
@@ -166,14 +176,14 @@ impl Supervisor {
             .await;
         let spec = WorkerLaunchSpec::from(entry);
         let slot = self.slot_for(&spec.project_id).await;
-        let _guard = slot.op_lock.lock().await;
-        self.stop_slot_locked(&slot, &spec.project_id, false)
-            .await?;
         {
+            let _guard = slot.op_lock.lock().await;
+            self.stop_slot_locked(&slot, &spec.project_id, false)
+                .await?;
             let mut record = slot.record.lock().await;
             record.crash_history.clear();
         }
-        self.spawn_worker_locked(slot.clone(), spec, "manual_restart")
+        self.spawn_worker(slot.clone(), spec, "manual_restart")
             .await
     }
 
@@ -184,6 +194,37 @@ impl Supervisor {
         let _guard = slot.op_lock.lock().await;
         let info = self.stop_slot_locked(&slot, project_id, true).await?;
         Ok(Some(info))
+    }
+
+    pub(crate) async fn stop_worker_if<F, Fut>(
+        &self,
+        project_id: &str,
+        predicate: F,
+    ) -> Result<Option<WorkerInfo>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let Some(slot) = self.get_slot(project_id).await else {
+            return Ok(None);
+        };
+        let _guard = slot.op_lock.lock().await;
+        if !predicate().await {
+            return Ok(None);
+        }
+        let info = self.stop_slot_locked(&slot, project_id, true).await?;
+        Ok(Some(info))
+    }
+
+    pub(crate) async fn forget_worker(&self, project_id: &str) -> Result<(), String> {
+        if let Some(slot) = self.get_slot(project_id).await {
+            let _guard = slot.op_lock.lock().await;
+            let _ = self.stop_slot_locked(&slot, project_id, false).await?;
+        }
+        self.workers.write().await.remove(project_id);
+        self.project_liveness.write().await.remove(project_id);
+        self.cron_pending.write().remove(project_id);
+        Ok(())
     }
 
     pub async fn stop_all(&self) {
@@ -296,6 +337,16 @@ impl Supervisor {
         entry.last_activity_ms = entry.last_activity_ms.max(activity_ms);
     }
 
+    pub(crate) async fn with_project_op_lock<F, Fut, T>(&self, project_id: &str, f: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let slot = self.slot_for(project_id).await;
+        let _guard = slot.op_lock.lock().await;
+        f().await
+    }
+
     async fn wants_alive(&self, project_id: &str) -> bool {
         let now = now_ms();
         if self
@@ -353,7 +404,7 @@ impl Supervisor {
         }
     }
 
-    async fn spawn_worker_locked(
+    async fn spawn_worker(
         self: &Arc<Self>,
         slot: Arc<WorkerSlot>,
         spec: WorkerLaunchSpec,
@@ -362,16 +413,20 @@ impl Supervisor {
         for attempt in 1..=MAX_PORT_BUSY_RETRIES {
             let ports = crate::daemon::ports::allocate_port_pair()?;
             let nonce = uuid::Uuid::new_v4().to_string();
-            let child = match self.spawn_child(&spec, ports, &nonce).await {
-                Ok(child) => child,
-                Err(error) => {
-                    self.mark_failed(&slot, &spec.project_id, error.clone())
-                        .await;
-                    return Err(format!("failed to spawn worker: {error}"));
+            let (pid, generation) = {
+                let _guard = slot.op_lock.lock().await;
+                if let Some(info) = self.reusable_info(&slot).await {
+                    return Ok(info);
                 }
-            };
-            let pid = child.id();
-            let generation = {
+                let child = match self.spawn_child(&spec, ports, &nonce).await {
+                    Ok(child) => child,
+                    Err(error) => {
+                        self.mark_failed(&slot, &spec.project_id, error.clone())
+                            .await;
+                        return Err(format!("failed to spawn worker: {error}"));
+                    }
+                };
+                let pid = child.id();
                 let mut record = slot.record.lock().await;
                 abort_task(&mut record.monitor_task);
                 record.generation = record.generation.saturating_add(1);
@@ -384,7 +439,7 @@ impl Supervisor {
                     state: WorkerState::Starting,
                     last_error: None,
                 };
-                record.generation
+                (pid, record.generation)
             };
             let _ = self
                 .events
@@ -404,6 +459,7 @@ impl Supervisor {
                 .wait_until_ready_or_exit(&slot, generation, ports.http_port, &nonce)
                 .await?
             {
+                ReadinessOutcome::Superseded(info) => return Ok(info),
                 ReadinessOutcome::Ready => {
                     let monitor = self.monitor_handle(slot.clone(), spec.clone(), generation);
                     let info = {
@@ -452,9 +508,10 @@ impl Supervisor {
                         continue;
                     }
                     let info = self
-                        .mark_failed(
+                        .mark_generation_failed(
                             &slot,
                             &spec.project_id,
+                            generation,
                             "worker port allocation retry limit reached".to_string(),
                         )
                         .await;
@@ -491,9 +548,10 @@ impl Supervisor {
                 ReadinessOutcome::Timeout => {
                     self.kill_generation_child(&slot, generation).await;
                     let info = self
-                        .mark_failed(
+                        .mark_generation_failed(
                             &slot,
                             &spec.project_id,
+                            generation,
                             "worker readiness timed out".to_string(),
                         )
                         .await;
@@ -503,6 +561,18 @@ impl Supervisor {
                             "worker_exited",
                             Some(spec.project_id.clone()),
                             json!({"reason": "readiness_timeout", "will_restart": false}),
+                        )
+                        .await;
+                    return Ok(info);
+                }
+                ReadinessOutcome::Shutdown => {
+                    self.kill_generation_child(&slot, generation).await;
+                    let info = self
+                        .mark_generation_failed(
+                            &slot,
+                            &spec.project_id,
+                            generation,
+                            "worker startup cancelled by daemon shutdown".to_string(),
                         )
                         .await;
                     return Ok(info);
@@ -604,21 +674,32 @@ impl Supervisor {
     ) -> Result<ReadinessOutcome, String> {
         let deadline = Instant::now() + READINESS_TIMEOUT;
         let url = format!("http://127.0.0.1:{http_port}/v1/ping");
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
+            if let Some(info) = info_if_generation_changed(slot, generation).await {
+                return Ok(ReadinessOutcome::Superseded(info));
+            }
             if let Some(exit_code) = take_exited_child(slot, generation).await? {
                 return Ok(ReadinessOutcome::Exited(exit_code));
             }
             if Instant::now() >= deadline {
                 return Ok(ReadinessOutcome::Timeout);
             }
-            if let Ok(response) = self.client.get(&url).send().await {
+            let response = tokio::select! {
+                _ = shutdown_rx.recv() => return Ok(ReadinessOutcome::Shutdown),
+                response = self.client.get(&url).send() => response,
+            };
+            if let Ok(response) = response {
                 if let Ok(body) = response.text().await {
                     if body.trim() == nonce {
                         return Ok(ReadinessOutcome::Ready);
                     }
                 }
             }
-            tokio::time::sleep(READINESS_POLL).await;
+            tokio::select! {
+                _ = shutdown_rx.recv() => return Ok(ReadinessOutcome::Shutdown),
+                _ = tokio::time::sleep(READINESS_POLL) => {}
+            }
         }
     }
 
@@ -654,8 +735,8 @@ impl Supervisor {
         spec: WorkerLaunchSpec,
         generation: u64,
     ) {
-        let _guard = slot.op_lock.lock().await;
         {
+            let _guard = slot.op_lock.lock().await;
             let mut record = slot.record.lock().await;
             if record.generation != generation
                 || !matches!(record.info.state.clone(), WorkerState::Starting)
@@ -666,7 +747,7 @@ impl Supervisor {
             record.monitor_task = None;
         }
         let _ = self
-            .spawn_worker_locked(slot.clone(), spec.clone(), "auto_restart")
+            .spawn_worker(slot.clone(), spec.clone(), "auto_restart")
             .await;
     }
 
@@ -835,22 +916,23 @@ impl Supervisor {
         project_id: &str,
         emit_event: bool,
     ) -> Result<WorkerInfo, String> {
-        let generation = {
+        let (generation, was_ready) = {
             let mut record = slot.record.lock().await;
             abort_task(&mut record.monitor_task);
             record.generation = record.generation.saturating_add(1);
+            let was_ready = matches!(record.info.state, WorkerState::Ready);
             record.info.state = if record.child.is_some() {
                 WorkerState::Stopping
             } else {
                 WorkerState::Stopped
             };
-            record.generation
+            (record.generation, was_ready)
         };
         let (http_port, had_child) = {
             let record = slot.record.lock().await;
             (record.info.http_port, record.child.is_some())
         };
-        if had_child {
+        if had_child && was_ready {
             let _ = self
                 .client
                 .post(format!("http://127.0.0.1:{http_port}/v1/graceful-shutdown"))
@@ -863,6 +945,8 @@ impl Supervisor {
             {
                 self.kill_generation_child(slot, generation).await;
             }
+        } else if had_child {
+            self.kill_generation_child(slot, generation).await;
         }
         let info = {
             let mut record = slot.record.lock().await;
@@ -933,6 +1017,31 @@ impl Supervisor {
         };
         record.info.clone()
     }
+
+    async fn mark_generation_failed(
+        &self,
+        slot: &Arc<WorkerSlot>,
+        project_id: &str,
+        generation: u64,
+        reason: String,
+    ) -> WorkerInfo {
+        let mut record = slot.record.lock().await;
+        if record.generation != generation {
+            return record.info.clone();
+        }
+        record.child = None;
+        record.info = WorkerInfo {
+            project_id: project_id.to_string(),
+            pid: None,
+            http_port: record.info.http_port,
+            lsp_port: record.info.lsp_port,
+            state: WorkerState::Failed {
+                reason: reason.clone(),
+            },
+            last_error: Some(reason),
+        };
+        record.info.clone()
+    }
 }
 
 impl WorkerSlot {
@@ -958,9 +1067,11 @@ impl WorkerSlot {
 }
 
 enum ReadinessOutcome {
+    Superseded(WorkerInfo),
     Ready,
     Exited(Option<i32>),
     Timeout,
+    Shutdown,
 }
 
 fn worker_args(
@@ -1039,6 +1150,11 @@ async fn take_exited_child(
     }
 }
 
+async fn info_if_generation_changed(slot: &Arc<WorkerSlot>, generation: u64) -> Option<WorkerInfo> {
+    let record = slot.record.lock().await;
+    (record.generation != generation).then(|| record.info.clone())
+}
+
 fn abort_task(task: &mut Option<JoinHandle<()>>) {
     if let Some(task) = task.take() {
         task.abort();
@@ -1100,6 +1216,60 @@ fn runtime_restart_delay(delay: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvGuard {
+        keys: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn fake_worker() -> Option<Self> {
+            let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+            if std::process::Command::new(&python)
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return None;
+            }
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fake_worker.py");
+            let keys = vec![
+                (
+                    "REFACT_DAEMON_WORKER_CMD",
+                    std::env::var("REFACT_DAEMON_WORKER_CMD").ok(),
+                ),
+                (
+                    "REFACT_DAEMON_SUPERVISOR_BACKOFF_MS",
+                    std::env::var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS").ok(),
+                ),
+                ("FAKE_WORKER_CRASH", std::env::var("FAKE_WORKER_CRASH").ok()),
+                (
+                    "FAKE_WORKER_DELAY_READY",
+                    std::env::var("FAKE_WORKER_DELAY_READY").ok(),
+                ),
+            ];
+            std::env::set_var(
+                "REFACT_DAEMON_WORKER_CMD",
+                format!("{} {}", python, script.display()),
+            );
+            std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
+            std::env::remove_var("FAKE_WORKER_CRASH");
+            std::env::remove_var("FAKE_WORKER_DELAY_READY");
+            Some(Self { keys })
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.keys.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn test_launch_spec(root: PathBuf) -> WorkerLaunchSpec {
         WorkerLaunchSpec {
@@ -1236,5 +1406,112 @@ mod tests {
         supervisor.notify_proxy_unreachable(entry, true).await;
 
         assert_eq!(supervisor.proxy_restart_tasks.lock().await.len(), 0);
+    }
+
+    fn test_entry(root: PathBuf) -> ProjectEntry {
+        ProjectEntry {
+            id: "project".to_string(),
+            slug: "project".to_string(),
+            root,
+            pinned: false,
+            last_active_ms: now_ms(),
+            settings: ProjectSettings::default(),
+        }
+    }
+
+    async fn wait_for_starting(supervisor: &Supervisor, project_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if supervisor
+                .worker_info(project_id)
+                .await
+                .map(|info| matches!(info.state, WorkerState::Starting))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "worker did not enter startup");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn stop_worker_can_run_during_stuck_startup() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        std::env::set_var("FAKE_WORKER_DELAY_READY", "30");
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+        let start = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let entry = entry.clone();
+            async move { supervisor.ensure_worker(&entry).await }
+        });
+
+        wait_for_starting(&supervisor, &entry.id).await;
+        let stopped =
+            tokio::time::timeout(Duration::from_secs(2), supervisor.stop_worker(&entry.id))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(stopped.state, WorkerState::Stopped);
+        let start_info = tokio::time::timeout(Duration::from_secs(2), start)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            start_info.state,
+            WorkerState::Stopping | WorkerState::Stopped
+        ));
+        assert_eq!(
+            supervisor.worker_info(&entry.id).await.unwrap().state,
+            WorkerState::Stopped
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn readiness_wait_exits_on_shutdown() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        std::env::set_var("FAKE_WORKER_DELAY_READY", "30");
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+        let start = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let entry = entry.clone();
+            async move { supervisor.ensure_worker(&entry).await }
+        });
+
+        wait_for_starting(&supervisor, &entry.id).await;
+        supervisor.request_shutdown("test shutdown".to_string());
+        let info = tokio::time::timeout(Duration::from_secs(2), start)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(info.state, WorkerState::Failed { .. }));
+        assert!(info
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("shutdown"));
     }
 }

@@ -14,6 +14,10 @@ from urllib.parse import parse_qs, urlparse
 class WorkerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/v1/ping":
+            if time.time() < self.server.ready_at:
+                self.send_response(503)
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("content-type", "text/plain")
             self.end_headers()
@@ -193,6 +197,7 @@ class WorkerServer(ThreadingHTTPServer):
     def __init__(self, server_address, handler, ping_message):
         super().__init__(server_address, handler)
         self.ping_message = ping_message
+        self.ready_at = time.time() + float(os.environ.get("FAKE_WORKER_DELAY_READY", "0") or "0")
         self.commands = []
         self.chat_cond = threading.Condition()
 

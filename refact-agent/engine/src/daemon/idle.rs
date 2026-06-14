@@ -105,7 +105,7 @@ pub(crate) async fn tick_at(state: &Arc<DaemonState>, now: u64) {
         let idle_secs = now
             .saturating_sub(snapshot.last_proxy_activity_ms)
             .saturating_div(1000);
-        match state.supervisor.stop_worker(&project_id).await {
+        match state.stop_worker_if_idle(&project_id).await {
             Ok(Some(_)) => {
                 let _ = state
                     .events
@@ -425,6 +425,60 @@ mod tests {
             .await;
         tokio::time::sleep(Duration::from_millis(1100)).await;
         tick_at(&state, now_ms()).await;
+        assert_eq!(
+            state.supervisor.worker_info(&entry.id).await.unwrap().state,
+            WorkerState::Ready
+        );
+        state.supervisor.stop_all().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn idle_revalidation_keeps_worker_that_becomes_active() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let (_dir, state, entry) = harness(1).await;
+        state.supervisor.ensure_worker(&entry).await.unwrap();
+        state.store_worker_status(idle_report(&entry.id)).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        let project_id = entry.id.clone();
+        let updater = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state.update_proxy_activity(&project_id).await;
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        tick_at(&state, now_ms()).await;
+        updater.await.unwrap();
+
+        assert_eq!(
+            state.supervisor.worker_info(&entry.id).await.unwrap().state,
+            WorkerState::Ready
+        );
+        assert!(!state.events.snapshot().await.iter().any(|event| {
+            event.kind == "worker_idle_stopped" && event.project_id.as_deref() == Some(&entry.id)
+        }));
+        state.supervisor.stop_all().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn idle_snapshot_uses_worker_heartbeat_activity() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let (_dir, state, entry) = harness(1).await;
+        state.supervisor.ensure_worker(&entry).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let mut report = idle_report(&entry.id);
+        report.last_activity_ts = now_ms();
+        state.store_worker_status(report).await;
+
+        tick_at(&state, now_ms()).await;
+
         assert_eq!(
             state.supervisor.worker_info(&entry.id).await.unwrap().state,
             WorkerState::Ready

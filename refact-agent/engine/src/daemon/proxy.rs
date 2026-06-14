@@ -65,6 +65,8 @@ async fn proxy_to_worker(
     };
 
     state.update_proxy_activity(&project_id).await;
+    state.increment_live_proxy_stream(&project_id).await;
+    let guard = ProxyStreamGuard::new(state.clone(), project_id.clone());
     let worker = match ready_worker(&state, &entry).await {
         Ok(worker) => worker,
         Err(response) => return response,
@@ -101,7 +103,7 @@ async fn proxy_to_worker(
         .await;
 
     match response {
-        Ok(response) => worker_response(state, entry, response).await,
+        Ok(response) => worker_response(state, entry, response, guard).await,
         Err(error) if error.is_timeout() => json_response(
             StatusCode::GATEWAY_TIMEOUT,
             json!({"error": "worker request timed out"}),
@@ -121,11 +123,6 @@ async fn ready_worker(
     state: &Arc<DaemonState>,
     entry: &ProjectEntry,
 ) -> Result<WorkerInfo, Response<Body>> {
-    if let Some(info) = state.supervisor.worker_info(&entry.id).await {
-        if matches!(info.state, WorkerState::Ready) {
-            return Ok(info);
-        }
-    }
     let info = match state.supervisor.ensure_worker(entry).await {
         Ok(info) => info,
         Err(error) => {
@@ -176,14 +173,13 @@ async fn worker_response(
     state: Arc<DaemonState>,
     entry: ProjectEntry,
     response: reqwest::Response,
+    guard: ProxyStreamGuard,
 ) -> Response<Body> {
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let headers = response_headers(response.headers());
-    state.increment_live_proxy_stream(&entry.id).await;
     let stream_state = state.clone();
     let stream_entry = entry.clone();
-    let guard = ProxyStreamGuard::new(stream_state.clone(), stream_entry.id.clone());
     let stream = async_stream::stream! {
         let _guard = guard;
         let mut upstream = response.bytes_stream();

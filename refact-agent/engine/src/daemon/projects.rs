@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::daemon::state::{now_ms, DaemonState};
 use crate::daemon::supervisor::WorkerInfo;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSettings {
     #[serde(default = "default_true")]
     pub ast: bool,
@@ -47,7 +47,7 @@ impl Default for ProjectSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub id: String,
     pub slug: String,
@@ -91,9 +91,8 @@ impl ProjectRegistry {
         }
     }
 
-    async fn save(&self) -> Result<(), String> {
-        crate::daemon::state::write_daemon_state_json_atomic(&self.path, &self.entries, "projects")
-            .await
+    async fn save_entries(&self, entries: &HashMap<String, ProjectEntry>) -> Result<(), String> {
+        crate::daemon::state::write_daemon_state_json_atomic(&self.path, entries, "projects").await
     }
 
     pub async fn open(&mut self, root: PathBuf) -> Result<ProjectEntry, String> {
@@ -105,17 +104,26 @@ impl ProjectRegistry {
         root: PathBuf,
         settings: Option<ProjectSettings>,
     ) -> Result<ProjectEntry, String> {
-        let id = project_id(&root);
+        let id = self
+            .entry_id_for_root(&root)
+            .unwrap_or_else(|| project_id(&root));
         let now = now_ms();
-        if self.entries.contains_key(&id) {
-            if let Some(entry) = self.entries.get_mut(&id) {
-                entry.last_active_ms = now;
-                if let Some(settings) = settings {
-                    entry.settings = settings;
-                }
+        if let Some(existing) = self.entries.get(&id) {
+            if existing.root != root {
+                return Err("project id collision detected".to_string());
             }
-            self.save().await?;
-            return Ok(self.entries[&id].clone());
+            let mut entries = self.entries.clone();
+            let entry = entries
+                .get_mut(&id)
+                .expect("existing project entry missing");
+            entry.last_active_ms = now;
+            if let Some(settings) = settings {
+                entry.settings = settings;
+            }
+            let entry = entry.clone();
+            self.save_entries(&entries).await?;
+            self.entries = entries;
+            return Ok(entry);
         }
         let slug = make_slug(&root, self.entries.values().map(|e| e.slug.as_str()));
         let entry = ProjectEntry {
@@ -126,8 +134,10 @@ impl ProjectRegistry {
             last_active_ms: now,
             settings: settings.unwrap_or_default(),
         };
-        self.entries.insert(id.clone(), entry.clone());
-        self.save().await?;
+        let mut entries = self.entries.clone();
+        entries.insert(id.clone(), entry.clone());
+        self.save_entries(&entries).await?;
+        self.entries = entries;
         Ok(entry)
     }
 
@@ -145,8 +155,11 @@ impl ProjectRegistry {
     }
 
     pub async fn forget(&mut self, id: &str) -> Result<bool, String> {
-        if self.entries.remove(id).is_some() {
-            self.save().await?;
+        if self.entries.contains_key(id) {
+            let mut entries = self.entries.clone();
+            entries.remove(id);
+            self.save_entries(&entries).await?;
+            self.entries = entries;
             Ok(true)
         } else {
             Ok(false)
@@ -159,20 +172,28 @@ impl ProjectRegistry {
         pinned: bool,
     ) -> Result<Option<ProjectEntry>, String> {
         if self.entries.contains_key(id) {
-            if let Some(entry) = self.entries.get_mut(id) {
-                entry.pinned = pinned;
-            }
-            self.save().await?;
-            return Ok(Some(self.entries[id].clone()));
+            let mut entries = self.entries.clone();
+            let entry = entries.get_mut(id).expect("existing project entry missing");
+            entry.pinned = pinned;
+            let entry = entry.clone();
+            self.save_entries(&entries).await?;
+            self.entries = entries;
+            return Ok(Some(entry));
         }
         Ok(None)
+    }
+
+    fn entry_id_for_root(&self, root: &Path) -> Option<String> {
+        self.entries
+            .iter()
+            .find_map(|(id, entry)| (entry.root == root).then(|| id.clone()))
     }
 }
 
 fn project_id(root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(root.to_string_lossy().as_bytes());
-    hex::encode(&hasher.finalize()[..6])
+    hex::encode(hasher.finalize())
 }
 
 fn make_slug<'a>(root: &Path, existing: impl Iterator<Item = &'a str>) -> String {
@@ -375,12 +396,32 @@ pub async fn forget_project(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    {
+        let registry = state.projects.read().await;
+        if registry.get(&id).is_none() {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+        }
+    }
+    if let Err(error) = state.supervisor.stop_worker(&id).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response();
+    }
     let result = {
         let mut registry = state.projects.write().await;
         registry.forget(&id).await
     };
     match result {
         Ok(true) => {
+            if let Err(error) = state.purge_project_runtime(&id).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                )
+                    .into_response();
+            }
             let _ = state
                 .events
                 .emit("project_forgotten", Some(id), json!({}))
@@ -503,6 +544,48 @@ mod tests {
         assert_eq!(id1, id2);
     }
 
+    #[tokio::test]
+    async fn project_id_uses_full_sha256_and_distinguishes_roots() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("a");
+        let root_b = dir.path().join("b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+
+        let id_a = project_id(&root_a);
+        let id_b = project_id(&root_b);
+
+        assert_eq!(id_a.len(), 64);
+        assert_eq!(id_b.len(), 64);
+        assert_ne!(id_a, id_b);
+    }
+
+    #[tokio::test]
+    async fn project_id_collision_is_rejected() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("a");
+        let root_b = dir.path().join("b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let id = project_id(&root_a);
+        let mut reg = make_registry(&dir);
+        reg.entries.insert(
+            id.clone(),
+            ProjectEntry {
+                id,
+                slug: "b".to_string(),
+                root: root_b,
+                pinned: false,
+                last_active_ms: 0,
+                settings: ProjectSettings::default(),
+            },
+        );
+
+        let error = reg.open(root_a).await.unwrap_err();
+
+        assert!(error.contains("collision"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn project_id_stable_via_symlink() {
@@ -621,6 +704,39 @@ mod tests {
         assert_eq!(updated.id, original.id);
         assert_eq!(updated.settings, settings);
         assert_eq!(reg.list()[0].settings, settings);
+    }
+
+    #[tokio::test]
+    async fn save_failure_leaves_registry_memory_unchanged() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+
+        let mut new_reg = ProjectRegistry::empty(blocked.join("projects.json"));
+        assert!(new_reg.open(root.clone()).await.is_err());
+        assert!(new_reg.list().is_empty());
+
+        let mut reg = make_registry(&dir);
+        let entry = reg.open(root.clone()).await.unwrap();
+        let original = reg.list();
+        reg.path = blocked.join("projects.json");
+
+        assert!(reg.set_pinned(&entry.id, true).await.is_err());
+        assert_eq!(reg.list(), original);
+
+        let settings = ProjectSettings {
+            ast: false,
+            vecdb: false,
+            ast_max_files: 1,
+            vecdb_max_files: 2,
+        };
+        assert!(reg.open_with_settings(root, Some(settings)).await.is_err());
+        assert_eq!(reg.list(), original);
+
+        assert!(reg.forget(&entry.id).await.is_err());
+        assert_eq!(reg.list(), original);
     }
 
     #[tokio::test]
@@ -759,8 +875,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(forget_resp.status(), StatusCode::OK);
+        assert!(state.supervisor.worker_info(&project_id).await.is_none());
 
         let gone_resp = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/daemon/v1/projects/{project_id}"))
@@ -770,6 +888,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone_resp.status(), StatusCode::NOT_FOUND);
+        state.supervisor.stop_all().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn forget_project_stops_running_worker() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        use crate::daemon::{config::DaemonConfig, events::EventBus, state::DaemonState};
+        use axum::body::Body;
+        use hyper::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        state.load_projects(dir.path().join("projects.json")).await;
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(project_root).await.unwrap()
+        };
+        state.sync_project_liveness(&entry).await;
+        state.supervisor.ensure_worker(&entry).await.unwrap();
+        assert!(state.supervisor.worker_info(&entry.id).await.is_some());
+        let router = crate::daemon::server::make_router(state.clone(), 8488);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/daemon/v1/projects/{}", entry.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state.supervisor.worker_info(&entry.id).await.is_none());
+        assert!(state.projects.read().await.get(&entry.id).is_none());
+        state.supervisor.stop_all().await;
     }
 
     #[tokio::test]
