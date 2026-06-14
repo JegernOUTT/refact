@@ -155,14 +155,24 @@ pub fn parse_marketplace_json(content: &str) -> Result<MarketplaceJson, String> 
         .map_err(|e| format!("parse marketplace.json: {}", e))
 }
 
-pub async fn load_marketplace_json(dir: &Path) -> Result<MarketplaceJson, String> {
+fn marketplace_json_path(dir: &Path) -> Option<PathBuf> {
     let claude_plugin_path = dir.join(".claude-plugin").join("marketplace.json");
+    if claude_plugin_path.exists() {
+        return Some(claude_plugin_path);
+    }
     let root_path = dir.join("marketplace.json");
-    let path = if claude_plugin_path.exists() {
-        claude_plugin_path
-    } else {
-        root_path
-    };
+    if root_path.exists() {
+        return Some(root_path);
+    }
+    None
+}
+
+fn marketplace_json_present(dir: &Path) -> bool {
+    marketplace_json_path(dir).is_some()
+}
+
+pub async fn load_marketplace_json(dir: &Path) -> Result<MarketplaceJson, String> {
+    let path = marketplace_json_path(dir).unwrap_or_else(|| dir.join("marketplace.json"));
     let content = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("read {:?}: {}", path, e))?;
@@ -255,6 +265,58 @@ async fn fetch_marketplace_to_cache(
         git2::Repository::clone(&url, &target_dir).map_err(|e| format!("clone {}: {}", url, e))?;
     }
     Ok(target_dir)
+}
+
+async fn refetch_marketplace_into_cache(
+    cache_dir: &Path,
+    name: &str,
+    source: &str,
+) -> Result<(), String> {
+    if is_local_source(source) {
+        return Err("refusing to re-fetch a local marketplace source into the cache".to_string());
+    }
+    let tmp_name = format!("tmp_marketplace_{}", uuid::Uuid::new_v4().simple());
+    let tmp_dir = fetch_marketplace_to_cache(source, cache_dir, &tmp_name)
+        .await
+        .map_err(|e| {
+            let td = marketplace_cache_dir(cache_dir, &tmp_name);
+            if td.exists() {
+                let _ = std::fs::remove_dir_all(&td);
+            }
+            e
+        })?;
+    if !marketplace_json_present(&tmp_dir) {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return Err(format!(
+            "marketplace source '{}' has no marketplace.json",
+            source
+        ));
+    }
+    let final_dir = marketplace_cache_dir(cache_dir, name);
+    if final_dir.exists() {
+        tokio::fs::remove_dir_all(&final_dir)
+            .await
+            .map_err(|e| format!("remove stale marketplace cache {:?}: {}", final_dir, e))?;
+    }
+    tokio::fs::rename(&tmp_dir, &final_dir)
+        .await
+        .map_err(|e| format!("rename marketplace dir {:?} -> {:?}: {}", tmp_dir, final_dir, e))?;
+    Ok(())
+}
+
+async fn resolve_marketplace_dir(
+    cache_dir: &Path,
+    name: &str,
+    source: &str,
+) -> Result<PathBuf, String> {
+    if is_local_source(source) {
+        return Ok(PathBuf::from(source));
+    }
+    let dir = marketplace_cache_dir(cache_dir, name);
+    if !marketplace_json_present(&dir) {
+        refetch_marketplace_into_cache(cache_dir, name, source).await?;
+    }
+    Ok(dir)
 }
 
 async fn add_marketplace_impl(
@@ -384,11 +446,7 @@ pub async fn list_marketplace_plugins(
         .iter()
         .find(|m| m.name == name)
         .ok_or_else(|| format!("marketplace '{}' not found", name))?;
-    let marketplace_dir = if is_local_source(&entry.source) {
-        PathBuf::from(&entry.source)
-    } else {
-        marketplace_cache_dir(&cache_dir, name)
-    };
+    let marketplace_dir = resolve_marketplace_dir(&cache_dir, name, &entry.source).await?;
     let mj = load_marketplace_json(&marketplace_dir).await?;
     Ok(mj.plugins)
 }
@@ -408,11 +466,9 @@ pub async fn install_plugin(
         .iter()
         .find(|m| m.name == marketplace_name)
         .ok_or_else(|| format!("marketplace '{}' not found", marketplace_name))?;
-    let marketplace_dir = if is_local_source(&market_entry.source) {
-        PathBuf::from(&market_entry.source)
-    } else {
-        marketplace_cache_dir(&cache_dir, marketplace_name)
-    };
+    let marketplace_source = market_entry.source.clone();
+    let marketplace_dir =
+        resolve_marketplace_dir(&cache_dir, marketplace_name, &marketplace_source).await?;
     let mj = load_marketplace_json(&marketplace_dir).await?;
     let plugin_entry = mj
         .plugins
@@ -1254,5 +1310,86 @@ mod tests {
         let result =
             resolve_plugin_source_dir(&marketplace_dir, &serde_json::json!("./plugins/my-plugin"));
         assert!(result.is_ok(), "regular dir should succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_json_present_detects_both_layouts_and_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        assert!(
+            !marketplace_json_present(dir),
+            "empty dir must report no marketplace.json"
+        );
+
+        tokio::fs::write(dir.join("marketplace.json"), r#"{"name":"root"}"#)
+            .await
+            .unwrap();
+        assert!(
+            marketplace_json_present(dir),
+            "root-level marketplace.json must be detected"
+        );
+
+        let claude_dir = dir.join(".claude-plugin");
+        tokio::fs::create_dir_all(&claude_dir).await.unwrap();
+        tokio::fs::write(claude_dir.join("marketplace.json"), r#"{"name":"claude"}"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            marketplace_json_path(dir),
+            Some(claude_dir.join("marketplace.json")),
+            ".claude-plugin layout must be preferred over the root file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_marketplace_dir_local_source_returns_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let local = tmp.path().join("local-market");
+        let source = local.to_string_lossy().to_string();
+
+        let resolved = resolve_marketplace_dir(&cache_dir, "ignored-name", &source)
+            .await
+            .unwrap();
+        assert_eq!(resolved, PathBuf::from(&source));
+        assert!(
+            !marketplace_cache_dir(&cache_dir, "ignored-name").exists(),
+            "local source must not create a cache directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_marketplace_dir_remote_present_skips_refetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let name = "already-cached";
+        let cached = marketplace_cache_dir(&cache_dir, name);
+        tokio::fs::create_dir_all(&cached).await.unwrap();
+        tokio::fs::write(
+            cached.join("marketplace.json"),
+            r#"{"name":"already-cached","plugins":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let resolved = resolve_marketplace_dir(&cache_dir, name, "owner/repo")
+            .await
+            .unwrap();
+        assert_eq!(resolved, cached);
+        assert!(cached.join("marketplace.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_refetch_marketplace_rejects_local_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let local = tmp.path().join("local-market");
+        let source = local.to_string_lossy().to_string();
+
+        let result = refetch_marketplace_into_cache(&cache_dir, "name", &source).await;
+        assert!(
+            result.is_err(),
+            "local sources must never be re-fetched into the cache"
+        );
     }
 }
