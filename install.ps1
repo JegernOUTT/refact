@@ -212,7 +212,7 @@ if ($NoModifyPath) {
 }
 Write-Host "Start Refact with:"
 Write-Host "  refact"
-Write-Host "  refact --tui"
+Write-Host "  refact tui"
 Write-Host "  refact daemon"
 Write-Host "Update Refact with:"
 Write-Host "  refact self-update"

@@ -331,7 +331,7 @@ else
 fi
 info "Start Refact with:"
 info "  refact"
-info "  refact --tui"
+info "  refact tui"
 info "  refact daemon"
 info "Update Refact with:"
 info "  refact self-update"
