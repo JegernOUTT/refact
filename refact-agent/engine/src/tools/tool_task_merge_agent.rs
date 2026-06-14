@@ -16,7 +16,10 @@ use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::worktrees::service::{worktree_merge_lock, WorktreeService};
-use crate::worktrees::types::{MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy};
+use crate::worktrees::types::{
+    MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy, WorktreeRecordView,
+    WorktreeReference,
+};
 
 fn git_merge_lock() -> &'static AMutex<()> {
     worktree_merge_lock()
@@ -293,6 +296,67 @@ fn ensure_legacy_agent_worktree_checkout(
     )
 }
 
+fn reference_matches_card(
+    task_id: &str,
+    card: &crate::tasks::types::BoardCard,
+    reference: &WorktreeReference,
+) -> bool {
+    if reference.task_id.as_deref() == Some(task_id)
+        && reference.card_id.as_deref() == Some(card.id.as_str())
+    {
+        return true;
+    }
+    if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
+        if reference.chat_id.as_deref() == Some(agent_chat_id) {
+            return true;
+        }
+    }
+    card.assignee
+        .as_deref()
+        .map(|assignee| {
+            reference.task_id.as_deref() == Some(task_id)
+                && reference.agent_id.as_deref() == Some(assignee)
+        })
+        .unwrap_or(false)
+}
+
+fn registered_record_matches_card(
+    view: &WorktreeRecordView,
+    task_id: &str,
+    card: &crate::tasks::types::BoardCard,
+) -> bool {
+    if view.meta.task_id.as_deref() == Some(task_id)
+        && view.meta.card_id.as_deref() == Some(card.id.as_str())
+    {
+        return true;
+    }
+    view.references
+        .iter()
+        .any(|reference| reference_matches_card(task_id, card, reference))
+}
+
+fn registered_error_allows_legacy_fallback(err: &str) -> bool {
+    !err.contains("does not match task")
+}
+
+async fn worktree_id_is_valid_for_card(
+    service: &WorktreeService,
+    worktree_id: &str,
+    task_id: &str,
+    card: &crate::tasks::types::BoardCard,
+) -> Result<(), String> {
+    let view = service.get_worktree(worktree_id).await?;
+    if !registered_record_matches_card(&view, task_id, card) {
+        return Err(format!(
+            "Registered worktree '{}' does not match task {} card {}",
+            worktree_id, task_id, card.id
+        ));
+    }
+    service
+        .validate_registered_worktree_checkout(worktree_id)
+        .await
+}
+
 fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
     let rendered = if concerns.is_empty() {
         "- verifier failed without concerns".to_string()
@@ -521,9 +585,7 @@ async fn merge_registered_task_worktree(
         .ok_or("Task has no base branch set")?;
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.to_path_buf())?;
-    service
-        .validate_registered_worktree_checkout(&worktree_id)
-        .await?;
+    worktree_id_is_valid_for_card(&service, &worktree_id, task_id, card).await?;
     let diff = service.diff_worktree(&worktree_id).await.ok();
     let changed_files = diff
         .as_ref()
@@ -712,8 +774,8 @@ impl Tool for ToolTaskMergeAgent {
             .as_ref()
             .ok_or("Task has no base branch set")?;
 
-        if card.agent_worktree_name.is_some() {
-            if let Some(result) = merge_registered_task_worktree(
+        let registered_merge_error = if card.agent_worktree_name.is_some() {
+            match merge_registered_task_worktree(
                 gcx.clone(),
                 workspace_root,
                 &task_id,
@@ -725,9 +787,22 @@ impl Tool for ToolTaskMergeAgent {
                 auto_revert,
                 auto_revert_timeout,
             )
-            .await?
+            .await
             {
-                return Ok(result);
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => None,
+                Err(err) => Some(err),
+            }
+        } else {
+            None
+        };
+
+        if let Some(error) = registered_merge_error.as_deref() {
+            if !registered_error_allows_legacy_fallback(error)
+                || card.agent_branch.is_none()
+                || card.agent_worktree.is_none()
+            {
+                return Err(error.to_string());
             }
         }
 
@@ -754,7 +829,15 @@ impl Tool for ToolTaskMergeAgent {
             }
         };
 
-        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)?;
+        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)
+            .map_err(|legacy_err| {
+                registered_merge_error
+                    .as_deref()
+                    .map(|registered_err| {
+                        format!("{}; legacy fallback failed: {}", registered_err, legacy_err)
+                    })
+                    .unwrap_or(legacy_err)
+            })?;
 
         let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
         if merge_in_progress {
@@ -2276,6 +2359,120 @@ mod worktree_merge_tool_tests {
             std::fs::read_to_string(root.join("wrong-branch.txt")).unwrap(),
             "do not diff\n"
         );
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_falls_back_to_legacy_metadata_when_registry_id_is_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp
+            .path()
+            .join("cache")
+            .join("worktrees")
+            .join("legacy-agent");
+        std::fs::create_dir_all(agent_worktree.parent().unwrap()).unwrap();
+        let branch = "refact/task/task-1/card/T-1/legacy-fallback";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        commit_file(
+            &agent_worktree,
+            "file.txt",
+            "legacy fallback\n",
+            "legacy change",
+        );
+
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(Some("missing-registry-id"), branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "legacy fallback\n"
+        );
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(tool_text(&result).contains("merged"));
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_registry_reference_match_is_accepted_without_card_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/reference-match".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut registry = service.load_registry().await.unwrap();
+        registry.records[0].meta.task_id = None;
+        registry.records[0].meta.card_id = None;
+        service.save_registry(&registry).await.unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "reference match\n", "agent change");
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card(&created.worktree.meta.id, &branch, &root),
+        )
+        .await;
+
+        let result = merge_registered_task_worktree(
+            gcx.clone(),
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("reference merge".to_string()),
+            false,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "reference match\n"
+        );
+        assert!(tool_text(&result).contains("merged"));
     }
     #[test]
     fn merge_agent_refuses_doing_card_without_force() {

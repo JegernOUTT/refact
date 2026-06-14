@@ -10,7 +10,10 @@ import {
   within,
 } from "../../utils/test-utils";
 import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
-import { resolveCardWorktree } from "./TaskWorkspaceWorktree";
+import {
+  isActionableWorktree,
+  resolveCardWorktree,
+} from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { taskSseEventReceived } from "./tasksSlice";
 import { switchToThread } from "../Chat/Thread";
@@ -221,6 +224,7 @@ function makeMeta(overrides: Partial<WorktreeMeta> = {}): WorktreeMeta {
 function makeRecord(
   metaOverrides: Partial<WorktreeMeta> = {},
   statusOverrides: Partial<WorktreeRecordView["status"]> = {},
+  references: WorktreeRecordView["references"] = [],
 ): WorktreeRecordView {
   const meta = makeMeta(metaOverrides);
   const referenceCount = meta.reference_count ?? 1;
@@ -228,7 +232,7 @@ function makeRecord(
     meta,
     created_at: "2026-04-30T00:00:00Z",
     updated_at: "2026-04-30T00:00:00Z",
-    references: [],
+    references,
     reference_count: referenceCount,
     referencing_chat_ids: [],
     status: {
@@ -717,6 +721,57 @@ describe("TaskWorkspace worktree resolution", () => {
     expect(target?.id).not.toBe(LEGACY_PATH);
   });
 
+  it("resolves_worktree_by_attached_references_when_meta_is_missing", () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_chat_id: "agent-chat-from-reference",
+    });
+    const record = makeRecord(
+      {
+        id: "wt-reference",
+        task_id: null,
+        card_id: null,
+      },
+      {},
+      [
+        {
+          kind: "task_agent",
+          task_id: TASK_ID,
+          card_id: CARD_ID,
+          chat_id: "agent-chat-from-reference",
+        },
+      ],
+    );
+
+    const target = resolveCardWorktree(TASK_ID, card, [record]);
+
+    expect(target).toMatchObject({
+      id: "wt-reference",
+      record,
+      legacy: false,
+    });
+    expect(isActionableWorktree(target!)).toBe(true);
+  });
+
+  it("unresolved_registry_id_is_stale_and_not_actionable", () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_worktree_name: "missing-wt",
+      agent_branch: "refact/task/stale-id",
+    });
+
+    const target = resolveCardWorktree(TASK_ID, card, []);
+
+    expect(target).toMatchObject({
+      id: "missing-wt",
+      legacy: false,
+      stale: true,
+    });
+    expect(target?.record).toBeUndefined();
+    expect(target?.label).toBe("missing-wt");
+    expect(isActionableWorktree(target!)).toBe(false);
+  });
+
   it("resolves_worktree_by_branch_for_legacy_cards", () => {
     const card = makeCard({
       agent_worktree: LEGACY_PATH,
@@ -863,6 +918,61 @@ describe("TaskWorkspace worktree actions", () => {
     expect(
       screen.getByRole("button", { name: "Discard/Delete" }),
     ).toBeDisabled();
+  });
+
+  it("unresolved_registry_id_renders_label_only_without_worktree_actions", async () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_worktree_name: "missing-wt",
+      agent_branch: "refact/task/missing-wt",
+    });
+    const openCalls: string[] = [];
+    const deleteCalls: string[] = [];
+    server.use(...taskWorkspaceHandlers(card, [], openCalls, deleteCalls));
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+
+    expect(screen.getAllByTitle("Worktree: missing-wt").length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getByText("This worktree appears stale, missing, or deleted."),
+    ).toBeInTheDocument();
+    const buttons = [
+      screen.getByRole("button", { name: "View Diff" }),
+      screen.getByRole("button", { name: "Merge" }),
+      screen.getByRole("button", { name: "Open" }),
+      screen.getByRole("button", { name: "Discard/Delete" }),
+    ];
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+    }
+    await user.click(buttons[0]);
+    await user.click(buttons[1]);
+    await user.click(buttons[2]);
+    await user.click(buttons[3]);
+    expect(openedIds(worktreeDiffPanelProps)).toEqual([]);
+    expect(openedIds(mergeWorktreeModalProps)).toEqual([]);
+    expect(openCalls).toEqual([]);
+    expect(deleteCalls).toEqual([]);
+  });
+
+  it("worktree_merge_and_delete_refresh_inventory_summary", async () => {
+    const source = await readGuiSource("services/refact/worktrees.ts");
+    const mutationInvalidatesSummary = (endpoint: string) => {
+      const match = new RegExp(
+        `${endpoint}: builder\\.mutation[\\s\\S]*?invalidatesTags:[\\s\\S]*?\\],`,
+      ).exec(source);
+      if (!match) throw new Error(`Missing invalidation block for ${endpoint}`);
+      return match[0].includes('id: "SUMMARY"');
+    };
+
+    expect(mutationInvalidatesSummary("mergeWorktree")).toBe(true);
+    expect(mutationInvalidatesSummary("deleteWorktree")).toBe(true);
   });
 
   it("worktree_id_passed_to_apis_is_never_a_filesystem_path", async () => {
