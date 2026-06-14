@@ -106,6 +106,7 @@ export interface TrajectoryInfo {
   created_at: string;
   updated_at: string;
   session_state?: string;
+  mode?: string;
   waiting_for_card_ids?: string[];
 }
 
@@ -312,17 +313,21 @@ export const tasksApi = createApi({
       ],
     }),
 
-    createPlannerChat: builder.mutation<{ chat_id: string }, string>({
-      queryFn: async (taskId, api, _opts, baseQuery) => {
+    createPlannerChat: builder.mutation<
+      { chat_id: string; mode?: string },
+      { taskId: string; mode?: string }
+    >({
+      queryFn: async ({ taskId, mode }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/planner-chats`),
           method: "POST",
+          body: mode ? { mode } : {},
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as { chat_id: string } };
+        return { data: result.data as { chat_id: string; mode?: string } };
       },
-      invalidatesTags: (_result, _error, taskId) => [
+      invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },
       ],
     }),
@@ -356,10 +361,11 @@ export const tasksApi = createApi({
         taskId: string;
         sourceChatId: string;
         targetModeDescription?: string;
+        targetMode?: string;
       }
     >({
       queryFn: async (
-        { taskId, sourceChatId, targetModeDescription },
+        { taskId, sourceChatId, targetModeDescription, targetMode },
         api,
         _opts,
         baseQuery,
@@ -374,6 +380,7 @@ export const tasksApi = createApi({
           body: {
             source_chat_id: sourceChatId,
             target_mode_description: targetModeDescription ?? "",
+            target_mode: targetMode ?? "task_planner",
           },
         });
         if (result.error) return { error: result.error };

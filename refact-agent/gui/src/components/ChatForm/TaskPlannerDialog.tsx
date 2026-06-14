@@ -117,7 +117,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
         }).unwrap();
         newChatId = result.new_chat_id;
       } else {
-        const result = await createPlannerChat(resolved.id).unwrap();
+        const result = await createPlannerChat({
+          taskId: resolved.id,
+        }).unwrap();
         newChatId = result.chat_id;
       }
 

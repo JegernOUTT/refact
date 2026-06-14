@@ -832,11 +832,35 @@ pub async fn handle_list_task_trajectories(
     Ok(Json(trajectories))
 }
 
+#[derive(Deserialize, Default)]
+pub struct CreatePlannerChatRequest {
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 pub async fn handle_create_planner_chat(
     State(app): State<AppState>,
     Path(task_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
+    let req: CreatePlannerChatRequest = if body_bytes.is_empty() {
+        CreatePlannerChatRequest::default()
+    } else {
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?
+    };
+    let mode = req
+        .mode
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "task_planner".to_string());
+    if mode.eq_ignore_ascii_case("task_agent") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "task_agent chats cannot be created here".to_string(),
+        ));
+    }
     storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -844,11 +868,16 @@ pub async fn handle_create_planner_chat(
     let chat_id = storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::chat::trajectories::save_initial_planner_trajectory(gcx.clone(), &task_id, &chat_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::chat::trajectories::save_initial_task_chat_trajectory(
+        gcx.clone(),
+        &task_id,
+        &chat_id,
+        &mode,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(json!({"chat_id": chat_id})))
+    Ok(Json(json!({"chat_id": chat_id, "mode": mode})))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1475,6 +1504,53 @@ mod tests {
             .find(|entry| entry.id == meta.id)
             .unwrap();
         assert_eq!(entry.meta.cards_total, 1);
+    }
+
+    #[tokio::test]
+    async fn create_planner_chat_with_mode_lists_with_that_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "task-mode";
+        let gcx = setup_task(temp.path(), task_id).await;
+
+        let Json(default_res) = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_res["mode"], json!("task_planner"));
+
+        let Json(agent_res) = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::from_static(br#"{"mode":"agent"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent_res["mode"], json!("agent"));
+        let agent_chat_id = agent_res["chat_id"].as_str().unwrap().to_string();
+
+        let rejected = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::from_static(br#"{"mode":"task_agent"}"#),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
+
+        let Json(list) = handle_list_task_trajectories(
+            State(app(gcx.clone())),
+            Path((task_id.to_string(), "planner".to_string())),
+        )
+        .await
+        .unwrap();
+        let agent_entry = list
+            .iter()
+            .find(|t| t.id == agent_chat_id)
+            .expect("agent-mode chat should be listed in the planner bucket");
+        assert_eq!(agent_entry.mode.as_deref(), Some("agent"));
     }
 
     fn snapshot(

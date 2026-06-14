@@ -570,6 +570,92 @@
   flex-shrink: 0;
 }
 
+.headerActionsPanel {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  overflow: hidden;
+}
+
+.headerActionsPanel > * + * {
+  border-left: var(--rf-hairline) solid var(--rf-border);
+}
+
+.headerActionsPanel .chatSwitcherTrigger {
+  border: 0;
+  border-radius: 0;
+  max-width: min(260px, 38vw);
+}
+
+.headerActionButton {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.headerActionButton:hover:not(:disabled),
+.headerActionButton:focus-visible {
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
+}
+
+.headerActionButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.headerActionButton:focus-visible {
+  outline: 2px solid var(--rf-focus-ring);
+  outline-offset: -2px;
+}
+
+.panelItemTitleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.modeOption {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-row-pad);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.modeOption:hover,
+.modeOption:focus-visible {
+  border-color: var(--rf-border);
+  background: color-mix(in oklab, var(--rf-surface-glass) 68%, white 4%);
+}
+
+.modeOptionMeta {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .chatSwitcherContent {
   display: flex;
   flex-direction: column;

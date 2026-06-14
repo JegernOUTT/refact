@@ -13,6 +13,7 @@ import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
 import { resolveCardWorktree } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { taskSseEventReceived } from "./tasksSlice";
+import { switchToThread } from "../Chat/Thread";
 import {
   loadTaskWorkspaceTab,
   setProjectStorageNamespace,
@@ -572,12 +573,44 @@ describe("PlannerItem waiting chips", () => {
     );
 
     const item = screen.getByRole("button", {
-      name: /Open planner chat/,
+      name: /Open chat/,
     });
     item.focus();
     await user.keyboard("{Enter}");
 
     expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("renders a mode badge for non-planner chats", () => {
+    const planner = { ...makePlanner(), mode: "agent" };
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.getByText("agent")).toBeInTheDocument();
+  });
+
+  it("does not render a mode badge for task_planner chats", () => {
+    const planner = { ...makePlanner(), mode: "task_planner" };
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.queryByText("task_planner")).not.toBeInTheDocument();
   });
 });
 
@@ -953,7 +986,9 @@ describe("TaskWorkspace layout and chat surfaces", () => {
       "data-state",
       "active",
     );
-    expect(screen.getByRole("button", { name: "New planner" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "New task planner" }),
+    ).toBeVisible();
   });
 
   it("defaults_to_chat_tab_when_saved_planners_exist", async () => {
@@ -1151,7 +1186,9 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     expect(screen.getByRole("tab", { name: /^Board/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Memories" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Documents" })).toBeInTheDocument();
-    expect(screen.getByText("Planner")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toHaveTextContent("Planner");
 
     await user.click(screen.getByRole("tab", { name: /^Board/ }));
     await screen.findAllByText(card.title);
@@ -1174,7 +1211,7 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Switch chat" }));
-    await user.click(screen.getByRole("button", { name: /Open planner chat/ }));
+    await user.click(screen.getByRole("button", { name: /Open chat/ }));
 
     await waitFor(() =>
       expect(
@@ -1182,7 +1219,9 @@ describe("TaskWorkspace layout and chat surfaces", () => {
           ?.activeChat,
       ).toEqual({ type: "planner", chatId: PLANNER_ID }),
     );
-    expect(screen.getByText("Planner")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toHaveTextContent("Planner");
 
     await user.click(screen.getByRole("tab", { name: "Memories" }));
     await screen.findByText(/memories shown/i);
@@ -1384,7 +1423,7 @@ describe("TaskWorkspace planner CRUD", () => {
     await user.click(await screen.findByRole("tab", { name: /^Board/ }));
 
     const deleteBtn = await screen.findByRole("button", {
-      name: "Delete planner chat",
+      name: "Delete chat",
       hidden: true,
     });
     await user.click(deleteBtn);
@@ -1393,7 +1432,7 @@ describe("TaskWorkspace planner CRUD", () => {
       expect(screen.getByText(/Delete failed/)).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("button", { name: "Delete planner chat", hidden: true }),
+      screen.getByRole("button", { name: "Delete chat", hidden: true }),
     ).toBeInTheDocument();
   });
 
@@ -1421,7 +1460,7 @@ describe("TaskWorkspace planner CRUD", () => {
     await user.click(await screen.findByRole("tab", { name: /^Board/ }));
 
     const deleteBtn = await screen.findByRole("button", {
-      name: "Delete planner chat",
+      name: "Delete chat",
       hidden: true,
     });
     await user.click(deleteBtn);
@@ -1444,11 +1483,11 @@ describe("TaskWorkspace planner CRUD", () => {
     await screen.findAllByText(makeCard().title);
 
     await waitFor(() =>
-      expect(screen.getByText("No planner chats yet")).toBeInTheDocument(),
+      expect(screen.getByText("No chats yet")).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("button", {
-        name: "Delete planner chat",
+        name: "Delete chat",
         hidden: true,
       }),
     ).not.toBeInTheDocument();
@@ -1471,7 +1510,7 @@ describe("TaskWorkspace planner CRUD", () => {
 
     await screen.findAllByText(makeCard().title);
 
-    await user.click(screen.getByRole("button", { name: "New planner" }));
+    await user.click(screen.getByRole("button", { name: "New task planner" }));
 
     await screen.findByText(/Create failed/);
   });
@@ -1586,6 +1625,51 @@ describe("TaskWorkspace planner restore race", () => {
       warnSpy.mockRestore();
     }
   });
+
+  it("re_pins_active_chat_when_global_thread_switches_away", async () => {
+    const card = makeCard({
+      title: "Persisted active agent",
+      column: "doing",
+      agent_chat_id: "agent-T-1",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const preloaded = workspacePreloadedState("unrelated-chat");
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...preloaded,
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task with worktree",
+              plannerChats: [],
+              activeChat: {
+                type: "agent",
+                cardId: CARD_ID,
+                chatId: "agent-T-1",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+    );
+
+    store.dispatch(switchToThread({ id: "unrelated-chat" }));
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+    );
+    expect(
+      store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+        ?.activeChat,
+    ).toEqual({ type: "agent", cardId: CARD_ID, chatId: "agent-T-1" });
+  });
+
   it("waits_for_current_task_ui_before_restoring_saved_planner_selection", async () => {
     const card = makeCard();
     const taskPromise = delay(50).then(() =>

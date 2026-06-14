@@ -268,6 +268,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           targetMode={targetModeForTransition.id}
           targetModeTitle={targetModeForTransition.title}
           targetModeDescription={targetModeForTransition.description}
+          taskId={taskId}
         />
       )}
 

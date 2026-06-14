@@ -540,6 +540,7 @@ pub async fn list_task_trajectories(
             created_at: entry.created_at,
             updated_at: entry.updated_at,
             session_state: None,
+            mode: Some(entry.mode),
             waiting_for_card_ids: entry.waiting_for_card_ids,
         })
         .collect();

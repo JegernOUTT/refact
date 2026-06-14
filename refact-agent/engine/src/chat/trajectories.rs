@@ -1950,10 +1950,11 @@ async fn load_generic_trajectory_for_chat_matching_source(
     None
 }
 
-pub async fn save_initial_planner_trajectory(
+pub async fn save_initial_task_chat_trajectory(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     chat_id: &str,
+    mode: &str,
 ) -> Result<(), String> {
     let greeting = "## 🎯 Task Planner
 
@@ -1999,9 +2000,13 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
-        mode: "task_planner".to_string(),
+        mode: mode.to_string(),
         tool_use: "agent".to_string(),
-        messages: vec![greeting_msg],
+        messages: if mode == "task_planner" {
+            vec![greeting_msg]
+        } else {
+            Vec::new()
+        },
         created_at: chrono::Utc::now().to_rfc3339(),
         boost_reasoning: false,
         checkpoints_enabled: true,
