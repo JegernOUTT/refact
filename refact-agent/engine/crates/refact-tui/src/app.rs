@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
@@ -22,7 +22,7 @@ use crate::commands::{
     CommandPicker, InfoTopic, LocalToggle,
 };
 use crate::composer::queue::{InputQueue, QueuedInput};
-use crate::composer::{load_history, save_history, ComposerState, EnterDecision};
+use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
 use crate::history::{insert_history, HistoryBuffer, HistoryInsertion, RESIZE_REFLOW_PENDING_CELL_CAP};
@@ -470,6 +470,10 @@ impl App {
 
     pub fn composer_state(&self) -> &ComposerState {
         &self.composer
+    }
+
+    pub fn composer_history_search(&self) -> Option<HistorySearchView> {
+        self.composer.history_search_view()
     }
 
     pub fn keymap(&self) -> &KeymapRegistry {
@@ -2984,6 +2988,9 @@ impl App {
         if self.composer_mode == ComposerMode::ProjectPicker {
             return self.handle_project_picker_key(key);
         }
+        if let Some(action) = self.handle_history_search_key(key) {
+            return action;
+        }
         let main_dispatch = self.keymap.dispatch(KeyContext::Main, key);
         if matches!(
             main_dispatch.action,
@@ -3024,6 +3031,25 @@ impl App {
         Some(AppAction::None)
     }
 
+    fn handle_history_search_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        if !self.composer.history_search_active() {
+            return None;
+        }
+        let dispatch = self.keymap.dispatch(KeyContext::Main, key);
+        match dispatch.action {
+            Some(KeyAction::HistorySearch) => self.composer.start_or_cycle_history_search(),
+            Some(KeyAction::Backspace) => self.composer.history_search_backspace(),
+            Some(KeyAction::Accept) => self.composer.accept_history_search(),
+            Some(KeyAction::Cancel) => self.composer.cancel_history_search(),
+            _ => {
+                if let Some(ch) = composer_search_text(key) {
+                    self.composer.history_search_insert_char(ch);
+                }
+            }
+        }
+        Some(AppAction::None)
+    }
+
     fn handle_main_dispatch(&mut self, dispatch: KeyDispatch, key: KeyEvent) -> AppAction {
         match dispatch.action {
             Some(KeyAction::ShowHelp) => {
@@ -3048,6 +3074,36 @@ impl App {
             },
             Some(KeyAction::ToggleReasoning) => {
                 self.toggle_reasoning_items();
+                AppAction::None
+            }
+            Some(KeyAction::HistorySearch) => {
+                self.input_queue.clear_selection();
+                self.composer.start_or_cycle_history_search();
+                AppAction::None
+            }
+            Some(KeyAction::KillToLineEnd) => {
+                self.input_queue.clear_selection();
+                self.composer.kill_to_line_end();
+                AppAction::None
+            }
+            Some(KeyAction::KillToLineStart) => {
+                self.input_queue.clear_selection();
+                self.composer.kill_to_line_start();
+                AppAction::None
+            }
+            Some(KeyAction::Yank) => {
+                self.input_queue.clear_selection();
+                self.composer.yank();
+                AppAction::None
+            }
+            Some(KeyAction::Undo) => {
+                self.input_queue.clear_selection();
+                self.composer.undo();
+                AppAction::None
+            }
+            Some(KeyAction::Redo) => {
+                self.input_queue.clear_selection();
+                self.composer.redo();
                 AppAction::None
             }
             Some(KeyAction::CtrlC) => self.ctrl_c_action(),
@@ -5092,11 +5148,23 @@ fn approval_patch(modal: &ApprovalModalState) -> Value {
     }
 }
 
+fn composer_search_text(key: KeyEvent) -> Option<char> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(ch) => Some(ch),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::approvals::PauseReason;
-    use crossterm::event::KeyCode;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Condvar, Mutex};
@@ -6439,6 +6507,61 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn app_ctrl_r_reverse_history_search_accepts_and_cancels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let mut app = App::with_history_path(project(), Some(path.clone()));
+        app.composer.set_text("alpha one");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+        let mut app = App::with_history_path(project(), Some(path.clone()));
+        app.composer.set_text("beta two");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+
+        let mut app = App::with_history_path(project(), Some(path));
+        app.composer.set_text("draft");
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.composer(), "beta two");
+        for ch in "alpha".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        assert_eq!(app.composer(), "alpha one");
+        assert_eq!(app.composer_history_search().unwrap().query, "alpha");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.composer(), "draft");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.composer(), "beta two");
+        assert!(app.composer_history_search().is_none());
+    }
+
+    #[test]
+    fn app_kill_yank_undo_redo_bindings_edit_composer() {
+        let mut app = App::new(project());
+        app.composer.set_text("alpha beta");
+        app.composer.move_word_backward(false);
+        app.composer.move_word_backward(false);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.composer(), "");
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(app.composer(), "alpha beta");
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(app.composer(), "");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.composer(), "alpha beta");
+    }
+
+    #[test]
     fn app_cancel_and_double_ctrl_c_behaviour() {
         let mut app = App::new(project());
         app.session_state = SessionState::Generating;
@@ -6852,7 +6975,7 @@ new-chat = "ctrl-x"
             app.visible_transcript().last(),
             Some(TranscriptItem::Reasoning(_, true))
         ));
-        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
         assert!(matches!(
             app.visible_transcript().last(),
             Some(TranscriptItem::Reasoning(_, false))

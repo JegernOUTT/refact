@@ -252,6 +252,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area
     };
     let title = match app.session_state() {
+        _ if app.composer_history_search().is_some() => history_search_title(app),
         SessionState::Generating => " message (Enter queues · Esc cancels) ".to_string(),
         SessionState::Paused => " approval pending ".to_string(),
         SessionState::WaitingUserInput => " waiting for input ".to_string(),
@@ -286,6 +287,23 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .saturating_add(view.cursor_row.min(max_rows.saturating_sub(1)));
         frame.set_cursor_position((x, y));
     }
+}
+
+fn history_search_title(app: &App) -> String {
+    let Some(search) = app.composer_history_search() else {
+        return " history search ".to_string();
+    };
+    let status = if search.total == 0 {
+        "no matches".to_string()
+    } else {
+        format!("{}/{}", search.selected, search.total)
+    };
+    let query = if search.query.is_empty() {
+        "type to filter".to_string()
+    } else {
+        search.query
+    };
+    format!(" history search: {query} · {status} · Enter accept · Esc cancel ")
 }
 
 fn render_queue_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {

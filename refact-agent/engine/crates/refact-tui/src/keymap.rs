@@ -57,6 +57,12 @@ pub enum KeyAction {
     OpenTranscriptOverlay,
     OpenExternalEditor,
     ToggleReasoning,
+    HistorySearch,
+    KillToLineEnd,
+    KillToLineStart,
+    Yank,
+    Undo,
+    Redo,
     CtrlC,
     Cancel,
     CycleToolSelection,
@@ -113,6 +119,12 @@ impl KeyAction {
             Self::OpenTranscriptOverlay => "transcript-overlay",
             Self::OpenExternalEditor => "external-editor",
             Self::ToggleReasoning => "toggle-reasoning",
+            Self::HistorySearch => "history-search",
+            Self::KillToLineEnd => "kill-to-line-end",
+            Self::KillToLineStart => "kill-to-line-start",
+            Self::Yank => "yank",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::CtrlC => "ctrl-c",
             Self::Cancel => "cancel",
             Self::CycleToolSelection => "cycle-tool-selection",
@@ -169,6 +181,12 @@ impl KeyAction {
             Self::OpenTranscriptOverlay => "open transcript overlay",
             Self::OpenExternalEditor => "edit composer in external editor",
             Self::ToggleReasoning => "fold or unfold reasoning blocks",
+            Self::HistorySearch => "reverse search composer history",
+            Self::KillToLineEnd => "cut composer text to line end",
+            Self::KillToLineStart => "cut composer text to line start",
+            Self::Yank => "yank composer kill buffer",
+            Self::Undo => "undo composer edit",
+            Self::Redo => "redo composer edit",
             Self::CtrlC => "abort active turn or arm exit",
             Self::Cancel => "cancel, close, or abort active work",
             Self::CycleToolSelection => "select next tool card",
@@ -233,6 +251,12 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::OpenTranscriptOverlay,
     KeyAction::OpenExternalEditor,
     KeyAction::ToggleReasoning,
+    KeyAction::HistorySearch,
+    KeyAction::KillToLineEnd,
+    KeyAction::KillToLineStart,
+    KeyAction::Yank,
+    KeyAction::Undo,
+    KeyAction::Redo,
     KeyAction::CtrlC,
     KeyAction::Cancel,
     KeyAction::CycleToolSelection,
@@ -325,7 +349,9 @@ impl KeyBinding {
         if let KeyCode::Char(ch) = code {
             if modifiers.contains(KeyModifiers::CONTROL) {
                 code = KeyCode::Char(ch.to_ascii_lowercase());
-                modifiers.remove(KeyModifiers::SHIFT);
+                if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                    modifiers.remove(KeyModifiers::SHIFT);
+                }
             } else if ch.is_ascii_alphabetic() {
                 if ch.is_ascii_uppercase() {
                     modifiers.insert(KeyModifiers::SHIFT);
@@ -802,7 +828,13 @@ fn default_entries() -> Vec<KeymapEntry> {
             &["ctrl-t"],
         ),
         entry(KeyContext::Main, KeyAction::OpenExternalEditor, &["ctrl-g"]),
-        entry(KeyContext::Main, KeyAction::ToggleReasoning, &["ctrl-r"]),
+        entry(KeyContext::Main, KeyAction::ToggleReasoning, &["alt-r"]),
+        entry(KeyContext::Main, KeyAction::HistorySearch, &["ctrl-r"]),
+        entry(KeyContext::Main, KeyAction::KillToLineEnd, &["ctrl-k"]),
+        entry(KeyContext::Main, KeyAction::KillToLineStart, &["ctrl-u"]),
+        entry(KeyContext::Main, KeyAction::Yank, &["ctrl-y"]),
+        entry(KeyContext::Main, KeyAction::Undo, &["ctrl-z"]),
+        entry(KeyContext::Main, KeyAction::Redo, &["ctrl-shift-z"]),
         entry(KeyContext::Main, KeyAction::CtrlC, &["ctrl-c"]),
         entry(KeyContext::Main, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::Main, KeyAction::CycleToolSelection, &["tab"]),
@@ -1116,5 +1148,32 @@ newline = "enter"
         );
         assert_eq!(vim.handle_dispatch(d.clone()).effect, VimEffect::None);
         assert_eq!(vim.handle_dispatch(d).effect, VimEffect::DeleteLine);
+    }
+
+    #[test]
+    fn default_keymap_has_no_conflicts_and_lists_composer_power_actions() {
+        let registry = KeymapRegistry::default();
+        assert!(registry.warnings().is_empty());
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::HistorySearch)
+        );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::Char('r'), KeyModifiers::ALT)),
+            Some(KeyAction::ToggleReasoning)
+        );
+        let rows = registry.help_rows();
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::HistorySearch && row.bindings.contains("Ctrl-R")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::KillToLineEnd && row.bindings.contains("Ctrl-K")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::Redo && row.bindings.contains("Ctrl-Shift-Z")));
     }
 }

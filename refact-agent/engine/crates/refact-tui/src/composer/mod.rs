@@ -9,6 +9,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const HISTORY_LIMIT: usize = 200;
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(35);
+const UNDO_LIMIT: usize = 100;
+const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerView {
@@ -28,6 +30,17 @@ pub struct ComposerState {
     editor: TextEditor,
     history: InputHistory,
     paste: PasteBurst,
+    kill_buffer: String,
+    undo: UndoHistory,
+    history_search: Option<HistorySearch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySearchView {
+    pub query: String,
+    pub current: Option<String>,
+    pub selected: usize,
+    pub total: usize,
 }
 
 impl ComposerState {
@@ -36,6 +49,9 @@ impl ComposerState {
             editor: TextEditor::new(),
             history: InputHistory::new(history),
             paste: PasteBurst::new(),
+            kill_buffer: String::new(),
+            undo: UndoHistory::new(),
+            history_search: None,
         }
     }
 
@@ -50,27 +66,39 @@ impl ComposerState {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.paste.reset();
         self.history.reset_navigation();
+        self.history_search = None;
+        self.undo.clear();
         self.editor.set_text(text.into());
     }
 
     pub fn clear(&mut self) {
         self.paste.reset();
         self.history.reset_navigation();
+        self.history_search = None;
+        self.undo.clear();
         self.editor.clear();
     }
 
     pub fn insert_char(&mut self, ch: char, now: Instant) {
         self.flush_pending_paste(now);
         self.history.reset_navigation();
+        self.history_search = None;
         let action = self.paste.push_char(ch, now);
-        self.apply_paste_action(action);
+        let before = self.editor.snapshot();
+        if self.apply_paste_action(action) {
+            self.record_edit(before, UndoKind::Typing, Some(now));
+        }
     }
 
     pub fn insert_explicit_newline(&mut self, now: Instant) {
         self.flush_pending_paste(now);
         self.history.reset_navigation();
+        self.history_search = None;
         let action = self.paste.push_explicit_newline(now);
-        self.apply_paste_action(action);
+        let before = self.editor.snapshot();
+        if self.apply_paste_action(action) {
+            self.record_edit(before, UndoKind::Other, None);
+        }
     }
 
     pub fn enter(&mut self, now: Instant) -> EnterDecision {
@@ -81,7 +109,11 @@ impl ComposerState {
             PasteAction::None => EnterDecision::Submit,
             action => {
                 self.history.reset_navigation();
-                self.apply_paste_action(action);
+                self.history_search = None;
+                let before = self.editor.snapshot();
+                if self.apply_paste_action(action) {
+                    self.record_edit(before, UndoKind::Other, None);
+                }
                 EnterDecision::InsertedNewline
             }
         }
@@ -91,19 +123,27 @@ impl ComposerState {
         self.flush_pending_paste_force();
         self.paste.reset();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.insert_str(text);
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn insert_text(&mut self, text: &str) {
         self.flush_pending_paste_force();
         self.paste.reset();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.insert_str(text);
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn flush_pending_paste(&mut self, now: Instant) -> bool {
         if let Some(text) = self.paste.take_if_expired(now) {
+            let before = self.editor.snapshot();
             self.editor.insert_str(&text);
+            self.record_edit(before, UndoKind::Other, None);
             self.history.reset_navigation();
             true
         } else {
@@ -113,7 +153,9 @@ impl ComposerState {
 
     pub fn flush_pending_paste_force(&mut self) -> bool {
         if let Some(text) = self.paste.take_pending() {
+            let before = self.editor.snapshot();
             self.editor.insert_str(&text);
+            self.record_edit(before, UndoKind::Other, None);
             true
         } else {
             false
@@ -128,6 +170,8 @@ impl ComposerState {
         }
         self.history.push(prompt.clone());
         self.editor.clear();
+        self.undo.clear();
+        self.history_search = None;
         self.paste.reset();
         Some(prompt)
     }
@@ -169,25 +213,37 @@ impl ComposerState {
     pub fn delete_current_line(&mut self) {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.delete_current_line();
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn open_line_below(&mut self) {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.open_line_below();
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn backspace(&mut self) {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.backspace();
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn delete(&mut self) {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         self.editor.delete();
+        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn move_up_or_history(&mut self, select: bool) {
@@ -201,6 +257,7 @@ impl ComposerState {
         let current = self.editor.text().to_string();
         if let Some(text) = self.history.previous(current) {
             self.editor.set_text(text);
+            self.undo.clear();
         }
     }
 
@@ -215,6 +272,7 @@ impl ComposerState {
         let current = self.editor.text().to_string();
         if let Some(text) = self.history.next(current) {
             self.editor.set_text(text);
+            self.undo.clear();
         }
     }
 
@@ -240,6 +298,8 @@ impl ComposerState {
         self.flush_pending_paste_force();
         self.paste.reset();
         self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
         let cursor = self.editor.cursor();
         let prefix = &self.editor.text()[..cursor];
         let start = prefix
@@ -250,6 +310,111 @@ impl ComposerState {
             self.editor.remove_range(start..cursor);
         }
         self.editor.insert_str(replacement);
+        self.record_edit(before, UndoKind::Other, None);
+    }
+
+    pub fn kill_to_line_end(&mut self) {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
+        if let Some(killed) = self.editor.kill_to_line_end() {
+            self.kill_buffer = killed;
+            self.record_edit(before, UndoKind::Other, None);
+        }
+    }
+
+    pub fn kill_to_line_start(&mut self) {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
+        if let Some(killed) = self.editor.kill_to_line_start() {
+            self.kill_buffer = killed;
+            self.record_edit(before, UndoKind::Other, None);
+        }
+    }
+
+    pub fn yank(&mut self) {
+        if self.kill_buffer.is_empty() {
+            return;
+        }
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
+        self.editor.insert_str(&self.kill_buffer);
+        self.record_edit(before, UndoKind::Other, None);
+    }
+
+    pub fn undo(&mut self) -> bool {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        self.undo.undo(&mut self.editor)
+    }
+
+    pub fn redo(&mut self) -> bool {
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        self.undo.redo(&mut self.editor)
+    }
+
+    pub fn start_or_cycle_history_search(&mut self) {
+        self.flush_pending_paste_force();
+        self.paste.reset();
+        self.history.reset_navigation();
+        if let Some(search) = self.history_search.as_mut() {
+            search.cycle();
+        } else {
+            let draft = self.editor.snapshot();
+            let mut search = HistorySearch::new(draft);
+            search.refresh(self.history.entries());
+            self.history_search = Some(search);
+        }
+        self.apply_history_search_preview();
+    }
+
+    pub fn history_search_insert_char(&mut self, ch: char) {
+        let Some(search) = self.history_search.as_mut() else {
+            return;
+        };
+        search.query.push(ch);
+        search.selected = 0;
+        search.refresh(self.history.entries());
+        self.apply_history_search_preview();
+    }
+
+    pub fn history_search_backspace(&mut self) {
+        let Some(search) = self.history_search.as_mut() else {
+            return;
+        };
+        search.query.pop();
+        search.selected = 0;
+        search.refresh(self.history.entries());
+        self.apply_history_search_preview();
+    }
+
+    pub fn accept_history_search(&mut self) {
+        if self.history_search.take().is_some() {
+            self.undo.clear();
+        }
+    }
+
+    pub fn cancel_history_search(&mut self) {
+        if let Some(search) = self.history_search.take() {
+            self.editor.restore(search.draft);
+        }
+    }
+
+    pub fn history_search_active(&self) -> bool {
+        self.history_search.is_some()
+    }
+
+    pub fn history_search_view(&self) -> Option<HistorySearchView> {
+        let search = self.history_search.as_ref()?;
+        Some(search.view(self.history.entries()))
     }
 
     pub fn height(&self, width: u16, max_rows: u16) -> u16 {
@@ -261,7 +426,7 @@ impl ComposerState {
             .view(width.max(1) as usize, max_rows.max(1) as usize)
     }
 
-    fn apply_paste_action(&mut self, action: PasteAction) {
+    fn apply_paste_action(&mut self, action: PasteAction) -> bool {
         match action {
             PasteAction::InsertAndTrack { ch, reset_start } => {
                 let start = self.editor.cursor();
@@ -271,16 +436,203 @@ impl ComposerState {
                 } else {
                     self.paste.set_candidate_end(self.editor.cursor());
                 }
+                true
             }
-            PasteAction::Insert(text) => self.editor.insert_str(&text),
-            PasteAction::RemoveAndHold { start, end } => self.editor.remove_range(start..end),
-            PasteAction::Hold | PasteAction::None => {}
+            PasteAction::Insert(text) => {
+                self.editor.insert_str(&text);
+                true
+            }
+            PasteAction::RemoveAndHold { start, end } => {
+                self.editor.remove_range(start..end);
+                true
+            }
+            PasteAction::Hold | PasteAction::None => false,
         }
     }
 
     fn cancel_edit_tracking(&mut self) {
         self.flush_pending_paste_force();
         self.paste.reset();
+        self.undo.finish_coalescing();
+    }
+
+    fn record_edit(&mut self, before: EditorSnapshot, kind: UndoKind, at: Option<Instant>) {
+        let after = self.editor.snapshot();
+        self.undo.record(before, after, kind, at);
+    }
+
+    fn apply_history_search_preview(&mut self) {
+        let Some(search) = self.history_search.as_ref() else {
+            return;
+        };
+        if let Some(current) = search.current() {
+            self.editor.set_text(current);
+        } else {
+            self.editor.restore(search.draft.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+    selection_anchor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UndoKind {
+    Typing,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UndoRecord {
+    before: EditorSnapshot,
+    after: EditorSnapshot,
+    kind: UndoKind,
+    at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UndoHistory {
+    undo: Vec<UndoRecord>,
+    redo: Vec<UndoRecord>,
+}
+
+impl UndoHistory {
+    fn new() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
+    fn record(
+        &mut self,
+        before: EditorSnapshot,
+        after: EditorSnapshot,
+        kind: UndoKind,
+        at: Option<Instant>,
+    ) {
+        if before == after {
+            return;
+        }
+        self.redo.clear();
+        if let Some(last) = self.undo.last_mut() {
+            if last.kind == UndoKind::Typing
+                && kind == UndoKind::Typing
+                && last.at.zip(at).is_some_and(|(previous, current)| {
+                    current
+                        .checked_duration_since(previous)
+                        .is_some_and(|elapsed| elapsed <= UNDO_COALESCE_WINDOW)
+                })
+            {
+                last.after = after;
+                last.at = at;
+                return;
+            }
+        }
+        self.undo.push(UndoRecord {
+            before,
+            after,
+            kind,
+            at,
+        });
+        if self.undo.len() > UNDO_LIMIT {
+            let excess = self.undo.len() - UNDO_LIMIT;
+            self.undo.drain(0..excess);
+        }
+    }
+
+    fn undo(&mut self, editor: &mut TextEditor) -> bool {
+        let Some(record) = self.undo.pop() else {
+            return false;
+        };
+        editor.restore(record.before.clone());
+        self.redo.push(record);
+        true
+    }
+
+    fn redo(&mut self, editor: &mut TextEditor) -> bool {
+        let Some(record) = self.redo.pop() else {
+            return false;
+        };
+        editor.restore(record.after.clone());
+        self.undo.push(record);
+        true
+    }
+
+    fn finish_coalescing(&mut self) {
+        if let Some(last) = self.undo.last_mut() {
+            last.at = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistorySearch {
+    draft: EditorSnapshot,
+    query: String,
+    matches: Vec<String>,
+    selected: usize,
+}
+
+impl HistorySearch {
+    fn new(draft: EditorSnapshot) -> Self {
+        Self {
+            draft,
+            query: String::new(),
+            matches: Vec::new(),
+            selected: 0,
+        }
+    }
+
+    fn refresh(&mut self, entries: &[String]) {
+        let needle = self.query.to_ascii_lowercase();
+        self.matches = entries
+            .iter()
+            .rev()
+            .filter(|entry| {
+                needle.is_empty() || entry.to_ascii_lowercase().contains(needle.as_str())
+            })
+            .cloned()
+            .collect();
+        if self.matches.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.matches.len() {
+            self.selected = self.matches.len() - 1;
+        }
+    }
+
+    fn cycle(&mut self) {
+        if !self.matches.is_empty() {
+            self.selected = (self.selected + 1) % self.matches.len();
+        }
+    }
+
+    fn current(&self) -> Option<String> {
+        self.matches.get(self.selected).cloned()
+    }
+
+    fn view(&self, entries: &[String]) -> HistorySearchView {
+        let mut clone = self.clone();
+        clone.refresh(entries);
+        HistorySearchView {
+            query: clone.query.clone(),
+            current: clone.current(),
+            selected: if clone.matches.is_empty() {
+                0
+            } else {
+                clone.selected + 1
+            },
+            total: clone.matches.len(),
+        }
     }
 }
 
@@ -312,6 +664,22 @@ impl TextEditor {
         self.text = text;
         self.cursor = self.text.len();
         self.selection_anchor = None;
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            selection_anchor: self.selection_anchor,
+        }
+    }
+
+    fn restore(&mut self, snapshot: EditorSnapshot) {
+        self.text = snapshot.text;
+        self.cursor = clamp_boundary(&self.text, snapshot.cursor);
+        self.selection_anchor = snapshot
+            .selection_anchor
+            .map(|anchor| clamp_boundary(&self.text, anchor));
     }
 
     pub fn clear(&mut self) {
@@ -426,6 +794,47 @@ impl TextEditor {
             self.cursor = insert_at + 1;
         }
         self.selection_anchor = None;
+    }
+
+    fn kill_to_line_end(&mut self) -> Option<String> {
+        if let Some(range) = self.selection_range() {
+            return self.remove_kill_range(range);
+        }
+        let end = self.text[self.cursor..]
+            .find('\n')
+            .map(|idx| self.cursor + idx + if idx == 0 { 1 } else { 0 })
+            .unwrap_or(self.text.len());
+        if end == self.cursor {
+            return None;
+        }
+        self.remove_kill_range(self.cursor..end)
+    }
+
+    fn kill_to_line_start(&mut self) -> Option<String> {
+        if let Some(range) = self.selection_range() {
+            return self.remove_kill_range(range);
+        }
+        let start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        if start == self.cursor {
+            return None;
+        }
+        self.remove_kill_range(start..self.cursor)
+    }
+
+    fn remove_kill_range(&mut self, range: Range<usize>) -> Option<String> {
+        let start = clamp_boundary(&self.text, range.start);
+        let end = clamp_boundary(&self.text, range.end);
+        if start >= end {
+            return None;
+        }
+        let killed = self.text[start..end].to_string();
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        self.selection_anchor = None;
+        Some(killed)
     }
 
     pub fn can_move_up(&self) -> bool {
@@ -1059,6 +1468,77 @@ mod tests {
         assert_eq!(composer.text(), "second");
         composer.move_down_or_history(false);
         assert_eq!(composer.text(), "draft");
+    }
+
+    #[test]
+    fn history_search_filters_accepts_and_cancels() {
+        let mut composer = ComposerState::new(vec![
+            "alpha one".to_string(),
+            "beta two".to_string(),
+            "alpha three".to_string(),
+        ]);
+        composer.set_text("draft");
+        composer.start_or_cycle_history_search();
+        assert_eq!(composer.text(), "alpha three");
+        let view = composer.history_search_view().unwrap();
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.total, 3);
+        composer.history_search_insert_char('b');
+        assert_eq!(composer.text(), "beta two");
+        assert_eq!(composer.history_search_view().unwrap().query, "b");
+        composer.cancel_history_search();
+        assert_eq!(composer.text(), "draft");
+
+        composer.start_or_cycle_history_search();
+        for ch in "alpha".chars() {
+            composer.history_search_insert_char(ch);
+        }
+        assert_eq!(composer.text(), "alpha three");
+        composer.start_or_cycle_history_search();
+        assert_eq!(composer.text(), "alpha one");
+        composer.accept_history_search();
+        assert_eq!(composer.text(), "alpha one");
+        assert!(!composer.history_search_active());
+    }
+
+    #[test]
+    fn kill_ring_cuts_and_yanks_line_segments() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.insert_paste("alpha beta\ngamma");
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "alpha beta\n");
+        composer.yank();
+        assert_eq!(composer.text(), "alpha beta\ngamma");
+        composer.set_text("alpha beta\ngamma");
+        composer.move_word_backward(false);
+        composer.move_word_backward(false);
+        composer.move_home(false);
+        composer.kill_to_line_end();
+        assert_eq!(composer.text(), "\ngamma");
+        composer.yank();
+        assert_eq!(composer.text(), "alpha beta\ngamma");
+        composer.kill_to_line_end();
+        assert_eq!(composer.text(), "alpha betagamma");
+    }
+
+    #[test]
+    fn undo_redo_coalesces_typing_and_keeps_structural_edits_separate() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.insert_char('a', t(0));
+        composer.insert_char('b', t(10));
+        composer.insert_char('c', t(20));
+        composer.flush_pending_paste_force();
+        assert_eq!(composer.text(), "abc");
+        assert!(composer.undo());
+        assert_eq!(composer.text(), "");
+        assert!(composer.redo());
+        assert_eq!(composer.text(), "abc");
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "");
+        assert!(composer.undo());
+        assert_eq!(composer.text(), "abc");
+        assert!(composer.redo());
+        assert_eq!(composer.text(), "");
     }
 
     #[test]
