@@ -13,6 +13,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::approvals::{ApprovalModalState, ApprovalQueue};
+use crate::ask_questions::{
+    AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
+};
 use crate::client::{
     worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
     OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
@@ -290,6 +293,7 @@ pub struct App {
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
     approval_queue: ApprovalQueue,
+    ask_questions_form: Option<AskQuestionsForm>,
     pending_approval_clears: VecDeque<PendingApprovalClear>,
     events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
@@ -365,6 +369,7 @@ impl App {
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
+            ask_questions_form: None,
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
@@ -423,6 +428,7 @@ impl App {
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
+            ask_questions_form: None,
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: None,
@@ -707,6 +713,10 @@ impl App {
 
     pub fn approval_modal(&self) -> Option<&ApprovalModalState> {
         self.approval_queue.front()
+    }
+
+    pub fn ask_questions_form(&self) -> Option<&AskQuestionsForm> {
+        self.ask_questions_form.as_ref()
     }
 
     #[cfg(test)]
@@ -1267,6 +1277,7 @@ impl App {
         self.usage = None;
         self.pending_send_retry = None;
         self.model_context_windows.clear();
+        self.ask_questions_form = None;
         self.default_context_window_tokens = None;
         self.retry_hint = None;
     }
@@ -1292,6 +1303,7 @@ impl App {
         self.selected_tool_index = None;
         self.usage = None;
         self.pending_send_retry = None;
+        self.ask_questions_form = None;
         self.retry_hint = None;
     }
 
@@ -1322,6 +1334,7 @@ impl App {
         self.selected_tool_index = None;
         self.usage = None;
         self.pending_send_retry = None;
+        self.ask_questions_form = None;
         self.retry_hint = None;
         AppAction::SubscribeCurrent
     }
@@ -1354,6 +1367,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
+        self.ask_questions_form = None;
         self.retry_hint = None;
         AppAction::ForkChat {
             source_chat_id,
@@ -1399,7 +1413,7 @@ impl App {
             return Some(self.start_backtrack_turn(prompt));
         }
         let params = self.take_submit_params(&prompt);
-        if self.is_chat_active() {
+        if self.is_chat_active() && self.session_state != SessionState::WaitingUserInput {
             self.input_queue.enqueue(prompt, params);
             self.input_queue.clear_selection();
             Some(AppAction::None)
@@ -1439,6 +1453,7 @@ impl App {
 
     fn start_prompt_turn(&mut self, prompt: String, params: Value) -> AppAction {
         self.cancel_backtrack();
+        self.ask_questions_form = None;
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
@@ -1470,6 +1485,11 @@ impl App {
             return AppAction::None;
         };
         self.start_prompt_turn(text, params)
+    }
+
+    fn submit_ask_questions_reply(&mut self, prompt: String) -> AppAction {
+        let params = self.take_submit_params(&prompt);
+        self.start_prompt_turn(prompt, params)
     }
 
     fn handle_command_finished(
@@ -2446,7 +2466,11 @@ impl App {
                     self.update_usage(&raw);
                 }
                 if self.session_state != SessionState::Paused {
-                    self.session_state = SessionState::Idle;
+                    if self.ask_questions_form.is_some() {
+                        self.session_state = SessionState::WaitingUserInput;
+                    } else {
+                        self.session_state = SessionState::Idle;
+                    }
                 }
                 if !self.is_chat_active() {
                     return self.dispatch_next_queued_input();
@@ -2530,6 +2554,7 @@ impl App {
         }
         if let Some(runtime) = raw.get("runtime") {
             self.apply_runtime_state(runtime);
+            self.maybe_open_pending_ask_questions_form();
             self.update_usage(runtime);
             self.update_server_queue_from_runtime(runtime);
             self.sync_runtime_approvals(runtime);
@@ -2538,6 +2563,7 @@ impl App {
 
     fn handle_runtime_updated(&mut self, raw: &Value) {
         self.apply_runtime_state(raw);
+        self.maybe_open_pending_ask_questions_form();
         self.update_server_queue_from_runtime(raw);
         self.sync_runtime_approvals(raw);
     }
@@ -2634,6 +2660,24 @@ impl App {
         };
     }
 
+    fn maybe_open_pending_ask_questions_form(&mut self) {
+        if self.session_state != SessionState::WaitingUserInput || self.ask_questions_form.is_some()
+        {
+            return;
+        }
+        let pending = self
+            .transcript_state
+            .messages()
+            .iter()
+            .rev()
+            .take_while(|message| message.role != TranscriptRole::User)
+            .find(|message| message.role == TranscriptRole::Tool && !message.tool_failed)
+            .cloned();
+        if let Some(message) = pending.as_ref() {
+            self.maybe_open_ask_questions_form(message);
+        }
+    }
+
     fn handle_pause_required(&mut self, raw: &Value, event_seq: Option<u64>) {
         self.session_state = SessionState::Paused;
         let filtered = self.filtered_approval_raw(raw);
@@ -2702,8 +2746,52 @@ impl App {
         self.push_state_tool_result(&message);
     }
 
+    fn maybe_open_ask_questions_form(&mut self, message: &TranscriptMessage) {
+        if self.session_state != SessionState::WaitingUserInput {
+            return;
+        }
+        if message.tool_failed {
+            return;
+        }
+        let request = AskQuestionsRequest::from_tool_content(
+            &message.content,
+            message.tool_call_id.as_deref(),
+        );
+        let Some(request) = request else {
+            return;
+        };
+        if self
+            .ask_questions_form
+            .as_ref()
+            .is_some_and(|form| form.tool_call_id() == request.tool_call_id)
+        {
+            return;
+        }
+        if self.has_later_user_message_after_tool(&request.tool_call_id) {
+            return;
+        }
+        self.ask_questions_form = Some(AskQuestionsForm::new(request));
+        self.session_state = SessionState::WaitingUserInput;
+    }
+
+    fn has_later_user_message_after_tool(&self, tool_call_id: &str) -> bool {
+        let mut seen_tool = false;
+        for message in self.transcript_state.messages() {
+            if seen_tool && message.role == TranscriptRole::User {
+                return true;
+            }
+            if message.role == TranscriptRole::Tool
+                && message.tool_call_id.as_deref() == Some(tool_call_id)
+            {
+                seen_tool = true;
+            }
+        }
+        false
+    }
+
     fn push_state_tool_result(&mut self, message: &TranscriptMessage) {
         let key = render_message_key(message, "tool", 0);
+        self.maybe_open_ask_questions_form(message);
         if self
             .rendered_state_keys
             .get(self.rendered_state_cursor)
@@ -2963,6 +3051,9 @@ impl App {
         if abort_active {
             self.session_state = SessionState::Idle;
             self.clear_approvals();
+            self.ask_questions_form = None;
+        } else {
+            self.ask_questions_form = None;
         }
         self.should_quit = true;
         AppAction::Quit { abort_active }
@@ -2981,6 +3072,9 @@ impl App {
         }
         if self.approval_modal().is_some() {
             return self.handle_approval_key(key);
+        }
+        if self.ask_questions_form.is_some() {
+            return self.handle_ask_questions_key(key);
         }
         if self.modal_picker.is_some() {
             return self.handle_modal_picker_key(key);
@@ -3002,6 +3096,84 @@ impl App {
             return action;
         }
         self.handle_main_dispatch(main_dispatch, key)
+    }
+
+    fn handle_ask_questions_key(&mut self, key: KeyEvent) -> AppAction {
+        let Some(form) = self.ask_questions_form.as_mut() else {
+            return AppAction::None;
+        };
+        if form.current_question().question_type == AskQuestionType::FreeText {
+            if let KeyCode::Char(ch) = key.code {
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    form.insert_char(ch);
+                    return AppAction::None;
+                }
+            }
+        }
+        let dispatch = self.keymap.dispatch(KeyContext::Main, key);
+        match dispatch.action {
+            Some(KeyAction::Cancel) => {
+                form.cancel();
+                self.ask_questions_form = None;
+                self.add_notice(
+                    "Question form canceled; type your answer in the composer to reply manually",
+                );
+                AppAction::None
+            }
+            Some(KeyAction::Accept) => match form.accept() {
+                AskQuestionsOutcome::Submitted(prompt) => {
+                    self.ask_questions_form = None;
+                    self.submit_ask_questions_reply(prompt)
+                }
+                AskQuestionsOutcome::None | AskQuestionsOutcome::Canceled => AppAction::None,
+            },
+            Some(KeyAction::MoveUp) => {
+                form.previous_option();
+                AppAction::None
+            }
+            Some(KeyAction::MoveDown) => {
+                form.next_option();
+                AppAction::None
+            }
+            Some(KeyAction::MoveLeft) | Some(KeyAction::MoveHome) => {
+                form.previous_question();
+                AppAction::None
+            }
+            Some(KeyAction::MoveRight) | Some(KeyAction::MoveEnd) => {
+                form.next_question();
+                AppAction::None
+            }
+            Some(KeyAction::ToggleSelectedTool) => {
+                form.toggle_current_multi();
+                AppAction::None
+            }
+            Some(KeyAction::Backspace) => {
+                form.backspace();
+                AppAction::None
+            }
+            Some(KeyAction::InsertNewline) => {
+                form.insert_newline();
+                AppAction::None
+            }
+            None => {
+                if let Some(ch) = dispatch.text {
+                    if form.current_question().question_type == AskQuestionType::YesNo {
+                        match ch {
+                            'y' | 'Y' => form.choose_yes_no(true),
+                            'n' | 'N' => form.choose_yes_no(false),
+                            _ => form.insert_char(ch),
+                        }
+                    } else {
+                        form.insert_char(ch);
+                    }
+                }
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
     }
 
     fn handle_vim_key(&mut self, key: KeyEvent) -> Option<AppAction> {
@@ -3222,6 +3394,7 @@ impl App {
             self.cancel_queue_edit();
             self.session_state = SessionState::Idle;
             self.add_notice("Cancel requested");
+            self.ask_questions_form = None;
             AppAction::Abort
         } else {
             self.handle_idle_escape()
@@ -5626,6 +5799,91 @@ new-chat = "ctrl-x"
         assert!(matches!(
             action,
             AppAction::SendMessage { prompt, .. } if prompt == "a\nb"
+        ));
+    }
+
+    #[test]
+    fn ask_questions_tool_result_opens_form_and_submits_canonical_reply() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({
+                "message": {
+                    "role": "tool",
+                    "tool_call_id": "call-ask",
+                    "tool_failed": false,
+                    "content": json!({
+                        "type": "ask_questions",
+                        "tool_call_id": "call-ask",
+                        "questions": [
+                            {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+                        ]
+                    }).to_string()
+                }
+            }),
+        });
+        assert!(app.ask_questions_form().is_none());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "waiting_user_input"}),
+        });
+
+        assert!(app.ask_questions_form().is_some());
+        assert_eq!(app.session_state(), SessionState::WaitingUserInput);
+        app.handle_key(key(KeyCode::Char('n')));
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(app.ask_questions_form().is_none());
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. }
+                if prompt == "[QA:call-ask]\n> [confirm] Proceed?\nNo"
+        ));
+    }
+
+    #[test]
+    fn ask_questions_escape_keeps_manual_composer_fallback() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({
+                "message": {
+                    "role": "tool",
+                    "tool_call_id": "call-ask",
+                    "tool_failed": false,
+                    "content": json!({
+                        "type": "ask_questions",
+                        "tool_call_id": "call-ask",
+                        "questions": [
+                            {"id": "notes", "type": "free_text", "text": "Notes?"}
+                        ]
+                    }).to_string()
+                }
+            }),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "waiting_user_input"}),
+        });
+
+        assert!(app.ask_questions_form().is_some());
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        assert!(app.ask_questions_form().is_none());
+        assert_eq!(app.session_state(), SessionState::WaitingUserInput);
+        app.composer.set_text("manual answer");
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt, .. } if prompt == "manual answer"
         ));
     }
 

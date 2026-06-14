@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
+use crate::ask_questions::{AskQuestionType, AskQuestionsForm};
 use crate::approvals::render_modal_lines;
 use crate::events_pane::{render_event_lines, render_worker_lines};
 use crate::keymap::{HelpRow, KeyAction, KeyContext};
@@ -62,6 +63,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(picker) = app.modal_picker() {
         render_modal_picker(frame, picker, area, composer_area);
+    }
+    if let Some(form) = app.ask_questions_form() {
+        render_ask_questions_form(frame, form, area);
     }
     if app.transcript_overlay().is_some() {
         let overlay_height = area.height.saturating_sub(4).max(8);
@@ -463,6 +467,112 @@ fn render_modal_picker(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, 
         List::new(items)
     };
     frame.render_widget(list, inner);
+}
+
+fn render_ask_questions_form(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect) {
+    let width = area.width.saturating_sub(6).min(96).max(24);
+    let option_count = form.current_question().choice_options().len() as u16;
+    let height = option_count
+        .saturating_add(9)
+        .min(area.height.saturating_sub(4).max(8));
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let title = format!(
+        " questions {} of {} ",
+        form.current_index() + 1,
+        form.question_count()
+    );
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(render_ask_questions_lines(form, inner.width as usize))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn render_ask_questions_lines(form: &AskQuestionsForm, width: usize) -> Vec<Line<'static>> {
+    let question = form.current_question();
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        question.text.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    match question.question_type {
+        AskQuestionType::FreeText => {
+            let text = form.current_text().unwrap_or_default();
+            if text.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "Type your answer…",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for line in text.lines() {
+                    lines.push(Line::from(line.to_string()));
+                }
+            }
+        }
+        AskQuestionType::YesNo | AskQuestionType::SingleSelect | AskQuestionType::MultiSelect => {
+            for (idx, option) in question.choice_options().iter().enumerate() {
+                let cursor = if form.current_choice_index() == Some(idx) {
+                    "›"
+                } else {
+                    " "
+                };
+                let selected = form.option_selected(idx);
+                let marker = match question.question_type {
+                    AskQuestionType::MultiSelect if selected => "☑",
+                    AskQuestionType::MultiSelect => "☐",
+                    _ if selected => "◉",
+                    _ => "○",
+                };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(cursor, Style::default().fg(Color::Cyan)),
+                    Span::raw(" "),
+                    Span::styled(marker, style),
+                    Span::raw(" "),
+                    Span::styled(option.clone(), style),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Current: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(form.current_answer_text()),
+    ]));
+    lines.push(Line::from(Span::styled(
+        ask_questions_help(question.question_type),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+        .into_iter()
+        .map(|line| truncate_line_with_ellipsis_if_overflow(line, width))
+        .collect()
+}
+
+fn ask_questions_help(question_type: AskQuestionType) -> &'static str {
+    match question_type {
+        AskQuestionType::YesNo => "Y/N choose · Enter next/submit · ←/→ question · Esc fallback",
+        AskQuestionType::SingleSelect => {
+            "↑/↓ choose · Enter next/submit · ←/→ question · Esc fallback"
+        }
+        AskQuestionType::MultiSelect => {
+            "↑/↓ move · Space toggle · Enter next/submit · Esc fallback"
+        }
+        AskQuestionType::FreeText => {
+            "Type answer · Ctrl-J newline · Enter next/submit · Esc fallback"
+        }
+    }
 }
 
 fn render_approval_modal(

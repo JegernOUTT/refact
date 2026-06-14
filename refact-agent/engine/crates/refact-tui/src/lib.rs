@@ -1,5 +1,6 @@
 pub mod app;
 pub mod approvals;
+pub mod ask_questions;
 pub mod client;
 pub mod clipboard;
 pub mod commands;
