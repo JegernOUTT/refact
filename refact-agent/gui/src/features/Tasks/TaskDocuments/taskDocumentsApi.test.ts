@@ -21,12 +21,13 @@ describe("taskDocumentMutationInvalidation", () => {
     ]);
   });
 
-  it("emits list and detail tags for pinTaskDocument", () => {
+  it("emits list, detail, and history tags for pinTaskDocument", () => {
     expect(
       taskDocumentMutationInvalidation.pinTaskDocument("task-1", "main-plan"),
     ).toEqual([
       { type: "TaskDocuments", id: "task-1" },
       { type: "TaskDocuments", id: "task-1:main-plan:detail" },
+      { type: "TaskDocuments", id: "task-1:main-plan:history" },
     ]);
   });
 

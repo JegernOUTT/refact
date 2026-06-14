@@ -412,6 +412,10 @@ async fn replace_document_content_at(
     validate_slug(slug)?;
     let path = document_path(documents_dir, slug);
     let mut document = read_document(&path).await?;
+    let pinned_changed = pinned.is_some_and(|pinned| pinned != document.frontmatter.pinned);
+    if document.content == content && !pinned_changed {
+        return Ok(document);
+    }
     snapshot_existing(documents_dir, slug).await?;
     document.content = content;
     if let Some(pinned) = pinned {
@@ -783,12 +787,13 @@ pub async fn update_task_document_for_api(
     task_id: &str,
     slug: &str,
     content: String,
+    pinned: Option<bool>,
 ) -> Result<TaskDocumentDetail, String> {
     let documents_dir = documents_dir_for_task(gcx, task_id).await?;
     if !document_path(&documents_dir, slug).exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
-    let document = update_document_at(&documents_dir, slug, &content).await?;
+    let document = replace_document_content_at(&documents_dir, slug, content, pinned).await?;
     Ok(document_to_detail(document))
 }
 
@@ -1643,7 +1648,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let updated = update_task_document_for_api(gcx.clone(), tid, "upd", "v2".to_string())
+        let updated = update_task_document_for_api(gcx.clone(), tid, "upd", "v2".to_string(), None)
             .await
             .unwrap();
         assert_eq!(updated.version, 2);
@@ -1653,6 +1658,61 @@ mod tests {
             .unwrap();
         assert!(!hist.history.is_empty());
         assert_eq!(hist.history[0].version, 1);
+    }
+
+    #[tokio::test]
+    async fn update_task_document_for_api_updates_content_and_pin_in_one_version() {
+        let (_temp, gcx) = setup_task_gcx("task-docs-update-pin").await;
+        let tid = "task-docs-update-pin";
+        create_task_document_for_api(
+            gcx.clone(),
+            tid,
+            CreateDocumentRequest {
+                slug: "combined".to_string(),
+                name: "Combined".to_string(),
+                kind: "plan".to_string(),
+                content: "v1".to_string(),
+                pinned: Some(true),
+                relevant_cards: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = update_task_document_for_api(
+            gcx.clone(),
+            tid,
+            "combined",
+            "v2".to_string(),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.content, "v2");
+        assert!(!updated.pinned);
+        let hist = history_task_document_for_api(gcx.clone(), tid, "combined")
+            .await
+            .unwrap();
+        assert_eq!(hist.history.len(), 1);
+        assert_eq!(hist.history[0].version, 1);
+
+        let unchanged = update_task_document_for_api(
+            gcx.clone(),
+            tid,
+            "combined",
+            "v2".to_string(),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(unchanged.version, 2);
+        let hist = history_task_document_for_api(gcx, tid, "combined")
+            .await
+            .unwrap();
+        assert_eq!(hist.history.len(), 1);
     }
 
     #[tokio::test]
@@ -1677,10 +1737,18 @@ mod tests {
             .await
             .unwrap();
         assert!(!unpinned.pinned);
-        let repinned = pin_task_document_for_api(gcx, tid, "pin-doc", true)
+        assert_eq!(unpinned.version, 2);
+        let repinned = pin_task_document_for_api(gcx.clone(), tid, "pin-doc", true)
             .await
             .unwrap();
         assert!(repinned.pinned);
+        assert_eq!(repinned.version, 3);
+        let history = history_task_document_for_api(gcx, tid, "pin-doc")
+            .await
+            .unwrap();
+        assert_eq!(history.history.len(), 2);
+        assert_eq!(history.history[0].version, 1);
+        assert_eq!(history.history[1].version, 2);
     }
 
     #[tokio::test]
@@ -1726,10 +1794,10 @@ mod tests {
         )
         .await
         .unwrap();
-        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v2".to_string())
+        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v2".to_string(), None)
             .await
             .unwrap();
-        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v3".to_string())
+        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v3".to_string(), None)
             .await
             .unwrap();
         let hist = history_task_document_for_api(gcx, tid, "hist-doc")

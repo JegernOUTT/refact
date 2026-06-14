@@ -257,6 +257,63 @@ describe("DocumentsPanel", () => {
     });
   });
 
+  it("editor save sends content and pin changes in one update request", async () => {
+    const updateRequests: unknown[] = [];
+    const pinRequests: unknown[] = [];
+    mockDocuments();
+    server.use(
+      http.get("*/v1/task/:taskId/documents/:slug", ({ params }) => {
+        if (params.slug === "initial-plan") {
+          return HttpResponse.json(detailResponse);
+        }
+        return HttpResponse.json({ status: 404 }, { status: 404 });
+      }),
+      http.put("*/v1/task/:taskId/documents/:slug", async ({ request }) => {
+        const body = await request.json();
+        updateRequests.push(body);
+        return HttpResponse.json({
+          ...detailResponse,
+          content: (body as { content: string }).content,
+          pinned: (body as { pinned: boolean }).pinned,
+          version: 4,
+        });
+      }),
+      http.post(
+        "*/v1/task/:taskId/documents/:slug/pin",
+        async ({ request }) => {
+          pinRequests.push(await request.json());
+          return HttpResponse.json(detailResponse);
+        },
+      ),
+    );
+
+    const { user } = render(<DocumentsPanel taskId="task-1" />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await screen.findByText("Initial Plan");
+    const row = screen.getByTestId("document-row-initial-plan");
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    await screen.findByText("Edit document");
+    await waitFor(() => {
+      expect(screen.getByLabelText("Content")).toHaveValue(
+        detailResponse.content,
+      );
+    });
+
+    await user.clear(screen.getByLabelText("Content"));
+    await user.type(screen.getByLabelText("Content"), "Updated body");
+    await user.click(screen.getByRole("checkbox", { name: "Pinned" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(updateRequests).toEqual([
+        { content: "Updated body", pinned: false },
+      ]);
+    });
+    expect(pinRequests).toEqual([]);
+  });
+
   it("delete shows confirm popover then calls delete mutation", async () => {
     const deleteRequests: string[] = [];
     mockDocuments();
@@ -435,11 +492,10 @@ describe("DocumentsPanel", () => {
 
     const allDocNames = screen
       .getAllByRole("button", { name: /Unpin|Pin/ })
-      .map(
-        (btn) =>
-          btn
-            .closest("[data-testid^='document-row-']")
-            ?.getAttribute("data-testid"),
+      .map((btn) =>
+        btn
+          .closest("[data-testid^='document-row-']")
+          ?.getAttribute("data-testid"),
       );
 
     expect(allDocNames[0]).toBe("document-row-initial-plan");

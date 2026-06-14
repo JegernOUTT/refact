@@ -1319,6 +1319,7 @@ pub struct GetDocumentQuery {
 #[derive(Deserialize)]
 pub struct UpdateTaskDocumentRequest {
     pub content: String,
+    pub pinned: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1382,9 +1383,10 @@ pub async fn handle_update_task_document(
     Path((task_id, slug)): Path<(String, String)>,
     Json(req): Json<UpdateTaskDocumentRequest>,
 ) -> Result<Json<TaskDocumentDetail>, (StatusCode, String)> {
-    let result = update_task_document_for_api(app.gcx.clone(), &task_id, &slug, req.content)
-        .await
-        .map_err(map_doc_error)?;
+    let result =
+        update_task_document_for_api(app.gcx.clone(), &task_id, &slug, req.content, req.pinned)
+            .await
+            .map_err(map_doc_error)?;
     Ok(Json(result))
 }
 
@@ -2568,6 +2570,7 @@ mod tests {
             Path(("task-doc-404".to_string(), "no-such-slug".to_string())),
             Json(UpdateTaskDocumentRequest {
                 content: "whatever".to_string(),
+                pinned: None,
             }),
         )
         .await;
@@ -2606,6 +2609,56 @@ mod tests {
         assert_eq!(result.0.content, "body text");
         assert!(result.0.pinned);
         assert_eq!(result.0.version, 2);
+    }
+
+    #[tokio::test]
+    async fn handle_update_task_document_accepts_pinned_in_same_request() {
+        use crate::tools::tool_task_documents::CreateDocumentRequest;
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_task(temp.path(), "task-doc-update-pin").await;
+        let _ = handle_create_task_document(
+            State(app(gcx.clone())),
+            Path("task-doc-update-pin".to_string()),
+            Json(CreateDocumentRequest {
+                slug: "combined-plan".to_string(),
+                name: "Combined Plan".to_string(),
+                kind: "plan".to_string(),
+                content: "v1".to_string(),
+                pinned: Some(true),
+                relevant_cards: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = handle_update_task_document(
+            State(app(gcx.clone())),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+            Json(UpdateTaskDocumentRequest {
+                content: "v2".to_string(),
+                pinned: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.0.content, "v2");
+        assert!(!result.0.pinned);
+        assert_eq!(result.0.version, 2);
+        let history = handle_history_task_document(
+            State(app(gcx.clone())),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.0.history.len(), 1);
+        assert_eq!(history.0.history[0].version, 1);
     }
 
     #[tokio::test]

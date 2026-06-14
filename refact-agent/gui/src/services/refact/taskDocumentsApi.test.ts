@@ -229,4 +229,39 @@ describe("taskDocumentsApi URLs", () => {
     );
     expect(relativeUrlSearchParams(url).toString()).toBe("");
   });
+
+  it("updateTaskDocument sends content and pin state in one request", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...validDetail, pinned: false }),
+    );
+    const store = createTestStore({
+      host: "web",
+      engineServed: true,
+      lspPort: 8123,
+      lspUrl: "http://127.0.0.1:8123",
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      taskDocumentsApi.endpoints.updateTaskDocument.initiate({
+        taskId: "task-1",
+        slug: "main-plan",
+        content: "# Updated",
+        pinned: false,
+      }),
+    );
+    await request;
+
+    const fetchRequest = firstRequest(fetchMock);
+    expect(fetchRequest.method).toBe("PUT");
+    expect(relativeUrlPath(fetchRequest.url)).toBe(
+      "/v1/task/task-1/documents/main-plan",
+    );
+    expect(await fetchRequest.json()).toEqual({
+      content: "# Updated",
+      pinned: false,
+    });
+  });
 });

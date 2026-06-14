@@ -16,7 +16,6 @@ import {
   type TaskDocumentKind,
   useCreateTaskDocumentMutation,
   useGetTaskDocumentQuery,
-  usePinTaskDocumentMutation,
   useUpdateTaskDocumentMutation,
 } from "../../../services/refact/taskDocumentsApi";
 import styles from "./TaskDocuments.module.css";
@@ -72,9 +71,8 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     useCreateTaskDocumentMutation();
   const [updateDocument, { isLoading: isUpdating }] =
     useUpdateTaskDocumentMutation();
-  const [pinDocument, { isLoading: isPinning }] = usePinTaskDocumentMutation();
 
-  const isSaving = isCreating || isUpdating || isPinning;
+  const isSaving = isCreating || isUpdating;
 
   useEffect(() => {
     if (!open) return;
@@ -132,10 +130,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
           setMutationError("Document is still loading. Please wait.");
           return;
         }
-        await updateDocument({ taskId, slug, content }).unwrap();
-        if (pinned !== existingDoc.pinned) {
-          await pinDocument({ taskId, slug, pinned }).unwrap();
-        }
+        await updateDocument({ taskId, slug, content, pinned }).unwrap();
       } else {
         if (
           !formSlug ||
@@ -167,7 +162,6 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     content,
     existingDoc,
     pinned,
-    pinDocument,
     formSlug,
     name,
     kind,
