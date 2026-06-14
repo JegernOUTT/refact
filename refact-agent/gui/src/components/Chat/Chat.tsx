@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import classNames from "classnames";
 import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
 import { Flex, Button, Card, Container } from "@radix-ui/themes";
@@ -64,7 +63,6 @@ export const Chat: React.FC<ChatProps> = ({
   const onEnableSend = () => dispatch(enableSend({ id: chatId }));
 
   const bottomDockRef = useRef<HTMLDivElement>(null);
-  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
 
   useEffect(() => {
     const dock = bottomDockRef.current;
@@ -112,9 +110,7 @@ export const Chat: React.FC<ChatProps> = ({
   return (
     <DropzoneProvider asChild>
       <Flex
-        className={classNames(styles.chatRoot, {
-          [styles.composerExpanded]: isComposerExpanded,
-        })}
+        className={styles.chatRoot}
         style={{
           ...style,
           minHeight: 0,
@@ -181,7 +177,6 @@ export const Chat: React.FC<ChatProps> = ({
                   embedded
                   onSubmit={handleSubmit}
                   onClose={maybeSendToSidebar}
-                  onExpandedChange={setIsComposerExpanded}
                 />
               </div>
             </div>

@@ -1,22 +1,11 @@
 .chatRoot {
   position: relative;
-  /* How far the floating dock overlaps the transcript viewport. Collapsed:
-     the full measured dock height, so content flows behind the glass.
-     Expanded: 0 — the transcript viewport is inset above the panel instead,
-     keeping the tail readable while typing. */
-  --rf-composer-overlap: var(--rf-composer-clearance, 0px);
-}
-
-.composerExpanded {
   --rf-composer-overlap: 0px;
 }
 
 .transcriptArea {
-  transition: padding-bottom var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-.composerExpanded .transcriptArea {
   padding-bottom: var(--rf-composer-clearance, 0px);
+  transition: padding-bottom var(--rf-dur-med) var(--rf-ease-standard);
 }
 
 @media (prefers-reduced-motion: reduce) {
