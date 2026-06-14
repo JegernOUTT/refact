@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    CronStore, Job,
+    Action, AgentTarget, CronStore, Job,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -188,6 +188,8 @@ fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "description": task.description,
         "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
         "chat_id": task.chat_id(),
+        "target": if job_is_isolated(task) { "isolated" } else { "existing_chat" },
+        "isolated": job_is_isolated(task),
         "mode": task.mode(),
         "recurring": task.recurring,
         "durable": task.durable,
@@ -195,6 +197,23 @@ fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "fire_count": task.fire_count,
         "created_at_ms": task.created_at_ms,
     })
+}
+
+fn job_is_isolated(task: &Job) -> bool {
+    matches!(
+        &task.action,
+        Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        }
+    )
+}
+
+#[cfg(test)]
+fn set_job_isolated(task: &mut Job) {
+    if let Action::AgentTurn { target, .. } = &mut task.action {
+        *target = AgentTarget::Isolated;
+    }
 }
 
 fn first_chars(value: &str, max_chars: usize) -> String {
@@ -354,7 +373,25 @@ mod tests {
         let items = run_tool(&mut tool, ccx, Some("session")).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["chat_id"], json!("chat"));
+        assert_eq!(items[0]["target"], json!("existing_chat"));
+        assert_eq!(items[0]["isolated"], json!(false));
         assert_eq!(items[0]["mode"], json!("agent"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_isolated_target() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let mut task = session_task("cron_list_isolated_target");
+        set_job_isolated(&mut task);
+        session_store.add(task).await.unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["chat_id"], Value::Null);
+        assert_eq!(items[0]["target"], json!("isolated"));
+        assert_eq!(items[0]["isolated"], json!(true));
     }
 
     #[tokio::test]

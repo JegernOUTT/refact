@@ -13,11 +13,11 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::get_active_project_path;
-use crate::scheduler::{
-    human_schedule, next_run_ms, scheduler_timezone, session_cron_store, CronStore, Job,
-    JsonFileCronStore, Trigger,
-};
 use crate::scheduler::schedule::parse_schedule;
+use crate::scheduler::{
+    human_schedule, next_run_ms, scheduler_timezone, session_cron_store, Action, AgentTarget,
+    CronStore, Job, JsonFileCronStore, Trigger,
+};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub const MAX_CRON_JOBS: usize = 50;
@@ -42,6 +42,7 @@ pub(crate) struct CronCreateInput {
     pub(crate) prompt: String,
     pub(crate) recurring: Option<bool>,
     pub(crate) durable: bool,
+    pub(crate) isolated: bool,
     pub(crate) description: String,
 }
 
@@ -54,6 +55,7 @@ pub(crate) struct CronCreateRuntime {
     pub(crate) timezone: Tz,
     pub(crate) chat_id: Option<String>,
     pub(crate) mode: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug)]
@@ -86,6 +88,7 @@ impl Tool for ToolCronCreate {
                     "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "default": false },
+                    "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
                     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
                 },
                 "required": ["prompt", "description"]
@@ -102,11 +105,12 @@ impl Tool for ToolCronCreate {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let input = input_from_args(args)?;
-        let (app, chat_id, project_root, mode) = cron_tool_context(ccx).await;
+        let (app, chat_id, project_root, mode, model) = cron_tool_context(ccx).await;
         let runtime = runtime_for_project(
             project_root,
             Some(chat_id.clone()),
             mode,
+            model,
             unix_now_ms(),
             scheduler_timezone(),
         )?;
@@ -119,6 +123,7 @@ impl Tool for ToolCronCreate {
             "human_schedule": outcome.human_schedule,
             "recurring": outcome.task.recurring,
             "durable": outcome.task.durable,
+            "isolated": job_is_isolated(&outcome.task),
         });
 
         Ok((
@@ -159,6 +164,7 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         prompt,
         recurring: optional_bool_arg(args, "recurring")?,
         durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
+        isolated: optional_bool_arg(args, "isolated")?.unwrap_or(false),
         description,
     })
 }
@@ -198,6 +204,7 @@ fn runtime_for_project(
     project_root: Option<PathBuf>,
     chat_id: Option<String>,
     mode: Option<String>,
+    model: Option<String>,
     now_ms: u64,
     timezone: Tz,
 ) -> Result<CronCreateRuntime, String> {
@@ -214,6 +221,7 @@ fn runtime_for_project(
         timezone,
         chat_id,
         mode,
+        model,
     })
 }
 
@@ -223,6 +231,7 @@ async fn cron_tool_context(
     crate::app_state::AppState,
     String,
     Option<PathBuf>,
+    Option<String>,
     Option<String>,
 ) {
     let (app, gcx, chat_id, scoped_root) = {
@@ -245,18 +254,17 @@ async fn cron_tool_context(
         let sessions = gcx.chat_sessions.read().await;
         sessions.get(&chat_id).cloned()
     };
-    let mode = if let Some(session_arc) = session_arc {
+    let (mode, model) = if let Some(session_arc) = session_arc {
         let session = session_arc.lock().await;
         let mode = session.thread.mode.clone();
-        if mode.is_empty() {
-            None
-        } else {
-            Some(mode)
-        }
+        let mode = if mode.is_empty() { None } else { Some(mode) };
+        let model = session.thread.model.clone();
+        let model = if model.is_empty() { None } else { Some(model) };
+        (mode, model)
     } else {
-        None
+        (None, None)
     };
-    (app, chat_id, project_root, mode)
+    (app, chat_id, project_root, mode, model)
 }
 
 pub(crate) async fn create_cron_job(
@@ -293,7 +301,7 @@ pub(crate) async fn create_cron_job(
         runtime.now_ms,
     );
     task.trigger = trigger;
-    task.set_existing_chat(runtime.chat_id);
+    apply_cron_create_target(&mut task, input.isolated, runtime.chat_id, runtime.model);
     task.set_mode(runtime.mode);
     validate_next_run(&task, runtime.now_ms, runtime.timezone)?;
     let human = human_schedule_for_trigger(&task.trigger);
@@ -310,6 +318,47 @@ pub(crate) async fn create_cron_job(
         human_schedule: human,
         summary,
     })
+}
+
+fn apply_cron_create_target(
+    task: &mut Job,
+    isolated: bool,
+    chat_id: Option<String>,
+    model: Option<String>,
+) {
+    if let Action::AgentTurn {
+        target,
+        model: task_model,
+        ..
+    } = &mut task.action
+    {
+        if isolated {
+            *target = AgentTarget::Isolated;
+            *task_model = model;
+        } else {
+            *target = AgentTarget::ExistingChat {
+                chat_id: chat_id.unwrap_or_default(),
+            };
+        }
+    }
+}
+
+fn job_is_isolated(task: &Job) -> bool {
+    matches!(
+        &task.action,
+        Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        }
+    )
+}
+
+#[cfg(test)]
+fn job_model(task: &Job) -> Option<&str> {
+    match &task.action {
+        Action::AgentTurn { model, .. } => model.as_deref().filter(|model| !model.is_empty()),
+        _ => None,
+    }
 }
 
 fn parse_create_schedule(input: &CronCreateInput, now_ms: u64) -> Result<Trigger, String> {
@@ -396,6 +445,7 @@ async fn emit_created_notice(
             "cron": task.cron_expr().unwrap_or_default(),
             "recurring": task.recurring,
             "durable": task.durable,
+            "isolated": job_is_isolated(task),
         }),
         summary.to_string(),
     ));
@@ -465,6 +515,7 @@ mod tests {
             timezone: chrono_tz::UTC,
             chat_id: Some("chat-1".to_string()),
             mode: Some("agent".to_string()),
+            model: Some("model-1".to_string()),
         }
     }
 
@@ -641,6 +692,45 @@ mod tests {
         );
         assert!(outcome.task.recurring);
         assert_eq!(outcome.human_schedule, "every 5 minutes");
+        assert!(!job_is_isolated(&outcome.task));
+        assert_eq!(outcome.task.chat_id(), Some("chat-1"));
+    }
+
+    #[tokio::test]
+    async fn isolated_true_creates_isolated_target() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+                ("isolated", json!(true)),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert!(job_is_isolated(&outcome.task));
+        assert_eq!(outcome.task.chat_id(), None);
+        assert_eq!(outcome.task.mode(), Some("agent"));
+        assert_eq!(job_model(&outcome.task), Some("model-1"));
+    }
+
+    #[tokio::test]
+    async fn isolated_default_creates_existing_chat_target() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            default_input(),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert!(!job_is_isolated(&outcome.task));
+        assert_eq!(outcome.task.chat_id(), Some("chat-1"));
+        assert_eq!(outcome.task.mode(), Some("agent"));
+        assert_eq!(job_model(&outcome.task), None);
     }
 
     #[tokio::test]

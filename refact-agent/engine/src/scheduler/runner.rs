@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::process_command_queue;
 use crate::chat::try_restore_session_if_trajectory_exists;
 use crate::chat::types::{ChatCommand, CommandRequest, EnqueueCommandOutcome, max_queue_size};
@@ -105,24 +106,28 @@ impl CronRunner {
             if !missed_one_shot_task(&task, now) {
                 continue;
             }
-            let Some(chat_id) = task.chat_id().map(str::to_string) else {
-                continue;
-            };
-            let app = AppState::from_gcx(self.gcx.clone()).await;
-            let restored =
-                try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, &chat_id)
-                    .await;
-            if !restored {
-                tracing::warn!(
-                    "skipping missed durable one-shot {}: no trajectory found for chat {}",
-                    task.id,
-                    chat_id
-                );
+            let chat_id = task.chat_id().map(str::to_string);
+            if let Some(chat_id) = &chat_id {
+                let app = AppState::from_gcx(self.gcx.clone()).await;
+                let restored =
+                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
+                        .await;
+                if !restored {
+                    tracing::warn!(
+                        "skipping missed durable one-shot {}: no trajectory found for chat {}",
+                        task.id,
+                        chat_id
+                    );
+                    continue;
+                }
+            } else if !job_is_isolated(&task) {
                 continue;
             }
-            match self.fire_with_missed(&task, true, true).await {
+            match self.fire_with_missed(&task, true, now, true).await {
                 Ok(true) => {
-                    *missed_counts.entry(chat_id).or_default() += 1;
+                    if let Some(chat_id) = chat_id {
+                        *missed_counts.entry(chat_id).or_default() += 1;
+                    }
                     if let Err(error) = self.store.remove(&task.id).await {
                         tracing::warn!(
                             "failed to remove caught-up scheduled task {}: {}",
@@ -185,6 +190,11 @@ impl CronRunner {
     }
 
     async fn handle_due_task(&mut self, task: Job, now: u64) {
+        if job_is_isolated(&task) {
+            self.handle_due_isolated_task(task, now).await;
+            return;
+        }
+
         let chat_id = match runnable_chat_id(&task) {
             Ok(chat_id) => chat_id,
             Err("missing chat_id") => {
@@ -285,7 +295,67 @@ impl CronRunner {
         }
 
         let final_fire = task_final_after_fire(&task, now);
-        match self.fire(&task, final_fire).await {
+        match self.fire(&task, final_fire, now).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(error) = record_run(&self.store, &task.id, "deferred", None, now).await {
+                    tracing::warn!(
+                        "failed to record deferred scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                }
+                self.defer_task(&task, now);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
+                self.handle_unfireable_task(&task, now, &error).await;
+                return;
+            }
+        }
+
+        if let Err(error) = record_run(&self.store, &task.id, "fired", None, now).await {
+            tracing::warn!(
+                "failed to record fired scheduled task {}: {}",
+                task.id,
+                error
+            );
+        }
+        if final_fire {
+            match self.store.remove(&task.id).await {
+                Ok(true) => self.emit_auto_expired_notice(&task).await,
+                Ok(false) => {
+                    tracing::warn!("expired scheduled task {} was already removed", task.id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to remove expired scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                }
+            }
+        } else if !task.recurring {
+            if let Err(error) = self.remove_task(&task).await {
+                tracing::warn!(
+                    "failed to remove fired one-shot scheduled task {}: {}",
+                    task.id,
+                    error
+                );
+            }
+        }
+        self.deferred_until_ms.remove(&task.id);
+    }
+
+    async fn handle_due_isolated_task(&mut self, task: Job, now: u64) {
+        if let Err(reason) = runnable_isolated_job(&task) {
+            self.handle_unfireable_task(&task, now, reason).await;
+            return;
+        }
+
+        let final_fire = task_final_after_fire(&task, now);
+        match self.fire(&task, final_fire, now).await {
             Ok(true) => {}
             Ok(false) => {
                 if let Err(error) = record_run(&self.store, &task.id, "deferred", None, now).await {
@@ -430,16 +500,24 @@ impl CronRunner {
             .is_some_and(|fire_at| fire_at <= now)
     }
 
-    async fn fire(&self, task: &Job, final_fire: bool) -> Result<bool, String> {
-        self.fire_with_missed(task, final_fire, false).await
+    async fn fire(&self, task: &Job, final_fire: bool, fired_at_ms: u64) -> Result<bool, String> {
+        self.fire_with_missed(task, final_fire, fired_at_ms, false)
+            .await
     }
 
     async fn fire_with_missed(
         &self,
         task: &Job,
         final_fire: bool,
+        fired_at_ms: u64,
         missed: bool,
     ) -> Result<bool, String> {
+        if job_is_isolated(&task) {
+            return self
+                .fire_isolated_with_missed(task, final_fire, fired_at_ms, missed)
+                .await;
+        }
+
         let chat_id = runnable_chat_id(task).map_err(|reason| {
             format!(
                 "Scheduled task {} is not a runnable chat job: {reason}",
@@ -478,6 +556,72 @@ impl CronRunner {
                     command: ChatCommand::SetParams {
                         patch: json!({"mode": mode}),
                     },
+                }) != EnqueueCommandOutcome::Accepted
+                {
+                    return Ok(false);
+                }
+            }
+            if session.enqueue_priority_command(CommandRequest {
+                client_request_id: format!("cron-fire-{}", Uuid::new_v4()),
+                priority: true,
+                command: ChatCommand::UserMessage {
+                    content: serde_json::Value::String(prompt),
+                    attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: false,
+                },
+            }) != EnqueueCommandOutcome::Accepted
+            {
+                return Ok(false);
+            }
+            session.add_message(event_message);
+            session.queue_processor_running.clone()
+        };
+
+        if !processor_flag.swap(true, Ordering::SeqCst) {
+            tokio::spawn(process_command_queue(app, session_arc, processor_flag));
+        }
+        Ok(true)
+    }
+
+    async fn fire_isolated_with_missed(
+        &self,
+        task: &Job,
+        final_fire: bool,
+        fired_at_ms: u64,
+        missed: bool,
+    ) -> Result<bool, String> {
+        runnable_isolated_job(task).map_err(|reason| {
+            format!(
+                "Scheduled task {} is not a runnable isolated chat job: {reason}",
+                task.id
+            )
+        })?;
+        let chat_id = format!("cron_{}_{}", task.id, fired_at_ms);
+        let app = AppState::from_gcx(self.gcx.clone()).await;
+        let session_arc =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await;
+        let event_message = if missed {
+            cron_fire_message_with_missed(task, final_fire, missed)
+        } else {
+            cron_fire_message(task, final_fire)
+        };
+        let prompt = task.prompt().unwrap_or_default().to_string();
+        let set_params = isolated_set_params_patch(task);
+        let processor_flag = {
+            let mut session = session_arc.lock().await;
+            if session.closed {
+                return Err(format!("Chat session {chat_id} is closed"));
+            }
+            let queued_commands = 1 + usize::from(set_params.is_some());
+            if session.command_queue.len().saturating_add(queued_commands) > max_queue_size() {
+                return Ok(false);
+            }
+            if let Some(patch) = set_params {
+                if session.enqueue_priority_command(CommandRequest {
+                    client_request_id: format!("cron-set-params-{}", Uuid::new_v4()),
+                    priority: true,
+                    command: ChatCommand::SetParams { patch },
                 }) != EnqueueCommandOutcome::Accepted
                 {
                     return Ok(false);
@@ -641,6 +785,73 @@ fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
         (Action::AgentTurn { .. }, Delivery::Chat) => Err("missing chat_id"),
         (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
         (Action::Command { .. }, _) => Err("command actions are not supported yet"),
+    }
+}
+
+fn runnable_isolated_job(job: &Job) -> Result<(), &'static str> {
+    if !matches!(
+        job.trigger,
+        Trigger::Cron { .. } | Trigger::Interval { .. } | Trigger::Once { .. }
+    ) {
+        return Err("trigger is not supported by the chat runner yet");
+    }
+    match (&job.action, &job.delivery) {
+        (
+            Action::AgentTurn {
+                target: AgentTarget::Isolated,
+                ..
+            },
+            Delivery::Chat,
+        ) => Ok(()),
+        (Action::AgentTurn { .. }, Delivery::Chat) => Err("target is not isolated"),
+        (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
+        (Action::Command { .. }, _) => Err("command actions are not supported yet"),
+    }
+}
+
+fn isolated_set_params_patch(task: &Job) -> Option<Value> {
+    let mut patch = serde_json::Map::new();
+    if let Some(mode) = task.mode() {
+        patch.insert("mode".to_string(), json!(mode));
+    }
+    if let Some(model) = job_model(task) {
+        patch.insert("model".to_string(), json!(model));
+    }
+    if patch.is_empty() {
+        None
+    } else {
+        Some(Value::Object(patch))
+    }
+}
+
+fn job_is_isolated(task: &Job) -> bool {
+    matches!(
+        &task.action,
+        Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        }
+    )
+}
+
+fn job_model(task: &Job) -> Option<&str> {
+    match &task.action {
+        Action::AgentTurn { model, .. } => model.as_deref().filter(|model| !model.is_empty()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn set_job_isolated(task: &mut Job) {
+    if let Action::AgentTurn { target, .. } = &mut task.action {
+        *target = AgentTarget::Isolated;
+    }
+}
+
+#[cfg(test)]
+fn set_job_model(task: &mut Job, value: Option<String>) {
+    if let Action::AgentTurn { model, .. } = &mut task.action {
+        *model = value;
     }
 }
 
@@ -860,6 +1071,20 @@ mod tests {
         task
     }
 
+    fn isolated_due_task(id: &str, now: u64) -> Job {
+        let mut task = due_task(id, now);
+        set_job_isolated(&mut task);
+        set_job_model(&mut task, Some("model-1".to_string()));
+        task
+    }
+
+    fn isolated_interval_task(id: &str, now: u64, every_ms: u64) -> Job {
+        let mut task = interval_task(id, now, every_ms);
+        set_job_isolated(&mut task);
+        set_job_model(&mut task, Some("model-1".to_string()));
+        task
+    }
+
     fn timezone_cron_task(id: &str, created_at_ms: u64) -> Job {
         let mut task = Job::new_cron_agent_chat(
             "0 9 * * *".to_string(),
@@ -912,6 +1137,45 @@ mod tests {
             .get("chat-1")
             .cloned()
             .unwrap()
+    }
+
+    async fn isolated_session_ids(gcx: &SharedGlobalContext, task_id: &str) -> Vec<String> {
+        let prefix = format!("cron_{task_id}_");
+        let sessions = gcx.chat_sessions.read().await;
+        let mut ids = sessions
+            .keys()
+            .filter(|id| id.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    async fn assert_isolated_prompt(gcx: &SharedGlobalContext, chat_id: &str, task_id: &str) {
+        let session_arc = {
+            let sessions = gcx.chat_sessions.read().await;
+            sessions.get(chat_id).cloned().unwrap()
+        };
+        let session = session_arc.lock().await;
+        let fire_event = event_message(&session, "cron_fire", task_id);
+        assert_eq!(
+            fire_event.extra["event"]["payload"]["task_id"],
+            json!(task_id)
+        );
+        let prompt_queued = session.command_queue.iter().any(|request| {
+            matches!(
+                &request.command,
+                ChatCommand::UserMessage { content, .. }
+                    if content.as_str() == Some("scheduled prompt")
+            )
+        });
+        let prompt_added = session.messages.iter().any(|message| {
+            message.role == "user" && message.content.content_text_only() == "scheduled prompt"
+        });
+        assert!(
+            prompt_queued || prompt_added,
+            "isolated session must receive the scheduled prompt"
+        );
     }
 
     fn event_message<'a>(
@@ -1311,6 +1575,60 @@ mod tests {
         let session = session.lock().await;
         assert!(session.messages.is_empty());
         assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn isolated_due_job_creates_fresh_session_and_skips_idle_gate() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(isolated_due_task("cron_isolated_due", now))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Generating).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("cron_isolated_due").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.last_fired_at_ms, Some(now));
+        assert_eq!(stored.fire_count, 1);
+        let ids = isolated_session_ids(&gcx, "cron_isolated_due").await;
+        assert_eq!(ids, vec![format!("cron_cron_isolated_due_{now}")]);
+        assert_isolated_prompt(&gcx, &ids[0], "cron_isolated_due").await;
+        let existing = session(&gcx).await;
+        let existing = existing.lock().await;
+        assert!(existing.messages.is_empty());
+        assert!(existing.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recurring_isolated_job_creates_distinct_session_per_fire() {
+        let now = now_ms();
+        let every_ms = 60_000;
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(isolated_interval_task(
+                "cron_isolated_recurring",
+                now,
+                every_ms,
+            ))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+        runner.fire_due_tasks(now + every_ms).await;
+
+        let ids = isolated_session_ids(&gcx, "cron_isolated_recurring").await;
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&format!("cron_cron_isolated_recurring_{now}")));
+        assert!(ids.contains(&format!("cron_cron_isolated_recurring_{}", now + every_ms)));
+        assert_ne!(ids[0], ids[1]);
+        let stored = store.get("cron_isolated_recurring").await.unwrap();
+        assert_eq!(stored.fire_count, 2);
     }
 
     #[tokio::test]
