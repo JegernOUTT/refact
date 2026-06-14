@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { act } from "react-dom/test-utils";
 
@@ -10,6 +12,24 @@ import {
 } from "./notificationsSlice";
 import { ProcessCompletedToasts } from "./Toast";
 import { switchToThread } from "../Chat/Thread";
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
+
+function readCssBlock(source: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
+  if (match?.index === undefined) {
+    throw new Error(`Missing CSS block for ${selector}`);
+  }
+  const start = source.indexOf("{", match.index);
+  const end = source.indexOf("\n}", start);
+  if (start === -1 || end === -1) {
+    throw new Error(`Malformed CSS block for ${selector}`);
+  }
+  return source.slice(start + 1, end);
+}
 
 function makeProcessCompletedEvent(
   overrides: Partial<ProcessCompletedEvent> = {},
@@ -41,6 +61,13 @@ describe("ProcessCompleted notifications", () => {
     expect(screen.getByText("exec_done")).toBeInTheDocument();
     expect(screen.getByText("✅")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument();
+  });
+
+  it("keeps internal padding on the toast surface", async () => {
+    const css = await readGuiSource("features/Notifications/Toast.module.css");
+    const toastBlock = readCssBlock(css, ".toast");
+
+    expect(toastBlock).toContain("padding: var(--rf-panel-pad)");
   });
 
   it("clears pending notifications when switching to the thread", () => {

@@ -11,6 +11,7 @@
 }
 
 .toast {
+  padding: var(--rf-panel-pad);
   pointer-events: auto;
   box-shadow: var(--rf-elev-overlay);
 }

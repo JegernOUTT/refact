@@ -13,6 +13,10 @@
   line-height: var(--rf-line);
 }
 
+.hoverCard {
+  padding: var(--rf-panel-pad);
+}
+
 .formStack {
   display: flex;
   width: 100%;

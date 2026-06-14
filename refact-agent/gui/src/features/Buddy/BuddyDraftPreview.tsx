@@ -4,6 +4,7 @@ import { Flex, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { selectBuddySnapshot } from "./buddySlice";
 import type { BuddyDraft } from "./types";
+import styles from "./BuddyDraftPreview.module.css";
 
 type Props = {
   draft: BuddyDraft;
@@ -14,7 +15,7 @@ export const BuddyDraftPreview: React.FC<Props> = ({ draft }) => {
   const titlePrefix = name ? `${name} draft` : "Draft";
 
   return (
-    <Surface variant="surface-1" animated="rise">
+    <Surface variant="surface-1" animated="rise" className={styles.panel}>
       <Flex align="start" gap="2">
         <Icon icon={Info} size="md" tone="accent" />
         <Flex direction="column" gap="1">

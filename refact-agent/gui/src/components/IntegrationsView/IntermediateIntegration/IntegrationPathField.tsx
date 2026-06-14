@@ -63,7 +63,11 @@ export const IntegrationPathField: React.FC<IntegrationPathFieldProps> = ({
                 side="right"
                 align="center"
               >
-                <Surface variant="overlay" radius="card">
+                <Surface
+                  variant="overlay"
+                  radius="card"
+                  className={styles.hoverCard}
+                >
                   <p className={styles.text}>Full project path:</p>
                   <p className={styles.text}>{projectInfo.fullPath}</p>
                 </Surface>
