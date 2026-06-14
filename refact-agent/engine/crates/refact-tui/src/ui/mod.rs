@@ -18,15 +18,18 @@ use crate::vendored::terminal_hyperlinks::{
 };
 
 pub mod footer;
+pub mod status_indicator;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.begin_frame_render();
     let area = frame.area();
+    let status_height = status_indicator::height(app);
     let main_constraints = if app.events_pane().open {
         vec![
             Constraint::Length(1),
             Constraint::Percentage(62),
             Constraint::Percentage(38),
+            Constraint::Length(status_height),
             Constraint::Length(app.composer_height(area.width)),
             Constraint::Length(1),
         ]
@@ -34,6 +37,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         vec![
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(status_height),
             Constraint::Length(app.composer_height(area.width)),
             Constraint::Length(1),
         ]
@@ -46,17 +50,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_header(frame, app, chunks[0]);
     render_transcript(frame, app, chunks[1]);
     let composer_area = if app.events_pane().open {
-        chunks[3]
+        chunks[4]
     } else {
-        chunks[2]
+        chunks[3]
     };
     if app.events_pane().open {
         render_events_pane(frame, app, chunks[2]);
+        status_indicator::render(frame, app, chunks[3]);
+        render_composer(frame, app, composer_area);
+        footer::render(frame, app, chunks[5]);
+    } else {
+        status_indicator::render(frame, app, chunks[2]);
         render_composer(frame, app, composer_area);
         footer::render(frame, app, chunks[4]);
-    } else {
-        render_composer(frame, app, composer_area);
-        footer::render(frame, app, chunks[3]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
         render_project_picker(frame, app.project_picker(), area);
@@ -754,6 +760,34 @@ mod tests {
         assert!(text.contains("refact"));
         assert!(text.contains("Ask Refact"));
         assert!(text.contains("demo"));
+    }
+
+    #[test]
+    fn render_busy_status_row_above_composer() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        app.apply_chat_event(crate::client::ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: serde_json::json!({"state": "generating"}),
+        });
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>());
+        let rows = rows.collect::<Vec<_>>();
+        let status_row = rows
+            .iter()
+            .position(|row| row.contains("Working") && row.contains("Esc to interrupt"))
+            .unwrap();
+        let composer_row = rows.iter().position(|row| row.contains("message")).unwrap();
+        assert!(status_row < composer_row);
     }
 
     #[test]

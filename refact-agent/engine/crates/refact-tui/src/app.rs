@@ -136,6 +136,13 @@ impl SessionState {
             SessionState::Error => "error",
         }
     }
+
+    pub fn shows_working_indicator(self) -> bool {
+        matches!(
+            self,
+            SessionState::Generating | SessionState::ExecutingTools
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -326,6 +333,9 @@ pub struct App {
     usage: Option<UsageSummary>,
     should_quit: bool,
     last_ctrl_c: Option<Instant>,
+    working_started_at_ms: Option<u64>,
+    working_tick: u64,
+    working_detail: Option<String>,
     stream_controller: StreamController,
     history: HistoryBuffer,
     native_scrollback: bool,
@@ -402,6 +412,9 @@ impl App {
             usage: None,
             should_quit: false,
             last_ctrl_c: None,
+            working_started_at_ms: None,
+            working_tick: 0,
+            working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
             history: HistoryBuffer::new(),
             native_scrollback: false,
@@ -461,6 +474,9 @@ impl App {
             usage: None,
             should_quit: false,
             last_ctrl_c: None,
+            working_started_at_ms: None,
+            working_tick: 0,
+            working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
             history: HistoryBuffer::new(),
             native_scrollback: false,
@@ -597,6 +613,67 @@ impl App {
 
     pub fn retry_hint(&self) -> Option<&str> {
         self.retry_hint.as_deref()
+    }
+
+    pub fn working_elapsed_ms(&self) -> u64 {
+        self.working_started_at_ms
+            .filter(|_| self.session_state.shows_working_indicator())
+            .map(|started| now_ms().saturating_sub(started))
+            .unwrap_or_default()
+    }
+
+    pub fn working_tick(&self) -> u64 {
+        self.working_tick
+    }
+
+    pub fn working_detail(&self) -> Option<&str> {
+        self.working_detail.as_deref()
+    }
+
+    fn set_session_state(&mut self, state: SessionState) {
+        let was_working = self.session_state.shows_working_indicator();
+        let is_working = state.shows_working_indicator();
+        self.session_state = state;
+        match (was_working, is_working) {
+            (false, true) => {
+                self.working_started_at_ms = Some(now_ms());
+                self.working_tick = 0;
+                self.working_detail = self.latest_tool_detail();
+            }
+            (true, false) => self.clear_working_indicator(),
+            _ => {}
+        }
+    }
+
+    fn clear_working_indicator(&mut self) {
+        self.working_started_at_ms = None;
+        self.working_tick = 0;
+        self.working_detail = None;
+    }
+
+    fn tick_working_indicator(&mut self) {
+        if !self.session_state.shows_working_indicator() {
+            return;
+        }
+        if self.working_started_at_ms.is_none() {
+            self.working_started_at_ms = Some(now_ms());
+        }
+        self.working_tick = self.working_tick.wrapping_add(1);
+    }
+
+    fn set_working_detail(&mut self, detail: String) {
+        if self.session_state.shows_working_indicator() && !detail.is_empty() {
+            self.working_detail = Some(detail);
+        }
+    }
+
+    fn latest_tool_detail(&self) -> Option<String> {
+        self.transcript.iter().rev().find_map(|item| match item {
+            TranscriptItem::Tool(card) if card.status == ToolStatus::Running => {
+                Some(card.summary())
+            }
+            _ => None,
+        })
     }
 
     pub fn daemon_online(&self) -> bool {
@@ -988,7 +1065,7 @@ impl App {
             CommandAction::BackendCommand { command } => {
                 if command == "stop" && self.is_chat_active() {
                     self.cancel_queue_edit();
-                    self.session_state = SessionState::Idle;
+                    self.set_session_state(SessionState::Idle);
                     self.clear_approvals();
                     AppAction::Abort
                 } else {
@@ -1261,7 +1338,7 @@ impl App {
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_title = None;
         self.show_session_header = true;
-        self.session_state = SessionState::Idle;
+        self.set_session_state(SessionState::Idle);
         self.replace_with_notice(format!(
             "Switched to project {} at {}",
             project.slug,
@@ -1295,7 +1372,7 @@ impl App {
             "New chat started".to_string(),
             Some(self.session_header_subtitle()),
         );
-        self.session_state = SessionState::Idle;
+        self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
@@ -1326,7 +1403,7 @@ impl App {
         self.pending_model = None;
         self.pending_mode = None;
         self.replace_with_session(format!("Resuming {title}"), subtitle);
-        self.session_state = SessionState::Idle;
+        self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
@@ -1360,7 +1437,7 @@ impl App {
             "Forking chat…".to_string(),
             Some(self.session_header_subtitle()),
         );
-        self.session_state = SessionState::Idle;
+        self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
@@ -1440,7 +1517,7 @@ impl App {
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
-        self.session_state = SessionState::Generating;
+        self.set_session_state(SessionState::Generating);
         self.stream_controller.clear();
         self.usage = None;
         self.retry_hint = None;
@@ -1457,7 +1534,7 @@ impl App {
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
-        self.session_state = SessionState::Generating;
+        self.set_session_state(SessionState::Generating);
         self.stream_controller.clear();
         self.usage = None;
         self.retry_hint = None;
@@ -1531,7 +1608,7 @@ impl App {
         params: Value,
         error: &str,
     ) -> AppAction {
-        self.session_state = SessionState::Idle;
+        self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
         self.rollback_failed_send_transcript(&prompt);
         self.restore_failed_prompt(prompt, params);
@@ -2069,6 +2146,7 @@ impl App {
     }
 
     fn run_stream_commit_tick(&mut self) {
+        self.tick_working_indicator();
         if run_commit_tick(&mut self.stream_controller).is_some() {
             self.sync_assistant_stream_item();
         }
@@ -2443,7 +2521,7 @@ impl App {
         match protocol_event {
             SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
             SseEvent::StreamStarted { message_id } => {
-                self.session_state = SessionState::Generating;
+                self.set_session_state(SessionState::Generating);
                 self.stream_controller.clear();
                 self.transcript_state.start_assistant(message_id.as_deref());
                 self.rebuild_render_transcript_from_state();
@@ -2467,9 +2545,9 @@ impl App {
                 }
                 if self.session_state != SessionState::Paused {
                     if self.ask_questions_form.is_some() {
-                        self.session_state = SessionState::WaitingUserInput;
+                        self.set_session_state(SessionState::WaitingUserInput);
                     } else {
-                        self.session_state = SessionState::Idle;
+                        self.set_session_state(SessionState::Idle);
                     }
                 }
                 if !self.is_chat_active() {
@@ -2647,10 +2725,10 @@ impl App {
             .and_then(Value::as_str)
             .is_some_and(|error| !error.is_empty())
         {
-            self.session_state = SessionState::Error;
+            self.set_session_state(SessionState::Error);
             return;
         }
-        self.session_state = match raw.get("state").and_then(Value::as_str).unwrap_or_default() {
+        let state = match raw.get("state").and_then(Value::as_str).unwrap_or_default() {
             "generating" => SessionState::Generating,
             "executing_tools" => SessionState::ExecutingTools,
             "paused" => SessionState::Paused,
@@ -2658,6 +2736,7 @@ impl App {
             "error" => SessionState::Error,
             _ => SessionState::Idle,
         };
+        self.set_session_state(state);
     }
 
     fn maybe_open_pending_ask_questions_form(&mut self) {
@@ -2679,7 +2758,7 @@ impl App {
     }
 
     fn handle_pause_required(&mut self, raw: &Value, event_seq: Option<u64>) {
-        self.session_state = SessionState::Paused;
+        self.set_session_state(SessionState::Paused);
         let filtered = self.filtered_approval_raw(raw);
         match ApprovalModalState::from_event_in_scope(
             self.approval_scope(&filtered, event_seq),
@@ -2832,11 +2911,17 @@ impl App {
             {
                 existing.update_from_tool_call(card);
                 self.selected_tool_index = Some(idx);
+                let detail = existing.summary();
+                if self.session_state.shows_working_indicator() && !detail.is_empty() {
+                    self.working_detail = Some(detail);
+                }
                 return;
             }
         }
+        let detail = card.summary();
         self.transcript.push(TranscriptItem::Tool(card));
         self.selected_tool_index = Some(self.transcript.len() - 1);
+        self.set_working_detail(detail);
     }
 
     fn complete_tool(
@@ -2852,6 +2937,7 @@ impl App {
                     card.result = result.clone();
                     card.status = status;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    let detail = card.summary();
                     if self.native_scrollback {
                         let item = self.transcript.remove(idx);
                         self.history.enqueue(item);
@@ -2866,6 +2952,9 @@ impl App {
                         });
                     } else {
                         self.selected_tool_index = Some(idx);
+                    }
+                    if self.session_state.shows_working_indicator() && !detail.is_empty() {
+                        self.working_detail = Some(detail);
                     }
                     self.finalize_matching_tool_messages(id);
                     return;
@@ -3049,7 +3138,7 @@ impl App {
     fn quit_action(&mut self) -> AppAction {
         let abort_active = self.is_chat_active();
         if abort_active {
-            self.session_state = SessionState::Idle;
+            self.set_session_state(SessionState::Idle);
             self.clear_approvals();
             self.ask_questions_form = None;
         } else {
@@ -3392,7 +3481,7 @@ impl App {
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
-            self.session_state = SessionState::Idle;
+            self.set_session_state(SessionState::Idle);
             self.add_notice("Cancel requested");
             self.ask_questions_form = None;
             AppAction::Abort
@@ -3578,7 +3667,7 @@ impl App {
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
-            self.session_state = SessionState::Idle;
+            self.set_session_state(SessionState::Idle);
             self.clear_approvals();
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
@@ -3707,7 +3796,7 @@ impl App {
     pub fn test_set_approval(&mut self, modal: ApprovalModalState) {
         self.clear_approvals();
         self.enqueue_approval(modal);
-        self.session_state = SessionState::Paused;
+        self.set_session_state(SessionState::Paused);
     }
 
     #[cfg(test)]
@@ -6004,7 +6093,7 @@ new-chat = "ctrl-x"
     #[test]
     fn abort_success_with_empty_queue_stays_idle() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
         assert_eq!(app.session_state(), SessionState::Idle);
 
@@ -6018,7 +6107,7 @@ new-chat = "ctrl-x"
     #[test]
     fn queued_item_can_be_edited_and_removed() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         app.composer.set_text("draft");
         app.handle_key(key(KeyCode::Enter));
         app.composer.set_text("keep draft");
@@ -6039,7 +6128,7 @@ new-chat = "ctrl-x"
     #[test]
     fn abort_retains_queue_and_restores_edit_draft() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         app.composer.set_text("queued");
         app.handle_key(key(KeyCode::Enter));
         app.composer.set_text("draft");
@@ -6066,13 +6155,13 @@ new-chat = "ctrl-x"
     #[test]
     fn finishing_queue_edit_while_idle_dispatches_next_item() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         app.composer.set_text("queued");
         app.handle_key(key(KeyCode::Enter));
         app.composer.set_text("draft");
         app.handle_key(key(KeyCode::Up));
         app.handle_key(key(KeyCode::Enter));
-        app.session_state = SessionState::Idle;
+        app.set_session_state(SessionState::Idle);
         app.composer.set_text("edited");
 
         let action = app.handle_key(key(KeyCode::Enter));
@@ -6822,7 +6911,7 @@ new-chat = "ctrl-x"
     #[test]
     fn app_cancel_and_double_ctrl_c_behaviour() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
             AppAction::Abort
@@ -6843,7 +6932,7 @@ new-chat = "ctrl-x"
     #[test]
     fn ctrl_c_during_generation_aborts_without_arming_quit_countdown() {
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -6866,7 +6955,7 @@ new-chat = "ctrl-x"
         let base_url = spawn_command_server(state.clone());
         let client = DaemonClient::new(base_url, None).unwrap();
         let mut app = App::new(project());
-        app.session_state = SessionState::Generating;
+        app.set_session_state(SessionState::Generating);
         let action = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert_eq!(action, AppAction::Quit { abort_active: true });
         assert!(app.should_quit());
@@ -7218,6 +7307,40 @@ new-chat = "ctrl-x"
         assert_eq!(cards[0].result, "done");
         assert!(cards[0].expanded);
         assert!(cards[0].args_preview.contains("echo 2"));
+    }
+
+    #[test]
+    fn working_indicator_ticks_and_tracks_current_tool_detail() {
+        let mut app = App::new(project());
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "generating"}),
+        });
+        assert_eq!(app.working_tick(), 0);
+        app.apply_stream_commit_tick();
+        assert_eq!(app.working_tick(), 1);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}}]}]}),
+        });
+        assert!(app
+            .working_detail()
+            .is_some_and(|detail| detail.contains("shell") && detail.contains("echo 1")));
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "idle"}),
+        });
+        assert_eq!(app.working_tick(), 0);
+        assert_eq!(app.working_elapsed_ms(), 0);
+        assert_eq!(app.working_detail(), None);
     }
 
     #[test]
