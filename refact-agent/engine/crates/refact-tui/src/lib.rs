@@ -17,6 +17,7 @@ pub mod render;
 pub mod sessions;
 pub mod streaming;
 pub mod terminal;
+pub mod text_safety;
 pub mod theme;
 pub mod tools;
 pub mod ui;

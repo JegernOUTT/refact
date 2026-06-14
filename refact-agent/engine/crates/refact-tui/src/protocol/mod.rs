@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::text_safety::sanitize_tool_inline;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
     Snapshot {
@@ -621,17 +623,195 @@ pub fn delta_ops_from_value(value: &Value) -> Vec<DeltaOp> {
 }
 
 pub fn content_text(message: &Value) -> Option<String> {
-    match message.get("content")? {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(parts) => Some(
-            parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        value => Some(value_to_compact_string(value)),
+    let content = match message.get("content")? {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(content_part_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        value => value_to_compact_string(value),
+    };
+    if message.get("role").and_then(Value::as_str) == Some("tool") {
+        Some(crate::text_safety::sanitize_tool_text(content))
+    } else {
+        Some(content)
     }
+}
+
+fn content_part_text(part: &Value) -> Option<String> {
+    if content_part_is_image(part) {
+        return Some(image_placeholder(part));
+    }
+    if content_part_is_file(part) {
+        return Some(file_placeholder(part));
+    }
+    part.get("text")
+        .or_else(|| {
+            part.get("m_content")
+                .filter(|_| content_part_type(part) == Some("text"))
+        })
+        .or_else(|| part.get("input_text"))
+        .or_else(|| part.get("output_text"))
+        .or_else(|| part.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            part.get("content")
+                .and_then(Value::as_array)
+                .map(|parts| content_parts_text(parts))
+        })
+        .or_else(|| content_part_placeholder(part))
+}
+
+fn content_parts_text(parts: &[Value]) -> String {
+    parts
+        .iter()
+        .filter_map(content_part_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn content_part_placeholder(part: &Value) -> Option<String> {
+    let kind = content_part_type(part).unwrap_or_default();
+    if kind == "text" {
+        return None;
+    }
+    if content_part_is_image(part) {
+        return Some(image_placeholder(part));
+    }
+    if content_part_is_file(part) {
+        return Some(file_placeholder(part));
+    }
+    if kind.is_empty() {
+        None
+    } else {
+        Some(format!("[{}]", sanitize_tool_inline(kind)))
+    }
+}
+
+fn content_part_type(part: &Value) -> Option<&str> {
+    part.get("type")
+        .or_else(|| part.get("m_type"))
+        .and_then(Value::as_str)
+}
+
+fn content_part_is_image(part: &Value) -> bool {
+    let kind = content_part_type(part).unwrap_or_default();
+    kind.starts_with("image/")
+        || matches!(kind, "image" | "image_url" | "input_image" | "output_image")
+        || part.get("image_url").is_some()
+}
+
+fn content_part_is_file(part: &Value) -> bool {
+    let kind = content_part_type(part).unwrap_or_default();
+    matches!(kind, "file" | "input_file" | "output_file" | "document")
+        || part.get("file_id").is_some()
+        || part.get("filename").is_some()
+        || part.get("file_name").is_some()
+}
+
+fn image_placeholder(part: &Value) -> String {
+    let mime = part
+        .get("mime_type")
+        .or_else(|| part.get("media_type"))
+        .and_then(Value::as_str)
+        .or_else(|| part.get("m_type").and_then(Value::as_str))
+        .or_else(|| {
+            part.get("source")
+                .and_then(|source| source.get("media_type"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| image_url(part).and_then(mime_from_data_url))
+        .unwrap_or("image");
+    match image_bytes(part) {
+        Some(bytes) => format!("[image: {}, {} bytes]", sanitize_tool_inline(mime), bytes),
+        None => format!("[image: {}]", sanitize_tool_inline(mime)),
+    }
+}
+
+fn file_placeholder(part: &Value) -> String {
+    let name = part
+        .get("filename")
+        .or_else(|| part.get("file_name"))
+        .or_else(|| part.get("name"))
+        .or_else(|| part.get("file_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("file");
+    let mime = part
+        .get("mime_type")
+        .or_else(|| part.get("media_type"))
+        .and_then(Value::as_str);
+    match (mime, file_bytes(part)) {
+        (Some(mime), Some(bytes)) => format!(
+            "[file: {}, {}, {} bytes]",
+            sanitize_tool_inline(name),
+            sanitize_tool_inline(mime),
+            bytes
+        ),
+        (Some(mime), None) => format!(
+            "[file: {}, {}]",
+            sanitize_tool_inline(name),
+            sanitize_tool_inline(mime)
+        ),
+        (None, Some(bytes)) => format!("[file: {}, {} bytes]", sanitize_tool_inline(name), bytes),
+        (None, None) => format!("[file: {}]", sanitize_tool_inline(name)),
+    }
+}
+
+fn image_url(part: &Value) -> Option<&str> {
+    part.get("image_url").and_then(|value| match value {
+        Value::String(url) => Some(url.as_str()),
+        Value::Object(map) => map.get("url").and_then(Value::as_str),
+        _ => None,
+    })
+}
+
+fn image_bytes(part: &Value) -> Option<usize> {
+    image_url(part)
+        .and_then(data_url_payload)
+        .map(estimated_base64_bytes)
+        .or_else(|| {
+            part.get("m_content")
+                .and_then(Value::as_str)
+                .map(estimated_base64_bytes)
+        })
+        .or_else(|| {
+            part.get("data")
+                .and_then(Value::as_str)
+                .map(estimated_base64_bytes)
+        })
+        .or_else(|| {
+            part.get("source")
+                .and_then(|source| source.get("data"))
+                .and_then(Value::as_str)
+                .map(estimated_base64_bytes)
+        })
+}
+
+fn file_bytes(part: &Value) -> Option<usize> {
+    part.get("bytes")
+        .and_then(Value::as_u64)
+        .map(|bytes| bytes as usize)
+        .or_else(|| part.get("blob").and_then(Value::as_str).map(str::len))
+        .or_else(|| part.get("data").and_then(Value::as_str).map(str::len))
+}
+
+fn mime_from_data_url(url: &str) -> Option<&str> {
+    url.strip_prefix("data:")?
+        .split_once(';')
+        .map(|(mime, _)| mime)
+}
+
+fn data_url_payload(url: &str) -> Option<&str> {
+    url.strip_prefix("data:")?
+        .split_once(',')
+        .map(|(_, data)| data)
+}
+
+fn estimated_base64_bytes(data: &str) -> usize {
+    let trimmed = data.trim_end_matches('=');
+    trimmed.len().saturating_mul(3) / 4
 }
 
 fn value_to_text(value: &Value) -> Option<String> {
@@ -756,5 +936,35 @@ mod tests {
         assert_eq!(message.server_content_blocks[0]["type"], "web_search_call");
         assert_eq!(message.usage.as_ref().unwrap()["total_tokens"], 3);
         assert_eq!(message.extra["metering"], 7);
+    }
+
+    #[test]
+    fn content_text_keeps_multimodal_placeholders_and_text() {
+        let message = json!({
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "found it"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}},
+                {"type": "file", "filename": "report.pdf", "mime_type": "application/pdf", "bytes": 1234}
+            ]
+        });
+
+        let content = content_text(&message).unwrap();
+
+        assert!(content.contains("found it"));
+        assert!(content.contains("[image: image/png, 4 bytes]"));
+        assert!(content.contains("[file: report.pdf, application/pdf, 1234 bytes]"));
+        assert!(!content.contains("(no output)"));
+    }
+
+    #[test]
+    fn tool_content_text_sanitizes_escape_sequences() {
+        let message = json!({"role": "tool", "content": "ok\x1b]0;pwned\x07\x1b[2Jdone"});
+        let content = content_text(&message).unwrap();
+
+        assert!(!content.contains('\x1b'));
+        assert!(!content.contains('\x07'));
+        assert!(!content.contains("pwned"));
+        assert_eq!(content, "okdone");
     }
 }

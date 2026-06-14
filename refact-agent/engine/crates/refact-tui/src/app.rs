@@ -50,6 +50,7 @@ use crate::sessions::{
 };
 use crate::streaming::{run_commit_tick, StreamController};
 use crate::terminal::{terminal_title, TerminalSession, TerminalTitleConfig};
+use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text, truncate_graphemes};
 use crate::theme::TuiTheme;
 use crate::tools::{
     now_ms, ToolCard, ToolStatus, MAX_SUBCHAT_ATTACHED_FILES, MAX_SUBCHAT_DEPTH,
@@ -3825,7 +3826,7 @@ impl App {
         for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
             if let TranscriptItem::Tool(card) = item {
                 if card.id == id || id.is_empty() {
-                    card.result = result.clone();
+                    card.set_result(&result);
                     card.status = status;
                     card.subchat_active = false;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
@@ -3854,7 +3855,7 @@ impl App {
             }
         }
         let mut card = ToolCard::from_tool_call(&json!({"id": id, "name": "tool"}));
-        card.result = result;
+        card.set_result(&result);
         card.status = status;
         card.duration_ms = Some(0);
         let item = TranscriptItem::Tool(card);
@@ -6665,7 +6666,11 @@ struct SubagentSummary {
 
 impl SubagentSummary {
     fn detail(&self) -> String {
-        let mut parts = vec![format!("{} [{}]", self.tool_name, self.tool_call_id)];
+        let mut parts = vec![format!(
+            "{} [{}]",
+            sanitize_tool_inline(&self.tool_name),
+            sanitize_tool_inline(&self.tool_call_id)
+        )];
         parts.push(if self.active { "active" } else { "recent" }.to_string());
         if self.depth > 1 {
             parts.push(format!("depth {}", self.depth));
@@ -6677,22 +6682,14 @@ impl SubagentSummary {
             parts.push("truncated".to_string());
         }
         if let Some(progress) = &self.progress {
-            parts.push(progress.clone());
+            parts.push(sanitize_tool_text(progress));
         }
         parts.join(" · ")
     }
 }
 
 fn truncate_subchat_progress(progress: &str) -> (String, bool) {
-    if progress.chars().count() <= MAX_SUBCHAT_PROGRESS_CHARS {
-        return (progress.to_string(), false);
-    }
-    let mut truncated = progress
-        .chars()
-        .take(MAX_SUBCHAT_PROGRESS_CHARS)
-        .collect::<String>();
-    truncated.push('…');
-    (truncated, true)
+    truncate_graphemes(&sanitize_tool_text(progress), MAX_SUBCHAT_PROGRESS_CHARS)
 }
 
 fn apply_subchat_update_to_card(
@@ -6718,11 +6715,12 @@ fn apply_subchat_update_to_card(
         card.subchat_log.push(progress.to_string());
     }
     for file in attached_files {
-        if file.is_empty() || card.attached_files.contains(file) {
+        let file = sanitize_tool_text(file);
+        if file.is_empty() || card.attached_files.contains(&file) {
             continue;
         }
         if card.attached_files.len() < MAX_SUBCHAT_ATTACHED_FILES {
-            card.attached_files.push(file.clone());
+            card.attached_files.push(file);
         } else {
             card.subchat_truncated = true;
         }
@@ -6780,11 +6778,12 @@ fn apply_subchat_update_to_tool_value(
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect::<Vec<_>>();
     for file in attached_files {
-        if file.is_empty() || files.contains(file) {
+        let file = sanitize_tool_text(file);
+        if file.is_empty() || files.contains(&file) {
             continue;
         }
         if files.len() < MAX_SUBCHAT_ATTACHED_FILES {
-            files.push(file.clone());
+            files.push(file);
         } else {
             truncated = true;
         }

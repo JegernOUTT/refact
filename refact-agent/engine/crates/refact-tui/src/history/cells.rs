@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::app::TranscriptItem;
 use crate::approvals::{render_modal_lines, ApprovalModalState};
 use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff, MarkdownRenderer};
+use crate::text_safety::{compact_tool_preview, sanitize_json_strings, sanitize_tool_text};
 use crate::tools::{ToolCard, ToolStatus};
 use crate::vendored::terminal_hyperlinks::{plain_hyperlink_lines, HyperlinkLine};
 
@@ -1321,9 +1322,10 @@ fn argument_value(card: &ToolCard, keys: &[&str]) -> Option<String> {
 }
 
 fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        value => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    let sanitized = sanitize_json_strings(value);
+    match sanitized {
+        Value::String(value) => value,
+        value => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
     }
 }
 
@@ -1347,6 +1349,7 @@ fn output_lines(
     max_lines: usize,
     collapsed: bool,
 ) -> Vec<Line<'static>> {
+    let result = sanitize_tool_text(result);
     let all_lines = result.lines().collect::<Vec<_>>();
     if all_lines.is_empty() {
         return vec![Line::from(Span::styled(
@@ -1392,13 +1395,7 @@ fn output_style(line: &str) -> Style {
 }
 
 fn compact_preview(value: &str, max_chars: usize) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let mut out = compact.chars().take(max_chars).collect::<String>();
-    out.push('…');
-    out
+    compact_tool_preview(value, max_chars)
 }
 
 fn format_duration(duration_ms: u64) -> String {

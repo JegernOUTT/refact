@@ -3,6 +3,9 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff};
+use crate::text_safety::{
+    compact_tool_preview, sanitize_json_strings, sanitize_tool_inline, sanitize_tool_text,
+};
 
 const MAX_RESULT_LINES: usize = 200;
 pub const MAX_SUBCHAT_DEPTH: usize = 5;
@@ -55,13 +58,14 @@ impl ToolCard {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let name = value
-            .get("function")
-            .and_then(|function| function.get("name"))
-            .or_else(|| value.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("tool")
-            .to_string();
+        let name = sanitize_tool_inline(
+            value
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .or_else(|| value.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+        );
         let raw_args = value
             .get("function")
             .and_then(|function| function.get("arguments"))
@@ -108,9 +112,13 @@ impl ToolCard {
     }
 
     pub fn with_result(mut self, result: impl Into<String>, status: ToolStatus) -> Self {
-        self.result = result.into();
+        self.result = sanitize_tool_text(result.into());
         self.status = status;
         self
+    }
+
+    pub fn set_result(&mut self, result: impl AsRef<str>) {
+        self.result = sanitize_tool_text(result);
     }
 
     pub fn update_from_tool_call(&mut self, update: ToolCard) {
@@ -260,7 +268,7 @@ fn subchat_log_from_value(value: &Value) -> Vec<String> {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty() && !value.contains("/tool:"))
         {
-            log.push(subchat.to_string());
+            log.push(sanitize_tool_text(subchat));
         }
     }
     log.truncate(1);
@@ -276,16 +284,17 @@ fn string_array_field(value: &Value, field: &str) -> Vec<String> {
                 .iter()
                 .filter_map(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string)
+                .map(sanitize_tool_text)
                 .collect()
         })
         .unwrap_or_default()
 }
 
 pub fn render_tool_result(result: &str, width: usize) -> Vec<Line<'static>> {
-    if is_unified_diff(result) {
+    let result = sanitize_tool_text(result);
+    if is_unified_diff(&result) {
         return render_unified_diff(
-            result,
+            &result,
             Some(width.saturating_sub(2).max(8)),
             color_enabled_from_env(),
         )
@@ -340,20 +349,21 @@ pub fn now_ms() -> u64 {
 }
 
 fn value_to_display(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        value => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    if let Some(text) = value.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+            return value_to_display(&parsed);
+        }
+        return sanitize_tool_text(text);
+    }
+    let sanitized = sanitize_json_strings(value);
+    match sanitized {
+        Value::String(value) => value,
+        value => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
     }
 }
 
 fn compact_preview(value: &str, max_chars: usize) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let mut out = compact.chars().take(max_chars).collect::<String>();
-    out.push('…');
-    out
+    compact_tool_preview(value, max_chars)
 }
 
 fn format_duration(duration_ms: u64) -> String {
@@ -414,6 +424,46 @@ mod tests {
         let lines = render_tool_result(&result, 80);
         assert_eq!(lines.len(), 201);
         assert!(format!("{:?}", lines.last().unwrap()).contains("5 more"));
+    }
+
+    #[test]
+    fn tool_result_escape_sequences_render_inert() {
+        let lines = render_tool_result("ok\x1b]0;pwned\x07\x1b[2Jdone", 80);
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\x07'));
+        assert!(!rendered.contains("pwned"));
+        assert!(rendered.contains("okdone"));
+    }
+
+    #[test]
+    fn tool_call_args_escape_sequences_render_inert() {
+        let card = ToolCard::from_tool_call(&json!({
+            "id": "call-1",
+            "function": {
+                "name": "shell\x1b[31m",
+                "arguments": r#"{"command":"echo \u001b]0;pwned\u0007\u001b[2Jdone"}"#
+            }
+        }));
+
+        let rendered = card.summary();
+
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\x07'));
+        assert!(!rendered.contains("pwned"));
+        assert!(rendered.contains("shell"));
+        assert!(rendered.contains("echo done"));
+    }
+
+    #[test]
+    fn compact_preview_truncates_on_grapheme_boundary() {
+        let family = "👨‍👩‍👧‍👦";
+        let preview = compact_preview(&format!("ab{family}cd"), 3);
+        assert_eq!(preview, format!("ab{family}…"));
     }
 
     #[test]
