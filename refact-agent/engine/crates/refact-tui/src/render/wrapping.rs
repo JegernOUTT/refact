@@ -13,7 +13,6 @@ struct StyledChar {
 #[derive(Clone)]
 enum Piece {
     Range(Range<usize>),
-    Space(Style),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,46 +43,106 @@ pub fn wrap_line(line: Line<'static>, width: Option<usize>) -> Vec<Line<'static>
     let mut current = Vec::<Piece>::new();
     let mut current_width = 0usize;
 
+    let mut pending_space = None::<Range<usize>>;
     for token in tokens {
-        let token_width = range_width(&chars, token.range.clone());
         match token.kind {
-            TokenKind::Space => {
-                if current.is_empty() {
-                    continue;
-                }
-                if current_width + 1 <= width {
-                    let style = chars
-                        .get(token.range.start)
-                        .map(|value| value.style)
-                        .unwrap_or_default();
-                    current.push(Piece::Space(style));
-                    current_width += 1;
-                } else {
-                    push_current(&chars, &mut out, &mut current, &mut current_width);
-                }
-            }
+            TokenKind::Space if current.is_empty() => append_range(
+                &chars,
+                token.range,
+                width,
+                &mut out,
+                &mut current,
+                &mut current_width,
+            ),
+            TokenKind::Space => pending_space = Some(token.range),
             TokenKind::Word => {
-                if token_width > width {
-                    if !current.is_empty() {
-                        push_current(&chars, &mut out, &mut current, &mut current_width);
-                    }
-                    push_hard_wrapped_range(&chars, token.range, width, &mut out);
-                } else if current_width + token_width <= width {
-                    current.push(Piece::Range(token.range));
-                    current_width += token_width;
+                if let Some(space_range) = pending_space.take() {
+                    append_space_and_word(
+                        &chars,
+                        space_range,
+                        token.range,
+                        width,
+                        &mut out,
+                        &mut current,
+                        &mut current_width,
+                    );
                 } else {
-                    push_current(&chars, &mut out, &mut current, &mut current_width);
-                    current.push(Piece::Range(token.range));
-                    current_width = token_width;
+                    append_range(
+                        &chars,
+                        token.range,
+                        width,
+                        &mut out,
+                        &mut current,
+                        &mut current_width,
+                    );
                 }
             }
         }
+    }
+    if let Some(space_range) = pending_space {
+        append_range(
+            &chars,
+            space_range,
+            width,
+            &mut out,
+            &mut current,
+            &mut current_width,
+        );
     }
     push_current(&chars, &mut out, &mut current, &mut current_width);
     if out.is_empty() {
         out.push(Line::default());
     }
     out
+}
+
+fn append_space_and_word(
+    chars: &[StyledChar],
+    space_range: Range<usize>,
+    word_range: Range<usize>,
+    width: usize,
+    out: &mut Vec<Line<'static>>,
+    current: &mut Vec<Piece>,
+    current_width: &mut usize,
+) {
+    let space_width = range_width(chars, space_range.clone());
+    let word_width = range_width(chars, word_range.clone());
+    if *current_width + space_width + word_width <= width {
+        current.push(Piece::Range(space_range));
+        current.push(Piece::Range(word_range));
+        *current_width += space_width + word_width;
+        return;
+    }
+
+    push_current(chars, out, current, current_width);
+    if space_width > 1 {
+        append_range(chars, space_range, width, out, current, current_width);
+    }
+    append_range(chars, word_range, width, out, current, current_width);
+}
+
+fn append_range(
+    chars: &[StyledChar],
+    range: Range<usize>,
+    width: usize,
+    out: &mut Vec<Line<'static>>,
+    current: &mut Vec<Piece>,
+    current_width: &mut usize,
+) {
+    let token_width = range_width(chars, range.clone());
+    if token_width > width {
+        if !current.is_empty() {
+            push_current(chars, out, current, current_width);
+        }
+        push_hard_wrapped_range(chars, range, width, out);
+    } else if *current_width + token_width <= width {
+        current.push(Piece::Range(range));
+        *current_width += token_width;
+    } else {
+        push_current(chars, out, current, current_width);
+        current.push(Piece::Range(range));
+        *current_width = token_width;
+    }
 }
 
 pub fn wrap_plain(text: &str, width: usize) -> Vec<String> {
@@ -164,7 +223,6 @@ fn push_current(
     current: &mut Vec<Piece>,
     current_width: &mut usize,
 ) {
-    trim_spaces(current);
     if current.is_empty() {
         *current_width = 0;
         return;
@@ -172,15 +230,6 @@ fn push_current(
     out.push(line_from_pieces(chars, current));
     current.clear();
     *current_width = 0;
-}
-
-fn trim_spaces(current: &mut Vec<Piece>) {
-    while matches!(current.first(), Some(Piece::Space(_))) {
-        current.remove(0);
-    }
-    while matches!(current.last(), Some(Piece::Space(_))) {
-        current.pop();
-    }
 }
 
 fn push_hard_wrapped_range(
@@ -212,7 +261,6 @@ fn line_from_pieces(chars: &[StyledChar], pieces: &[Piece]) -> Line<'static> {
     for piece in pieces {
         match piece {
             Piece::Range(range) => push_range_spans(chars, range.clone(), &mut spans),
-            Piece::Space(style) => push_span(&mut spans, ' ', *style),
         }
     }
     Line::from(spans)
@@ -275,6 +323,12 @@ mod tests {
         ));
         assert!(lines.len() > 1);
         assert_eq!(lines[0], "https://exam");
+    }
+
+    #[test]
+    fn preserves_indentation_and_multi_space_runs_when_wrapping() {
+        let lines = plain(wrap_line(Line::from("    key  =  value"), Some(12)));
+        assert_eq!(lines, vec!["    key  =", "  value"]);
     }
 
     #[test]

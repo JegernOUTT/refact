@@ -3,6 +3,10 @@ use ratatui::text::{Line, Span};
 
 use super::wrapping::wrap_line;
 
+const WORD_DIFF_MAX_CHARS: usize = 4096;
+const WORD_DIFF_MAX_WORDS: usize = 512;
+const WORD_DIFF_MAX_CELLS: usize = 65_536;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffKind {
     File,
@@ -127,12 +131,33 @@ fn word_diff_spans(
     delete_style: Style,
     add_style: Style,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    if removed.len() > WORD_DIFF_MAX_CHARS || added.len() > WORD_DIFF_MAX_CHARS {
+        return line_level_spans(removed, added, delete_style, add_style);
+    }
     let (removed_tokens, removed_words) = tokenize_words(removed);
     let (added_tokens, added_words) = tokenize_words(added);
+    if removed_words.len() > WORD_DIFF_MAX_WORDS
+        || added_words.len() > WORD_DIFF_MAX_WORDS
+        || removed_words.len().saturating_mul(added_words.len()) > WORD_DIFF_MAX_CELLS
+    {
+        return line_level_spans(removed, added, delete_style, add_style);
+    }
     let (removed_unchanged, added_unchanged) = unchanged_word_indices(&removed_words, &added_words);
     (
         spans_for_tokens(&removed_tokens, &removed_unchanged, delete_style),
         spans_for_tokens(&added_tokens, &added_unchanged, add_style),
+    )
+}
+
+fn line_level_spans(
+    removed: &str,
+    added: &str,
+    delete_style: Style,
+    add_style: Style,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    (
+        vec![Span::styled(removed.to_string(), delete_style)],
+        vec![Span::styled(added.to_string(), add_style)],
     )
 }
 
@@ -249,9 +274,7 @@ fn prefix_for(kind: DiffKind) -> &'static str {
     match kind {
         DiffKind::Add => "+ ",
         DiffKind::Delete => "- ",
-        DiffKind::Hunk => "@ ",
-        DiffKind::File => "  ",
-        DiffKind::Context => "  ",
+        DiffKind::Hunk | DiffKind::File | DiffKind::Context => "",
     }
 }
 
@@ -308,6 +331,18 @@ mod tests {
     }
 
     #[test]
+    fn renders_file_hunk_and_context_lines_verbatim() {
+        let lines = render_unified_diff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n same", Some(80), false);
+        let rendered = plain(&lines);
+        assert!(rendered.contains(&"--- a/x".to_string()));
+        assert!(rendered.contains(&"+++ b/x".to_string()));
+        assert!(rendered.contains(&"@@ -1 +1 @@".to_string()));
+        assert!(rendered.contains(&" same".to_string()));
+        assert!(!rendered.iter().any(|line| line.starts_with("@ @@")));
+        assert!(!rendered.iter().any(|line| line.starts_with("  ---")));
+    }
+
+    #[test]
     fn highlights_changed_words_in_adjacent_delete_add_pair() {
         let lines = render_unified_diff(
             "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";",
@@ -342,6 +377,30 @@ mod tests {
             .style
             .add_modifier
             .contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn oversized_word_diff_uses_line_level_fallback() {
+        let removed = format!("-{}", "slow ".repeat(WORD_DIFF_MAX_WORDS + 1));
+        let added = format!("+{}", "fast ".repeat(WORD_DIFF_MAX_WORDS + 1));
+        let diff = format!("--- a/x\n+++ b/x\n@@ -1 +1 @@\n{removed}\n{added}");
+        let lines = render_unified_diff(&diff, None, true);
+        let removed_line = lines
+            .iter()
+            .find(|line| line_to_plain(line).starts_with("- slow"))
+            .unwrap();
+        let added_line = lines
+            .iter()
+            .find(|line| line_to_plain(line).starts_with("+ fast"))
+            .unwrap();
+        assert!(removed_line
+            .spans
+            .iter()
+            .all(|span| !span.style.add_modifier.contains(Modifier::REVERSED)));
+        assert!(added_line
+            .spans
+            .iter()
+            .all(|span| !span.style.add_modifier.contains(Modifier::REVERSED)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::color_enabled_from_env;
 use super::diff::{is_unified_diff, render_unified_diff};
@@ -346,7 +346,7 @@ impl Writer {
             return;
         }
         let source = std::mem::take(&mut self.current);
-        let wrapped = wrap_line(source.line.clone(), self.options.width);
+        let wrapped = self.wrap_line(source.line.clone());
         self.out.extend(remap_wrapped_line(&source, wrapped));
     }
 
@@ -370,11 +370,68 @@ impl Writer {
         ) {
             let mut spans = vec![Span::styled("  ", self.style(MarkdownStyle::Muted))];
             spans.extend(line.spans);
-            self.out.extend(plain_hyperlink_lines(wrap_line(
-                Line::from(spans),
-                self.options.width,
-            )));
+            self.out
+                .extend(plain_hyperlink_lines(self.wrap_line(Line::from(spans))));
         }
+    }
+
+    fn wrap_line(&self, line: Line<'static>) -> Vec<Line<'static>> {
+        let Some(width) = self.options.width.filter(|width| *width > 0) else {
+            return vec![line];
+        };
+        let Some(prefix) = self.continuation_prefix(&line) else {
+            return wrap_line(line, Some(width));
+        };
+        if line_width(&line) <= width || prefix.width >= width {
+            return wrap_line(line, Some(width));
+        }
+
+        let (source_prefix, body) = split_line_at_width(line, prefix.width);
+        wrap_line(body, Some(width - prefix.width))
+            .into_iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                prepend_spans(
+                    line,
+                    if idx == 0 {
+                        &source_prefix
+                    } else {
+                        &prefix.continuation
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn continuation_prefix(&self, line: &Line<'static>) -> Option<ContinuationPrefix> {
+        let text = line_to_plain(line);
+        if text.starts_with("▍ ") {
+            return Some(ContinuationPrefix {
+                width: 2,
+                continuation: leading_spans(line, 2),
+            });
+        }
+        let muted = self.style(MarkdownStyle::Muted);
+        if line
+            .spans
+            .first()
+            .is_some_and(|span| span.style == muted && span.content.as_ref().starts_with("  "))
+        {
+            return Some(ContinuationPrefix {
+                width: 2,
+                continuation: vec![Span::styled("  ", muted)],
+            });
+        }
+        if let Some(width) = list_prefix_width(&text) {
+            return Some(ContinuationPrefix {
+                width,
+                continuation: vec![Span::styled(
+                    " ".repeat(width),
+                    self.style(MarkdownStyle::ListMarker),
+                )],
+            });
+        }
+        None
     }
 
     fn flush_table(&mut self) {
@@ -460,6 +517,81 @@ enum MarkdownStyle {
 struct CodeBlockState {
     lang: String,
     source: String,
+}
+
+struct ContinuationPrefix {
+    width: usize,
+    continuation: Vec<Span<'static>>,
+}
+
+fn prepend_spans(mut line: Line<'static>, prefix: &[Span<'static>]) -> Line<'static> {
+    let mut spans = prefix.to_vec();
+    spans.extend(std::mem::take(&mut line.spans));
+    line.spans = spans;
+    line
+}
+
+fn split_line_at_width(
+    line: Line<'static>,
+    target_width: usize,
+) -> (Vec<Span<'static>>, Line<'static>) {
+    let mut prefix = Vec::new();
+    let mut body = Vec::new();
+    let mut consumed = 0usize;
+    let mut in_body = false;
+
+    for span in line.spans {
+        if in_body {
+            body.push(span);
+            continue;
+        }
+
+        let mut prefix_text = String::new();
+        let mut body_text = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if consumed < target_width && consumed + ch_width <= target_width {
+                prefix_text.push(ch);
+                consumed += ch_width;
+            } else {
+                in_body = true;
+                body_text.push(ch);
+            }
+        }
+        if !prefix_text.is_empty() {
+            prefix.push(Span::styled(prefix_text, span.style));
+        }
+        if !body_text.is_empty() {
+            body.push(Span::styled(body_text, span.style));
+        }
+    }
+
+    (prefix, Line::from(body))
+}
+
+fn leading_spans(line: &Line<'static>, target_width: usize) -> Vec<Span<'static>> {
+    split_line_at_width(line.clone(), target_width).0
+}
+
+fn list_prefix_width(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let indent = bytes.iter().take_while(|byte| **byte == b' ').count();
+    let rest = &text[indent..];
+    if rest.starts_with("• ")
+        || rest.starts_with("- ")
+        || rest.starts_with("* ")
+        || rest.starts_with("+ ")
+    {
+        return Some(indent + 2);
+    }
+    let digits = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits > 0 && rest.as_bytes().get(digits..digits + 2) == Some(b". ") {
+        return Some(indent + digits + 2);
+    }
+    None
 }
 
 #[derive(Default, Clone)]
@@ -825,6 +957,20 @@ mod tests {
         );
         let rendered = text(&lines);
         assert!(rendered.iter().any(|line| line == url));
+    }
+
+    #[test]
+    fn wrapped_list_and_blockquote_lines_keep_continuation_prefixes() {
+        let lines = render_markdown_with_options(
+            "- alpha beta gamma delta epsilon zeta\n\n> quoted alpha beta gamma delta",
+            RenderOptions::plain(Some(16)),
+        );
+        let rendered = text(&lines);
+        assert!(rendered.iter().any(|line| line == "• alpha beta"));
+        assert!(rendered.iter().any(|line| line == "  gamma delta"));
+        assert!(rendered.iter().any(|line| line == "▍ quoted alpha"));
+        assert!(rendered.iter().any(|line| line == "▍ beta gamma"));
+        assert!(rendered.iter().all(|line| line.width() <= 16));
     }
 
     #[test]
