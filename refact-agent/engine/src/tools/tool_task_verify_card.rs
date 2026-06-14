@@ -89,6 +89,7 @@ impl Tool for ToolTaskVerifyCard {
             VerifyCardRequest {
                 task_id,
                 card_id: card_id.clone(),
+                expected_state: None,
             },
         )
         .await?;

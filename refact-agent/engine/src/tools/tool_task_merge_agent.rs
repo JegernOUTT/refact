@@ -12,6 +12,7 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::chat::verifier::load_expected_card_state;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
@@ -648,8 +649,14 @@ async fn merge_registered_task_worktree(
         expected_agent_chat_id,
     )
     .await?;
-    let post_merge_check = match response.merge_commit.as_ref() {
-        Some(merge_commit) if response.merged && auto_revert => Some(
+    let post_merge_expected_state =
+        if response.merge_commit.is_some() && response.merged && auto_revert {
+            Some(load_expected_card_state(gcx.clone(), task_id, card_id).await?)
+        } else {
+            None
+        };
+    let post_merge_check = match (response.merge_commit.as_ref(), post_merge_expected_state) {
+        (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => Some(
             crate::chat::post_merge_check::post_merge_check(
                 gcx,
                 crate::chat::post_merge_check::PostMergeCheckRequest {
@@ -659,6 +666,7 @@ async fn merge_registered_task_worktree(
                     enabled: auto_revert,
                     timeout: auto_revert_timeout,
                     expected_merge_commit: merge_commit.clone(),
+                    expected_card_state: Some(expected_card_state),
                 },
             )
             .await?,
@@ -1196,6 +1204,8 @@ Use `cat <file>` to see conflict markers in each file."#,
         drop(_guard);
 
         let post_merge_check = if auto_revert && !merge_commit.is_empty() {
+            let expected_card_state =
+                load_expected_card_state(gcx.clone(), &task_id, card_id).await?;
             Some(
                 crate::chat::post_merge_check::post_merge_check(
                     gcx.clone(),
@@ -1206,6 +1216,7 @@ Use `cat <file>` to see conflict markers in each file."#,
                         enabled: true,
                         timeout: auto_revert_timeout,
                         expected_merge_commit: merge_commit,
+                        expected_card_state: Some(expected_card_state),
                     },
                 )
                 .await?,

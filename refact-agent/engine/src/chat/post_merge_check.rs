@@ -8,12 +8,14 @@ use chrono::Utc;
 use tokio::process::Command;
 
 use crate::chat::verify_cmd::parse_restricted_argv;
+use crate::chat::verifier::ExpectedCardState;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, BoardColumn, StatusUpdate};
 
 pub const DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_TAIL_CHARS: usize = 6000;
+const STALE_POST_MERGE_WRITE: &str = "stale post-merge write";
 
 #[derive(Clone, Debug)]
 pub struct PostMergeCheckRequest {
@@ -23,6 +25,7 @@ pub struct PostMergeCheckRequest {
     pub enabled: bool,
     pub timeout: Duration,
     pub expected_merge_commit: String,
+    pub expected_card_state: Option<ExpectedCardState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,10 +162,18 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
     }
 
     let board = storage::load_board(gcx.clone(), &request.task_id).await?;
-    let card = board
-        .get_card(&request.card_id)
-        .ok_or_else(|| format!("Card {} not found", request.card_id))?
-        .clone();
+    let Some(card) = board.get_card(&request.card_id) else {
+        if request.expected_card_state.is_some() {
+            return Ok(skipped_result("stale card state"));
+        }
+        return Err(format!("Card {} not found", request.card_id));
+    };
+    if let Some(expected) = request.expected_card_state.as_ref() {
+        if !expected.matches_board_card(board.rev, card) {
+            return Ok(skipped_result("stale card state"));
+        }
+    }
+    let card = card.clone();
     let commands = extract_verification_commands(&card.instructions);
     if commands.is_empty() {
         return Ok(skipped_result("no verification command found"));
@@ -234,6 +245,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             gcx,
             &request.task_id,
             &request.card_id,
+            request.expected_card_state.as_ref(),
             &command,
             &output_tail,
             &expected_merge_commit,
@@ -251,7 +263,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             output_tail,
             merge_commit: Some(expected_merge_commit),
             revert_commit: None,
-            fix_card_id: Some(fix_card_id),
+            fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
         });
@@ -266,6 +278,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             gcx,
             &request.task_id,
             &request.card_id,
+            request.expected_card_state.as_ref(),
             &command,
             &output_tail,
             &expected_merge_commit,
@@ -283,7 +296,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             output_tail,
             merge_commit: Some(expected_merge_commit),
             revert_commit: None,
-            fix_card_id: Some(fix_card_id),
+            fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
         });
@@ -312,6 +325,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             gcx,
             &request.task_id,
             &request.card_id,
+            request.expected_card_state.as_ref(),
             &command,
             &output_tail,
             &expected_merge_commit,
@@ -329,7 +343,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             output_tail,
             merge_commit: Some(expected_merge_commit),
             revert_commit: None,
-            fix_card_id: Some(fix_card_id),
+            fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
         });
@@ -367,6 +381,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         gcx,
         &request.task_id,
         &request.card_id,
+        request.expected_card_state.as_ref(),
         &command,
         &output_tail,
         merge_commit.as_deref().unwrap_or("unknown"),
@@ -385,7 +400,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         output_tail,
         merge_commit,
         revert_commit,
-        fix_card_id: Some(fix_card_id),
+        fix_card_id,
         skipped_reason: None,
         revert_skipped_reason: None,
     })
@@ -521,6 +536,7 @@ async fn store_regression_result(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     card_id: &str,
+    expected_card_state: Option<&ExpectedCardState>,
     command: &str,
     output_tail: &str,
     merge_commit: &str,
@@ -528,8 +544,10 @@ async fn store_regression_result(
     first_error: &str,
     revert_skipped_reason: Option<&str>,
     diagnostic: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let card_id_owned = card_id.to_string();
+    let task_id_owned = task_id.to_string();
+    let expected_card_state = expected_card_state.cloned();
     let command_owned = command.to_string();
     let output_owned = output_tail.to_string();
     let merge_commit_owned = merge_commit.to_string();
@@ -537,12 +555,26 @@ async fn store_regression_result(
     let first_error_owned = first_error.to_string();
     let revert_skipped_reason_owned = revert_skipped_reason.map(str::to_string);
     let diagnostic_owned = diagnostic.map(str::to_string);
-    let (_, fix_card_id) = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+    let result = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+        let Some(source_card_ref) = board.get_card(&card_id_owned) else {
+            if expected_card_state.is_some() {
+                return Err(format!(
+                    "{} for task {} card {}: card no longer exists",
+                    STALE_POST_MERGE_WRITE, task_id_owned, card_id_owned
+                ));
+            }
+            return Err(format!("Card {} not found", card_id_owned));
+        };
+        if let Some(expected) = expected_card_state.as_ref() {
+            if !expected.matches_board_card(board.rev, source_card_ref) {
+                return Err(format!(
+                    "{} for task {} card {}: current card state no longer matches post-merge request",
+                    STALE_POST_MERGE_WRITE, task_id_owned, card_id_owned
+                ));
+            }
+        }
+        let source_card = source_card_ref.clone();
         ensure_regressed_column(board);
-        let source_card = board
-            .get_card(&card_id_owned)
-            .ok_or_else(|| format!("Card {} not found", card_id_owned))?
-            .clone();
         let fix_card_id = next_fix_card_id(board, &card_id_owned);
         let now = Utc::now().to_rfc3339();
         let original = board
@@ -569,9 +601,17 @@ async fn store_regression_result(
         ));
         Ok(fix_card_id)
     })
-    .await?;
+    .await;
+    let fix_card_id = match result {
+        Ok((_, fix_card_id)) => fix_card_id,
+        Err(error) if error.starts_with(STALE_POST_MERGE_WRITE) => {
+            tracing::info!("{}", error);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let _ = storage::update_task_stats(gcx, task_id).await;
-    Ok(fix_card_id)
+    Ok(Some(fix_card_id))
 }
 
 fn ensure_regressed_column(board: &mut crate::tasks::types::TaskBoard) {
@@ -738,6 +778,13 @@ mod tests {
         calls: Vec<PostMergeCommand>,
     }
 
+    struct MutatingRunner {
+        outputs: VecDeque<PostMergeCommandOutput>,
+        calls: Vec<PostMergeCommand>,
+        gcx: Arc<GlobalContext>,
+        mutated: bool,
+    }
+
     #[async_trait]
     impl PostMergeCommandRunner for MockRunner {
         async fn run(
@@ -747,6 +794,36 @@ mod tests {
             _timeout: Duration,
         ) -> PostMergeCommandOutput {
             self.calls.push(command);
+            self.outputs
+                .pop_front()
+                .expect("mock output must be queued")
+        }
+    }
+
+    #[async_trait]
+    impl PostMergeCommandRunner for MutatingRunner {
+        async fn run(
+            &mut self,
+            _workspace_root: &Path,
+            command: PostMergeCommand,
+            _timeout: Duration,
+        ) -> PostMergeCommandOutput {
+            let should_mutate = matches!(
+                &command,
+                PostMergeCommand::Git(args)
+                    if args.first().map(String::as_str) == Some("rev-parse")
+            );
+            self.calls.push(command);
+            if should_mutate && !self.mutated {
+                storage::update_board_atomic(self.gcx.clone(), "task-1", |board| {
+                    board.get_card_mut("T-1").unwrap().final_report =
+                        Some("newer finish".to_string());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                self.mutated = true;
+            }
             self.outputs
                 .pop_front()
                 .expect("mock output must be queued")
@@ -837,6 +914,7 @@ mod tests {
             enabled: true,
             timeout: Duration::from_secs(5),
             expected_merge_commit: "mergehash".to_string(),
+            expected_card_state: None,
         }
     }
 
@@ -1083,6 +1161,85 @@ mod tests {
             .iter()
             .any(|update| update.message == "Auto-reverted: error: regression failed"));
         assert!(board.columns.iter().any(|column| column.id == "regressed"));
+    }
+
+    #[tokio::test]
+    async fn post_merge_check_skips_stale_card_state_before_running_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cargo test --lib`"),
+        )
+        .await;
+        let expected_card_state =
+            crate::chat::verifier::load_expected_card_state(gcx.clone(), "task-1", "T-1")
+                .await
+                .unwrap();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-1").unwrap().final_report = Some("newer finish".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut req = request(temp.path());
+        req.expected_card_state = Some(expected_card_state);
+        let mut runner = MockRunner::default();
+
+        let result = post_merge_check_with_runner(gcx.clone(), req, &mut runner)
+            .await
+            .unwrap();
+
+        assert!(!result.checked);
+        assert_eq!(result.skipped_reason.as_deref(), Some("stale card state"));
+        assert!(runner.calls.is_empty());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert!(board.get_card("T-1-fix").is_none());
+    }
+
+    #[tokio::test]
+    async fn post_merge_check_noops_regression_write_when_card_changed_after_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cargo test --lib`"),
+        )
+        .await;
+        let expected_card_state =
+            crate::chat::verifier::load_expected_card_state(gcx.clone(), "task-1", "T-1")
+                .await
+                .unwrap();
+        let mut req = request(temp.path());
+        req.expected_card_state = Some(expected_card_state);
+        let mut runner = MutatingRunner {
+            outputs: VecDeque::from([
+                output(false, Some(1), "running\nerror: regression failed\n"),
+                output(true, Some(0), "newhead\n"),
+            ]),
+            calls: Vec::new(),
+            gcx: gcx.clone(),
+            mutated: false,
+        };
+
+        let result = post_merge_check_with_runner(gcx.clone(), req, &mut runner)
+            .await
+            .unwrap();
+
+        assert!(result.checked);
+        assert_eq!(
+            result.revert_skipped_reason.as_deref(),
+            Some("HEAD changed since merge")
+        );
+        assert!(result.fix_card_id.is_none());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let original = board.get_card("T-1").unwrap();
+        assert_eq!(original.column, "done");
+        assert_eq!(original.final_report.as_deref(), Some("newer finish"));
+        assert!(board.get_card("T-1-fix").is_none());
     }
 
     #[tokio::test]
