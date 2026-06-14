@@ -3314,6 +3314,9 @@ fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool 
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return false;
     }
+    if path.file_name().is_some_and(|name| name == "index.json") {
+        return false;
+    }
     if !is_under_task_root(path, task_roots) {
         return true;
     }
@@ -5805,6 +5808,35 @@ mod tests {
             .unwrap();
 
         assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(700)).await;
+    }
+
+    #[test]
+    fn trajectory_dispatch_ignores_generated_index_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_root = dir.path().join(".refact").join("tasks");
+        std::fs::create_dir_all(&task_root).unwrap();
+        let task_index = task_root
+            .join("task-index")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join("index.json");
+        let task_chat = task_index.with_file_name("chat-1.json");
+        let normal_index = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join("index.json");
+
+        assert!(!should_dispatch_trajectory_path(
+            &task_index,
+            &[task_root.clone()]
+        ));
+        assert!(!should_dispatch_trajectory_path(
+            &normal_index,
+            &[task_root.clone()]
+        ));
+        assert!(should_dispatch_trajectory_path(&task_chat, &[task_root]));
     }
 
     #[serial]
