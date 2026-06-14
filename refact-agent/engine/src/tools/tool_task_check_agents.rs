@@ -1134,6 +1134,12 @@ mod tests {
         }
     }
 
+    fn orphan_doing_card(id: &str) -> BoardCard {
+        let mut card = board_card(id, "doing", None);
+        card.assignee = Some("agent-1".to_string());
+        card
+    }
+
     fn task_meta() -> StoredTaskMeta {
         let now = Utc::now().to_rfc3339();
         StoredTaskMeta {
@@ -1262,7 +1268,7 @@ mod tests {
 
     #[test]
     fn check_agents_surfaces_doing_card_without_agent_chat_id_as_stuck() {
-        let card = board_card("T-404", "doing", None);
+        let card = orphan_doing_card("T-404");
         assert!(should_report_card(&card));
 
         let status = agent_status_from_card(&card, 0, None, None);
@@ -1278,13 +1284,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_agent_statuses_surfaces_doing_card_without_agent_chat_id_as_stuck() {
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![orphan_doing_card("T-404")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        let chat_facade = AppState::from_gcx(gcx.clone()).await.chat.facade.clone();
+
+        let statuses = get_agent_statuses(gcx, chat_facade, "task-1")
+            .await
+            .unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].card_id, "T-404");
+        assert_eq!(statuses[0].agent_chat_id, "none");
+        assert_eq!(
+            classify_agent_status(&statuses[0], now()),
+            AgentStateKind::Stuck
+        );
+    }
+
+    #[tokio::test]
+    async fn check_agents_tool_output_surfaces_doing_card_without_agent_chat_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![orphan_doing_card("T-404")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+
+        let output = tool_output_text(
+            ToolTaskCheckAgents::new()
+                .tool_execute(ccx, &"call".to_string(), &HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.starts_with("⚠️  Alerts: 1 stuck"));
+        assert!(output.contains("T-404"));
+        assert!(output.contains("STUCK"));
+        assert!(output.contains("needs attention"));
+    }
+
+    #[tokio::test]
     async fn wait_agents_invalid_wait_does_not_record_wait_state_or_abort() {
         use crate::chat::types::ChatSession;
         use std::sync::atomic::Ordering;
 
         let temp = tempfile::tempdir().unwrap();
         let board = TaskBoard {
-            cards: vec![board_card("T-1", "doing", None)],
+            cards: vec![orphan_doing_card("T-1")],
             ..Default::default()
         };
         let gcx = write_task_board(temp.path(), board).await;
@@ -1319,6 +1371,8 @@ mod tests {
             panic!("expected text")
         };
         assert!(text.contains("planner wait mode was not entered"));
+        assert!(text.contains("T-1"));
+        assert!(text.contains("STUCK"));
 
         let session = session_arc.lock().await;
         assert!(session.waiting_for_card_ids.is_empty());
