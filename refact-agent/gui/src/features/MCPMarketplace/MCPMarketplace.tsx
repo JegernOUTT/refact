@@ -10,6 +10,7 @@ import {
   FieldText,
   Icon,
   LoadingState,
+  VirtualizedGrid,
 } from "../../components/ui";
 import {
   useGetMarketplaceQuery,
@@ -31,6 +32,8 @@ import { integrationsApi } from "../../services/refact/integrations";
 import { change } from "../Pages/pagesSlice";
 
 const PAGE_SIZE = 20;
+
+const SERVER_CARD_HEIGHT = 240;
 
 const fallbackInstallError = "Failed to install MCP server";
 
@@ -310,10 +313,13 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       )}
 
       {!isLoading && filteredServers.length > 0 && (
-        <div className={`${styles.serverGrid} rf-stagger`}>
-          {filteredServers.map((server) => (
+        <VirtualizedGrid
+          items={filteredServers}
+          getItemKey={(server) => `${server.source_id}:${server.id}`}
+          rowHeight={SERVER_CARD_HEIGHT}
+          aria-label="MCP servers"
+          renderItem={(server) => (
             <ServerCard
-              key={`${server.source_id}:${server.id}`}
               server={server}
               isInstalled={installedIds.has(server.id)}
               installedConfigPath={installedConfigPaths.get(server.id)}
@@ -323,8 +329,8 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               onConfigure={handleConfigure}
               sourceLabel={sourceMap.get(server.source_id)}
             />
-          ))}
-        </div>
+          )}
+        />
       )}
 
       {totalPages > 1 && (

@@ -112,16 +112,11 @@
   width: 100%;
 }
 
-.serverGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
 .serverCard {
   height: 100%;
   box-sizing: border-box;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   padding: var(--rf-space-3);
@@ -159,6 +154,23 @@
   height: 100%;
 }
 
+.cardBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cardFooterGroup {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
 .cardTitle,
 .cardMeta {
   flex: 1;
@@ -182,10 +194,6 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--rf-space-2);
-}
-
-.cardFooter {
-  margin-top: auto;
 }
 
 .cardActionRow {
@@ -236,7 +244,6 @@
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  flex: 1;
   font-size: var(--rf-text-1);
   line-height: var(--rf-line);
   color: var(--rf-color-muted);
@@ -353,8 +360,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .serverCard,
-  .serverCardInstalling,
-  .serverGrid > * {
+  .serverCardInstalling {
     transition: none;
     animation: none;
   }

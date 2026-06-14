@@ -6,22 +6,6 @@
   gap: var(--rf-space-3);
 }
 
-.configList {
-  display: grid;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  gap: var(--rf-space-2);
-}
-
-.itemRows {
-  display: grid;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  gap: var(--rf-space-1);
-}
-
 .configRow {
   display: grid;
   width: 100%;

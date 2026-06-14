@@ -23,6 +23,7 @@ import {
   SegmentedControl,
   Spinner,
   Tabs,
+  VirtualizedGrid,
 } from "../../components/ui";
 import { SettingsSection } from "../Settings/SettingsSection";
 import {
@@ -81,59 +82,63 @@ const KIND_ORDER: ConfigKind[] = [
   "code_lens",
 ];
 
+const CONFIG_ROW_GAP = 4;
+
 const ConfigList: React.FC<{
   items: ConfigItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string, scope: "global" | "local") => void;
 }> = ({ items, selectedId, onSelect, onDelete }) => {
+  if (items.length === 0) {
+    return <span className={styles.emptyText}>No configs found</span>;
+  }
   return (
-    <div className={styles.configList}>
-      <div className={`${styles.itemRows} rf-stagger`}>
-        {items.map((item) => (
-          <div
-            key={item.id}
-            role="button"
-            tabIndex={0}
-            className={`${styles.configRow} rf-enter-rise rf-pressable ${
-              selectedId === item.id ? styles.selected : ""
-            }`}
-            onClick={() => onSelect(item.id)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onSelect(item.id);
-              }
-            }}
-          >
-            <div className={styles.rowInfo}>
-              <span className={styles.rowTitle}>{item.title}</span>
-              <span className={styles.rowId}>{item.id}</span>
-            </div>
-            <Badge
-              className={styles.scopeBadge}
-              tone={item.scope === "global" ? "accent" : "success"}
-            >
-              {item.scope === "global" ? "G" : "L"}
-            </Badge>
-            <IconButton
-              aria-label={`Delete ${item.id}`}
-              icon={Trash2}
-              variant="ghost"
-              size="sm"
-              className={styles.deleteBtn}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(item.id, item.scope);
-              }}
-            />
+    <VirtualizedGrid
+      items={items}
+      columns={1}
+      gap={CONFIG_ROW_GAP}
+      getItemKey={(item) => item.id}
+      aria-label="Configurations"
+      renderItem={(item) => (
+        <div
+          role="button"
+          tabIndex={0}
+          className={`${styles.configRow} rf-pressable ${
+            selectedId === item.id ? styles.selected : ""
+          }`}
+          onClick={() => onSelect(item.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onSelect(item.id);
+            }
+          }}
+        >
+          <div className={styles.rowInfo}>
+            <span className={styles.rowTitle}>{item.title}</span>
+            <span className={styles.rowId}>{item.id}</span>
           </div>
-        ))}
-        {items.length === 0 && (
-          <span className={styles.emptyText}>No configs found</span>
-        )}
-      </div>
-    </div>
+          <Badge
+            className={styles.scopeBadge}
+            tone={item.scope === "global" ? "accent" : "success"}
+          >
+            {item.scope === "global" ? "G" : "L"}
+          </Badge>
+          <IconButton
+            aria-label={`Delete ${item.id}`}
+            icon={Trash2}
+            variant="ghost"
+            size="sm"
+            className={styles.deleteBtn}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(item.id, item.scope);
+            }}
+          />
+        </div>
+      )}
+    />
   );
 };
 

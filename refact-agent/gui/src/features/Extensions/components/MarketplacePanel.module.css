@@ -1,10 +1,8 @@
 .panel {
-  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-4);
   min-width: 0;
-  overflow-y: auto;
   padding: var(--rf-space-3);
 }
 
@@ -56,13 +54,6 @@
 .muted {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-}
-
-.pluginsGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
-  gap: var(--rf-space-3);
-  min-width: 0;
 }
 
 .installedSection {

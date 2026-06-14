@@ -18,12 +18,16 @@ import {
   FieldError,
   FieldText,
   Icon,
+  VirtualizedGrid,
 } from "../../../components/ui";
 import { Spinner } from "../../../components/Spinner";
 import { AddMarketplaceDialog } from "./AddMarketplaceDialog";
 import { MarketplacePluginCard } from "./MarketplacePluginCard";
 
 import styles from "./MarketplacePanel.module.css";
+
+const PLUGIN_COLUMN_WIDTH = 280;
+const PLUGIN_CARD_HEIGHT = 160;
 
 type PluginIdentity = Pick<PluginEntry, "marketplace" | "name">;
 
@@ -134,15 +138,19 @@ const MarketplaceSection: React.FC<MarketplaceSectionProps> = ({
       )}
 
       {filteredPlugins.length > 0 && (
-        <div className={`${styles.pluginsGrid} rf-stagger`}>
-          {filteredPlugins.map((plugin) => (
+        <VirtualizedGrid
+          items={filteredPlugins}
+          getItemKey={(plugin) => getPluginKey(plugin)}
+          minColumnWidth={PLUGIN_COLUMN_WIDTH}
+          rowHeight={PLUGIN_CARD_HEIGHT}
+          aria-label={`${marketplace.name} plugins`}
+          renderItem={(plugin) => (
             <MarketplacePluginCard
-              key={getPluginKey(plugin)}
               plugin={plugin}
               isInstalled={installedIds.has(getPluginKey(plugin))}
             />
-          ))}
-        </div>
+          )}
+        />
       )}
     </section>
   );

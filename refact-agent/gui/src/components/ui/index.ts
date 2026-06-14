@@ -110,6 +110,8 @@ export type {
   TooltipProps,
   TooltipTriggerProps,
 } from "./Tooltip";
+export * from "./VirtualizedGrid";
 export * from "./VirtualList";
+export * from "./VirtualizedGrid";
 export { useToken } from "./useToken";
 export { useTokens } from "./useTokens";

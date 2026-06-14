@@ -38,7 +38,7 @@ Connected widgets live in their owning feature folder and compose kit pieces. If
 - Motion must honor `prefers-reduced-motion` and `prefers-reduced-transparency`.
 - Use shared motion and responsive utilities before adding one-off CSS.
 - Keep shrinkable flex and grid children able to shrink with `min-width: 0`; horizontal overflow belongs only in explicit scroll islands.
-- Every component ships a `.stories.tsx` file.
+- Every component ships a `.stories.tsx` file. New kit components (e.g. `VirtualizedGrid`) must include one before they are considered complete.
 
 ## Verification
 

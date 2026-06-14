@@ -130,16 +130,11 @@
   color: var(--rf-color-danger);
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
 .card {
   height: 100%;
   box-sizing: border-box;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   padding: var(--rf-space-3);
@@ -171,6 +166,23 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   height: 100%;
+}
+
+.cardBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cardFooterGroup {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .cardTitle,
@@ -205,11 +217,10 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-style: italic;
-  flex: 1;
 }
 
 .cardFooter {
-  margin-top: auto;
+  min-width: 0;
 }
 
 .cardActionRow {
@@ -316,8 +327,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .card,
-  .cardInstalling,
-  .grid > * {
+  .cardInstalling {
     transition: none;
     animation: none;
   }

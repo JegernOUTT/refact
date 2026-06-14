@@ -10,6 +10,7 @@ import {
   FieldText,
   Icon,
   LoadingState,
+  VirtualizedGrid,
 } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import type { Config } from "../Config/configSlice";
@@ -24,6 +25,8 @@ import { MarketplaceInstallDialog } from "./MarketplaceInstallDialog";
 import { MarketplaceSourceSelector } from "./MarketplaceSourceSelector";
 import { MarketplaceSourceSettings } from "./MarketplaceSourceSettings";
 import styles from "./ExtensionsMarketplace.module.css";
+
+const MARKETPLACE_CARD_HEIGHT = 240;
 
 type ExtensionsMarketplaceProps = {
   host: Config["host"];
@@ -233,10 +236,13 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
       )}
 
       {!isLoading && filteredItems.length > 0 && (
-        <div className={`${styles.grid} rf-stagger`}>
-          {filteredItems.map((item) => (
+        <VirtualizedGrid
+          items={filteredItems}
+          getItemKey={(item) => `${item.source_id}:${item.id}`}
+          rowHeight={MARKETPLACE_CARD_HEIGHT}
+          aria-label={`${kind}s`}
+          renderItem={(item) => (
             <MarketplaceItemCard
-              key={`${item.source_id}:${item.id}`}
               item={item}
               isInstalling={
                 isInstalling &&
@@ -248,8 +254,8 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
                 setInstallingItem(next);
               }}
             />
-          ))}
-        </div>
+          )}
+        />
       )}
     </div>
   );
