@@ -230,6 +230,24 @@ impl DaemonState {
         changed
     }
 
+    pub(crate) async fn store_validated_worker_status(
+        &self,
+        report: WorkerStatusReport,
+    ) -> Result<bool, String> {
+        let project_id = report.project_id.clone();
+        if self.projects.read().await.get(&project_id).is_none() {
+            return Err("project not found".to_string());
+        }
+        if !self
+            .supervisor
+            .worker_pid_matches(&project_id, report.pid)
+            .await
+        {
+            return Err("worker status does not match the current worker".to_string());
+        }
+        Ok(self.store_worker_status(report).await)
+    }
+
     pub async fn load_projects(&self, path: PathBuf) {
         let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
         for entry in registry.list() {

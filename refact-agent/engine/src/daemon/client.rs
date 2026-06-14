@@ -119,7 +119,11 @@ pub async fn get_json<T: DeserializeOwned>(
     let response = daemon_request(info, reqwest::Method::GET, path)
         .send()
         .await
-        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+        .map_err(|error| {
+            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+                "failed to contact daemon: {error}"
+            )))
+        })?;
     decode_json_response(response).await
 }
 
@@ -127,7 +131,11 @@ pub async fn get_text(info: &DaemonInfo, path: &str) -> Result<String, DaemonCli
     let response = daemon_request(info, reqwest::Method::GET, path)
         .send()
         .await
-        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+        .map_err(|error| {
+            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+                "failed to contact daemon: {error}"
+            )))
+        })?;
     decode_text_response(response).await
 }
 
@@ -140,7 +148,11 @@ pub async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
         .json(body)
         .send()
         .await
-        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+        .map_err(|error| {
+            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+                "failed to contact daemon: {error}"
+            )))
+        })?;
     decode_json_response(response).await
 }
 
@@ -158,7 +170,11 @@ pub async fn delete_json<T: DeserializeOwned>(
     let response = daemon_request(info, reqwest::Method::DELETE, path)
         .send()
         .await
-        .map_err(|error| DaemonClientError::Http(format!("failed to contact daemon: {error}")))?;
+        .map_err(|error| {
+            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+                "failed to contact daemon: {error}"
+            )))
+        })?;
     decode_json_response(response).await
 }
 
@@ -216,7 +232,9 @@ async fn decode_text_response(response: reqwest::Response) -> Result<String, Dae
         return Err(response_status_error(response).await);
     }
     response.text().await.map_err(|error| {
-        DaemonClientError::Http(format!("failed to read daemon response: {error}"))
+        DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+            "failed to read daemon response: {error}"
+        )))
     })
 }
 
@@ -226,7 +244,10 @@ async fn response_status_error(response: reqwest::Response) -> DaemonClientError
         .text()
         .await
         .unwrap_or_else(|error| error.to_string());
-    DaemonClientError::Status { status, body }
+    DaemonClientError::Status {
+        status,
+        body: crate::daemon::auth::redact_daemon_token(&body),
+    }
 }
 
 async fn ensure_daemon_running_with_starter<F>(starter: F) -> Result<DaemonInfo, String>

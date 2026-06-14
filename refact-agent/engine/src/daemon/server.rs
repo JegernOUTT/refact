@@ -193,9 +193,17 @@ async fn logs(
 async fn worker_status(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     Json(report): Json<crate::daemon_link::WorkerStatusReport>,
-) -> Json<serde_json::Value> {
-    let event_emitted = state.store_worker_status(report).await;
-    Json(json!({"success": true, "event_emitted": event_emitted}))
+) -> Response {
+    match state.store_validated_worker_status(report).await {
+        Ok(event_emitted) => {
+            Json(json!({"success": true, "event_emitted": event_emitted})).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": error})),
+        )
+            .into_response(),
+    }
 }
 
 async fn events(
@@ -267,7 +275,7 @@ async fn tail_file(path: &std::path::Path, tail: usize) -> Result<String, String
     if !out.is_empty() {
         out.push('\n');
     }
-    Ok(out)
+    Ok(crate::daemon::auth::redact_daemon_token(&out))
 }
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {
@@ -285,6 +293,17 @@ async fn wait_for_shutdown(state: Arc<DaemonState>) {
 mod tests {
     use super::*;
     use crate::daemon::events::EventBus;
+    use crate::daemon::projects::ProjectRegistry;
+
+    async fn test_state(dir: &tempfile::TempDir) -> Arc<DaemonState> {
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        *state.projects.write().await = ProjectRegistry::empty(dir.path().join("projects.json"));
+        state
+    }
 
     #[test]
     fn daemon_server_bind_rejects_invalid_host() {
@@ -301,11 +320,7 @@ mod tests {
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
+        let state = test_state(&dir).await;
         let response = make_router(state, 8488)
             .oneshot(
                 Request::builder()
@@ -329,11 +344,7 @@ mod tests {
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
+        let state = test_state(&dir).await;
         let response = make_router(state, 8488)
             .oneshot(
                 Request::builder()
@@ -447,14 +458,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tail_file_redacts_daemon_token_query_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        tokio::fs::write(
+            &path,
+            "GET /p/project/v1?daemon_token=secret-token&chat=1 failed\n",
+        )
+        .await
+        .unwrap();
+
+        let text = tail_file(&path, 10).await.unwrap();
+
+        assert!(!text.contains("secret-token"));
+        assert!(text.contains("daemon_token=<redacted>&chat=1"));
+    }
+
+    #[tokio::test]
     async fn worker_status_handler_stores_report_and_emits_only_on_change() {
         use crate::daemon_link::WorkerStatusReport;
         use tokio::time::{timeout, Duration};
 
-        fn report(lsp_clients: usize, busy_chats: usize) -> WorkerStatusReport {
+        fn report(
+            project_id: &str,
+            pid: u32,
+            lsp_clients: usize,
+            busy_chats: usize,
+        ) -> WorkerStatusReport {
             WorkerStatusReport {
-                project_id: "project".to_string(),
-                pid: 123,
+                project_id: project_id.to_string(),
+                pid,
                 lsp_clients,
                 busy_chats,
                 exec_running: 0,
@@ -463,42 +496,128 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
-            DaemonConfig::default(),
-            EventBus::new(dir.path().join("events.jsonl")),
-            None,
-        );
+        let state = test_state(&dir).await;
         let mut events = state.events.subscribe();
+        let root = tempfile::tempdir().unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+        state
+            .supervisor
+            .set_test_worker_info(
+                &entry.id,
+                123,
+                crate::daemon::supervisor::WorkerState::Ready,
+            )
+            .await;
 
-        let first = worker_status(State((state.clone(), 8488)), Json(report(1, 0))).await;
-        assert_eq!(first.0["event_emitted"], true);
+        let first = worker_status(
+            State((state.clone(), 8488)),
+            Json(report(&entry.id, 123, 1, 0)),
+        )
+        .await;
+        let (status, first) = response_json(first).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["event_emitted"], true);
         let event = timeout(Duration::from_secs(1), events.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(event.kind, "worker_status");
-        assert_eq!(event.project_id.as_deref(), Some("project"));
+        assert_eq!(event.project_id.as_deref(), Some(entry.id.as_str()));
         assert_eq!(
             state
-                .latest_worker_status("project")
+                .latest_worker_status(&entry.id)
                 .await
                 .unwrap()
                 .lsp_clients,
             1
         );
 
-        let second = worker_status(State((state.clone(), 8488)), Json(report(1, 0))).await;
-        assert_eq!(second.0["event_emitted"], false);
+        let second = worker_status(
+            State((state.clone(), 8488)),
+            Json(report(&entry.id, 123, 1, 0)),
+        )
+        .await;
+        let (status, second) = response_json(second).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["event_emitted"], false);
         assert!(timeout(Duration::from_millis(50), events.recv())
             .await
             .is_err());
 
-        let third = worker_status(State((state.clone(), 8488)), Json(report(2, 0))).await;
-        assert_eq!(third.0["event_emitted"], true);
+        let third = worker_status(
+            State((state.clone(), 8488)),
+            Json(report(&entry.id, 123, 2, 0)),
+        )
+        .await;
+        let (status, third) = response_json(third).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(third["event_emitted"], true);
         let event = timeout(Duration::from_secs(1), events.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(event.payload["lsp_clients"], 2);
+    }
+
+    #[tokio::test]
+    async fn worker_status_handler_rejects_missing_project_and_wrong_pid() {
+        use crate::daemon_link::WorkerStatusReport;
+
+        fn report(project_id: &str, pid: u32) -> WorkerStatusReport {
+            WorkerStatusReport {
+                project_id: project_id.to_string(),
+                pid,
+                lsp_clients: 1,
+                busy_chats: 0,
+                exec_running: 0,
+                last_activity_ts: 55,
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let root = tempfile::tempdir().unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+        state
+            .supervisor
+            .set_test_worker_info(
+                &entry.id,
+                123,
+                crate::daemon::supervisor::WorkerState::Ready,
+            )
+            .await;
+
+        let missing =
+            worker_status(State((state.clone(), 8488)), Json(report("missing", 123))).await;
+        let (status, missing) = response_json(missing).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing["success"], false);
+        assert!(missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("project not found"));
+
+        let wrong_pid =
+            worker_status(State((state.clone(), 8488)), Json(report(&entry.id, 999))).await;
+        let (status, wrong_pid) = response_json(wrong_pid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(wrong_pid["success"], false);
+        assert!(wrong_pid["error"]
+            .as_str()
+            .unwrap()
+            .contains("current worker"));
+        assert!(state.latest_worker_status(&entry.id).await.is_none());
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
     }
 }

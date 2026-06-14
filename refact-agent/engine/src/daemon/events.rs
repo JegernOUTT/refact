@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::{broadcast, Mutex};
 
 const DEFAULT_RING_CAPACITY: usize = 4096;
@@ -62,7 +62,7 @@ impl EventBus {
             ts_ms: crate::daemon::state::now_ms(),
             kind: kind.into(),
             project_id,
-            payload,
+            payload: redact_value(payload),
         };
         {
             let mut ring = self.ring.lock().await;
@@ -74,6 +74,20 @@ impl EventBus {
         append_jsonl(&self.events_path, &self.rotated_path, &event).await?;
         let _ = self.tx.send(event.clone());
         Ok(event)
+    }
+}
+
+fn redact_value(value: Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(crate::daemon::auth::redact_daemon_token(&value)),
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, redact_value(value)))
+                .collect::<Map<_, _>>(),
+        ),
+        other => other,
     }
 }
 
@@ -148,5 +162,26 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap().kind, "one");
         let content = tokio::fs::read_to_string(path).await.unwrap();
         assert_eq!(content.lines().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn daemon_event_bus_redacts_token_bearing_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let bus = EventBus::new(path.clone());
+        let event = bus
+            .emit(
+                "proxy_worker_unreachable",
+                Some("project".to_string()),
+                json!({"error": "GET /p/project/v1?daemon_token=secret-token failed"}),
+            )
+            .await
+            .unwrap();
+
+        assert!(!event.payload.to_string().contains("secret-token"));
+        assert!(event.payload.to_string().contains("<redacted>"));
+        let content = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(!content.contains("secret-token"));
+        assert!(content.contains("<redacted>"));
     }
 }

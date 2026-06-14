@@ -200,6 +200,37 @@ impl Supervisor {
         Some(info)
     }
 
+    pub async fn worker_pid_matches(&self, project_id: &str, pid: u32) -> bool {
+        let Some(slot) = self.get_slot(project_id).await else {
+            return false;
+        };
+        let record = slot.record.lock().await;
+        matches!(
+            record.info.state,
+            WorkerState::Ready | WorkerState::Starting
+        ) && record.info.pid == Some(pid)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_worker_info(
+        &self,
+        project_id: &str,
+        pid: u32,
+        state: WorkerState,
+    ) {
+        let slot = self.slot_for(project_id).await;
+        let mut record = slot.record.lock().await;
+        record.generation = record.generation.saturating_add(1);
+        record.info = WorkerInfo {
+            project_id: project_id.to_string(),
+            pid: Some(pid),
+            http_port: 1,
+            lsp_port: 2,
+            state,
+            last_error: None,
+        };
+    }
+
     pub async fn notify_proxy_unreachable(
         self: &Arc<Self>,
         entry: ProjectEntry,

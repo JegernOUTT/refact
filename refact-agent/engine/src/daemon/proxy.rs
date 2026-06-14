@@ -106,7 +106,14 @@ async fn proxy_to_worker(
             StatusCode::GATEWAY_TIMEOUT,
             json!({"error": "worker request timed out"}),
         ),
-        Err(error) => worker_unreachable(state, entry, error.to_string()).await,
+        Err(error) => {
+            worker_unreachable(
+                state,
+                entry,
+                crate::daemon::auth::redact_daemon_token(&error.to_string()),
+            )
+            .await
+        }
     }
 }
 
@@ -184,7 +191,7 @@ async fn worker_response(
             match chunk {
                 Ok(chunk) => yield Ok::<_, io::Error>(chunk),
                 Err(error) => {
-                    let message = error.to_string();
+                    let message = crate::daemon::auth::redact_daemon_token(&error.to_string());
                     let _ = stream_state.events.emit(
                         "proxy_worker_unreachable",
                         Some(stream_entry.id.clone()),
@@ -240,7 +247,7 @@ fn worker_v1_path(project_id: &str, uri: &Uri) -> String {
 }
 
 fn target_url(port: u16, path: &str, query: Option<&str>) -> String {
-    match query {
+    match crate::daemon::auth::query_without_daemon_token(query) {
         Some(query) => format!("http://127.0.0.1:{port}{path}?{query}"),
         None => format!("http://127.0.0.1:{port}{path}"),
     }
@@ -416,6 +423,22 @@ mod tests {
             target_url(1234, "/v1/echo", Some("a=1&b=two")),
             "http://127.0.0.1:1234/v1/echo?a=1&b=two"
         );
+    }
+
+    #[test]
+    fn target_url_strips_daemon_token_query() {
+        let url = target_url(
+            1234,
+            "/v1/chats/subscribe",
+            Some("chat_id=abc&daemon_token=secret-token&tail=1"),
+        );
+
+        assert_eq!(
+            url,
+            "http://127.0.0.1:1234/v1/chats/subscribe?chat_id=abc&tail=1"
+        );
+        assert!(!url.contains("secret-token"));
+        assert!(!url.contains(crate::daemon::auth::DAEMON_AUTH_QUERY));
     }
 
     #[test]

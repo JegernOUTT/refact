@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{OriginalUri, Path as AxumPath, State};
-use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Serialize;
@@ -65,6 +65,7 @@ pub(crate) async fn handle_project_picker(
 
 pub(crate) async fn handle_project_gui_index(
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
     State((state, port)): State<(Arc<DaemonState>, u16)>,
     AxumPath(project_id): AxumPath<String>,
 ) -> Response {
@@ -81,7 +82,20 @@ pub(crate) async fn handle_project_gui_index(
     match ChatGuiAsset::get(INDEX_PATH) {
         Some(asset) => {
             let body = project_gui_index_body(asset.data, &project_id, port);
-            asset_response(INDEX_PATH, body, StatusCode::OK)
+            let mut response = asset_response(INDEX_PATH, body, StatusCode::OK);
+            if let Some(cookie) = state.auth_token.as_deref().and_then(|expected| {
+                crate::daemon::auth::project_cookie_from_headers(&headers, &project_id, expected)
+            }) {
+                if let Ok(cookie) =
+                    HeaderValue::from_str(&daemon_auth_cookie_value(Some(&project_id), &cookie))
+                {
+                    response.headers_mut().insert(header::SET_COOKIE, cookie);
+                }
+                if let Ok(cookie) = HeaderValue::from_str(&expire_daemon_auth_cookie()) {
+                    response.headers_mut().append(header::SET_COOKIE, cookie);
+                }
+            }
+            response
         }
         None => html_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -119,6 +133,7 @@ async fn project_entry(state: &DaemonState, project_id: &str) -> Option<ProjectE
 fn daemon_auth_redirect(state: &DaemonState, uri: &Uri) -> Option<Response> {
     let expected = state.auth_token.as_deref()?;
     let token = crate::daemon::auth::matching_daemon_query_token(uri.query(), expected)?;
+    let project_id = crate::daemon::auth::requested_project_id(uri.path());
     let mut response = Response::new(axum::body::boxed(axum::body::Full::from(Vec::<u8>::new())));
     *response.status_mut() = StatusCode::SEE_OTHER;
     response.headers_mut().insert(
@@ -127,16 +142,46 @@ fn daemon_auth_redirect(state: &DaemonState, uri: &Uri) -> Option<Response> {
     );
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&daemon_auth_cookie(&token)).ok()?,
+        HeaderValue::from_str(&daemon_auth_cookie(project_id, &token)).ok()?,
     );
+    if project_id.is_some() {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&expire_daemon_auth_cookie()).ok()?,
+        );
+    }
     Some(response)
 }
 
-fn daemon_auth_cookie(token: &str) -> String {
+fn daemon_auth_cookie(project_id: Option<&str>, token: &str) -> String {
+    daemon_auth_cookie_value(
+        project_id,
+        &project_id
+            .map(|project_id| crate::daemon::auth::project_cookie_value(project_id, token))
+            .unwrap_or_else(|| token.to_string()),
+    )
+}
+
+fn daemon_auth_cookie_value(project_id: Option<&str>, value: &str) -> String {
+    match project_id {
+        Some(project_id) => format!(
+            "{}={}; HttpOnly; SameSite=Strict; Path={}/",
+            crate::daemon::auth::DAEMON_AUTH_COOKIE,
+            value,
+            project_api_prefix(project_id)
+        ),
+        None => format!(
+            "{}={}; HttpOnly; SameSite=Strict; Path=/",
+            crate::daemon::auth::DAEMON_AUTH_COOKIE,
+            value
+        ),
+    }
+}
+
+fn expire_daemon_auth_cookie() -> String {
     format!(
-        "{}={}; HttpOnly; SameSite=Strict; Path=/",
-        crate::daemon::auth::DAEMON_AUTH_COOKIE,
-        token
+        "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+        crate::daemon::auth::DAEMON_AUTH_COOKIE
     )
 }
 
@@ -718,7 +763,110 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap()
-            .contains("refact_daemon_auth=secret-token"));
+            .contains(&format!(
+                "refact_daemon_auth=project:{}:secret-token",
+                entry.id
+            )));
+        assert!(response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains(&format!("Path=/p/{}/", entry.id)));
+    }
+
+    #[tokio::test]
+    async fn project_gui_index_upgrades_bearer_to_project_scoped_cookie() {
+        let test = test_state_with_auth(Some("secret-token")).await;
+        let state = test.state;
+        let root = tempfile::tempdir().unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.path().to_path_buf()).await.unwrap()
+        };
+
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/p/{}/", entry.id))
+                    .header(header::AUTHORIZATION, "Bearer secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains(&format!(
+            "refact_daemon_auth=project:{}:secret-token",
+            entry.id
+        )));
+        assert!(cookie.contains(&format!("Path=/p/{}/", entry.id)));
+    }
+
+    #[tokio::test]
+    async fn project_scoped_cookie_cannot_authorize_other_project_or_control_plane() {
+        let test = test_state_with_auth(Some("secret-token")).await;
+        let state = test.state;
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let (entry_a, entry_b) = {
+            let mut registry = state.projects.write().await;
+            (
+                registry.open(root_a.path().to_path_buf()).await.unwrap(),
+                registry.open(root_b.path().to_path_buf()).await.unwrap(),
+            )
+        };
+        let cookie = format!(
+            "{}={}",
+            crate::daemon::auth::DAEMON_AUTH_COOKIE,
+            crate::daemon::auth::project_cookie_value(&entry_a.id, "secret-token")
+        );
+        let router = crate::daemon::server::make_router(state, 8488);
+
+        let same_project = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/p/{}/", entry_a.id))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let other_project = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/p/{}/", entry_b.id))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let control_plane = router
+            .oneshot(
+                Request::builder()
+                    .uri("/daemon/v1/projects")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(same_project.status(), StatusCode::OK);
+        assert_eq!(other_project.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(control_plane.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
