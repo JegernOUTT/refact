@@ -16,6 +16,14 @@ const DEFAULT_DAEMON_PORT: u16 = 8488;
 const PLAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const SSE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(test))]
+const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const SSE_HEADER_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+const SSE_ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const SSE_ERROR_BODY_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_DIR_ENV: &str = "REFACT_DAEMON_DIR";
 const STATUS_BODY_NOTICE_MAX_CHARS: usize = 300;
 
@@ -816,18 +824,15 @@ impl DaemonClient {
     }
 
     pub async fn subscribe_daemon_events(&self) -> Result<DaemonEventStream, ClientError> {
-        let response = self
-            .with_auth(
-                self.sse_client
-                    .get(self.url("/daemon/v1/events?follow=true")),
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                ClientError::Http(format!("failed to subscribe to daemon events: {error}"))
-            })?;
+        let url = self.url("/daemon/v1/events?follow=true");
+        let response = send_sse_request(
+            self.with_auth(self.sse_client.get(url.clone())),
+            &url,
+            "failed to subscribe to daemon events",
+        )
+        .await?;
         if !response.status().is_success() {
-            return Err(status_error(response).await);
+            return Err(sse_status_error(response).await);
         }
         Ok(sse_data_stream(response)
             .map(|data| {
@@ -848,13 +853,15 @@ impl DaemonClient {
             encode_path_segment(project_id),
             encode_query_value(chat_id)
         );
-        let response = self
-            .with_auth(self.sse_client.get(self.url(&path)))
-            .send()
-            .await
-            .map_err(|error| ClientError::Http(format!("failed to subscribe to chat: {error}")))?;
+        let url = self.url(&path);
+        let response = send_sse_request(
+            self.with_auth(self.sse_client.get(url.clone())),
+            &url,
+            "failed to subscribe to chat",
+        )
+        .await?;
         if !response.status().is_success() {
-            return Err(status_error(response).await);
+            return Err(sse_status_error(response).await);
         }
         Ok(sse_data_stream(response)
             .map(|data| data.and_then(|data| parse_chat_event(&data)))
@@ -1139,6 +1146,30 @@ async fn status_error(response: reqwest::Response) -> ClientError {
     ClientError::Status { status, body }
 }
 
+async fn sse_status_error(response: reqwest::Response) -> ClientError {
+    let status = response.status().as_u16();
+    let body = match tokio::time::timeout(SSE_ERROR_BODY_TIMEOUT, response.text()).await {
+        Ok(Ok(body)) => sanitize_status_body(body),
+        Ok(Err(error)) => sanitize_status_body(error.to_string()),
+        Err(_) => format!("status {status}"),
+    };
+    ClientError::Status { status, body }
+}
+
+async fn send_sse_request(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    failure_context: &str,
+) -> Result<reqwest::Response, ClientError> {
+    match tokio::time::timeout(SSE_HEADER_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(ClientError::Http(format!("{failure_context}: {error}"))),
+        Err(_) => Err(ClientError::Http(format!(
+            "timed out waiting for SSE response headers from {url}"
+        ))),
+    }
+}
+
 fn sanitize_status_body(body: impl AsRef<str>) -> String {
     let mut sanitized = body
         .as_ref()
@@ -1301,6 +1332,99 @@ pub struct ToolDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
+
+    struct TestServer {
+        base_url: String,
+        stop: mpsc::Sender<()>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        fn stop(self) {
+            let _ = self.stop.send(());
+            let _ = self.handle.join();
+        }
+    }
+
+    fn spawn_stalled_header_server() -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                let _ = stopped.recv_timeout(Duration::from_secs(5));
+            }
+        });
+        TestServer {
+            base_url: format!("http://{addr}"),
+            stop,
+            handle,
+        }
+    }
+
+    fn spawn_stalled_error_body_server() -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                read_request_headers(&mut stream);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 1024\r\n\r\n",
+                );
+                let _ = stream.flush();
+                let _ = stopped.recv_timeout(Duration::from_secs(5));
+            }
+        });
+        TestServer {
+            base_url: format!("http://{addr}"),
+            stop,
+            handle,
+        }
+    }
+
+    fn spawn_delayed_sse_body_server() -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                read_request_headers(&mut stream);
+                let _ =
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+                let _ = stream.flush();
+                thread::sleep(SSE_HEADER_TIMEOUT + Duration::from_millis(100));
+                let _ = stream
+                    .write_all(b"data: {\"chat_id\":\"chat\",\"seq\":1,\"type\":\"snapshot\"}\n\n");
+                let _ = stream.flush();
+                let _ = stopped.recv_timeout(Duration::from_secs(5));
+            }
+        });
+        TestServer {
+            base_url: format!("http://{addr}"),
+            stop,
+            handle,
+        }
+    }
+
+    fn read_request_headers(stream: &mut std::net::TcpStream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut request = Vec::new();
+        let mut buffer = [0; 256];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => request.extend_from_slice(&buffer[..read]),
+                Err(_) => break,
+            }
+        }
+        let _ = stream.set_read_timeout(None);
+    }
 
     #[test]
     fn sse_parser_handles_partial_frames() {
@@ -1328,6 +1452,95 @@ mod tests {
         assert!(!body.contains('\n'));
         assert!(body.ends_with('…'));
         assert_eq!(body.chars().count(), STATUS_BODY_NOTICE_MAX_CHARS + 1);
+    }
+
+    #[tokio::test]
+    async fn subscribe_chat_times_out_waiting_for_sse_headers() {
+        let server = spawn_stalled_header_server();
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.subscribe_chat("project", "chat"),
+        )
+        .await;
+        server.stop();
+        let error = match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("stalled SSE header subscription unexpectedly succeeded"),
+            Err(_) => panic!("stalled SSE header subscription exceeded outer timeout"),
+        };
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match error {
+            ClientError::Http(message) => {
+                assert!(message.contains("timed out waiting for SSE response headers"));
+                assert!(message.contains("/p/project/v1/chats/subscribe"));
+            }
+            other => panic!("expected HTTP timeout error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_daemon_events_times_out_waiting_for_sse_headers() {
+        let server = spawn_stalled_header_server();
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let started = Instant::now();
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), client.subscribe_daemon_events()).await;
+        server.stop();
+        let error = match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("stalled daemon event subscription unexpectedly succeeded"),
+            Err(_) => panic!("stalled daemon event subscription exceeded outer timeout"),
+        };
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match error {
+            ClientError::Http(message) => {
+                assert!(message.contains("timed out waiting for SSE response headers"));
+                assert!(message.contains("/daemon/v1/events"));
+            }
+            other => panic!("expected HTTP timeout error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_error_body_read_times_out_to_status_only_message() {
+        let server = spawn_stalled_error_body_server();
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.subscribe_chat("project", "chat"),
+        )
+        .await;
+        server.stop();
+        let error = match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("stalled error-body subscription unexpectedly succeeded"),
+            Err(_) => panic!("stalled error-body subscription exceeded outer timeout"),
+        };
+        match error {
+            ClientError::Status { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "status 500");
+            }
+            other => panic!("expected status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_remains_unbounded_after_headers() {
+        let server = spawn_delayed_sse_body_server();
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let mut stream = client.subscribe_chat("project", "chat").await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.stop();
+        assert_eq!(event.chat_id.as_deref(), Some("chat"));
+        assert_eq!(event.seq, Some(1));
+        assert_eq!(event.kind, "snapshot");
     }
 
     #[test]
