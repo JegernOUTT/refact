@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::client::WorkerInfo;
 
-const MAX_EVENTS: usize = 200;
+const MAX_EVENTS: usize = 10_000;
+const EVENTS_RETENTION_NOTICE_KIND: &str = "retention_notice";
+const EVENTS_RETENTION_NOTICE_MESSAGE: &str =
+    "Older daemon events dropped after reaching 10000 events";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonEventRecord {
@@ -48,6 +51,27 @@ impl EventsPaneState {
         if self.events.len() > MAX_EVENTS {
             let drop_count = self.events.len() - MAX_EVENTS;
             self.events.drain(0..drop_count);
+            if !self
+                .events
+                .iter()
+                .any(|event| event.kind == EVENTS_RETENTION_NOTICE_KIND)
+            {
+                let ts_ms = self
+                    .events
+                    .last()
+                    .map(|event| event.ts_ms)
+                    .unwrap_or_default();
+                self.events.push(DaemonEventRecord {
+                    ts_ms,
+                    kind: EVENTS_RETENTION_NOTICE_KIND.to_string(),
+                    project_id: None,
+                    payload: serde_json::json!({"message": EVENTS_RETENTION_NOTICE_MESSAGE}),
+                });
+                if self.events.len() > MAX_EVENTS {
+                    let drop_count = self.events.len() - MAX_EVENTS;
+                    self.events.drain(0..drop_count);
+                }
+            }
         }
     }
 
@@ -145,7 +169,7 @@ mod tests {
     #[test]
     fn events_state_caps_tail() {
         let mut state = EventsPaneState::new();
-        for idx in 0..205 {
+        for idx in 0..10_005 {
             state.push_event(DaemonEventRecord {
                 ts_ms: idx,
                 kind: "tick".to_string(),
@@ -153,7 +177,11 @@ mod tests {
                 payload: Value::Null,
             });
         }
-        assert_eq!(state.events().len(), 200);
-        assert_eq!(state.events()[0].ts_ms, 5);
+        assert_eq!(state.events().len(), 10_000);
+        assert!(state
+            .events()
+            .iter()
+            .any(|event| event.kind == EVENTS_RETENTION_NOTICE_KIND));
+        assert!(state.events()[0].ts_ms > 0);
     }
 }

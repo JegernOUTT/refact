@@ -61,6 +61,9 @@ const PATCH_LIKE_FUNCTIONS: &[&str] = &[
 ];
 const CHAT_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
 const ABORT_BEFORE_QUIT_TIMEOUT: Duration = Duration::from_secs(1);
+const LIVE_TRANSCRIPT_ITEM_LIMIT: usize = 10_000;
+const LIVE_TRANSCRIPT_RETENTION_NOTICE: &str =
+    "Older live transcript items dropped after reaching 10000 live items";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -76,6 +79,18 @@ pub enum TuiError {
 pub struct TuiOptions {
     pub daemon_url: Option<String>,
     pub project_hint: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistorySaveRequest {
+    path: PathBuf,
+    entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorCommand {
+    program: String,
+    args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,6 +333,9 @@ pub struct App {
     server_queue_size: usize,
     server_queue_previews: Vec<String>,
     history_path: Option<PathBuf>,
+    pending_history_save: Option<HistorySaveRequest>,
+    history_save_in_flight: bool,
+    history_failure_notified: bool,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
@@ -401,6 +419,9 @@ impl App {
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
             history_path,
+            pending_history_save: None,
+            history_save_in_flight: false,
+            history_failure_notified: false,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
@@ -467,6 +488,9 @@ impl App {
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
             history_path: None,
+            pending_history_save: None,
+            history_save_in_flight: false,
+            history_failure_notified: false,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
@@ -782,7 +806,7 @@ impl App {
             for (old_idx, item) in old_items.into_iter().enumerate() {
                 if item.keeps_live() {
                     let new_idx = self.transcript.len();
-                    self.transcript.push(item);
+                    self.push_live_item(item);
                     if old_selected == Some(old_idx) {
                         self.selected_tool_index = Some(new_idx);
                     }
@@ -2163,9 +2187,33 @@ impl App {
         items
     }
 
-    fn persist_history(&self) {
+    fn persist_history(&mut self) {
         if let Some(path) = &self.history_path {
-            let _ = save_history(path, self.composer.history_entries());
+            self.pending_history_save = Some(HistorySaveRequest {
+                path: path.clone(),
+                entries: self.composer.history_entries().to_vec(),
+            });
+        }
+    }
+
+    fn take_pending_history_save(&mut self) -> Option<HistorySaveRequest> {
+        if self.history_save_in_flight {
+            return None;
+        }
+        let request = self.pending_history_save.take()?;
+        self.history_save_in_flight = true;
+        Some(request)
+    }
+
+    fn handle_history_save_result(&mut self, result: Result<(), String>) {
+        self.history_save_in_flight = false;
+        match result {
+            Ok(()) => self.history_failure_notified = false,
+            Err(error) if !self.history_failure_notified => {
+                self.history_failure_notified = true;
+                self.add_notice(error);
+            }
+            Err(_) => {}
         }
     }
 
@@ -2200,7 +2248,7 @@ impl App {
         }
         match self.transcript.last_mut() {
             Some(TranscriptItem::Assistant(value)) => *value = visible,
-            _ => self.transcript.push(TranscriptItem::Assistant(visible)),
+            _ => self.push_live_item(TranscriptItem::Assistant(visible)),
         }
     }
 
@@ -2257,7 +2305,82 @@ impl App {
         if self.native_scrollback && !item.keeps_live() {
             self.history.enqueue(item);
         } else {
-            self.transcript.push(item);
+            self.push_live_item(item);
+        }
+    }
+
+    fn push_live_item(&mut self, item: TranscriptItem) {
+        self.transcript.push(item);
+        self.enforce_live_transcript_limit();
+    }
+
+    fn enforce_live_transcript_limit(&mut self) {
+        if self.transcript.len() <= LIVE_TRANSCRIPT_ITEM_LIMIT {
+            return;
+        }
+        let has_notice = matches!(
+            self.transcript.first(),
+            Some(TranscriptItem::Notice(text)) if text == LIVE_TRANSCRIPT_RETENTION_NOTICE
+        );
+        let target_len = LIVE_TRANSCRIPT_ITEM_LIMIT.saturating_sub(usize::from(!has_notice));
+        let remove_count = self.transcript.len().saturating_sub(target_len);
+        let mut remove_indices = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter(|(idx, item)| {
+                !item.keeps_live()
+                    && !(*idx == 0
+                        && matches!(
+                            item,
+                            TranscriptItem::Notice(text) if text == LIVE_TRANSCRIPT_RETENTION_NOTICE
+                        ))
+            })
+            .map(|(idx, _)| idx)
+            .take(remove_count)
+            .collect::<Vec<_>>();
+        if remove_indices.len() < remove_count {
+            let missing = remove_count - remove_indices.len();
+            let existing = remove_indices.clone();
+            let additional = self
+                .transcript
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| existing.binary_search(idx).is_err())
+                .map(|(idx, _)| idx)
+                .take(missing)
+                .collect::<Vec<_>>();
+            remove_indices.extend(additional);
+            remove_indices.sort_unstable();
+        }
+        if remove_indices.is_empty() {
+            return;
+        }
+        self.selected_tool_index = self.selected_tool_index.and_then(|selected| {
+            if remove_indices.binary_search(&selected).is_ok() {
+                None
+            } else {
+                Some(selected - remove_indices.iter().filter(|idx| **idx < selected).count())
+            }
+        });
+        self.selected_backtrack_index = self.selected_backtrack_index.and_then(|selected| {
+            if remove_indices.binary_search(&selected).is_ok() {
+                None
+            } else {
+                Some(selected - remove_indices.iter().filter(|idx| **idx < selected).count())
+            }
+        });
+        for idx in remove_indices.into_iter().rev() {
+            self.transcript.remove(idx);
+        }
+        if !has_notice {
+            self.transcript.insert(
+                0,
+                TranscriptItem::Notice(LIVE_TRANSCRIPT_RETENTION_NOTICE.to_string()),
+            );
+            if let Some(selected) = self.selected_tool_index.as_mut() {
+                *selected += 1;
+            }
         }
     }
 
@@ -3124,7 +3247,7 @@ impl App {
             }
         }
         let detail = card.summary();
-        self.transcript.push(TranscriptItem::Tool(card));
+        self.push_live_item(TranscriptItem::Tool(card));
         self.selected_tool_index = Some(self.transcript.len() - 1);
         self.set_working_detail(detail);
     }
@@ -3175,7 +3298,7 @@ impl App {
             self.history.enqueue(item);
             self.selected_tool_index = None;
         } else {
-            self.transcript.push(item);
+            self.push_live_item(item);
             self.selected_tool_index = Some(self.transcript.len() - 1);
         }
         self.finalize_matching_tool_messages(id);
@@ -4006,7 +4129,7 @@ impl App {
 
     #[cfg(test)]
     pub fn test_push_tool(&mut self, card: ToolCard) {
-        self.transcript.push(TranscriptItem::Tool(card));
+        self.push_live_item(TranscriptItem::Tool(card));
         self.selected_tool_index = Some(self.transcript.len() - 1);
     }
 
@@ -4170,6 +4293,7 @@ enum RuntimeEvent {
     SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
+    HistorySaved(Result<(), String>),
     CommandFinished {
         context: CommandContextTag,
         result: Result<(), String>,
@@ -4452,6 +4576,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     app.add_notice(format!("Failed to refresh workers: {error}"));
                 }
             }
+            RuntimeEvent::HistorySaved(result) => app.handle_history_save_result(result),
             RuntimeEvent::CommandFinished { context, result } => {
                 let action = app.handle_command_finished(context, result);
                 run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
@@ -4460,6 +4585,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::DiffLoaded(Err(error)) => {
                 app.add_notice(format!("Failed to load git diff: {error}"))
             }
+        }
+        if let Some(request) = app.take_pending_history_save() {
+            spawn_history_save_task(request, tx.clone());
         }
         for bytes in app.take_pending_notifications() {
             terminal.write_notification(&bytes)?;
@@ -4486,6 +4614,24 @@ fn history_path_for_root(root: &std::path::Path) -> PathBuf {
 fn load_tui_config_content() -> Option<String> {
     let path = KeymapRegistry::default_config_path()?;
     fs::read_to_string(path).ok()
+}
+
+fn spawn_history_save_task(request: HistorySaveRequest, tx: mpsc::Sender<RuntimeEvent>) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || execute_history_save_request(request))
+            .await
+            .unwrap_or_else(|error| Err(format!("Failed to save composer history: {error}")));
+        let _ = tx.send(RuntimeEvent::HistorySaved(result)).await;
+    });
+}
+
+fn execute_history_save_request(request: HistorySaveRequest) -> Result<(), String> {
+    save_history(&request.path, &request.entries).map_err(|error| {
+        format!(
+            "Failed to save composer history to {}: {error}",
+            request.path.display()
+        )
+    })
 }
 
 fn stable_path_hash(path: &std::path::Path) -> String {
@@ -4859,19 +5005,39 @@ fn edit_text_with_editor_command(editor: &str, draft: String) -> Result<String, 
 }
 
 fn external_editor_command() -> Result<String, String> {
-    for key in ["EDITOR", "VISUAL"] {
-        if let Ok(value) = env::var(key) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Ok(value.to_string());
-            }
+    let editor = env::var("EDITOR").ok();
+    let visual = env::var("VISUAL").ok();
+    external_editor_command_from_values(editor.as_deref(), visual.as_deref(), command_in_path)
+}
+
+fn external_editor_command_from_values(
+    editor: Option<&str>,
+    visual: Option<&str>,
+    command_exists: impl Fn(&str) -> bool,
+) -> Result<String, String> {
+    for value in [editor, visual].into_iter().flatten() {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
         }
     }
-    if command_in_path("vi") {
+    if command_exists("vi") {
         Ok("vi".to_string())
     } else {
         Err("No $EDITOR/$VISUAL set and fallback vi was not found".to_string())
     }
+}
+
+fn parse_editor_command(editor: &str) -> Result<EditorCommand, String> {
+    let parts = shell_words::split(editor)
+        .map_err(|error| format!("Failed to parse editor command `{editor}`: {error}"))?;
+    let Some((program, args)) = parts.split_first() else {
+        return Err("Editor command is empty".to_string());
+    };
+    Ok(EditorCommand {
+        program: program.clone(),
+        args: args.to_vec(),
+    })
 }
 
 fn temp_editor_path() -> PathBuf {
@@ -4883,10 +5049,9 @@ fn temp_editor_path() -> PathBuf {
 }
 
 fn run_editor_command(editor: &str, path: &Path) -> Result<(), String> {
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!("{} \"$1\"", editor))
-        .arg("refact-tui-editor")
+    let command = parse_editor_command(editor)?;
+    let status = Command::new(&command.program)
+        .args(&command.args)
         .arg(path)
         .status()
         .map_err(|error| format!("Failed to launch editor `{editor}`: {error}"))?;
@@ -5925,6 +6090,44 @@ mod tests {
         app.test_push_history_item(TranscriptItem::Notice("legacy".to_string()));
         assert_eq!(app.visible_transcript().len(), 2);
         assert_eq!(app.history_pending_count(), 0);
+    }
+
+    #[test]
+    fn live_transcript_drops_oldest_items_after_limit() {
+        let mut app = App::new(project());
+        for idx in 0..10_005 {
+            app.test_push_history_item(TranscriptItem::Notice(format!("notice {idx}")));
+        }
+
+        assert_eq!(app.visible_transcript().len(), 10_000);
+        assert!(matches!(
+            app.visible_transcript().first(),
+            Some(TranscriptItem::Notice(text)) if text == LIVE_TRANSCRIPT_RETENTION_NOTICE
+        ));
+        assert!(!app
+            .visible_transcript()
+            .iter()
+            .any(|item| { matches!(item, TranscriptItem::Notice(text) if text == "notice 0") }));
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text == "notice 10004")
+        }));
+    }
+
+    #[test]
+    fn live_transcript_retention_preserves_running_tool() {
+        let mut app = App::new(project());
+        app.test_push_tool(ToolCard::from_tool_call(
+            &json!({"id": "call-keep", "function": {"name": "shell", "arguments": "{}"}}),
+        ));
+        for idx in 0..10_005 {
+            app.test_push_history_item(TranscriptItem::Notice(format!("notice {idx}")));
+        }
+
+        assert_eq!(app.visible_transcript().len(), 10_000);
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| { matches!(item, TranscriptItem::Tool(card) if card.id == "call-keep") }));
     }
 
     #[test]
@@ -7349,6 +7552,33 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn editor_command_parser_handles_flags_quotes_and_empty_command() {
+        let parsed = parse_editor_command("nano --wait 'two words'").unwrap();
+        assert_eq!(parsed.program, "nano");
+        assert_eq!(parsed.args, vec!["--wait", "two words"]);
+        assert!(parse_editor_command("   ").is_err());
+    }
+
+    #[test]
+    fn editor_command_selection_prefers_editor_then_visual_then_vi() {
+        assert_eq!(
+            external_editor_command_from_values(Some(" nvim --wait "), Some("code"), |_| false)
+                .unwrap(),
+            "nvim --wait"
+        );
+        assert_eq!(
+            external_editor_command_from_values(Some(" "), Some("code --reuse-window"), |_| false)
+                .unwrap(),
+            "code --reuse-window"
+        );
+        assert_eq!(
+            external_editor_command_from_values(None, None, |command| command == "vi").unwrap(),
+            "vi"
+        );
+        assert!(external_editor_command_from_values(None, None, |_| false).is_err());
+    }
+
+    #[test]
     fn app_paste_burst_does_not_submit_on_embedded_enters() {
         let mut app = App::new(project());
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
@@ -7374,12 +7604,52 @@ new-chat = "ctrl-x"
             app.handle_key(key(KeyCode::Enter)),
             AppAction::SendMessage { prompt, .. } if prompt == "first"
         ));
+        let request = app.take_pending_history_save().unwrap();
+        execute_history_save_request(request).unwrap();
+        app.handle_history_save_result(Ok(()));
         let mut app = App::with_history_path(project(), Some(path));
         app.composer.set_text("draft");
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.composer(), "first");
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.composer(), "draft");
+    }
+
+    #[test]
+    fn history_save_failure_emits_one_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_file = dir.path().join("not-a-dir");
+        std::fs::write(&parent_file, "blocked").unwrap();
+        let path = parent_file.join("history.json");
+        let mut app = App::with_history_path(project(), Some(path));
+
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+        let request = app.take_pending_history_save().unwrap();
+        let result = execute_history_save_request(request);
+        app.handle_history_save_result(result);
+
+        app.set_session_state(SessionState::Idle);
+        app.composer.set_text("second");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+        let request = app.take_pending_history_save().unwrap();
+        let result = execute_history_save_request(request);
+        app.handle_history_save_result(result);
+
+        let notices = app
+            .visible_transcript()
+            .iter()
+            .filter(|item| {
+                matches!(item, TranscriptItem::Notice(text) if text.contains("Failed to save composer history"))
+            })
+            .count();
+        assert_eq!(notices, 1);
     }
 
     #[test]
@@ -7392,12 +7662,18 @@ new-chat = "ctrl-x"
             app.handle_key(key(KeyCode::Enter)),
             AppAction::SendMessage { .. }
         ));
+        let request = app.take_pending_history_save().unwrap();
+        execute_history_save_request(request).unwrap();
+        app.handle_history_save_result(Ok(()));
         let mut app = App::with_history_path(project(), Some(path.clone()));
         app.composer.set_text("beta two");
         assert!(matches!(
             app.handle_key(key(KeyCode::Enter)),
             AppAction::SendMessage { .. }
         ));
+        let request = app.take_pending_history_save().unwrap();
+        execute_history_save_request(request).unwrap();
+        app.handle_history_save_result(Ok(()));
 
         let mut app = App::with_history_path(project(), Some(path));
         app.composer.set_text("draft");

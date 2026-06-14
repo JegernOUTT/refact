@@ -727,7 +727,16 @@ mod tests {
 
     #[test]
     fn help_rows_are_generated_from_active_keymap() {
-        let app = App::new(project());
+        let mut app = App::new(project());
+        let keymap = crate::keymap::KeymapRegistry::from_toml_str(
+            r#"
+[bindings]
+new-chat = "ctrl-x"
+help = "f1"
+"#,
+        )
+        .unwrap();
+        app.test_set_keymap(keymap);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
             .draw(|frame| render_help(frame, &app, frame.area()))
@@ -740,7 +749,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("show generated keymap help"));
-        assert!(text.contains("Ctrl-N"));
+        assert!(text.contains("Ctrl-X"));
+        assert!(!text.contains("Ctrl-N"));
     }
 
     #[test]

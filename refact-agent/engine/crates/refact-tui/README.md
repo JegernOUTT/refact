@@ -148,6 +148,10 @@ Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes
 
 Recovery snapshots replace the inline live region and pending finalized cells using revision-aware transcript keys, so changed content with stable message ids is rendered while identical snapshots do not enqueue duplicate cells. Finalized cells already inserted into native terminal scrollback are intentionally left as-is; the live transcript and future pending insertions follow the latest snapshot.
 
+## External editor
+
+External editor support reads `$EDITOR` first, then `$VISUAL`, parses the value as a shell-style command line for quoted arguments, and executes the program directly with the temporary draft path appended. If neither variable is set, the TUI falls back to `vi` when it is available on `PATH`.
+
 ## Manual smoke
 
 ```bash

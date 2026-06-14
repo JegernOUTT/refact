@@ -17,6 +17,7 @@ const PLAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const SSE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_DIR_ENV: &str = "REFACT_DAEMON_DIR";
+const STATUS_BODY_NOTICE_MAX_CHARS: usize = 300;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -685,8 +686,28 @@ async fn status_error(response: reqwest::Response) -> ClientError {
     let body = response
         .text()
         .await
-        .unwrap_or_else(|error| error.to_string());
+        .map(sanitize_status_body)
+        .unwrap_or_else(|error| sanitize_status_body(error.to_string()));
     ClientError::Status { status, body }
+}
+
+fn sanitize_status_body(body: impl AsRef<str>) -> String {
+    let mut sanitized = body
+        .as_ref()
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if sanitized.chars().count() > STATUS_BODY_NOTICE_MAX_CHARS {
+        sanitized = sanitized
+            .chars()
+            .take(STATUS_BODY_NOTICE_MAX_CHARS)
+            .collect::<String>();
+        sanitized.push('…');
+    }
+    sanitized
 }
 
 fn build_plain_http_client() -> Result<reqwest::Client, ClientError> {
@@ -803,5 +824,15 @@ mod tests {
         assert_eq!(event.chat_id.as_deref(), Some("c"));
         assert_eq!(event.seq, Some(7));
         assert_eq!(event.kind, "stream_started");
+    }
+
+    #[test]
+    fn status_body_notice_is_sanitized_and_truncated() {
+        let input = format!("bad\u{1b}[31m\n{}", "x".repeat(400));
+        let body = sanitize_status_body(input);
+        assert!(!body.contains('\u{1b}'));
+        assert!(!body.contains('\n'));
+        assert!(body.ends_with('…'));
+        assert_eq!(body.chars().count(), STATUS_BODY_NOTICE_MAX_CHARS + 1);
     }
 }
