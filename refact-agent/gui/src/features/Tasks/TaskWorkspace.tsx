@@ -30,6 +30,8 @@ import {
   tasksApi,
 } from "../../services/refact/tasks";
 import { Markdown } from "../../components/Markdown";
+import { ModeMenuItem } from "../../components/ChatForm/ModeSelect";
+import modeSelectStyles from "../../components/ChatForm/ModeSelect.module.css";
 import styles from "./Tasks.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
@@ -105,10 +107,12 @@ const LEGACY_WORKTREE_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
 const EMPTY_BACKGROUND_AGENTS: Record<string, BackgroundAgentSummary> =
   Object.freeze({});
+const EMPTY_LINKED_CARDS: string[] = [];
 
 interface PlannerPanelProps {
   plannerChats: PlannerInfo[];
   activeChat: ActiveChat;
+  linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
 }
@@ -116,6 +120,7 @@ interface PlannerPanelProps {
 interface PlannerItemProps {
   planner: PlannerInfo;
   isSelected: boolean;
+  linkedCardIds?: string[];
   onSelect: () => void;
   onRemove: () => void;
 }
@@ -202,6 +207,7 @@ const isTaskWorkspaceTab = (value: string): value is TaskWorkspaceTab =>
 export const PlannerItem: React.FC<PlannerItemProps> = ({
   planner,
   isSelected,
+  linkedCardIds = EMPTY_LINKED_CARDS,
   onSelect,
   onRemove,
 }) => {
@@ -225,6 +231,8 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
   const showWaitingChips = isWaiting && waitingCards.length > 0;
   const visibleCards = waitingCards.slice(0, 5);
   const hiddenCount = Math.max(0, waitingCards.length - 5);
+  const visibleLinkedCards = linkedCardIds.slice(0, 4);
+  const hiddenLinkedCount = Math.max(0, linkedCardIds.length - 4);
 
   return (
     <Box
@@ -260,6 +268,31 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
             {displayTitle}
           </Text>
         </div>
+        {linkedCardIds.length > 0 && (
+          <Flex
+            gap="1"
+            wrap="wrap"
+            align="center"
+            className={styles.plannerLinkedCards}
+            data-testid={`planner-linked-cards-${planner.id}`}
+          >
+            {visibleLinkedCards.map((cardId) => (
+              <Badge
+                key={cardId}
+                tone="muted"
+                className={styles.agentItemBadge}
+                title={`Spawned agent for ${cardId}`}
+              >
+                {cardId}
+              </Badge>
+            ))}
+            {hiddenLinkedCount > 0 && (
+              <Text size="1" color="gray" className={styles.plannerWaitingMore}>
+                +{hiddenLinkedCount}
+              </Text>
+            )}
+          </Flex>
+        )}
         {showWaitingChips && (
           <Flex
             gap="1"
@@ -306,6 +339,7 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
 const PlannerPanel: React.FC<PlannerPanelProps> = ({
   plannerChats,
   activeChat,
+  linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
 }) => {
@@ -332,6 +366,9 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
                   isSelected={
                     activeChat?.type === "planner" &&
                     activeChat.chatId === planner.id
+                  }
+                  linkedCardIds={
+                    linkedCardsByPlanner.get(planner.id) ?? EMPTY_LINKED_CARDS
                   }
                   onSelect={() => onSelectPlanner(planner.id)}
                   onRemove={() => onRemovePlanner(planner.id)}
@@ -423,7 +460,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
         {agents.length === 0 ? (
           <Flex align="center" justify="center" className={styles.emptyState}>
             <Text size="1" color="gray">
-              No agents yet
+              No task agents yet
             </Text>
           </Flex>
         ) : (
@@ -460,6 +497,7 @@ interface BoardRailProps {
   plannerChats: PlannerInfo[];
   cards: BoardCard[];
   activeChat: ActiveChat;
+  linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
   onSelectAgent: (cardId: string, chatId: string) => void;
@@ -469,6 +507,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
   plannerChats,
   cards,
   activeChat,
+  linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
   onSelectAgent,
@@ -477,7 +516,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
   const doneAgentChats = agentChats.filter((card) => card.column === "done");
 
   return (
-    <aside className={styles.boardRail} aria-label="Chats and agents">
+    <aside className={styles.boardRail} aria-label="Chats and task agents">
       <div className={styles.railGroupHeader}>
         <Text
           size="1"
@@ -494,6 +533,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
       <PlannerPanel
         plannerChats={plannerChats}
         activeChat={activeChat}
+        linkedCardsByPlanner={linkedCardsByPlanner}
         onSelectPlanner={onSelectPlanner}
         onRemovePlanner={onRemovePlanner}
       />
@@ -504,7 +544,7 @@ const BoardRail: React.FC<BoardRailProps> = ({
           color="gray"
           className={styles.sectionHeaderLabel}
         >
-          Agents
+          Task Agents
         </Text>
         <Flex align="center" gap="2" className={styles.sectionHeaderMeta}>
           <Badge tone="muted">
@@ -526,6 +566,7 @@ interface ChatSwitcherProps {
   plannerChats: PlannerInfo[];
   cards: BoardCard[];
   activeChat: ActiveChat;
+  linkedCardsByPlanner: Map<string, string[]>;
   onSelectPlanner: (chatId: string) => void;
   onRemovePlanner: (chatId: string) => void;
   onSelectAgent: (cardId: string, chatId: string) => void;
@@ -536,6 +577,7 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
   plannerChats,
   cards,
   activeChat,
+  linkedCardsByPlanner,
   onSelectPlanner,
   onRemovePlanner,
   onSelectAgent,
@@ -593,6 +635,9 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
                   activeChat?.type === "planner" &&
                   activeChat.chatId === planner.id
                 }
+                linkedCardIds={
+                  linkedCardsByPlanner.get(planner.id) ?? EMPTY_LINKED_CARDS
+                }
                 onSelect={() => {
                   setOpen(false);
                   onSelectPlanner(planner.id);
@@ -610,7 +655,7 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
               color="gray"
               className={styles.sectionHeaderLabel}
             >
-              Agents
+              Task Agents
             </Text>
             <Flex direction="column" gap="1">
               {agents.map(({ card, status }) => (
@@ -692,28 +737,21 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
             No modes available
           </Text>
         ) : (
-          <Flex direction="column" gap="1">
-            {modes.map((mode) => (
-              <button
-                key={mode.id}
-                type="button"
-                className={`${styles.modeOption} rf-pressable`}
-                onClick={() => {
-                  setOpen(false);
-                  onCreate(mode.id);
-                }}
-              >
-                <Text size="1" className={styles.panelItemTitle}>
-                  {mode.title}
-                </Text>
-                {mode.tools_count > 0 && (
-                  <Text size="1" color="gray" className={styles.modeOptionMeta}>
-                    {mode.tools_count} tools
-                  </Text>
-                )}
-              </button>
+          <div className={modeSelectStyles.modeList}>
+            {modes.map((mode, index) => (
+              <React.Fragment key={mode.id}>
+                {index > 0 && <div className={modeSelectStyles.separator} />}
+                <ModeMenuItem
+                  mode={mode}
+                  isSelected={false}
+                  onSelect={() => {
+                    setOpen(false);
+                    onCreate(mode.id);
+                  }}
+                />
+              </React.Fragment>
             ))}
-          </Flex>
+          </div>
         )}
       </Popover.Content>
     </Popover>
@@ -1066,6 +1104,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       taskId,
       role: "planner",
     });
+  const { data: savedAgents } = useListTaskTrajectoriesQuery({
+    taskId,
+    role: "agents",
+  });
   const [createPlannerChat, { isLoading: isCreatingPlanner }] =
     useCreatePlannerChatMutation();
   const [deletePlannerChat] = useDeletePlannerChatMutation();
@@ -1078,6 +1120,25 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       ),
     [currentTaskUI?.plannerChats],
   );
+  const linkedCardsByPlanner = useMemo(() => {
+    const agentToPlanner = new Map<string, string>();
+    for (const traj of savedAgents ?? []) {
+      if (traj.parent_id) agentToPlanner.set(traj.id, traj.parent_id);
+    }
+    const result = new Map<string, string[]>();
+    for (const card of board?.cards ?? []) {
+      if (!card.agent_chat_id) continue;
+      const plannerId = agentToPlanner.get(card.agent_chat_id);
+      if (!plannerId) continue;
+      const existing = result.get(plannerId);
+      if (existing) {
+        existing.push(card.id);
+      } else {
+        result.set(plannerId, [card.id]);
+      }
+    }
+    return result;
+  }, [savedAgents, board?.cards]);
   const activeChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
@@ -1599,7 +1660,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
-        dispatch(tasksApi.util.invalidateTags([{ type: "Board", id: taskId }]));
+        dispatch(
+          tasksApi.util.invalidateTags([
+            { type: "Board", id: taskId },
+            { type: "TaskTrajectories", id: `${taskId}/agents` },
+          ]),
+        );
       }
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1892,6 +1958,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               plannerChats={plannerChats}
               cards={board.cards}
               activeChat={activeChat}
+              linkedCardsByPlanner={linkedCardsByPlanner}
               onSelectPlanner={handleSelectPlanner}
               onRemovePlanner={handleRemovePlanner}
               onSelectAgent={handleSelectAgent}
@@ -1906,6 +1973,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                   plannerChats={plannerChats}
                   cards={board.cards}
                   activeChat={activeChat}
+                  linkedCardsByPlanner={linkedCardsByPlanner}
                   onSelectPlanner={handleSelectPlanner}
                   onRemovePlanner={handleRemovePlanner}
                   onSelectAgent={handleSelectAgent}

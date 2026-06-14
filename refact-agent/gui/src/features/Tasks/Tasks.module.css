@@ -627,35 +627,6 @@
   min-width: 0;
 }
 
-.modeOption {
-  appearance: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  width: 100%;
-  min-width: 0;
-  padding: var(--rf-row-pad);
-  border: var(--rf-hairline) solid transparent;
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-}
-
-.modeOption:hover,
-.modeOption:focus-visible {
-  border-color: var(--rf-border);
-  background: color-mix(in oklab, var(--rf-surface-glass) 68%, white 4%);
-}
-
-.modeOptionMeta {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
 .chatSwitcherContent {
   display: flex;
   flex-direction: column;
@@ -900,6 +871,13 @@
 
 .plannerWaitingMore {
   white-space: nowrap;
+}
+
+.plannerLinkedCards {
+  min-width: 0;
+  flex-shrink: 1;
+  margin-top: var(--rf-space-2xs);
+  overflow: hidden;
 }
 
 @media (prefers-reduced-transparency: reduce) {

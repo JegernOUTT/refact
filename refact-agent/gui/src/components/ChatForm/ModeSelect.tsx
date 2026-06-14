@@ -293,7 +293,10 @@ type ModeMenuItemProps = {
   isSelfSwitch?: boolean;
 };
 
-const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
+export const ModeMenuItem = React.forwardRef<
+  HTMLButtonElement,
+  ModeMenuItemProps
+>(
   (
     { mode, isSelected, onSelect, disabled, showTransitionHint, isSelfSwitch },
     ref,

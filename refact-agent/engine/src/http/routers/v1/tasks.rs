@@ -973,6 +973,9 @@ async fn find_planner_referencing_agents(
             .collect::<Vec<_>>()
     };
     for (chat_id, session_arc) in live_sessions {
+        if chat_id == planner_chat_id {
+            continue;
+        }
         let task_meta = {
             let session = session_arc.lock().await;
             session.thread.task_meta.clone()
@@ -980,7 +983,8 @@ async fn find_planner_referencing_agents(
         let Some(task_meta) = task_meta else {
             continue;
         };
-        if task_meta.task_id == task_id
+        if task_meta.role == "agents"
+            && task_meta.task_id == task_id
             && task_meta.planner_chat_id.as_deref() == Some(planner_chat_id)
         {
             seen.insert((chat_id.clone(), "live"));
@@ -1655,6 +1659,21 @@ mod tests {
             agent_id: Some(agent_id.to_string()),
             card_id: card_id.map(str::to_string),
             planner_chat_id: Some(planner_chat_id.to_string()),
+        });
+        gcx.chat_sessions.write().await.insert(
+            chat_id.to_string(),
+            Arc::new(tokio::sync::Mutex::new(session)),
+        );
+    }
+
+    async fn insert_live_planner_session(gcx: Arc<GlobalContext>, task_id: &str, chat_id: &str) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.thread.task_meta = Some(ChatTaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(chat_id.to_string()),
         });
         gcx.chat_sessions.write().await.insert(
             chat_id.to_string(),
@@ -2365,6 +2384,51 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let gcx = setup_task(temp.path(), "task-1").await;
             save_planner(gcx.clone(), "task-1", "planner-chat").await;
+            let planner_path = temp
+                .path()
+                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
+            assert!(planner_path.exists());
+
+            let result = handle_delete_planner_chat(
+                State(app(gcx)),
+                Path(("task-1".to_string(), "planner-chat".to_string())),
+                no_force(),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            assert!(!planner_path.exists());
+        }
+
+        #[tokio::test]
+        async fn delete_planner_chat_not_blocked_by_own_live_session() {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = setup_task(temp.path(), "task-1").await;
+            save_planner(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
+            let planner_path = temp
+                .path()
+                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
+            assert!(planner_path.exists());
+
+            let result = handle_delete_planner_chat(
+                State(app(gcx)),
+                Path(("task-1".to_string(), "planner-chat".to_string())),
+                no_force(),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            assert!(!planner_path.exists());
+        }
+
+        #[tokio::test]
+        async fn delete_planner_chat_not_blocked_by_sibling_planner_chat() {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = setup_task(temp.path(), "task-1").await;
+            save_planner(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "chat-2").await;
             let planner_path = temp
                 .path()
                 .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");

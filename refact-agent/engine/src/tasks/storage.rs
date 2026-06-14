@@ -541,6 +541,7 @@ pub async fn list_task_trajectories(
             updated_at: entry.updated_at,
             session_state: None,
             mode: Some(entry.mode),
+            parent_id: entry.parent_id,
             waiting_for_card_ids: entry.waiting_for_card_ids,
         })
         .collect();

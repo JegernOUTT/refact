@@ -412,6 +412,8 @@ pub struct TrajectoryInfo {
     pub session_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for_card_ids: Vec<String>,
 }

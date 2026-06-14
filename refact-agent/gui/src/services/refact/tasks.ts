@@ -107,6 +107,7 @@ export interface TrajectoryInfo {
   updated_at: string;
   session_state?: string;
   mode?: string;
+  parent_id?: string;
   waiting_for_card_ids?: string[];
 }
 
@@ -342,6 +343,7 @@ export const tasksApi = createApi({
           url: buildApiUrlFromState(
             state,
             `/v1/tasks/${taskId}/planner-chats/${chatId}`,
+            { force: "true" },
           ),
           method: "DELETE",
         });
@@ -350,6 +352,7 @@ export const tasksApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },
+        { type: "Board", id: taskId },
         { type: "Tasks", id: taskId },
         "Tasks",
       ],

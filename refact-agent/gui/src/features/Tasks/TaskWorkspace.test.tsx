@@ -319,6 +319,9 @@ function taskWorkspaceHandlers(
     http.get("*/v1/tasks/task-1/trajectories/planner", () =>
       HttpResponse.json([]),
     ),
+    http.get("*/v1/tasks/task-1/trajectories/agents", () =>
+      HttpResponse.json([]),
+    ),
     http.get("*/v1/worktrees", () =>
       HttpResponse.json(makeWorktreeList(records)),
     ),
@@ -611,6 +614,66 @@ describe("PlannerItem waiting chips", () => {
     );
 
     expect(screen.queryByText("task_planner")).not.toBeInTheDocument();
+  });
+});
+
+describe("PlannerItem linked cards", () => {
+  it("renders linked card badges for cards whose agent the chat spawned", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        linkedCardIds={["G-1", "G-2"]}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(
+      screen.getByTestId(`planner-linked-cards-${planner.id}`),
+    ).toBeInTheDocument();
+    expect(screen.getByText("G-1")).toBeInTheDocument();
+    expect(screen.getByText("G-2")).toBeInTheDocument();
+  });
+
+  it("caps linked card badges at 4 with '+N'", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        linkedCardIds={["G-1", "G-2", "G-3", "G-4", "G-5", "G-6"]}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.getByText("G-4")).toBeInTheDocument();
+    expect(screen.queryByText("G-5")).not.toBeInTheDocument();
+    expect(screen.getByText("+2")).toBeInTheDocument();
+  });
+
+  it("does not render the linked cards row when there are none", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(
+      screen.queryByTestId(`planner-linked-cards-${planner.id}`),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -1056,6 +1119,45 @@ describe("TaskWorkspace layout and chat surfaces", () => {
         within(boardTab).getByTitle(/waiting for input/),
       ).toHaveTextContent("1"),
     );
+  });
+
+  it("board_rail_shows_linked_card_badge_for_agent_spawned_by_chat", async () => {
+    const card = makeCard({ column: "doing", agent_chat_id: "agent-T-1" });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Spawning planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+      http.get("*/v1/tasks/task-1/trajectories/agents", () =>
+        HttpResponse.json([
+          {
+            id: "agent-T-1",
+            title: "Agent T-1",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+            parent_id: PLANNER_ID,
+          },
+        ]),
+      ),
+    );
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
+    const linkedCards = await screen.findByTestId(
+      `planner-linked-cards-${PLANNER_ID}`,
+    );
+    expect(within(linkedCards).getByText(CARD_ID)).toBeInTheDocument();
   });
 
   it("planner_and_agents_overflow_inside_single_panel_scroll_owners", async () => {
