@@ -494,46 +494,99 @@ async fn scan_trajectory_entries(
     Ok(indexed_entries)
 }
 
-async fn trajectory_ids_on_disk(dir: &Path) -> Result<HashSet<String>, String> {
-    let mut ids = HashSet::new();
-    let mut entries = match fs::read_dir(dir).await {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+struct DiskTrajectoryFile {
+    file_name: String,
+    file_len: u64,
+    file_modified_unix_ms: i64,
+}
+
+async fn scan_trajectory_dir_files(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
+    let dir = dir.to_path_buf();
+    let dir_for_err = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read trajectory directory {:?}: {e}",
+                    dir
+                ))
+            }
+        };
+        let mut files = Vec::new();
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            let file_name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if file_name == TRAJECTORY_INDEX_FILE
+                || file_name.starts_with('.')
+                || !file_name.ends_with(".json")
+            {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let file_modified_unix_ms = match unix_modified_ms(&metadata) {
+                Ok(ms) => ms,
+                Err(_) => continue,
+            };
+            files.push(DiskTrajectoryFile {
+                file_name,
+                file_len: metadata.len(),
+                file_modified_unix_ms,
+            });
+        }
+        Ok(files)
+    })
+    .await
+    .map_err(|e| format!("Failed to scan trajectory directory {:?}: {e}", dir_for_err))?
+}
+
+async fn read_and_index_single_trajectory(
+    dir: &Path,
+    path: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Option<TrajectoryIndexEntry> {
+    let content = fs::read_to_string(path).await.ok()?;
+    let value = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) => value,
         Err(e) => {
-            return Err(format!(
-                "Failed to read trajectory directory {:?}: {e}",
-                dir
-            ))
+            tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
+            return None;
         }
     };
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| format!("Failed to iterate trajectory directory {:?}: {e}", dir))?
-    {
-        let path = entry.path();
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if file_name == TRAJECTORY_INDEX_FILE
-            || file_name.starts_with('.')
-            || path.extension().and_then(|e| e.to_str()) != Some("json")
-        {
-            continue;
-        }
-        let metadata = match entry.metadata().await {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-            ids.insert(stem.to_string());
+    match entry_from_trajectory_value(dir, path, &value, source_hint) {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, e);
+            None
         }
     }
-    Ok(ids)
+}
+
+async fn persist_reconciled_trajectory_index(
+    dir: &Path,
+    entries: &[TrajectoryIndexEntry],
+) -> Result<(), String> {
+    let lock = get_trajectory_index_lock(dir).await;
+    let _guard = lock.lock().await;
+    let index = TrajectoryIndex {
+        schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+        updated_at: Utc::now().to_rfc3339(),
+        entries: entries.to_vec(),
+    };
+    write_trajectory_index_atomic(dir, &index).await
 }
 
 pub async fn rebuild_trajectory_index_from_disk(
@@ -556,21 +609,61 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
-    let index = match read_trajectory_index(dir).await {
-        Ok(Some(index)) => index,
-        Ok(None) | Err(_) => return rebuild_trajectory_index_from_disk(dir, source_hint).await,
+    let disk_files = scan_trajectory_dir_files(dir).await?;
+
+    let (existing_entries, index_unreadable) = match read_trajectory_index(dir).await {
+        Ok(Some(index)) => (index.entries, false),
+        Ok(None) => (Vec::new(), false),
+        Err(_) => (Vec::new(), true),
     };
-    let disk_ids = trajectory_ids_on_disk(dir).await?;
-    let index_ids: HashSet<String> = index.entries.iter().map(|entry| entry.id.clone()).collect();
-    if disk_ids != index_ids {
-        return rebuild_trajectory_index_from_disk(dir, source_hint).await;
-    }
-    for entry in &index.entries {
-        if !trajectory_index_entry_is_fresh(dir, entry).await {
-            return rebuild_trajectory_index_from_disk(dir, source_hint).await;
+
+    let by_file: HashMap<String, TrajectoryIndexEntry> = existing_entries
+        .into_iter()
+        .map(|entry| (entry.file_name.clone(), entry))
+        .collect();
+
+    let mut new_entries: Vec<TrajectoryIndexEntry> = Vec::with_capacity(disk_files.len());
+    let mut content_changed = index_unreadable;
+
+    for disk in &disk_files {
+        if let Some(entry) = by_file.get(&disk.file_name) {
+            if entry.file_len == disk.file_len
+                && entry.file_modified_unix_ms == disk.file_modified_unix_ms
+            {
+                new_entries.push(entry.clone());
+                continue;
+            }
+        }
+        let was_indexed = by_file.contains_key(&disk.file_name);
+        let path = dir.join(&disk.file_name);
+        match read_and_index_single_trajectory(dir, &path, source_hint.clone()).await {
+            Some(entry) => {
+                new_entries.push(entry);
+                content_changed = true;
+            }
+            None => {
+                if was_indexed {
+                    content_changed = true;
+                }
+            }
         }
     }
-    Ok(index.entries)
+
+    if !content_changed {
+        let disk_names: HashSet<&str> = disk_files
+            .iter()
+            .map(|disk| disk.file_name.as_str())
+            .collect();
+        content_changed = by_file
+            .keys()
+            .any(|file_name| !disk_names.contains(file_name.as_str()));
+    }
+
+    if content_changed {
+        persist_reconciled_trajectory_index(dir, &new_entries).await?;
+    }
+
+    Ok(new_entries)
 }
 
 pub(crate) fn list_candidate_from_entry(
@@ -720,6 +813,126 @@ mod tests {
         assert_eq!(entries.len(), 2);
         let index = read_trajectory_index(&dir).await.unwrap().unwrap();
         assert_eq!(index.entries.len(), 2);
+    }
+
+    async fn write_raw_trajectory(dir: &Path, file_stem: &str, id: &str) -> PathBuf {
+        fs::create_dir_all(dir).await.unwrap();
+        let path = dir.join(format!("{file_stem}.json"));
+        let value = json!({
+            "id": id,
+            "title": "Backup",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "model": "test-model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [{"role":"user","content":"hi"}]
+        });
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
+            .await
+            .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn non_indexable_backup_files_do_not_force_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        write_raw_trajectory(&dir, "chat-1_initial", "chat-1").await;
+
+        let first = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1, "only the real trajectory is indexed");
+        assert_eq!(first[0].id, "chat-1");
+
+        let index_after_first = read_trajectory_index(&dir).await.unwrap().unwrap();
+        let updated_at_marker = index_after_first.updated_at.clone();
+        assert_eq!(index_after_first.entries.len(), 1);
+
+        for _ in 0..3 {
+            let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+                .await
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, "chat-1");
+            let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+            assert_eq!(
+                index.updated_at, updated_at_marker,
+                "index must not be rewritten when nothing indexable changed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_directory_does_not_rewrite_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+
+        assert_eq!(
+            list_trajectory_entries_from_index_or_rebuild(&dir, None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let marker = read_trajectory_index(&dir)
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at;
+
+        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            marker
+        );
+    }
+
+    #[tokio::test]
+    async fn modified_trajectory_is_reindexed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(entries[0].title, "One");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let path = dir.join("chat-1.json");
+        let value = json!({
+            "id": "chat-1",
+            "title": "One Renamed",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:01Z",
+            "model": "test-model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [{"role":"user","content":"hello again"}]
+        });
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap())
+            .await
+            .unwrap();
+
+        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "One Renamed");
+        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].title, "One Renamed");
     }
 
     #[tokio::test]
