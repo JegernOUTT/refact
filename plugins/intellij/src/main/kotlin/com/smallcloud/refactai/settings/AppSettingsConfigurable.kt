@@ -30,6 +30,7 @@ class AppSettingsConfigurable : Configurable {
         modified = modified || mySettingsComponent!!.useDeveloperMode != InferenceGlobalContext.developerModeEnabled
 
         modified = modified || mySettingsComponent!!.xDebugLSPPort != InferenceGlobalContext.xDebugLSPPort
+        modified = modified || mySettingsComponent!!.refactBinaryPath != InferenceGlobalContext.refactBinaryPath
 
         modified = modified || mySettingsComponent!!.stagingVersion != InferenceGlobalContext.stagingVersion
 
@@ -51,6 +52,7 @@ class AppSettingsConfigurable : Configurable {
         InferenceGlobalContext.developerModeEnabled = mySettingsComponent!!.useDeveloperMode
         InferenceGlobalContext.stagingVersion = mySettingsComponent!!.stagingVersion
         InferenceGlobalContext.xDebugLSPPort = mySettingsComponent!!.xDebugLSPPort
+        InferenceGlobalContext.refactBinaryPath = mySettingsComponent!!.refactBinaryPath
         InferenceGlobalContext.astIsEnabled = mySettingsComponent!!.astIsEnabled
         InferenceGlobalContext.astFileLimit = mySettingsComponent!!.astFileLimit
         InferenceGlobalContext.vecdbIsEnabled = mySettingsComponent!!.vecdbIsEnabled
@@ -66,6 +68,7 @@ class AppSettingsConfigurable : Configurable {
         mySettingsComponent!!.useDeveloperMode = InferenceGlobalContext.developerModeEnabled
         mySettingsComponent!!.stagingVersion = InferenceGlobalContext.stagingVersion
         mySettingsComponent!!.xDebugLSPPort = InferenceGlobalContext.xDebugLSPPort
+        mySettingsComponent!!.refactBinaryPath = InferenceGlobalContext.refactBinaryPath
         mySettingsComponent!!.astIsEnabled = InferenceGlobalContext.astIsEnabled
         mySettingsComponent!!.astFileLimit = InferenceGlobalContext.astFileLimit
         mySettingsComponent!!.vecdbIsEnabled = InferenceGlobalContext.vecdbIsEnabled

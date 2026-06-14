@@ -40,6 +40,8 @@ class AppSettingsComponent {
                     experimentalPanel.isVisible = true
                     myXDebugLSPPortLabel.isVisible = true
                     myXDebugLSPPort.isVisible = true
+                    myRefactBinaryPathLabel.isVisible = true
+                    myRefactBinaryPath.isVisible = true
                 }
             }
 
@@ -62,6 +64,12 @@ class AppSettingsComponent {
         isVisible = false
     }
     private val myXDebugLSPPortLabel = JBLabel("xDebug LSP port:").apply {
+        isVisible = false
+    }
+    private val myRefactBinaryPath = JBTextField().apply {
+        isVisible = false
+    }
+    private val myRefactBinaryPathLabel = JBLabel("Refact binary path:").apply {
         isVisible = false
     }
     private val myStagingVersionText = JBTextField().apply {
@@ -193,6 +201,7 @@ class AppSettingsComponent {
             addComponent(TitledSeparator(RefactAIBundle.message("advancedSettings.experimentalFeatures")))
 
             addLabeledComponent(myXDebugLSPPortLabel, myXDebugLSPPort, UIUtil.LARGE_VGAP)
+            addLabeledComponent(myRefactBinaryPathLabel, myRefactBinaryPath, UIUtil.LARGE_VGAP)
             addComponentFillVertically(JPanel(), 0)
         }.panel
         experimentalPanel.isVisible = false
@@ -271,6 +280,12 @@ class AppSettingsComponent {
 
         set(newVal) {
             myXDebugLSPPort.text = newVal?.toString() ?: ""
+        }
+
+    var refactBinaryPath: String?
+        get() = myRefactBinaryPath.text.trim().ifEmpty { null }
+        set(newVal) {
+            myRefactBinaryPath.text = newVal ?: ""
         }
 
     var stagingVersion: String

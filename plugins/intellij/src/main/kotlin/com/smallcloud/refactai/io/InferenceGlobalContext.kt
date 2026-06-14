@@ -41,6 +41,16 @@ class InferenceGlobalContext : Disposable {
                     .userInferenceUriChanged(newInferenceUrl)
         }
 
+    var refactBinaryPath: String?
+        get() = AppSettingsState.refactBinaryPath
+        set(newPath) {
+            val normalized = newPath?.trim()?.ifEmpty { null }
+            if (normalized == refactBinaryPath) return
+            messageBus
+                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
+                .refactBinaryPathChanged(normalized)
+        }
+
     var developerModeEnabled: Boolean
         get() = AppSettingsState.developerModeEnabled
         set(newValue) {

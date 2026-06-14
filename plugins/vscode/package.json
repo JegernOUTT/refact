@@ -212,18 +212,24 @@
 					"default": 8488,
 					"order": 15
 				},
+				"refactai.binaryPath": {
+					"type": "string",
+					"markdownDescription": "Optional path to a standalone `refact` binary. Leave empty to use a compatible `refact` on PATH or in `~/.refact/bin`, otherwise the extension downloads its pinned release.",
+					"default": "",
+					"order": 16
+				},
 				"refactai.httpHost": {
 					"type": "string",
 					"markdownDescription": "Deprecated. Refact now uses the daemon project proxy instead of a VS Code-managed worker HTTP bind host.",
 					"deprecationMessage": "Refact now connects through the local daemon and ignores this worker-spawn setting.",
 					"default": "0.0.0.0",
-					"order": 16
+					"order": 17
 				},
 				"refactai.browserHost": {
 					"type": "string",
 					"markdownDescription": "Host/IP to open for the daemon-served Refact UI. Leave empty to open this machine's `.local` name. For LAN access, set this to this machine's LAN IP, for example `192.168.1.20`.",
 					"default": "",
-					"order": 17
+					"order": 18
 				}
 			}
 		},

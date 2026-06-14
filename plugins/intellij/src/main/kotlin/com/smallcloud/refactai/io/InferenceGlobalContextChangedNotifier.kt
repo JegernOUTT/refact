@@ -6,6 +6,7 @@ import java.net.URI
 interface InferenceGlobalContextChangedNotifier {
     fun inferenceUriChanged(newUrl: URI?) {}
     fun userInferenceUriChanged(newUrl: String?) {}
+    fun refactBinaryPathChanged(newPath: String?) {}
     fun temperatureChanged(newTemp: Float?) {}
     fun modelChanged(newModel: String?) {}
     fun lastAutoModelChanged(newModel: String?) {}

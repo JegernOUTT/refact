@@ -7,6 +7,8 @@ import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
 import java.io.IOException
+import java.security.MessageDigest
+import java.util.Comparator
 
 class RefactDaemonClientTest {
     @Test
@@ -15,11 +17,137 @@ class RefactDaemonClientTest {
         assertTrue(versionIsOlder("8.1.0-alpha", "8.1.1"))
         assertFalse(versionIsOlder("8.2.0", "8.1.0"))
         assertFalse(versionIsOlder("", "8.1.0"))
+        assertEquals("8.1.0", extractRefactVersion("refact 8.1.0\n"))
+    }
+
+    @Test
+    fun releaseAssetUrlUsesStableContract() {
+        val asset = refactReleaseAsset("8.1.0", "aarch64-pc-windows-msvc", "Windows 11")
+
+        assertEquals("aarch64-pc-windows-msvc", asset.target)
+        assertEquals("refact-8.1.0-aarch64-pc-windows-msvc.zip", asset.archiveName)
+        assertEquals(
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-aarch64-pc-windows-msvc.zip",
+            asset.archiveUrl,
+        )
+        assertEquals(
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-aarch64-pc-windows-msvc.zip.sha256",
+            asset.sha256Url,
+        )
+    }
+
+    @Test
+    fun binaryResolverHonorsExplicitOverrideWithoutVersionCheck() {
+        val root = Files.createTempDirectory("refact-binary-resolver-explicit")
+        val explicit = root.resolve("custom").resolve("refact")
+
+        try {
+            val resolved = RefactBinaryResolver.resolve(
+                RefactBinaryResolverOptions(
+                    explicitPath = explicit.toString(),
+                    minVersion = "9.0.0",
+                    pinnedVersion = "9.0.0",
+                    cacheDir = root.resolve("cache"),
+                    pathEnv = "",
+                    homeDir = root.resolve("home"),
+                    versionReader = { null },
+                )
+            )
+
+            assertEquals(explicit.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun binaryResolverSkipsOldPathBinaryAndUsesHomeBinary() {
+        val root = Files.createTempDirectory("refact-binary-resolver-home")
+        val pathDir = root.resolve("path-bin")
+        val homeDir = root.resolve("home")
+        val pathRefact = pathDir.resolve("refact")
+        val homeRefact = homeDir.resolve(".refact").resolve("bin").resolve("refact")
+
+        try {
+            Files.createDirectories(pathRefact.parent)
+            Files.createDirectories(homeRefact.parent)
+            Files.writeString(pathRefact, "")
+            Files.writeString(homeRefact, "")
+
+            val resolved = RefactBinaryResolver.resolve(
+                RefactBinaryResolverOptions(
+                    minVersion = "8.1.0",
+                    pinnedVersion = "8.1.0",
+                    cacheDir = root.resolve("cache"),
+                    pathEnv = pathDir.toString(),
+                    homeDir = homeDir,
+                    osName = "Linux",
+                    arch = "amd64",
+                    versionReader = { path -> if (path == pathRefact) "refact 8.0.0" else "refact 8.1.0" },
+                )
+            )
+
+            assertEquals(homeRefact.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun binaryResolverDownloadsPinnedArchiveWhenSystemBinariesAreOld() {
+        val root = Files.createTempDirectory("refact-binary-resolver-download")
+        val pathDir = root.resolve("path-bin")
+        val homeDir = root.resolve("home")
+        val pathRefact = pathDir.resolve("refact")
+        val homeRefact = homeDir.resolve(".refact").resolve("bin").resolve("refact")
+        val downloads = mutableListOf<String>()
+
+        try {
+            Files.createDirectories(pathRefact.parent)
+            Files.createDirectories(homeRefact.parent)
+            Files.writeString(pathRefact, "")
+            Files.writeString(homeRefact, "")
+            val resolved = RefactBinaryResolver.resolve(
+                RefactBinaryResolverOptions(
+                    minVersion = "8.1.0",
+                    pinnedVersion = "8.1.0",
+                    cacheDir = root.resolve("cache"),
+                    pathEnv = pathDir.toString(),
+                    homeDir = homeDir,
+                    osName = "Linux",
+                    arch = "amd64",
+                    versionReader = { path -> if (path.toString().contains("cache")) "refact 8.1.0" else "refact 7.9.0" },
+                    downloader = { uri, dest ->
+                        downloads.add(uri.toString())
+                        Files.createDirectories(dest.parent)
+                        if (uri.toString().endsWith(".sha256")) {
+                            val archive = dest.parent.resolve("refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz")
+                            Files.writeString(dest, "${sha256(archive)}  archive\n")
+                        } else {
+                            Files.writeString(dest, "archive")
+                        }
+                    },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "") },
+                    chmod = {},
+                )
+            )
+
+            assertEquals(root.resolve("cache").resolve("8.1.0").resolve("x86_64-unknown-linux-gnu").resolve("refact").toString(), resolved)
+            assertEquals(
+                listOf(
+                    "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
+                ),
+                downloads,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test
     fun windowsDaemonCommandUsesPlainBinaryWithPathSpaces() {
-        val bin = "C:\\Program Files\\Refact\\refact-lsp.exe"
+        val bin = "C:\\Program Files\\Refact\\refact.exe"
 
         val commands = daemonCommandCandidates(bin, DaemonSpawnOs.Windows)
 
@@ -113,4 +241,17 @@ class RefactDaemonClientTest {
         assertEquals(0, shutdowns)
         assertEquals(0, waitUntilDowns)
     }
+}
+
+private fun Path.deleteRecursively() {
+    if (!Files.exists(this)) return
+    Files.walk(this).use { paths ->
+        paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+    }
+}
+
+private fun sha256(path: Path): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(Files.readAllBytes(path))
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }

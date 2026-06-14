@@ -11,7 +11,6 @@ import com.smallcloud.refactai.ExtraInfoChangedNotifier
 import com.smallcloud.refactai.PluginState
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.settings.AppSettingsState.Companion.instance
-import java.io.File
 import java.net.URI
 
 /**
@@ -30,6 +29,7 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
     var userLoggedIn: String? = null
     var inferenceUri: String? = null
     var userInferenceUri: String? = null
+    var refactBinaryPath: String? = null
     var loginMessage: String? = null
     var tooltipMessage: String? = null
     var inferenceMessage: String? = null
@@ -65,6 +65,10 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
 
                     override fun userInferenceUriChanged(newUrl: String?) {
                         instance.userInferenceUri = newUrl
+                    }
+
+                    override fun refactBinaryPathChanged(newPath: String?) {
+                        instance.refactBinaryPath = newPath?.trim()?.ifEmpty { null }
                     }
 
                     override fun modelChanged(newModel: String?) {
@@ -151,7 +155,7 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
 
 fun settingsStartup() {
     instance.userInferenceUri?.let {
-        if (File(it).exists()) {
+        if (java.io.File(it).exists()) {
             instance.userInferenceUri = null
         }
     }

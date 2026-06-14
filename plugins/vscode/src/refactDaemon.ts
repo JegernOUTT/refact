@@ -161,9 +161,8 @@ export function ensureBundledRefactPath(assetPath: string): string {
 }
 
 function ensureDaemonSpawnTarget(binPath: string): void {
-    const assetPath = path.dirname(binPath);
-    if (path.basename(binPath) !== bundledRefactName() || !fs.existsSync(binPath)) {
-        const message = missingBundledRefactError(assetPath);
+    if (!fs.existsSync(binPath)) {
+        const message = `refact binary not found at ${binPath}`;
         console.log(message);
         throw new Error(message);
     }

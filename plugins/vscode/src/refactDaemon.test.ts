@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -16,6 +17,11 @@ import {
     resolveBundledRefactPath,
     type DaemonStatus,
 } from "./refactDaemon";
+import {
+    extractRefactVersion,
+    refactReleaseAsset,
+    resolveRefactBinary,
+} from "./refactBinaryResolver";
 
 export async function runRefactDaemonTests() {
     assert.strictEqual(
@@ -42,6 +48,7 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
 
     await runBundledRefactSpawnTests();
+    await runStandaloneResolutionTests();
     await runDaemonUpgradeWaitsForExitTest();
     await runDaemonUpgradeTimeoutTest();
 }
@@ -50,9 +57,7 @@ async function runBundledRefactSpawnTests() {
     const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-test-"));
     try {
         const refactPath = resolveBundledRefactPath(assetPath);
-        const legacyPath = path.join(assetPath, process.platform === "win32" ? "refact-lsp.exe" : "refact-lsp");
         fs.writeFileSync(refactPath, "");
-        fs.writeFileSync(legacyPath, "");
 
         assert.strictEqual(ensureBundledRefactPath(assetPath), refactPath);
 
@@ -71,7 +76,6 @@ async function runBundledRefactSpawnTests() {
         });
 
         assert.deepStrictEqual(spawned, [refactPath]);
-        assert.notStrictEqual(spawned[0], legacyPath);
 
         fs.unlinkSync(refactPath);
         let readAttempts = 0;
@@ -90,27 +94,94 @@ async function runBundledRefactSpawnTests() {
             ensureError = error instanceof Error ? error : new Error(String(error));
         }
 
-        assert.strictEqual(ensureError?.message, missingBundledRefactError(assetPath));
+        assert.strictEqual(ensureError?.message, `refact binary not found at ${refactPath}`);
         assert.strictEqual(readAttempts, 0);
-        assert.deepStrictEqual(spawned, [path.join(assetPath, process.platform === "win32" ? "refact.exe" : "refact")]);
+        assert.deepStrictEqual(spawned, [refactPath]);
 
-        ensureError = undefined;
-        try {
-            await ensureDaemon(legacyPath, {
-                timeoutMs: 1,
-                spawnDaemon: binPath => spawned.push(binPath),
-                readDaemonInfo: async () => undefined,
-                sleep: async () => undefined,
-            });
-        } catch (error) {
-            ensureError = error instanceof Error ? error : new Error(String(error));
-        }
-
-        assert.strictEqual(ensureError?.message, missingBundledRefactError(assetPath));
-        assert.deepStrictEqual(spawned, [path.join(assetPath, process.platform === "win32" ? "refact.exe" : "refact")]);
+        assert.strictEqual(missingBundledRefactError(assetPath), `refact binary not found in ${assetPath} — reinstall the extension`);
     } finally {
         fs.rmSync(assetPath, { recursive: true, force: true });
     }
+}
+
+async function runStandaloneResolutionTests() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-binary-resolver-test-"));
+    try {
+        const explicit = path.join(root, "custom", process.platform === "win32" ? "refact.exe" : "refact");
+        assert.strictEqual(await resolveRefactBinary({
+            explicitPath: explicit,
+            minVersion: "9.0.0",
+            pinnedVersion: "9.0.0",
+            cacheDir: path.join(root, "cache"),
+            pathEnv: "",
+            homeDir: path.join(root, "home"),
+            runVersion: async () => undefined,
+        }), path.resolve(explicit));
+
+        const pathDir = path.join(root, "path-bin");
+        const homeDir = path.join(root, "home");
+        const cacheDir = path.join(root, "cache");
+        const pathRefact = path.join(pathDir, process.platform === "win32" ? "refact.exe" : "refact");
+        const homeRefact = path.join(homeDir, ".refact", "bin", process.platform === "win32" ? "refact.exe" : "refact");
+        fs.mkdirSync(path.dirname(pathRefact), { recursive: true });
+        fs.mkdirSync(path.dirname(homeRefact), { recursive: true });
+        fs.writeFileSync(pathRefact, "");
+        fs.writeFileSync(homeRefact, "");
+
+        const oldPathIsSkipped = await resolveRefactBinary({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir,
+            pathEnv: pathDir,
+            homeDir,
+            runVersion: async binPath => binPath === pathRefact ? "refact 8.0.0" : "refact 8.1.0",
+        });
+        assert.strictEqual(oldPathIsSkipped, homeRefact);
+
+        const downloads: string[] = [];
+        const extracted = await resolveRefactBinary({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir,
+            pathEnv: pathDir,
+            homeDir,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => binPath.includes(`${path.sep}cache${path.sep}`) ? "refact 8.1.0" : "refact 7.9.0",
+            downloadFile: async (url, destPath) => {
+                downloads.push(url);
+                fs.mkdirSync(path.dirname(destPath), { recursive: true });
+                if (url.endsWith(".sha256")) {
+                    fs.writeFileSync(destPath, `${sha256FileSync(path.join(path.dirname(destPath), "refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz"))}  archive\n`);
+                } else {
+                    fs.writeFileSync(destPath, "archive");
+                }
+            },
+            extractArchive: async (_archivePath, destDir) => {
+                fs.writeFileSync(path.join(destDir, "refact"), "");
+            },
+            chmod: async () => undefined,
+        });
+        assert.strictEqual(extracted, path.join(cacheDir, "8.1.0", "x86_64-unknown-linux-gnu", "refact"));
+        assert.deepStrictEqual(downloads, [
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
+        ]);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+
+    assert.strictEqual(extractRefactVersion("refact 8.1.0\n"), "8.1.0");
+    assert.deepStrictEqual(refactReleaseAsset("8.1.0", "aarch64-pc-windows-msvc", "win32"), {
+        target: "aarch64-pc-windows-msvc",
+        archiveName: "refact-8.1.0-aarch64-pc-windows-msvc.zip",
+        archiveUrl: "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-aarch64-pc-windows-msvc.zip",
+        sha256Url: "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-aarch64-pc-windows-msvc.zip.sha256",
+    });
+}
+
+function sha256FileSync(filePath: string): string {
+    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
 async function spawnAndReturnStatus(

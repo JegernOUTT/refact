@@ -5,8 +5,10 @@ import * as fetchAPI from "./fetchAPI";
 import * as lspClient from 'vscode-languageclient/node';
 import * as net from 'net';
 import * as os from 'os';
+import * as path from 'path';
 import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
+import * as refactBinary from './refactBinaryResolver';
 import * as refactDaemon from './refactDaemon';
 
 const DEBUG_HTTP_PORT = 8001;
@@ -14,6 +16,7 @@ const DEBUG_LSP_PORT = 8002;
 
 export class RustBinaryBlob {
     public asset_path: string;
+    public binary_cache_path: string;
     public port: number = 0;
     public project_id: string = "";
     public lsp_port: number = 0;
@@ -28,8 +31,9 @@ export class RustBinaryBlob {
     private reconnectAttempts: number = 0;
     private openedProjects: Map<string, refactDaemon.OpenProjectResponse> = new Map();
 
-    constructor(asset_path: string) {
+    constructor(asset_path: string, binary_cache_path?: string) {
         this.asset_path = asset_path;
+        this.binary_cache_path = binary_cache_path ?? path.join(asset_path, "refact-bin");
         this.lsp_client_options = {
             documentSelector: [{ scheme: 'file', language: '*' }],
             diagnosticCollectionName: 'RUST LSP',
@@ -167,8 +171,14 @@ export class RustBinaryBlob {
         }
 
         this.port = daemonPort;
-        const binPath = refactDaemon.resolveBundledRefactPath(this.asset_path);
         const pluginVersion = this.plugin_version();
+        const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
+        const binPath = await refactBinary.resolveRefactBinary({
+            explicitPath: configuredBinary,
+            minVersion: pluginVersion,
+            pinnedVersion: pluginVersion,
+            cacheDir: this.binary_cache_path,
+        });
         await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
         if (generation !== this.lifecycleGeneration) {
             return;
@@ -493,8 +503,8 @@ export class RustBinaryBlob {
             : refactDaemon.DEFAULT_DAEMON_PORT;
     }
 
-    private plugin_version(): string | undefined {
-        return vscode.extensions.getExtension("smallcloud.codify")?.packageJSON?.version;
+    private plugin_version(): string {
+        return vscode.extensions.getExtension("smallcloud.codify")?.packageJSON?.version ?? "0.0.0";
     }
 
     private workspace_roots(): string[] {

@@ -3,41 +3,27 @@ package com.smallcloud.refactai.lsp
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.SystemInfo
-import com.intellij.openapi.util.io.FileUtil.getTempDirectory
-import com.intellij.openapi.util.io.FileUtil.setExecutable
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.MessageBus
 import com.intellij.util.messages.Topic
 import com.smallcloud.refactai.Resources
-import com.smallcloud.refactai.Resources.binPrefix
 import com.smallcloud.refactai.io.ConnectionStatus
 import com.smallcloud.refactai.io.HttpStatusException
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 import java.net.URI
-import java.nio.file.Paths
-import java.security.MessageDigest
-import java.util.UUID
+import java.nio.file.Path
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.io.path.Path
 import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
-
-private fun getExeSuffix(): String {
-    if (SystemInfo.isWindows) return ".exe"
-    return ""
-}
 
 interface LSPProcessHolderChangedNotifier {
     fun capabilitiesChanged(newCaps: LSPCapabilities) {}
@@ -250,6 +236,11 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             .subscribe(InferenceGlobalContextChangedNotifier.TOPIC, object : InferenceGlobalContextChangedNotifier {
                 override fun userInferenceUriChanged(newUrl: String?) {
                     settingsChanged("inference-uri-changed")
+                }
+
+                override fun refactBinaryPathChanged(newPath: String?) {
+                    resetBinaryResolution()
+                    settingsChanged("refact-binary-path-changed")
                 }
 
                 override fun astFlagChanged(newValue: Boolean) {
@@ -622,7 +613,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     companion object {
         @Volatile
         var BIN_PATH: String? = null
-        private var TMP_BIN_PATH: String? = null
+        private var BIN_CACHE_DIR: Path = Path.of(PathManager.getSystemPath(), "refactai", "bin")
 
         @JvmStatic
         fun getInstance(project: Project): LSPProcessHolder = project.service()
@@ -631,98 +622,42 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         private val initialized = AtomicBoolean(false)
         private val logger = Logger.getInstance("LSPProcessHolder")
 
-        private fun generateMD5HexAndWriteInTmpFile(input: InputStream, tmpFileName: File): String {
-            val digest = MessageDigest.getInstance("MD5")
-            val buffer = ByteArray(1024)
-            var bytesRead: Int
-            val fileOut = FileOutputStream(tmpFileName)
-            while (input.read(buffer).also { bytesRead = it } != -1) {
-                digest.update(buffer, 0, bytesRead)
-                fileOut.write(buffer, 0, bytesRead)
-            }
-            fileOut.flush()
-            fileOut.close()
-            input.close()
-            return digest.digest().joinToString("") { String.format("%02x", it) }
+        fun setBinaryCacheDirForTest(path: Path) {
+            BIN_CACHE_DIR = path
+            initialized.set(false)
+            BIN_PATH = null
+        }
+
+        fun resetBinaryResolution() {
+            initialized.set(false)
+            BIN_PATH = null
         }
 
         @Synchronized
         fun initialize() {
             logger.warn("LSP initialize start")
             if (initialized.get()) return
-
-            val input: InputStream? = Companion::class.java.getResourceAsStream(
-                "/bin/${binPrefix}/refact${getExeSuffix()}"
-            )
-            if (input == null) {
-                emitError("Refact binary is not found for host operating system, please contact support")
+            if (ApplicationManager.getApplication().isUnitTestMode && BIN_PATH != null) {
+                initialized.set(true)
+                return
+            }
+            val resolvedPath = try {
+                RefactBinaryResolver.resolve(
+                    RefactBinaryResolverOptions(
+                        explicitPath = InferenceGlobalContext.refactBinaryPath,
+                        minVersion = Resources.version,
+                        pinnedVersion = Resources.version,
+                        cacheDir = BIN_CACHE_DIR,
+                    )
+                )
+            } catch (e: Exception) {
+                emitError("Refact binary is not available for host operating system: ${e.message}")
+                logger.warn("LSP initialize failed: ${e.message}", e)
                 logger.warn("LSP initialize finished")
                 return
             }
-            input.use { stream ->
-                val tmpFile = Path(getTempDirectory(), "${UUID.randomUUID()}${getExeSuffix()}").toFile()
-                val hash = try {
-                    generateMD5HexAndWriteInTmpFile(stream, tmpFile)
-                } catch (e: Exception) {
-                    logger.warn("LSP initialize: failed to write temp binary: ${e.message}")
-                    tmpFile.delete()
-                    return
-                }
-
-                val targetName = ApplicationInfo.getInstance().build.toString()
-                    .replace(Regex("[^A-Za-z0-9 ]"), "_") + "_refact_${hash}${getExeSuffix()}"
-                val targetPath = Paths.get(getTempDirectory(), targetName)
-                val targetFile = targetPath.toFile()
-
-                var resolvedPath: String? = null
-
-                for (attempt in 1..5) {
-                    try {
-                        targetPath.parent.toFile().mkdirs()
-                        if (targetFile.exists()) {
-                            if (targetFile.canExecute()) {
-                                resolvedPath = targetFile.canonicalPath
-                                break
-                            }
-                            setExecutable(targetFile)
-                            if (targetFile.canExecute()) {
-                                resolvedPath = targetFile.canonicalPath
-                                break
-                            }
-                        }
-                        java.nio.file.Files.move(
-                            tmpFile.toPath(), targetPath,
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING
-                        )
-                        setExecutable(targetFile)
-                        if (targetFile.exists() && targetFile.canExecute()) {
-                            resolvedPath = targetFile.canonicalPath
-                            break
-                        }
-                        logger.warn("LSP initialize: move succeeded but binary not ready (attempt $attempt)")
-                    } catch (e: Exception) {
-                        logger.warn("LSP initialize: attempt $attempt failed to install binary: ${e.message}")
-                    }
-                }
-
-                if (resolvedPath == null) {
-                    setExecutable(tmpFile)
-                    if (tmpFile.exists() && tmpFile.canExecute()) {
-                        logger.warn("LSP initialize: using temp path as fallback")
-                        resolvedPath = tmpFile.canonicalPath
-                        TMP_BIN_PATH = resolvedPath
-                    } else {
-                        logger.warn("LSP initialize: binary could not be installed or made executable — giving up")
-                        tmpFile.delete()
-                        return
-                    }
-                } else {
-                    if (tmpFile.exists()) tmpFile.deleteOnExit()
-                }
-
-                BIN_PATH = resolvedPath
-                initialized.set(true)
-            }
+            BIN_PATH = resolvedPath
+            initialized.set(true)
             logger.warn("LSP initialize finished")
             logger.warn("LSP initialize BIN_PATH=$BIN_PATH")
         }

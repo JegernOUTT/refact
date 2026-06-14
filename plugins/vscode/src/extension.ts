@@ -270,7 +270,8 @@ export function activate(context: vscode.ExtensionContext)
     }));
 
     global.rust_binary_blob = new launchRust.RustBinaryBlob(
-        fileURLToPath(vscode.Uri.joinPath(context.extensionUri, "assets").toString())
+        fileURLToPath(vscode.Uri.joinPath(context.extensionUri, "assets").toString()),
+        context.globalStorageUri.fsPath,
     );
     global.rust_binary_blob
         .settings_changed() // async function will finish later
@@ -328,6 +329,7 @@ export function activate(context: vscode.ExtensionContext)
             e.affectsConfiguration("refactai.vecdb") ||
             e.affectsConfiguration("refactai.vecdbFileLimit") ||
             e.affectsConfiguration("refactai.daemonPort") ||
+            e.affectsConfiguration("refactai.binaryPath") ||
             e.affectsConfiguration("refactai.xperimental")
         ) {
             if (config_debounce) {
