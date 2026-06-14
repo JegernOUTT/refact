@@ -30,6 +30,12 @@ pub enum SseEvent {
     MessageAdded {
         message: Option<Value>,
     },
+    SubchatUpdate {
+        tool_call_id: String,
+        subchat_id: String,
+        attached_files: Vec<String>,
+        depth: usize,
+    },
     Unknown {
         kind: String,
         raw: Value,
@@ -87,6 +93,35 @@ impl SseEvent {
             "pause_cleared" => Self::PauseCleared,
             "message_added" => Self::MessageAdded {
                 message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
+            },
+            "subchat_update" => Self::SubchatUpdate {
+                tool_call_id: raw
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                subchat_id: raw
+                    .get("subchat_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                attached_files: raw
+                    .get("attached_files")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                depth: raw
+                    .get("depth")
+                    .or_else(|| raw.get("subchat_depth"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as usize,
             },
             _ => Self::Unknown {
                 kind: kind.to_string(),
@@ -666,6 +701,32 @@ mod tests {
                 assert_eq!(unknown.raw["payload"]["x"], 1);
             }
             other => panic!("unexpected op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subchat_update_parses_parent_tool_progress() {
+        let event = SseEvent::from_raw(&json!({
+            "type": "subchat_update",
+            "tool_call_id": "call-1",
+            "subchat_id": "1/2: search({})",
+            "attached_files": ["src/lib.rs", "src/app.rs"],
+            "depth": 7
+        }));
+
+        match event {
+            SseEvent::SubchatUpdate {
+                tool_call_id,
+                subchat_id,
+                attached_files,
+                depth,
+            } => {
+                assert_eq!(tool_call_id, "call-1");
+                assert_eq!(subchat_id, "1/2: search({})");
+                assert_eq!(attached_files, vec!["src/lib.rs", "src/app.rs"]);
+                assert_eq!(depth, 7);
+            }
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 

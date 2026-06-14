@@ -9,6 +9,7 @@ pub enum MiscCommand {
     DebugConfig,
     CopyLastAssistant,
     RawTranscript,
+    Subagents,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -121,12 +122,18 @@ pub const RAW_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const SUBAGENTS_COMMAND: CommandDef = CommandDef {
+    name: "subagents",
+    aliases: &["multi-agents"],
+    description: "local info: list active and recent subagent activity",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Subagents,
+    },
+};
+
 pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
-    unavailable(
-        "subagents",
-        &["multi-agents"],
-        "no TUI subagent picker yet; use the GUI customization surface",
-    ),
     unavailable(
         "side",
         &[],

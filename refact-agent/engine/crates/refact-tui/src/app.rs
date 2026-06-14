@@ -45,7 +45,10 @@ use crate::sessions::{
 use crate::streaming::{run_commit_tick, StreamController};
 use crate::terminal::{terminal_title, TerminalSession, TerminalTitleConfig};
 use crate::theme::TuiTheme;
-use crate::tools::{now_ms, ToolCard, ToolStatus};
+use crate::tools::{
+    now_ms, ToolCard, ToolStatus, MAX_SUBCHAT_ATTACHED_FILES, MAX_SUBCHAT_DEPTH,
+    MAX_SUBCHAT_PROGRESS_CHARS,
+};
 
 const PATCH_LIKE_FUNCTIONS: &[&str] = &[
     "patch",
@@ -1381,6 +1384,11 @@ impl App {
                 self.composer.clear();
                 self.open_raw_transcript_overlay()
             }
+            misc::MiscCommand::Subagents => {
+                self.composer.clear();
+                self.show_subagents_card();
+                AppAction::None
+            }
         }
     }
 
@@ -1466,6 +1474,84 @@ impl App {
         self.push_history_item(TranscriptItem::Info(
             text.lines().map(str::to_string).collect(),
         ));
+    }
+
+    fn show_subagents_card(&mut self) {
+        let summaries = self.subagent_summaries();
+        if summaries.is_empty() {
+            self.push_history_item(TranscriptItem::Info(vec![
+                "Subagents".to_string(),
+                "No active subagents".to_string(),
+            ]));
+            return;
+        }
+        let mut lines = vec!["Subagents".to_string()];
+        for summary in summaries.iter().take(MAX_SUBCHAT_DEPTH) {
+            lines.push(summary.detail());
+        }
+        if summaries.len() > MAX_SUBCHAT_DEPTH {
+            lines.push(format!(
+                "… {} more subagents",
+                summaries.len() - MAX_SUBCHAT_DEPTH
+            ));
+        }
+        self.push_history_item(TranscriptItem::Info(lines));
+    }
+
+    fn subagent_summaries(&self) -> Vec<SubagentSummary> {
+        let finished_tool_ids = self
+            .transcript_state
+            .messages()
+            .iter()
+            .filter(|message| message.role == TranscriptRole::Tool)
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        let mut summaries = Vec::<SubagentSummary>::new();
+        for message in self.transcript_state.messages() {
+            if message.role != TranscriptRole::Assistant {
+                continue;
+            }
+            for tool in &message.tool_calls {
+                let card = ToolCard::from_tool_call(tool);
+                if card.subchat_log.is_empty() && card.attached_files.is_empty() {
+                    continue;
+                }
+                let active = card.subchat_active && !finished_tool_ids.contains(&card.id);
+                summaries.push(SubagentSummary {
+                    tool_call_id: card.id,
+                    tool_name: card.name,
+                    progress: card.subchat_log.last().cloned(),
+                    attached_files: card.attached_files.len(),
+                    depth: card.subchat_depth,
+                    active,
+                    truncated: card.subchat_truncated,
+                });
+            }
+        }
+        for item in &self.transcript {
+            let TranscriptItem::Tool(card) = item else {
+                continue;
+            };
+            if card.subchat_log.is_empty() && card.attached_files.is_empty() {
+                continue;
+            }
+            if summaries
+                .iter()
+                .any(|summary| summary.tool_call_id == card.id)
+            {
+                continue;
+            }
+            summaries.push(SubagentSummary {
+                tool_call_id: card.id.clone(),
+                tool_name: card.name.clone(),
+                progress: card.subchat_log.last().cloned(),
+                attached_files: card.attached_files.len(),
+                depth: card.subchat_depth,
+                active: card.subchat_active && card.status == ToolStatus::Running,
+                truncated: card.subchat_truncated,
+            });
+        }
+        summaries
     }
 
     fn status_snapshot(&self) -> session::StatusSnapshot {
@@ -2883,6 +2969,12 @@ impl App {
             SseEvent::MessageAdded { message } => {
                 self.handle_message_added_payload(message.as_ref())
             }
+            SseEvent::SubchatUpdate {
+                tool_call_id,
+                subchat_id,
+                attached_files,
+                depth,
+            } => self.handle_subchat_update(&tool_call_id, &subchat_id, &attached_files, depth),
             SseEvent::Unknown { .. } => {}
         }
         AppAction::None
@@ -3252,6 +3344,121 @@ impl App {
         self.set_working_detail(detail);
     }
 
+    fn handle_subchat_update(
+        &mut self,
+        tool_call_id: &str,
+        subchat_id: &str,
+        attached_files: &[String],
+        depth: usize,
+    ) {
+        if tool_call_id.is_empty() {
+            return;
+        }
+        let depth = depth.clamp(1, MAX_SUBCHAT_DEPTH);
+        let (progress, progress_truncated) = truncate_subchat_progress(subchat_id);
+        self.update_state_subchat(
+            tool_call_id,
+            subchat_id,
+            &progress,
+            attached_files,
+            depth,
+            progress_truncated,
+        );
+        let updated = self.update_visible_subchat(
+            tool_call_id,
+            subchat_id,
+            &progress,
+            attached_files,
+            depth,
+            progress_truncated,
+        );
+        if !updated && !subchat_id.is_empty() {
+            let mut card =
+                ToolCard::from_tool_call(&json!({"id": tool_call_id, "name": "subagent"}));
+            apply_subchat_update_to_card(
+                &mut card,
+                subchat_id,
+                &progress,
+                attached_files,
+                depth,
+                progress_truncated,
+            );
+            self.push_history_item(TranscriptItem::Tool(card));
+            self.selected_tool_index = self.transcript.len().checked_sub(1);
+        }
+        if let Some(summary) = self
+            .subagent_summaries()
+            .first()
+            .map(SubagentSummary::detail)
+        {
+            self.set_working_detail(summary);
+        }
+    }
+
+    fn update_visible_subchat(
+        &mut self,
+        tool_call_id: &str,
+        subchat_id: &str,
+        progress: &str,
+        attached_files: &[String],
+        depth: usize,
+        progress_truncated: bool,
+    ) -> bool {
+        for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
+            let TranscriptItem::Tool(card) = item else {
+                continue;
+            };
+            if card.id != tool_call_id {
+                continue;
+            }
+            apply_subchat_update_to_card(
+                card,
+                subchat_id,
+                progress,
+                attached_files,
+                depth,
+                progress_truncated,
+            );
+            self.selected_tool_index = Some(idx);
+            return true;
+        }
+        false
+    }
+
+    fn update_state_subchat(
+        &mut self,
+        tool_call_id: &str,
+        subchat_id: &str,
+        progress: &str,
+        attached_files: &[String],
+        depth: usize,
+        progress_truncated: bool,
+    ) {
+        for message in self.transcript_state.messages_mut() {
+            if message.role != TranscriptRole::Assistant {
+                continue;
+            }
+            for tool in &mut message.tool_calls {
+                if tool
+                    .get("id")
+                    .or_else(|| tool.get("tool_call_id"))
+                    .and_then(Value::as_str)
+                    != Some(tool_call_id)
+                {
+                    continue;
+                }
+                apply_subchat_update_to_tool_value(
+                    tool,
+                    subchat_id,
+                    progress,
+                    attached_files,
+                    depth,
+                    progress_truncated,
+                );
+            }
+        }
+    }
+
     fn complete_tool(
         &mut self,
         id: &str,
@@ -3264,6 +3471,7 @@ impl App {
                 if card.id == id || id.is_empty() {
                     card.result = result.clone();
                     card.status = status;
+                    card.subchat_active = false;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
                     let detail = card.summary();
                     if self.native_scrollback {
@@ -5614,6 +5822,150 @@ fn retry_value_after(message: &str, needle: &str) -> Option<String> {
 
 fn value_to_compact_string(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubagentSummary {
+    tool_call_id: String,
+    tool_name: String,
+    progress: Option<String>,
+    attached_files: usize,
+    depth: usize,
+    active: bool,
+    truncated: bool,
+}
+
+impl SubagentSummary {
+    fn detail(&self) -> String {
+        let mut parts = vec![format!("{} [{}]", self.tool_name, self.tool_call_id)];
+        parts.push(if self.active { "active" } else { "recent" }.to_string());
+        if self.depth > 1 {
+            parts.push(format!("depth {}", self.depth));
+        }
+        if self.attached_files > 0 {
+            parts.push(format!("{} files", self.attached_files));
+        }
+        if self.truncated {
+            parts.push("truncated".to_string());
+        }
+        if let Some(progress) = &self.progress {
+            parts.push(progress.clone());
+        }
+        parts.join(" · ")
+    }
+}
+
+fn truncate_subchat_progress(progress: &str) -> (String, bool) {
+    if progress.chars().count() <= MAX_SUBCHAT_PROGRESS_CHARS {
+        return (progress.to_string(), false);
+    }
+    let mut truncated = progress
+        .chars()
+        .take(MAX_SUBCHAT_PROGRESS_CHARS)
+        .collect::<String>();
+    truncated.push('…');
+    (truncated, true)
+}
+
+fn apply_subchat_update_to_card(
+    card: &mut ToolCard,
+    subchat_id: &str,
+    progress: &str,
+    attached_files: &[String],
+    depth: usize,
+    progress_truncated: bool,
+) {
+    if subchat_id.is_empty() {
+        card.clear_subchat();
+        return;
+    }
+    card.subchat_active = true;
+    card.subchat_depth = depth.clamp(1, MAX_SUBCHAT_DEPTH);
+    card.subchat_updates = card.subchat_updates.saturating_add(1);
+    if progress_truncated {
+        card.subchat_truncated = true;
+    }
+    if !subchat_id.contains("/tool:") && !progress.is_empty() {
+        card.subchat_log.clear();
+        card.subchat_log.push(progress.to_string());
+    }
+    for file in attached_files {
+        if file.is_empty() || card.attached_files.contains(file) {
+            continue;
+        }
+        if card.attached_files.len() < MAX_SUBCHAT_ATTACHED_FILES {
+            card.attached_files.push(file.clone());
+        } else {
+            card.subchat_truncated = true;
+        }
+    }
+}
+
+fn apply_subchat_update_to_tool_value(
+    tool: &mut Value,
+    subchat_id: &str,
+    progress: &str,
+    attached_files: &[String],
+    depth: usize,
+    progress_truncated: bool,
+) {
+    let Value::Object(map) = tool else {
+        return;
+    };
+    if subchat_id.is_empty() {
+        map.remove("subchat");
+        map.insert("subchat_log".to_string(), Value::Array(Vec::new()));
+        map.insert("attached_files".to_string(), Value::Array(Vec::new()));
+        map.insert("subchat_updates".to_string(), json!(0));
+        map.insert("subchat_depth".to_string(), json!(1));
+        map.insert("subchat_truncated".to_string(), Value::Bool(false));
+        return;
+    }
+    map.insert("subchat".to_string(), Value::String(subchat_id.to_string()));
+    map.insert(
+        "subchat_depth".to_string(),
+        Value::Number((depth.clamp(1, MAX_SUBCHAT_DEPTH) as u64).into()),
+    );
+    let updates = map
+        .get("subchat_updates")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+        .saturating_add(1);
+    map.insert("subchat_updates".to_string(), Value::Number(updates.into()));
+    let mut truncated = map
+        .get("subchat_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || progress_truncated;
+    if !subchat_id.contains("/tool:") && !progress.is_empty() {
+        map.insert(
+            "subchat_log".to_string(),
+            Value::Array(vec![Value::String(progress.to_string())]),
+        );
+    }
+    let mut files = map
+        .get("attached_files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    for file in attached_files {
+        if file.is_empty() || files.contains(file) {
+            continue;
+        }
+        if files.len() < MAX_SUBCHAT_ATTACHED_FILES {
+            files.push(file.clone());
+        } else {
+            truncated = true;
+        }
+    }
+    map.insert(
+        "attached_files".to_string(),
+        Value::Array(files.into_iter().map(Value::String).collect()),
+    );
+    map.insert("subchat_truncated".to_string(), Value::Bool(truncated));
 }
 
 fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
@@ -8199,6 +8551,107 @@ new-chat = "ctrl-x"
         assert_eq!(cards[0].status, ToolStatus::Success);
         assert_eq!(cards[0].result, "done");
         assert!(cards[0].expanded);
+    }
+
+    #[test]
+    fn subchat_update_attaches_bounded_progress_to_parent_tool() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "tool_subagent", "arguments": "{}"}}]}]}),
+        });
+        let attached = (0..20)
+            .map(|idx| format!("src/file_{idx}.rs"))
+            .collect::<Vec<_>>();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({
+                "tool_call_id": "call-1",
+                "subchat_id": "1/2: search({\"query\":\"needle\"})",
+                "attached_files": attached,
+                "depth": 9
+            }),
+        });
+
+        let cards = tool_cards(&app);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].subchat_log,
+            vec!["1/2: search({\"query\":\"needle\"})"]
+        );
+        assert_eq!(cards[0].attached_files.len(), MAX_SUBCHAT_ATTACHED_FILES);
+        assert_eq!(cards[0].subchat_depth, MAX_SUBCHAT_DEPTH);
+        assert!(cards[0].subchat_active);
+        assert!(cards[0].subchat_truncated);
+    }
+
+    #[test]
+    fn subchat_update_file_notice_does_not_replace_latest_progress_and_clear_resets() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "tool_subagent", "arguments": "{}"}}]}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({"tool_call_id": "call-1", "subchat_id": "thinking", "attached_files": []}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({"tool_call_id": "call-1", "subchat_id": "/tool:files", "attached_files": ["README.md"]}),
+        });
+        assert_eq!(tool_cards(&app)[0].subchat_log, vec!["thinking"]);
+        assert_eq!(tool_cards(&app)[0].attached_files, vec!["README.md"]);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({"tool_call_id": "call-1", "subchat_id": "", "attached_files": []}),
+        });
+        assert!(tool_cards(&app)[0].subchat_log.is_empty());
+        assert!(tool_cards(&app)[0].attached_files.is_empty());
+        assert!(!tool_cards(&app)[0].subchat_active);
+    }
+
+    #[test]
+    fn subagents_command_lists_live_activity_and_empty_state() {
+        let mut app = App::new(project());
+        app.execute_command_name("subagents");
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Info(lines)) if lines.iter().any(|line| line == "No active subagents")
+        ));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "tool_subagent", "arguments": "{}"}}]}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({"tool_call_id": "call-1", "subchat_id": "collecting context", "attached_files": ["src/lib.rs"]}),
+        });
+        app.execute_command_name("multi-agents");
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Info(lines))
+                if lines.join("\n").contains("tool_subagent [call-1]")
+                    && lines.join("\n").contains("collecting context")
+        ));
     }
 
     #[test]

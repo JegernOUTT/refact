@@ -144,6 +144,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::DEBUG_CONFIG_COMMAND,
             misc::COPY_COMMAND,
             misc::RAW_COMMAND,
+            misc::SUBAGENTS_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],
@@ -219,7 +220,15 @@ mod tests {
     fn misc_command_group_is_visible_in_popup() {
         let items = command_picker_items(CommandContext { active_turn: false });
         for title in [
-            "/theme", "/help", "/events", "/quit", "/keymap", "/vim", "/copy", "/raw",
+            "/theme",
+            "/help",
+            "/events",
+            "/quit",
+            "/keymap",
+            "/vim",
+            "/copy",
+            "/raw",
+            "/subagents",
         ] {
             assert!(
                 items.iter().any(|item| item.title == title),

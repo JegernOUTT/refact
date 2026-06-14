@@ -23,6 +23,7 @@ pub enum HistoryCellKind {
     Notice,
     Info,
     Tool,
+    Subchat,
     Exec,
     Diff,
     Plan,
@@ -473,6 +474,39 @@ impl HistoryCell for ToolCallCell {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SubchatCell {
+    card: ToolCard,
+}
+
+impl SubchatCell {
+    pub fn new(card: ToolCard) -> Self {
+        Self { card }
+    }
+
+    pub fn render_inline(&self, width: usize) -> Vec<Line<'static>> {
+        self.card.render_subchat_lines(width)
+    }
+}
+
+impl HistoryCell for SubchatCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Subchat
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        finish(self.render_inline(width))
+    }
+
+    fn is_final(&self) -> bool {
+        !self.card.subchat_active
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(self.kind(), &self.card))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExecToolCell {
     card: ToolCard,
     selected: bool,
@@ -510,6 +544,7 @@ impl HistoryCell for ExecToolCell {
             command_label(&self.card),
             meta.join(" · "),
         ));
+        lines.extend(subchat_lines(&self.card, width));
         if self.card.expanded {
             lines.extend(output_lines(
                 &self.card.result,
@@ -575,6 +610,7 @@ impl HistoryCell for DiffToolCell {
                 .map(format_duration)
                 .unwrap_or_default(),
         ));
+        lines.extend(subchat_lines(&self.card, width));
         for stat in &stats {
             lines.push(Line::from(vec![
                 Span::styled("Δ ", Style::default().fg(Color::Blue)),
@@ -650,6 +686,7 @@ impl HistoryCell for ServerToolCell {
                 .map(format_duration)
                 .unwrap_or_default(),
         ));
+        lines.extend(subchat_lines(&self.card, width));
         if self.card.expanded && !self.card.result.is_empty() {
             lines.extend(output_lines(
                 &self.card.result,
@@ -704,6 +741,7 @@ impl HistoryCell for SearchToolCell {
                 .map(format_duration)
                 .unwrap_or_default(),
         ));
+        lines.extend(subchat_lines(&self.card, width));
         if self.card.expanded && !self.card.result.is_empty() {
             lines.extend(output_lines(
                 &self.card.result,
@@ -768,6 +806,7 @@ impl HistoryCell for RequestInputToolCell {
                 .map(format_duration)
                 .unwrap_or_default(),
         ));
+        lines.extend(subchat_lines(&self.card, width));
         if self.card.expanded {
             if let Some(prompt) = argument_value(
                 &self.card,
@@ -1248,6 +1287,10 @@ fn status_style(status: ToolStatus) -> Style {
         ToolStatus::Success => Style::default().fg(Color::Green),
         ToolStatus::Error => Style::default().fg(Color::Red),
     }
+}
+
+fn subchat_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
+    SubchatCell::new(card.clone()).render_inline(width)
 }
 
 fn command_label(card: &ToolCard) -> String {
