@@ -720,24 +720,15 @@ pub fn replace_binary(current_path: &Path, replacement_path: &Path) -> Result<()
 
 #[cfg(unix)]
 fn preserve_binary_permissions(
-    current_path: &Path,
+    _current_path: &Path,
     replacement_path: &Path,
 ) -> Result<(), SelfUpdateError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let permissions = std::fs::metadata(current_path)
-        .map_err(|error| {
-            SelfUpdateError::runtime(format!(
-                "failed to inspect current binary {}: {error}",
-                current_path.display()
-            ))
-        })?
-        .permissions();
-    let mode = permissions.mode();
-    std::fs::set_permissions(replacement_path, std::fs::Permissions::from_mode(mode)).map_err(
+    std::fs::set_permissions(replacement_path, std::fs::Permissions::from_mode(0o755)).map_err(
         |error| {
             SelfUpdateError::runtime(format!(
-                "failed to preserve permissions on {}: {error}",
+                "failed to set executable permissions on {}: {error}",
                 replacement_path.display()
             ))
         },
@@ -834,14 +825,44 @@ fn replace_binary_inner(
         ))
     })?;
     if let Err(error) = std::fs::rename(replacement_path, current_path) {
-        let _ = std::fs::rename(&old_path, current_path);
-        return Err(SelfUpdateError::runtime(format!(
-            "failed to install updated binary {}: {error}. The previous binary was restored.",
-            current_path.display()
-        )));
+        let rollback_error = std::fs::rename(&old_path, current_path).err();
+        return Err(windows_install_failure_error(
+            current_path,
+            replacement_path,
+            &old_path,
+            &error,
+            rollback_error.as_ref(),
+        ));
     }
     let _ = std::fs::remove_file(&old_path);
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn windows_install_failure_error(
+    current_path: &Path,
+    replacement_path: &Path,
+    old_path: &Path,
+    install_error: &std::io::Error,
+    rollback_error: Option<&std::io::Error>,
+) -> SelfUpdateError {
+    match rollback_error {
+        Some(rollback_error) => SelfUpdateError::runtime(format!(
+            "failed to install updated binary {} from {}: {install_error}. Rollback also failed while moving {} back to {}: {rollback_error}. The refact binary may be in a broken state. Recover manually by moving {} back to {}, then rerun the installer or use the temp binary at {}.",
+            current_path.display(),
+            replacement_path.display(),
+            old_path.display(),
+            current_path.display(),
+            old_path.display(),
+            current_path.display(),
+            replacement_path.display()
+        )),
+        None => SelfUpdateError::runtime(format!(
+            "failed to install updated binary {} from {}: {install_error}. The previous binary was restored.",
+            current_path.display(),
+            replacement_path.display()
+        )),
+    }
 }
 
 fn not_writable_error(path: &Path, reason: impl Into<String>) -> SelfUpdateError {
@@ -1155,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_replace_preserves_permissions() {
+    fn atomic_replace_installs_replacement_and_removes_temp() {
         let dir = tempfile::tempdir().unwrap();
         let current = dir.path().join(binary_name());
         let replacement = dir.path().join("replacement");
@@ -1177,6 +1198,49 @@ mod tests {
                 0o755
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_forces_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join(binary_name());
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&current, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644)).unwrap();
+        replace_binary(&current, &replacement).unwrap();
+        assert_eq!(
+            std::fs::metadata(&current).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn windows_install_failure_reports_restored_only_after_rollback_success() {
+        let current = Path::new("C:/refact/refact.exe");
+        let replacement = Path::new("C:/refact/.refact.exe.update-1");
+        let old = Path::new("C:/refact/refact.exe.old");
+        let install_error = std::io::Error::new(std::io::ErrorKind::Other, "install failed");
+        let error = windows_install_failure_error(current, replacement, old, &install_error, None);
+        assert!(error.message.contains("previous binary was restored"));
+        assert!(!error.message.contains("may be in a broken state"));
+
+        let install_error = std::io::Error::new(std::io::ErrorKind::Other, "install failed");
+        let rollback_error = std::io::Error::new(std::io::ErrorKind::Other, "rollback failed");
+        let error = windows_install_failure_error(
+            current,
+            replacement,
+            old,
+            &install_error,
+            Some(&rollback_error),
+        );
+        assert!(error.message.contains("may be in a broken state"));
+        assert!(error.message.contains(&old.display().to_string()));
+        assert!(error.message.contains(&replacement.display().to_string()));
+        assert!(!error.message.contains("previous binary was restored"));
     }
 
     #[test]
