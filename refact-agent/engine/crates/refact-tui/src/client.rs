@@ -123,6 +123,191 @@ struct AtCommandCompletionResponse {
     completions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntegrationListResponse {
+    #[serde(default)]
+    pub integrations: Vec<IntegrationRecord>,
+    #[serde(default)]
+    pub error_log: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntegrationRecord {
+    #[serde(default)]
+    pub project_path: String,
+    #[serde(default)]
+    pub integr_name: String,
+    #[serde(default)]
+    pub integr_config_path: String,
+    #[serde(default)]
+    pub integr_config_exists: bool,
+    #[serde(default)]
+    pub config_unparsed: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpViewData {
+    pub servers: Vec<McpServerSummary>,
+    pub error_log: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub transport: String,
+    pub project_path: String,
+    pub config_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<McpServerInfoResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerInfoResponse {
+    pub config_path: String,
+    #[serde(default)]
+    pub status: Value,
+    #[serde(default)]
+    pub auth_status: Value,
+    #[serde(default)]
+    pub server_name: Option<String>,
+    #[serde(default)]
+    pub server_version: Option<String>,
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<McpToolInfo>,
+    #[serde(default)]
+    pub resources: Vec<McpResourceInfo>,
+    #[serde(default)]
+    pub prompts: Vec<McpPromptInfo>,
+    #[serde(default)]
+    pub capabilities: Value,
+    #[serde(default)]
+    pub logs_tail: Vec<String>,
+    #[serde(default)]
+    pub metrics: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpToolInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub annotations: Option<Value>,
+    #[serde(default)]
+    pub internal_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpResourceInfo {
+    pub uri: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SlashCommandsListResponse {
+    #[serde(default)]
+    pub commands: Vec<SlashCommandInfo>,
+    #[serde(default)]
+    pub skills: Vec<SkillInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub user_invocable: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KnowledgeGraphResponse {
+    #[serde(default)]
+    pub nodes: Vec<KnowledgeNode>,
+    #[serde(default)]
+    pub edges: Vec<KnowledgeEdge>,
+    #[serde(default)]
+    pub stats: KnowledgeStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KnowledgeNode {
+    pub id: String,
+    #[serde(default)]
+    pub node_type: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub created: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeEdge {
+    pub source: String,
+    pub target: String,
+    pub edge_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgeStats {
+    #[serde(default)]
+    pub doc_count: usize,
+    #[serde(default)]
+    pub tag_count: usize,
+    #[serde(default)]
+    pub file_count: usize,
+    #[serde(default)]
+    pub entity_count: usize,
+    #[serde(default)]
+    pub edge_count: usize,
+    #[serde(default)]
+    pub active_docs: usize,
+    #[serde(default)]
+    pub deprecated_docs: usize,
+    #[serde(default)]
+    pub trajectory_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatEvent {
     pub chat_id: Option<String>,
@@ -294,6 +479,76 @@ impl DaemonClient {
 
     pub async fn get_chat_modes(&self, project_id: &str) -> Result<Value, ClientError> {
         let path = format!("/p/{}/v1/chat-modes", encode_path_segment(project_id));
+        self.get_json(&path).await
+    }
+
+    pub async fn mcp_view_data(&self, project_id: &str) -> Result<McpViewData, ClientError> {
+        let integrations = self.list_integrations(project_id).await?;
+        let mut servers = Vec::new();
+        for integration in integrations
+            .integrations
+            .into_iter()
+            .filter(is_configured_mcp_integration)
+        {
+            let info = self
+                .mcp_server_info(project_id, &integration.integr_config_path)
+                .await;
+            let (info, error) = match info {
+                Ok(info) => (Some(info), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            servers.push(McpServerSummary {
+                name: integration.integr_name.clone(),
+                transport: mcp_transport(&integration.integr_name)
+                    .unwrap_or("mcp")
+                    .to_string(),
+                project_path: integration.project_path,
+                config_path: integration.integr_config_path,
+                info,
+                error,
+            });
+        }
+        servers.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(McpViewData {
+            servers,
+            error_log: integrations.error_log,
+        })
+    }
+
+    pub async fn list_integrations(
+        &self,
+        project_id: &str,
+    ) -> Result<IntegrationListResponse, ClientError> {
+        let path = format!("/p/{}/v1/integrations", encode_path_segment(project_id));
+        self.get_json(&path).await
+    }
+
+    pub async fn mcp_server_info(
+        &self,
+        project_id: &str,
+        config_path: &str,
+    ) -> Result<McpServerInfoResponse, ClientError> {
+        let path = format!(
+            "/p/{}/v1/mcp-server-info?config_path={}",
+            encode_path_segment(project_id),
+            encode_query_value(config_path)
+        );
+        self.get_json(&path).await
+    }
+
+    pub async fn slash_commands(
+        &self,
+        project_id: &str,
+    ) -> Result<SlashCommandsListResponse, ClientError> {
+        let path = format!("/p/{}/v1/slash-commands", encode_path_segment(project_id));
+        self.get_json(&path).await
+    }
+
+    pub async fn knowledge_graph(
+        &self,
+        project_id: &str,
+    ) -> Result<KnowledgeGraphResponse, ClientError> {
+        let path = format!("/p/{}/v1/knowledge-graph", encode_path_segment(project_id));
         self.get_json(&path).await
     }
 
@@ -775,6 +1030,22 @@ fn encode_path_segment(value: &str) -> String {
     url_encode(value)
 }
 
+fn is_configured_mcp_integration(integration: &IntegrationRecord) -> bool {
+    integration.integr_config_exists && mcp_transport(&integration.integr_name).is_some()
+}
+
+fn mcp_transport(name: &str) -> Option<&'static str> {
+    if name.starts_with("mcp_stdio_") {
+        Some("stdio")
+    } else if name.starts_with("mcp_sse_") {
+        Some("sse")
+    } else if name.starts_with("mcp_http_") {
+        Some("http")
+    } else {
+        None
+    }
+}
+
 fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -834,5 +1105,77 @@ mod tests {
         assert!(!body.contains('\n'));
         assert!(body.ends_with('…'));
         assert_eq!(body.chars().count(), STATUS_BODY_NOTICE_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn slash_commands_fixture_parses_typed_lists() {
+        let response: SlashCommandsListResponse = serde_json::from_str(
+            r#"{
+                "commands": [{"name":"review","description":"Review","argument_hint":"[path]","source":"project_refact"}],
+                "skills": [{"name":"explain","description":"Explain","user_invocable":true,"source":"global_refact"}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(response.commands[0].name, "review");
+        assert_eq!(
+            response.commands[0].argument_hint.as_deref(),
+            Some("[path]")
+        );
+        assert_eq!(response.skills[0].name, "explain");
+        assert!(response.skills[0].user_invocable);
+    }
+
+    #[test]
+    fn knowledge_graph_fixture_parses_stats_and_docs() {
+        let response: KnowledgeGraphResponse = serde_json::from_str(
+            r#"{
+                "nodes": [{"id":"doc1","node_type":"doc_decision","label":"Decision","tags":["ui"],"file_path":".refact/knowledge/d.md","kind":"decision"}],
+                "edges": [{"source":"doc1","target":"tag:ui","edge_type":"tagged_with"}],
+                "stats": {"doc_count":1,"tag_count":1,"file_count":0,"entity_count":0,"edge_count":1,"active_docs":1,"deprecated_docs":0,"trajectory_count":0}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(response.stats.doc_count, 1);
+        assert_eq!(response.nodes[0].kind.as_deref(), Some("decision"));
+        assert_eq!(response.edges[0].edge_type, "tagged_with");
+    }
+
+    #[test]
+    fn mcp_fixtures_filter_configured_servers_and_parse_info() {
+        let integrations: IntegrationListResponse = serde_json::from_str(
+            r#"{
+                "integrations": [
+                    {"integr_name":"mcp_stdio_demo","integr_config_path":"/tmp/mcp.yaml","integr_config_exists":true},
+                    {"integr_name":"mcp_sse_missing","integr_config_path":"/tmp/missing.yaml","integr_config_exists":false},
+                    {"integr_name":"github","integr_config_path":"/tmp/github.yaml","integr_config_exists":true}
+                ],
+                "error_log": []
+            }"#,
+        )
+        .unwrap();
+        let servers = integrations
+            .integrations
+            .iter()
+            .filter(|integration| is_configured_mcp_integration(integration))
+            .collect::<Vec<_>>();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(mcp_transport(&servers[0].integr_name), Some("stdio"));
+
+        let info: McpServerInfoResponse = serde_json::from_str(
+            r#"{
+                "config_path":"/tmp/mcp.yaml",
+                "status":{"status":"connected"},
+                "auth_status":"not_applicable",
+                "tools":[{"name":"lookup","description":"Lookup","input_schema":{"type":"object"},"internal_name":"demo_lookup"}],
+                "resources":[],
+                "prompts":[],
+                "capabilities":{"tools":true},
+                "logs_tail":[],
+                "metrics":{}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(info.tools[0].internal_name, "demo_lookup");
+        assert_eq!(info.status["status"], "connected");
     }
 }

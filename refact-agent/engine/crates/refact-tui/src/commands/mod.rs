@@ -145,6 +145,9 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::COPY_COMMAND,
             misc::RAW_COMMAND,
             misc::SUBAGENTS_COMMAND,
+            misc::MCP_COMMAND,
+            misc::SKILLS_COMMAND,
+            misc::MEMORIES_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],
@@ -229,6 +232,9 @@ mod tests {
             "/copy",
             "/raw",
             "/subagents",
+            "/mcp",
+            "/skills",
+            "/memories",
         ] {
             assert!(
                 items.iter().any(|item| item.title == title),

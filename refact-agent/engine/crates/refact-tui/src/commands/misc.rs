@@ -10,6 +10,9 @@ pub enum MiscCommand {
     CopyLastAssistant,
     RawTranscript,
     Subagents,
+    Mcp,
+    Skills,
+    Memories,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -133,6 +136,39 @@ pub const SUBAGENTS_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const MCP_COMMAND: CommandDef = CommandDef {
+    name: "mcp",
+    aliases: &[],
+    description: "read-only overlay: show configured MCP servers, status, and tools",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Mcp,
+    },
+};
+
+pub const SKILLS_COMMAND: CommandDef = CommandDef {
+    name: "skills",
+    aliases: &[],
+    description: "read-only overlay: list available skills and slash commands",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Skills,
+    },
+};
+
+pub const MEMORIES_COMMAND: CommandDef = CommandDef {
+    name: "memories",
+    aliases: &[],
+    description: "read-only overlay: show knowledge graph memory entries and summary",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Memories,
+    },
+};
+
 pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
     unavailable(
         "side",
@@ -144,18 +180,7 @@ pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
         &[],
         "background side-note routing has no Refact daemon chat command",
     ),
-    unavailable(
-        "skills",
-        &[],
-        "skills marketplace and editor are GUI-only today",
-    ),
     unavailable("hooks", &[], "hook editing is GUI-only today"),
-    unavailable("memories", &[], "memory browsing is not exposed in the TUI"),
-    unavailable(
-        "mcp",
-        &[],
-        "MCP configuration and marketplace are not exposed in the TUI",
-    ),
     unavailable("apps", &[], "Refact daemon has no apps command surface"),
     unavailable(
         "plugins",

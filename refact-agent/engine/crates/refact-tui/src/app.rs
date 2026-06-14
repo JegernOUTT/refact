@@ -18,7 +18,8 @@ use crate::ask_questions::{
 };
 use crate::client::{
     worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
-    OpenProjectResponse, ProjectEntry, ToolDecision, WorkerInfo,
+    KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry,
+    SlashCommandsListResponse, ToolDecision, WorkerInfo,
 };
 use crate::commands::{
     command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
@@ -39,6 +40,7 @@ use crate::pickers::{
     PickerAccept, PickerItem, PickerKind, PickerState,
 };
 use crate::protocol::{DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState};
+use crate::read_only_views::{mcp_overlay, memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay};
 use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
@@ -1389,7 +1391,65 @@ impl App {
                 self.show_subagents_card();
                 AppAction::None
             }
+            misc::MiscCommand::Mcp => self.open_read_only_view(ReadOnlyView::Mcp),
+            misc::MiscCommand::Skills => self.open_read_only_view(ReadOnlyView::Skills),
+            misc::MiscCommand::Memories => self.open_read_only_view(ReadOnlyView::Memories),
         }
+    }
+
+    fn open_read_only_view(&mut self, view: ReadOnlyView) -> AppAction {
+        self.composer.clear();
+        self.open_view_overlay(view.loading_overlay());
+        AppAction::LoadReadOnlyView { view }
+    }
+
+    fn open_view_overlay(&mut self, overlay: ViewOverlay) {
+        let raw_lines = if overlay.raw_lines.is_empty() {
+            overlay.rendered_lines.clone()
+        } else {
+            overlay.raw_lines
+        };
+        self.transcript_overlay = Some(PagerOverlay::new(
+            overlay.title,
+            overlay.rendered_lines,
+            raw_lines,
+        ));
+    }
+
+    fn handle_mcp_view_loaded(&mut self, result: Result<McpViewData, String>) {
+        match result {
+            Ok(data) => self.open_view_overlay(mcp_overlay(&data)),
+            Err(error) => self.open_failed_view(ReadOnlyView::Mcp, error),
+        }
+    }
+
+    fn handle_skills_view_loaded(&mut self, result: Result<SlashCommandsListResponse, String>) {
+        match result {
+            Ok(data) => self.open_view_overlay(skills_overlay(&data)),
+            Err(error) => self.open_failed_view(ReadOnlyView::Skills, error),
+        }
+    }
+
+    fn handle_memories_view_loaded(&mut self, result: Result<KnowledgeGraphResponse, String>) {
+        match result {
+            Ok(data) => self.open_view_overlay(memories_overlay(&data)),
+            Err(error) => self.open_failed_view(ReadOnlyView::Memories, error),
+        }
+    }
+
+    fn open_failed_view(&mut self, view: ReadOnlyView, error: String) {
+        self.retry_hint = retry_hint_from_message(&error);
+        self.add_notice(format!("Failed to load /{}: {error}", view.command_name()));
+        let lines = vec![
+            view.title().to_string(),
+            format!("Failed to load /{} backend data.", view.command_name()),
+            error,
+        ];
+        self.open_view_overlay(ViewOverlay {
+            title: view.title().to_string(),
+            rendered_lines: lines.clone(),
+            raw_lines: lines,
+        });
     }
 
     fn execute_picker_command(&mut self, picker: CommandPicker) -> AppAction {
@@ -4400,6 +4460,9 @@ pub enum AppAction {
         query: String,
         cursor: i64,
     },
+    LoadReadOnlyView {
+        view: ReadOnlyView,
+    },
     LoadSessions,
     RefreshWorkers,
     LoadDaemonStatus,
@@ -4498,6 +4561,9 @@ enum RuntimeEvent {
     ModelsLoaded(Result<Value, String>),
     ModesLoaded(Result<Value, String>),
     FileMentionsLoaded(Result<Vec<String>, String>),
+    McpViewLoaded(Result<McpViewData, String>),
+    SkillsViewLoaded(Result<SlashCommandsListResponse, String>),
+    MemoriesViewLoaded(Result<KnowledgeGraphResponse, String>),
     SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
@@ -4766,6 +4832,9 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 app.add_notice(format!("Failed to load file mentions: {error}"));
                 app.open_file_mention_picker(Vec::new());
             }
+            RuntimeEvent::McpViewLoaded(result) => app.handle_mcp_view_loaded(result),
+            RuntimeEvent::SkillsViewLoaded(result) => app.handle_skills_view_loaded(result),
+            RuntimeEvent::MemoriesViewLoaded(result) => app.handle_memories_view_loaded(result),
             RuntimeEvent::SessionsLoaded(Ok(trajectories)) => {
                 app.open_session_picker_from_trajectories(trajectories)
             }
@@ -4920,6 +4989,37 @@ async fn run_action(
                         .await
                         .map_err(|error| error.to_string());
                     let _ = tx.send(RuntimeEvent::FileMentionsLoaded(result)).await;
+                });
+            }
+        }
+        AppAction::LoadReadOnlyView { view } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    match view {
+                        ReadOnlyView::Mcp => {
+                            let result = client
+                                .mcp_view_data(&project_id)
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = tx.send(RuntimeEvent::McpViewLoaded(result)).await;
+                        }
+                        ReadOnlyView::Skills => {
+                            let result = client
+                                .slash_commands(&project_id)
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = tx.send(RuntimeEvent::SkillsViewLoaded(result)).await;
+                        }
+                        ReadOnlyView::Memories => {
+                            let result = client
+                                .knowledge_graph(&project_id)
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = tx.send(RuntimeEvent::MemoriesViewLoaded(result)).await;
+                        }
+                    }
                 });
             }
         }
@@ -7261,11 +7361,39 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn unavailable_commands_report_explicit_reason() {
+    fn read_only_view_commands_open_loading_overlays() {
         let mut app = App::new(project());
-        assert_eq!(app.execute_command_name("mcp"), AppAction::None);
-        assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Notice(text) if text.contains("/mcp unavailable:") && text.contains("MCP"))
+        assert_eq!(
+            app.execute_command_name("mcp"),
+            AppAction::LoadReadOnlyView {
+                view: ReadOnlyView::Mcp
+            }
+        );
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "MCP" && overlay.lines().join("\n").contains("Loading /mcp")
+        }));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("skills"),
+            AppAction::LoadReadOnlyView {
+                view: ReadOnlyView::Skills
+            }
+        );
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Skills" && overlay.lines().join("\n").contains("Loading /skills")
+        }));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("memories"),
+            AppAction::LoadReadOnlyView {
+                view: ReadOnlyView::Memories
+            }
+        );
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Memories"
+                && overlay.lines().join("\n").contains("Loading /memories")
         }));
     }
 
@@ -7285,6 +7413,37 @@ new-chat = "ctrl-x"
         assert!(app
             .transcript_overlay()
             .is_some_and(|overlay| overlay.is_copy_mode()));
+    }
+
+    #[test]
+    fn read_only_view_loaded_opens_rendered_overlay() {
+        let mut app = App::new(project());
+        app.handle_skills_view_loaded(Ok(SlashCommandsListResponse {
+            commands: Vec::new(),
+            skills: vec![crate::client::SkillInfo {
+                name: "explain".to_string(),
+                description: "Explain code".to_string(),
+                user_invocable: true,
+                source: "project_refact".to_string(),
+            }],
+        }));
+
+        let overlay = app.transcript_overlay().unwrap();
+        assert_eq!(overlay.title(), "Skills");
+        assert!(overlay.lines().join("\n").contains("/explain"));
+    }
+
+    #[test]
+    fn read_only_view_failure_reports_explicit_notice_and_overlay() {
+        let mut app = App::new(project());
+        app.handle_memories_view_loaded(Err("boom".to_string()));
+
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Failed to load /memories: boom"))
+        }));
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Memories" && overlay.lines().join("\n").contains("boom")
+        }));
     }
 
     #[test]

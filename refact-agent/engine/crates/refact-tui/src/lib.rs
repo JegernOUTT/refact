@@ -12,6 +12,7 @@ pub mod notifications;
 pub mod overlay;
 pub mod pickers;
 pub mod protocol;
+pub mod read_only_views;
 pub mod render;
 pub mod sessions;
 pub mod streaming;
