@@ -68,7 +68,12 @@ const PATCH_LIKE_FUNCTIONS: &[&str] = &[
     "apply_patch",
     "undo_textdoc",
 ];
-const CHAT_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
+const CHAT_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const CHAT_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(4);
+const CHAT_MAX_RECONNECT_ATTEMPTS: u32 = 8;
+const DAEMON_EVENTS_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const DAEMON_EVENTS_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const DAEMON_EVENTS_MAX_RECONNECT_ATTEMPTS: u32 = 8;
 const ABORT_BEFORE_QUIT_TIMEOUT: Duration = Duration::from_secs(1);
 const LIVE_TRANSCRIPT_ITEM_LIMIT: usize = 10_000;
 const LIVE_TRANSCRIPT_RETENTION_NOTICE: &str =
@@ -266,8 +271,21 @@ struct PendingApprovalClear {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CommandContextTag {
-    SendMessage { prompt: String, params: Value },
+    SendMessage {
+        prompt: String,
+        params: Value,
+    },
     Abort,
+    Rename {
+        title: String,
+    },
+    Fork {
+        target_chat_id: String,
+        title: Option<String>,
+    },
+    Archive {
+        chat_id: String,
+    },
     Other,
 }
 
@@ -384,6 +402,7 @@ pub struct App {
     help_open: bool,
     usage: Option<UsageSummary>,
     should_quit: bool,
+    abort_in_flight: bool,
     last_ctrl_c: Option<Instant>,
     working_started_at_ms: Option<u64>,
     working_tick: u64,
@@ -470,6 +489,7 @@ impl App {
             help_open: false,
             usage: None,
             should_quit: false,
+            abort_in_flight: false,
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
@@ -539,6 +559,7 @@ impl App {
             help_open: false,
             usage: None,
             should_quit: false,
+            abort_in_flight: false,
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
@@ -1190,8 +1211,8 @@ impl App {
             CommandAction::BackendCommand { command } => {
                 if command == "stop" && self.is_chat_active() {
                     self.cancel_queue_edit();
-                    self.set_session_state(SessionState::Idle);
-                    self.clear_approvals();
+                    self.abort_in_flight = true;
+                    self.add_notice("Cancel requested");
                     AppAction::Abort
                 } else {
                     self.composer.clear();
@@ -1914,7 +1935,9 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
-        self.pending_send_retry = None;
+        self.model = None;
+        self.mode = None;
+        self.clear_pending_target_params();
         self.clear_reasoning_level();
         self.model_context_windows.clear();
         self.model_reasoning_caps.clear();
@@ -1924,18 +1947,27 @@ impl App {
     }
 
     fn new_chat(&mut self) {
+        self.open_chat_shell(
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            "New chat started".to_string(),
+        );
+    }
+
+    fn open_chat_shell(&mut self, chat_id: String, title: Option<String>, notice: String) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
-        self.chat_id = uuid::Uuid::new_v4().to_string();
-        self.session_title = None;
+        self.chat_id = chat_id;
+        self.session_title = title;
         self.show_session_header = true;
         self.input_queue.clear();
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
-        self.replace_with_session(
-            "New chat started".to_string(),
-            Some(self.session_header_subtitle()),
-        );
+        self.model = None;
+        self.mode = None;
+        self.clear_pending_target_params();
+        self.clear_reasoning_level();
+        self.replace_with_session(notice, Some(self.session_header_subtitle()));
         self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
         self.rendered_state_cursor = 0;
@@ -1943,8 +1975,6 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
-        self.pending_send_retry = None;
-        self.clear_reasoning_level();
         self.ask_questions_form = None;
         self.retry_hint = None;
     }
@@ -1966,8 +1996,7 @@ impl App {
         self.model = None;
         self.mode = None;
         self.clear_reasoning_level();
-        self.pending_model = None;
-        self.pending_mode = None;
+        self.clear_pending_target_params();
         self.replace_with_session(format!("Resuming {title}"), subtitle);
         self.set_session_state(SessionState::Idle);
         self.stream_controller.clear();
@@ -1976,7 +2005,6 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
-        self.pending_send_retry = None;
         self.ask_questions_form = None;
         self.retry_hint = None;
         AppAction::SubscribeCurrent
@@ -1992,30 +2020,24 @@ impl App {
             );
             return AppAction::None;
         };
-        let source_chat_id = self.chat_id.clone();
-        self.chat_id = uuid::Uuid::new_v4().to_string();
-        self.session_title = self
+        let target_chat_id = uuid::Uuid::new_v4().to_string();
+        let title = self
             .session_title
             .as_ref()
             .map(|title| format!("Fork of {title}"));
-        self.show_session_header = true;
-        self.replace_with_session(
-            "Forking chat…".to_string(),
-            Some(self.session_header_subtitle()),
-        );
-        self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
-        self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
-        self.clear_approvals();
-        self.selected_tool_index = None;
-        self.usage = None;
-        self.ask_questions_form = None;
-        self.retry_hint = None;
+        let source_chat_id = self.chat_id.clone();
+        self.add_notice("Forking chat…");
         AppAction::ForkChat {
+            target_chat_id,
             source_chat_id,
             up_to_message_id,
+            title,
         }
+    }
+
+    fn open_forked_chat(&mut self, target_chat_id: String, title: Option<String>) -> AppAction {
+        self.open_chat_shell(target_chat_id, title, "Forked chat started".to_string());
+        AppAction::SubscribeCurrent
     }
 
     fn rename_chat(&mut self, args: &str) -> AppAction {
@@ -2028,19 +2050,28 @@ impl App {
             self.add_notice("/rename needs the new title in the composer first");
             return AppAction::None;
         }
-        self.session_title = Some(title.clone());
-        self.show_session_header = true;
         self.add_notice(format!("Renaming chat to {title}"));
-        AppAction::SetParams {
-            patch: json!({"title": title, "is_title_generated": false}),
-        }
+        AppAction::RenameChat { title }
+    }
+
+    fn apply_renamed_chat(&mut self, title: String) {
+        self.session_title = Some(title);
+        self.show_session_header = true;
     }
 
     fn archive_chat(&mut self) -> AppAction {
         let chat_id = self.chat_id.clone();
+        let new_chat_id = uuid::Uuid::new_v4().to_string();
         self.add_notice("Archiving current chat from recent sessions");
-        self.new_chat();
-        AppAction::ArchiveChat { chat_id }
+        AppAction::ArchiveChat {
+            chat_id,
+            new_chat_id,
+        }
+    }
+
+    fn apply_archived_chat(&mut self, new_chat_id: String) -> AppAction {
+        self.open_chat_shell(new_chat_id, None, "New chat started".to_string());
+        AppAction::SubscribeCurrent
     }
 
     fn submit_composer(&mut self) -> Option<AppAction> {
@@ -2148,9 +2179,25 @@ impl App {
 
     fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
         match context {
-            CommandContextTag::Abort if self.session_state == SessionState::Idle => {
+            CommandContextTag::Abort => {
+                if !self.abort_in_flight {
+                    return AppAction::None;
+                }
+                self.abort_in_flight = false;
+                self.set_session_state(SessionState::Idle);
+                self.clear_approvals();
+                self.ask_questions_form = None;
                 self.dispatch_next_queued_input()
             }
+            CommandContextTag::Rename { title } => {
+                self.apply_renamed_chat(title);
+                AppAction::None
+            }
+            CommandContextTag::Fork {
+                target_chat_id,
+                title,
+            } => self.open_forked_chat(target_chat_id, title),
+            CommandContextTag::Archive { chat_id } => self.apply_archived_chat(chat_id),
             _ => AppAction::None,
         }
     }
@@ -2160,6 +2207,23 @@ impl App {
         match context {
             CommandContextTag::SendMessage { prompt, params } => {
                 self.rollback_failed_send_message(prompt, params, &error)
+            }
+            CommandContextTag::Abort => {
+                self.abort_in_flight = false;
+                self.add_notice(format!("Abort failed: {error}"));
+                AppAction::None
+            }
+            CommandContextTag::Rename { .. } => {
+                self.add_notice(format!("Rename failed: {error}"));
+                AppAction::None
+            }
+            CommandContextTag::Fork { .. } => {
+                self.add_notice(format!("Fork failed: {error}"));
+                AppAction::None
+            }
+            CommandContextTag::Archive { .. } => {
+                self.add_notice(format!("Archive failed: {error}"));
+                AppAction::None
             }
             _ => {
                 self.add_notice(format!("Command failed: {error}"));
@@ -2587,6 +2651,12 @@ impl App {
             }
             Err(_) => {}
         }
+    }
+
+    fn clear_pending_target_params(&mut self) {
+        self.pending_model = None;
+        self.pending_mode = None;
+        self.pending_send_retry = None;
     }
 
     fn take_pending_params(&mut self) -> Value {
@@ -3874,6 +3944,18 @@ impl App {
         self.retry_hint = retry_hint_from_message(message);
     }
 
+    fn handle_daemon_events_disconnected(&mut self, message: String, retrying: bool) {
+        if retrying {
+            self.add_notice(format!(
+                "Daemon events disconnected: {message}; reconnecting with bounded backoff…"
+            ));
+        } else {
+            self.add_notice(format!(
+                "Daemon events disconnected: {message}; reconnect limit reached"
+            ));
+        }
+    }
+
     fn update_current_worker_from_list(&mut self, workers: &[WorkerInfo]) {
         let Some(project) = self.current_project.as_mut() else {
             return;
@@ -3960,13 +4042,11 @@ impl App {
     fn quit_action(&mut self) -> AppAction {
         let abort_active = self.is_chat_active();
         if abort_active {
-            self.set_session_state(SessionState::Idle);
-            self.clear_approvals();
-            self.ask_questions_form = None;
+            self.abort_in_flight = true;
         } else {
             self.ask_questions_form = None;
+            self.should_quit = true;
         }
-        self.should_quit = true;
         AppAction::Quit { abort_active }
     }
 
@@ -4303,9 +4383,8 @@ impl App {
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
-            self.set_session_state(SessionState::Idle);
+            self.abort_in_flight = true;
             self.add_notice("Cancel requested");
-            self.ask_questions_form = None;
             AppAction::Abort
         } else {
             self.handle_idle_escape()
@@ -4489,8 +4568,7 @@ impl App {
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
-            self.set_session_state(SessionState::Idle);
-            self.clear_approvals();
+            self.abort_in_flight = true;
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
             return AppAction::Abort;
@@ -4714,12 +4792,18 @@ pub enum AppAction {
     SetParams {
         patch: Value,
     },
+    RenameChat {
+        title: String,
+    },
     ForkChat {
+        target_chat_id: String,
         source_chat_id: String,
         up_to_message_id: String,
+        title: Option<String>,
     },
     ArchiveChat {
         chat_id: String,
+        new_chat_id: String,
     },
     LoadDiff {
         root: PathBuf,
@@ -4788,8 +4872,15 @@ enum RuntimeEvent {
         message: String,
     },
     InputError(String),
-    DaemonEvent(DaemonEventRecord),
-    DaemonEventsDisconnected(String),
+    DaemonEvent {
+        generation: u64,
+        event: DaemonEventRecord,
+    },
+    DaemonEventsDisconnected {
+        generation: u64,
+        message: String,
+        retrying: bool,
+    },
     ProjectsLoaded(Result<Vec<ProjectEntry>, String>),
     ProjectOpened(Result<OpenProjectResponse, String>),
     CapsLoaded(Result<Value, String>),
@@ -4813,6 +4904,7 @@ enum RuntimeEvent {
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     HistorySaved(Result<(), String>),
     CommandFinished {
+        generation: u64,
         context: CommandContextTag,
         result: Result<(), String>,
     },
@@ -4830,7 +4922,54 @@ struct SubscriptionTask {
     generation: u64,
     project_id: String,
     chat_id: String,
+    reconnect_attempts: u32,
     join: JoinHandle<()>,
+}
+
+#[derive(Debug, Default)]
+struct DaemonEventSubscription {
+    generation: u64,
+    current: Option<JoinHandle<()>>,
+}
+
+impl DaemonEventSubscription {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn start(&mut self, client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+        self.abort_current();
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.current = Some(spawn_daemon_events_task(client, tx, self.generation));
+    }
+
+    fn restart(&mut self, client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+        self.start(client, tx);
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn apply_event(&self, app: &mut App, generation: u64, event: DaemonEventRecord) -> bool {
+        if !self.is_current(generation) {
+            return false;
+        }
+        app.push_daemon_event(event);
+        true
+    }
+
+    fn abort_current(&mut self) {
+        if let Some(current) = self.current.take() {
+            current.abort();
+        }
+    }
+}
+
+impl Drop for DaemonEventSubscription {
+    fn drop(&mut self) {
+        self.abort_current();
+    }
 }
 
 impl SubscriptionManager {
@@ -4845,20 +4984,39 @@ impl SubscriptionManager {
         chat_id: String,
         tx: mpsc::Sender<RuntimeEvent>,
     ) {
-        self.start(client, project_id, chat_id, tx, Duration::ZERO);
+        self.start(client, project_id, chat_id, tx, Duration::ZERO, 0);
     }
 
-    fn reconnect_current(&mut self, client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+    fn reconnect_current(
+        &mut self,
+        client: DaemonClient,
+        tx: mpsc::Sender<RuntimeEvent>,
+    ) -> Result<(), String> {
         let Some(current) = &self.current else {
-            return;
+            return Ok(());
         };
+        if current.reconnect_attempts >= CHAT_MAX_RECONNECT_ATTEMPTS {
+            return Err("chat SSE reconnect limit reached".to_string());
+        }
+        let generation = current.generation;
+        let project_id = current.project_id.clone();
+        let chat_id = current.chat_id.clone();
+        let reconnect_attempts = current.reconnect_attempts.saturating_add(1);
+        let initial_delay = reconnect_backoff(
+            CHAT_RECONNECT_INITIAL_BACKOFF,
+            CHAT_RECONNECT_MAX_BACKOFF,
+            reconnect_attempts,
+            generation,
+        );
         self.start(
             client,
-            current.project_id.clone(),
-            current.chat_id.clone(),
+            project_id,
+            chat_id,
             tx,
-            CHAT_RECONNECT_BACKOFF,
+            initial_delay,
+            reconnect_attempts,
         );
+        Ok(())
     }
 
     fn abort_current(&mut self) {
@@ -4873,14 +5031,53 @@ impl SubscriptionManager {
             .is_some_and(|current| current.generation == generation)
     }
 
+    fn current_generation(&self) -> Option<u64> {
+        self.current.as_ref().map(|current| current.generation)
+    }
+
+    fn command_generation(&self) -> u64 {
+        self.current_generation().unwrap_or(self.generation)
+    }
+
+    fn is_command_current(&self, generation: u64) -> bool {
+        match &self.current {
+            Some(current) => current.generation == generation,
+            None => self.generation == generation,
+        }
+    }
+
+    fn mark_connected(&mut self, generation: u64) {
+        if let Some(current) = self.current.as_mut() {
+            if current.generation == generation {
+                current.reconnect_attempts = 0;
+            }
+        }
+    }
+
     fn apply_chat_event(
-        &self,
+        &mut self,
         app: &mut App,
         generation: u64,
         event: ChatEvent,
     ) -> Option<AppAction> {
-        self.is_current(generation)
-            .then(|| app.handle_chat_event(event))
+        if !self.is_current(generation) {
+            return None;
+        }
+        self.mark_connected(generation);
+        Some(app.handle_chat_event(event))
+    }
+
+    fn apply_command_finished(
+        &self,
+        app: &mut App,
+        generation: u64,
+        context: CommandContextTag,
+        result: Result<(), String>,
+    ) -> Option<AppAction> {
+        if generation != 0 && !self.is_command_current(generation) {
+            return None;
+        }
+        Some(app.handle_command_finished(context, result))
     }
 
     fn start(
@@ -4890,6 +5087,7 @@ impl SubscriptionManager {
         chat_id: String,
         tx: mpsc::Sender<RuntimeEvent>,
         initial_delay: Duration,
+        reconnect_attempts: u32,
     ) {
         self.abort_current();
         self.generation = self.generation.wrapping_add(1).max(1);
@@ -4906,6 +5104,7 @@ impl SubscriptionManager {
             generation,
             project_id,
             chat_id,
+            reconnect_attempts,
             join,
         });
     }
@@ -4947,9 +5146,10 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     let mut subscriptions = SubscriptionManager::new();
+    let mut daemon_events = DaemonEventSubscription::new();
     let mut input_task = spawn_input_task(tx.clone());
     spawn_tick_task(tx.clone());
-    spawn_daemon_events_task(client.clone(), tx.clone());
+    daemon_events.start(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
     if let Some(project_id) = app.current_project_id().map(str::to_string) {
         app.begin_subscription_attempt();
@@ -4987,7 +5187,17 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         let result = terminal.write_clipboard(&text);
                         app.record_clipboard_result(source, result);
                     }
-                    action => run_action(&mut app, action, &client, &tx, &mut subscriptions).await,
+                    action => {
+                        run_action(
+                            &mut app,
+                            action,
+                            &client,
+                            &tx,
+                            &mut subscriptions,
+                            &mut daemon_events,
+                        )
+                        .await
+                    }
                 }
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
@@ -5001,7 +5211,15 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
                 if let Some(action) = subscriptions.apply_chat_event(&mut app, generation, event) {
-                    run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+                    run_action(
+                        &mut app,
+                        action,
+                        &client,
+                        &tx,
+                        &mut subscriptions,
+                        &mut daemon_events,
+                    )
+                    .await;
                 }
             }
             RuntimeEvent::ChatResubscribe {
@@ -5011,7 +5229,11 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 if subscriptions.is_current(generation) {
                     app.record_chat_resubscribe(&message);
                     app.add_notice(format!("SSE resync: {message}"));
-                    subscriptions.reconnect_current(client.clone(), tx.clone());
+                    if let Err(error) = subscriptions.reconnect_current(client.clone(), tx.clone())
+                    {
+                        app.record_chat_disconnected(&error);
+                        app.add_notice(error);
+                    }
                 }
             }
             RuntimeEvent::ChatDisconnected {
@@ -5022,15 +5244,24 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     continue;
                 }
                 app.record_chat_disconnected(&message);
-                app.add_notice(format!("SSE disconnected: {message}; reconnecting…"));
-                subscriptions.reconnect_current(client.clone(), tx.clone());
+                match subscriptions.reconnect_current(client.clone(), tx.clone()) {
+                    Ok(()) => app.add_notice(format!("SSE disconnected: {message}; reconnecting…")),
+                    Err(error) => app.add_notice(format!("SSE disconnected: {message}; {error}")),
+                }
             }
             RuntimeEvent::InputError(message) => app.add_notice(format!("Input error: {message}")),
-            RuntimeEvent::DaemonEvent(event) => app.push_daemon_event(event),
-            RuntimeEvent::DaemonEventsDisconnected(message) => {
-                app.add_notice(format!(
-                    "Daemon events disconnected: {message}; reconnecting…"
-                ));
+            RuntimeEvent::DaemonEvent { generation, event } => {
+                daemon_events.apply_event(&mut app, generation, event);
+            }
+            RuntimeEvent::DaemonEventsDisconnected {
+                generation,
+                message,
+                retrying,
+            } => {
+                if !daemon_events.is_current(generation) {
+                    continue;
+                }
+                app.handle_daemon_events_disconnected(message, retrying);
             }
             RuntimeEvent::ProjectsLoaded(Ok(projects)) => app.open_project_picker(projects),
             RuntimeEvent::ProjectsLoaded(Err(error)) => {
@@ -5046,6 +5277,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         app.chat_id().to_string(),
                         tx.clone(),
                     );
+                    daemon_events.restart(client.clone(), tx.clone());
                     load_caps(client.clone(), tx.clone(), project_id);
                 }
             }
@@ -5114,9 +5346,24 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 }
             }
             RuntimeEvent::HistorySaved(result) => app.handle_history_save_result(result),
-            RuntimeEvent::CommandFinished { context, result } => {
-                let action = app.handle_command_finished(context, result);
-                run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+            RuntimeEvent::CommandFinished {
+                generation,
+                context,
+                result,
+            } => {
+                if let Some(action) =
+                    subscriptions.apply_command_finished(&mut app, generation, context, result)
+                {
+                    run_action(
+                        &mut app,
+                        action,
+                        &client,
+                        &tx,
+                        &mut subscriptions,
+                        &mut daemon_events,
+                    )
+                    .await;
+                }
             }
             RuntimeEvent::DiffLoaded(Ok(diff)) => app.show_diff_result(diff),
             RuntimeEvent::DiffLoaded(Err(error)) => {
@@ -5199,6 +5446,7 @@ async fn run_action(
     client: &DaemonClient,
     tx: &mpsc::Sender<RuntimeEvent>,
     subscriptions: &mut SubscriptionManager,
+    daemon_events: &mut DaemonEventSubscription,
 ) {
     match action {
         AppAction::None => {}
@@ -5416,11 +5664,13 @@ async fn run_action(
                     app.chat_id().to_string(),
                     tx.clone(),
                 );
+                daemon_events.restart(client.clone(), tx.clone());
             }
         }
         AppAction::SendMessage { prompt, params } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 let context = CommandContextTag::SendMessage {
@@ -5441,7 +5691,11 @@ async fn run_action(
                     .await
                     .map_err(|error| error.to_string());
                     let _ = tx
-                        .send(RuntimeEvent::CommandFinished { context, result })
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
+                            result,
+                        })
                         .await;
                 });
             }
@@ -5449,6 +5703,7 @@ async fn run_action(
         AppAction::RetryFromIndex { index, content } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -5458,6 +5713,7 @@ async fn run_action(
                         .map_err(|error| error.to_string());
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
+                            generation,
                             context: CommandContextTag::Other,
                             result,
                         })
@@ -5468,6 +5724,7 @@ async fn run_action(
         AppAction::SetParams { patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -5477,7 +5734,31 @@ async fn run_action(
                         .map_err(|error| error.to_string());
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
+                            generation,
                             context: CommandContextTag::Other,
+                            result,
+                        })
+                        .await;
+                });
+            }
+        }
+        AppAction::RenameChat { title } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
+                let patch = json!({"title": title, "is_title_generated": false});
+                let client = client.clone();
+                let tx = tx.clone();
+                let context = CommandContextTag::Rename { title };
+                tokio::spawn(async move {
+                    let result = client
+                        .send_set_params(&project_id, &chat_id, patch)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
                             result,
                         })
                         .await;
@@ -5485,25 +5766,24 @@ async fn run_action(
             }
         }
         AppAction::ForkChat {
+            target_chat_id,
             source_chat_id,
             up_to_message_id,
+            title,
         } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
-                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
-                app.begin_subscription_attempt();
-                subscriptions.subscribe(
-                    client.clone(),
-                    project_id.clone(),
-                    chat_id.clone(),
-                    tx.clone(),
-                );
+                let context = CommandContextTag::Fork {
+                    target_chat_id: target_chat_id.clone(),
+                    title,
+                };
                 tokio::spawn(async move {
                     let result = client
                         .send_branch_from_chat(
                             &project_id,
-                            &chat_id,
+                            &target_chat_id,
                             &source_chat_id,
                             &up_to_message_id,
                         )
@@ -5511,25 +5791,25 @@ async fn run_action(
                         .map_err(|error| error.to_string());
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
-                            context: CommandContextTag::Other,
+                            generation,
+                            context,
                             result,
                         })
                         .await;
                 });
             }
         }
-        AppAction::ArchiveChat { chat_id } => {
+        AppAction::ArchiveChat {
+            chat_id,
+            new_chat_id,
+        } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
-                let new_chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
-                app.begin_subscription_attempt();
-                subscriptions.subscribe(
-                    client.clone(),
-                    project_id.clone(),
-                    new_chat_id,
-                    tx.clone(),
-                );
+                let context = CommandContextTag::Archive {
+                    chat_id: new_chat_id,
+                };
                 tokio::spawn(async move {
                     let result = client
                         .delete_trajectory(&project_id, &chat_id)
@@ -5537,7 +5817,8 @@ async fn run_action(
                         .map_err(|error| error.to_string());
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
-                            context: CommandContextTag::Other,
+                            generation,
+                            context,
                             result,
                         })
                         .await;
@@ -5556,6 +5837,7 @@ async fn run_action(
         AppAction::SendToolDecisions { decisions, patch } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -5571,6 +5853,7 @@ async fn run_action(
                     .map_err(|error| error.to_string());
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
+                            generation,
                             context: CommandContextTag::Other,
                             result,
                         })
@@ -5581,29 +5864,59 @@ async fn run_action(
         AppAction::Abort => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = client
-                        .send_abort(&project_id, &chat_id)
-                        .await
-                        .map_err(|error| error.to_string());
+                    let result = match tokio::time::timeout(
+                        ABORT_BEFORE_QUIT_TIMEOUT,
+                        client.send_abort(&project_id, &chat_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("abort request timed out".to_string()),
+                    };
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
+                            generation,
                             context: CommandContextTag::Abort,
                             result,
                         })
                         .await;
                 });
+            } else {
+                let _ = app.handle_command_finished(
+                    CommandContextTag::Abort,
+                    Err("no active project for abort".to_string()),
+                );
             }
         }
         AppAction::Quit { abort_active } => {
             if abort_active {
-                if let Err(error) = send_abort_for_current_chat(app, client).await {
-                    app.add_notice(format!("Abort before quit failed: {error}"));
+                match send_abort_for_current_chat(app, client).await {
+                    Ok(()) => app.handle_quit_abort_success(),
+                    Err(error) => app.handle_quit_abort_failure(error),
                 }
             }
         }
+    }
+}
+
+impl App {
+    fn handle_quit_abort_success(&mut self) {
+        self.abort_in_flight = false;
+        self.set_session_state(SessionState::Idle);
+        self.clear_approvals();
+        self.ask_questions_form = None;
+        self.should_quit = true;
+    }
+
+    fn handle_quit_abort_failure(&mut self, error: String) {
+        self.abort_in_flight = false;
+        self.should_quit = false;
+        self.add_notice(format!("Abort before quit failed: {error}"));
     }
 }
 
@@ -5810,44 +6123,113 @@ fn load_caps(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>, project_id: S
     });
 }
 
-fn spawn_daemon_events_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
+fn reconnect_backoff(initial: Duration, max: Duration, attempt: u32, generation: u64) -> Duration {
+    let shift = attempt.saturating_sub(1).min(8);
+    let multiplier = 1u32 << shift;
+    let base = initial.saturating_mul(multiplier).min(max);
+    let jitter_seed = generation.wrapping_add(u64::from(attempt).wrapping_mul(17));
+    let jitter_ms = jitter_seed % 97;
+    base.saturating_add(Duration::from_millis(jitter_ms))
+        .min(max)
+}
+
+fn spawn_daemon_events_task(
+    client: DaemonClient,
+    tx: mpsc::Sender<RuntimeEvent>,
+    generation: u64,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut reconnect_attempts = 0u32;
         loop {
             match client.subscribe_daemon_events().await {
                 Ok(mut stream) => {
+                    let mut disconnected = false;
                     while let Some(event) = stream.next().await {
                         match event {
                             Ok(event) => {
-                                if tx.send(RuntimeEvent::DaemonEvent(event)).await.is_err() {
+                                reconnect_attempts = 0;
+                                if tx
+                                    .send(RuntimeEvent::DaemonEvent { generation, event })
+                                    .await
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
                             Err(error) => {
+                                disconnected = true;
+                                reconnect_attempts = reconnect_attempts.saturating_add(1);
+                                let retrying =
+                                    reconnect_attempts <= DAEMON_EVENTS_MAX_RECONNECT_ATTEMPTS;
                                 if tx
-                                    .send(RuntimeEvent::DaemonEventsDisconnected(error.to_string()))
+                                    .send(RuntimeEvent::DaemonEventsDisconnected {
+                                        generation,
+                                        message: error.to_string(),
+                                        retrying,
+                                    })
                                     .await
                                     .is_err()
                                 {
+                                    return;
+                                }
+                                if !retrying {
                                     return;
                                 }
                                 break;
                             }
                         }
                     }
-                }
-                Err(error) => {
+                    if disconnected {
+                        continue;
+                    }
+                    reconnect_attempts = reconnect_attempts.saturating_add(1);
+                    let retrying = reconnect_attempts <= DAEMON_EVENTS_MAX_RECONNECT_ATTEMPTS;
                     if tx
-                        .send(RuntimeEvent::DaemonEventsDisconnected(error.to_string()))
+                        .send(RuntimeEvent::DaemonEventsDisconnected {
+                            generation,
+                            message: "stream ended".to_string(),
+                            retrying,
+                        })
                         .await
                         .is_err()
                     {
                         return;
                     }
+                    if !retrying {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    reconnect_attempts = reconnect_attempts.saturating_add(1);
+                    let retrying = reconnect_attempts <= DAEMON_EVENTS_MAX_RECONNECT_ATTEMPTS;
+                    if tx
+                        .send(RuntimeEvent::DaemonEventsDisconnected {
+                            generation,
+                            message: error.to_string(),
+                            retrying,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if !retrying {
+                        return;
+                    }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            if reconnect_attempts == 0 {
+                reconnect_attempts = 1;
+            }
+            let delay = reconnect_backoff(
+                DAEMON_EVENTS_RECONNECT_INITIAL_BACKOFF,
+                DAEMON_EVENTS_RECONNECT_MAX_BACKOFF,
+                reconnect_attempts,
+                generation,
+            );
+            tokio::time::sleep(delay).await;
         }
-    });
+    })
 }
 
 fn spawn_subscription_task(
@@ -7477,7 +7859,8 @@ new-chat = "ctrl-x"
         assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
         assert_eq!(app.input_queue().len(), 2);
         assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
-        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
 
         let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
 
@@ -7486,6 +7869,7 @@ new-chat = "ctrl-x"
             AppAction::SendMessage { prompt, .. } if prompt == "second"
         ));
         assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(!app.abort_in_flight);
         assert_eq!(app.input_queue().len(), 1);
         assert_eq!(app.input_queue().items()[0].text, "third");
         assert_eq!(
@@ -7500,12 +7884,14 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.set_session_state(SessionState::Generating);
         assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
-        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
 
         let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
 
         assert_eq!(action, AppAction::None);
         assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
         assert!(app.input_queue().is_empty());
     }
 
@@ -7554,7 +7940,8 @@ new-chat = "ctrl-x"
         );
         assert_eq!(app.composer(), "draft");
         assert_eq!(app.input_queue().len(), 1);
-        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
     }
 
     #[test]
@@ -8364,10 +8751,10 @@ new-chat = "ctrl-x"
 
         assert!(matches!(
             action,
-            AppAction::ForkChat { source_chat_id, up_to_message_id }
+            AppAction::ForkChat { source_chat_id, up_to_message_id, .. }
                 if source_chat_id == source && up_to_message_id == "a1"
         ));
-        assert_ne!(app.chat_id(), source);
+        assert_eq!(app.chat_id(), source);
     }
 
     #[test]
@@ -8377,16 +8764,257 @@ new-chat = "ctrl-x"
 
         assert_eq!(
             app.execute_command_name("rename Better title"),
-            AppAction::SetParams {
-                patch: json!({"title": "Better title", "is_title_generated": false})
+            AppAction::RenameChat {
+                title: "Better title".to_string()
             }
         );
-        assert_eq!(app.session_title(), Some("Better title"));
+        assert_eq!(app.session_title(), None);
+
+        let action = app.execute_command_name("archive");
+        assert!(matches!(
+            action,
+            AppAction::ArchiveChat { chat_id: archived, .. } if archived == chat_id
+        ));
+        assert_eq!(app.chat_id(), chat_id);
+    }
+
+    #[test]
+    fn command_finished_from_stale_generation_is_ignored() {
+        let mut app = App::new(project());
+        let mut subscriptions = SubscriptionManager::new();
+        subscriptions.generation = 3;
+        let old_chat_id = app.chat_id().to_string();
+        let stale_title = "stale title".to_string();
+
+        assert!(subscriptions
+            .apply_command_finished(
+                &mut app,
+                2,
+                CommandContextTag::Rename {
+                    title: stale_title.clone(),
+                },
+                Ok(()),
+            )
+            .is_none());
+        assert_eq!(app.session_title(), None);
+
+        assert!(subscriptions
+            .apply_command_finished(
+                &mut app,
+                3,
+                CommandContextTag::Rename { title: stale_title },
+                Ok(()),
+            )
+            .is_some());
+        assert_eq!(app.chat_id(), old_chat_id);
+        assert_eq!(app.session_title(), Some("stale title"));
+    }
+
+    #[test]
+    fn daemon_event_from_stale_generation_is_ignored() {
+        let mut app = App::new(project());
+        let mut daemon_events = DaemonEventSubscription::new();
+        daemon_events.generation = 2;
+        let stale = DaemonEventRecord {
+            ts_ms: 1,
+            kind: "worker_ready".to_string(),
+            project_id: Some("old".to_string()),
+            payload: Value::Null,
+        };
+        let fresh = DaemonEventRecord {
+            ts_ms: 2,
+            kind: "worker_ready".to_string(),
+            project_id: Some("p1".to_string()),
+            payload: Value::Null,
+        };
+
+        assert!(!daemon_events.apply_event(&mut app, 1, stale));
+        assert!(app.events_pane().events().is_empty());
+        assert!(daemon_events.apply_event(&mut app, 2, fresh));
+        assert_eq!(app.events_pane().events().len(), 1);
+    }
+
+    #[test]
+    fn daemon_event_disconnect_notice_reports_bounded_reconnect() {
+        let mut app = App::new(project());
+
+        app.handle_daemon_events_disconnected("network down".to_string(), true);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("bounded backoff"))
+        }));
+
+        app.handle_daemon_events_disconnected("network down".to_string(), false);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("reconnect limit reached"))
+        }));
+    }
+
+    #[test]
+    fn abort_failure_does_not_leave_ui_idle() {
+        let mut app = App::new(project());
+        app.set_session_state(SessionState::Generating);
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
+
+        let action = app.handle_command_finished(
+            CommandContextTag::Abort,
+            Err("backend unavailable".to_string()),
+        );
+
+        assert_eq!(action, AppAction::None);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(!app.abort_in_flight);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Abort failed"))
+        }));
+    }
+
+    #[test]
+    fn failed_session_mutations_do_not_commit_local_state() {
+        let mut app = App::new(project());
+        let source_chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(source_chat_id.clone()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"id": source_chat_id, "title": "Base", "model": "gpt-demo", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "hello"},
+                {"message_id": "a1", "role": "assistant", "content": "hi"}
+            ]}),
+        });
+        let action = app.execute_command_name("fork");
+        let (target_chat_id, title) = match action {
+            AppAction::ForkChat {
+                target_chat_id,
+                title,
+                ..
+            } => (target_chat_id, title),
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert_eq!(app.chat_id(), source_chat_id);
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Fork {
+                    target_chat_id: target_chat_id.clone(),
+                    title: title.clone(),
+                },
+                Err("branch failed".to_string()),
+            ),
+            AppAction::None
+        );
+        assert_eq!(app.chat_id(), source_chat_id);
 
         assert_eq!(
-            app.execute_command_name("archive"),
-            AppAction::ArchiveChat { chat_id }
+            app.handle_command_finished(
+                CommandContextTag::Fork {
+                    target_chat_id: target_chat_id.clone(),
+                    title,
+                },
+                Ok(()),
+            ),
+            AppAction::SubscribeCurrent
         );
+        assert_eq!(app.chat_id(), target_chat_id);
+
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        assert_eq!(
+            app.execute_command_name("rename Better title"),
+            AppAction::RenameChat {
+                title: "Better title".to_string()
+            }
+        );
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Rename {
+                    title: "Better title".to_string(),
+                },
+                Err("rename failed".to_string()),
+            ),
+            AppAction::None
+        );
+        assert_eq!(app.session_title(), None);
+
+        let action = app.execute_command_name("archive");
+        let new_chat_id = match action {
+            AppAction::ArchiveChat { new_chat_id, .. } => new_chat_id,
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert_eq!(app.chat_id(), chat_id);
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Archive {
+                    chat_id: new_chat_id.clone(),
+                },
+                Err("archive failed".to_string()),
+            ),
+            AppAction::None
+        );
+        assert_eq!(app.chat_id(), chat_id);
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Archive {
+                    chat_id: new_chat_id.clone(),
+                },
+                Ok(()),
+            ),
+            AppAction::SubscribeCurrent
+        );
+        assert_eq!(app.chat_id(), new_chat_id);
+    }
+
+    #[test]
+    fn project_and_chat_switch_clear_pending_params() {
+        let mut app = App::new(project());
+        app.pending_model = Some("model-a".to_string());
+        app.pending_mode = Some("mode-a".to_string());
+        app.pending_send_retry = Some(PendingSendRetry {
+            prompt: "retry".to_string(),
+            params: json!({"model": "old"}),
+        });
+
+        app.new_chat();
+        app.composer.set_text("hello");
+        let action = app.handle_key(key(KeyCode::Enter));
+        match action {
+            AppAction::SendMessage { params, .. } => {
+                assert_eq!(params.get("model"), None);
+                assert_eq!(
+                    params.get("mode"),
+                    Some(&Value::String("agent".to_string()))
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        app.pending_model = Some("model-b".to_string());
+        app.pending_mode = Some("mode-b".to_string());
+        app.pending_send_retry = Some(PendingSendRetry {
+            prompt: "retry".to_string(),
+            params: json!({"model": "old"}),
+        });
+        app.set_project(OpenProjectResponse {
+            project_id: "p2".to_string(),
+            slug: "demo2".to_string(),
+            root: PathBuf::from("/tmp/demo2"),
+            pinned: false,
+            worker: None,
+            cron_pending: None,
+        });
+        app.composer.set_text("next");
+        let action = app.handle_key(key(KeyCode::Enter));
+        match action {
+            AppAction::SendMessage { params, .. } => {
+                assert_eq!(params.get("model"), None);
+                assert_eq!(
+                    params.get("tool_use"),
+                    Some(&Value::String("agent".to_string()))
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]
@@ -8408,10 +9036,20 @@ new-chat = "ctrl-x"
         let action = app.execute_command_name("agent");
         let (tx, mut rx) = mpsc::channel(1);
         let mut subscriptions = SubscriptionManager::new();
-        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+        let mut daemon_events = DaemonEventSubscription::new();
+        run_action(
+            &mut app,
+            action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeEvent::CommandFinished {
+                generation: 0,
                 context: CommandContextTag::Other,
                 result: Ok(())
             })
@@ -8442,10 +9080,20 @@ new-chat = "ctrl-x"
         let action = app.execute_command_name("reasoning high");
         let (tx, mut rx) = mpsc::channel(1);
         let mut subscriptions = SubscriptionManager::new();
-        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+        let mut daemon_events = DaemonEventSubscription::new();
+        run_action(
+            &mut app,
+            action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeEvent::CommandFinished {
+                generation: 0,
                 context: CommandContextTag::Other,
                 result: Ok(())
             })
@@ -8760,6 +9408,12 @@ new-chat = "ctrl-x"
             app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
             AppAction::Abort
         );
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            AppAction::None
+        );
         assert_eq!(app.session_state(), SessionState::Idle);
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -8782,9 +9436,16 @@ new-chat = "ctrl-x"
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             AppAction::Abort
         );
-        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert!(app.abort_in_flight);
         assert!(!app.should_quit());
         assert!(app.last_ctrl_c.is_none());
+
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -8802,13 +9463,25 @@ new-chat = "ctrl-x"
         app.set_session_state(SessionState::Generating);
         let action = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert_eq!(action, AppAction::Quit { abort_active: true });
-        assert!(app.should_quit());
+        assert!(!app.should_quit());
+        assert_eq!(app.session_state(), SessionState::Generating);
 
         let (tx, _rx) = mpsc::channel(1);
         let mut subscriptions = SubscriptionManager::new();
-        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+        let mut daemon_events = DaemonEventSubscription::new();
+        run_action(
+            &mut app,
+            action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
 
         assert!(state.wait_for("abort"));
+        assert!(app.should_quit());
+        assert_eq!(app.session_state(), SessionState::Idle);
     }
 
     #[test]
@@ -9520,6 +10193,7 @@ new-chat = "ctrl-x"
             generation: 2,
             project_id: "p2".to_string(),
             chat_id: app.chat_id().to_string(),
+            reconnect_attempts: 0,
             join,
         });
         let stale = chat_event(
@@ -9552,6 +10226,7 @@ new-chat = "ctrl-x"
             generation: 1,
             project_id: "p1".to_string(),
             chat_id: "c1".to_string(),
+            reconnect_attempts: 0,
             join,
         });
         let client = DaemonClient::new("http://127.0.0.1:1", None).unwrap();
