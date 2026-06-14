@@ -456,23 +456,48 @@ fn append_completion_warning(message: &mut String, warning: Option<&str>) {
     }
 }
 
-fn clear_force_merge_ownership_if_current(
+fn terminal_card_column(column: &str) -> bool {
+    matches!(column, "done" | "failed" | "regressed")
+}
+
+fn force_merge_card_matches_current(
+    card: &crate::tasks::types::BoardCard,
+    expected_assignee: Option<&str>,
+    expected_agent_chat_id: Option<&str>,
+) -> bool {
+    card.assignee.as_deref() == expected_assignee
+        && card.agent_chat_id.as_deref() == expected_agent_chat_id
+}
+
+fn finalize_force_merge_card_if_current(
     card: &mut crate::tasks::types::BoardCard,
     expected_assignee: Option<&str>,
     expected_agent_chat_id: Option<&str>,
 ) -> bool {
-    if card.assignee.as_deref() != expected_assignee
-        || card.agent_chat_id.as_deref() != expected_agent_chat_id
-    {
+    if !force_merge_card_matches_current(card, expected_assignee, expected_agent_chat_id) {
         return false;
     }
-    let changed = card.assignee.is_some() || card.agent_chat_id.is_some();
+    let mut changed = card.assignee.is_some() || card.agent_chat_id.is_some();
+    if !terminal_card_column(&card.column) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let previous_column = card.column.clone();
+        card.column = "done".to_string();
+        card.completed_at = Some(now.clone());
+        card.status_updates.push(crate::tasks::types::StatusUpdate {
+            timestamp: now,
+            message: format!(
+                "Force-merged by planner without the normal agent_finish path; marked done for manual review from column '{}'.",
+                previous_column
+            ),
+        });
+        changed = true;
+    }
     card.assignee = None;
     card.agent_chat_id = None;
     changed
 }
 
-async fn clear_force_merge_ownership_after_merge(
+async fn finalize_force_merge_card_after_merge(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     card_id: &str,
@@ -484,7 +509,7 @@ async fn clear_force_merge_ownership_after_merge(
         let Some(card) = board.get_card_mut(&card_id_owned) else {
             return Ok(false);
         };
-        Ok(clear_force_merge_ownership_if_current(
+        Ok(finalize_force_merge_card_if_current(
             card,
             expected_assignee.as_deref(),
             expected_agent_chat_id.as_deref(),
@@ -509,7 +534,7 @@ async fn clear_board_mirrors_after_registered_merge(
     let clear_ownership = force && (response.merged || response.status == "nothing_to_merge");
     let Some(cleanup) = response.cleanup.as_ref() else {
         if clear_ownership {
-            clear_force_merge_ownership_after_merge(
+            finalize_force_merge_card_after_merge(
                 gcx,
                 task_id,
                 card_id,
@@ -530,8 +555,17 @@ async fn clear_board_mirrors_after_registered_merge(
     let card_id_owned = card_id.to_string();
     let clear_worktree = cleanup.worktree_deleted || cleanup.registry_deleted;
     let clear_branch = cleanup.branch_deleted;
-    let (_, ownership_changed) = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+    let (_, stats_changed) = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
         if let Some(card) = board.get_card_mut(&card_id_owned) {
+            if clear_ownership
+                && !force_merge_card_matches_current(
+                    card,
+                    expected_assignee.as_deref(),
+                    expected_agent_chat_id.as_deref(),
+                )
+            {
+                return Ok(false);
+            }
             if clear_branch {
                 card.agent_branch = None;
             }
@@ -540,7 +574,7 @@ async fn clear_board_mirrors_after_registered_merge(
                 card.agent_worktree_name = None;
             }
             if clear_ownership {
-                return Ok(clear_force_merge_ownership_if_current(
+                return Ok(finalize_force_merge_card_if_current(
                     card,
                     expected_assignee.as_deref(),
                     expected_agent_chat_id.as_deref(),
@@ -550,7 +584,7 @@ async fn clear_board_mirrors_after_registered_merge(
         Ok(false)
     })
     .await?;
-    if ownership_changed {
+    if stats_changed {
         storage::update_task_stats(gcx, task_id).await?;
     }
     Ok(())
@@ -970,15 +1004,17 @@ Then call `merge_agent` again."#,
             };
 
             let mut cleanup_status = Vec::new();
+            let mut worktree_removed = false;
+            let mut branch_deleted = false;
             if worktree_dirty {
                 cleanup_status.push(
                     "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
                 );
             } else if agent_branch != base_branch {
                 let _guard = git_merge_lock().lock().await;
-                let worktree_removed =
+                worktree_removed =
                     run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
-                let branch_deleted = run_git(&["branch", "-D", agent_branch]).is_ok();
+                branch_deleted = run_git(&["branch", "-D", agent_branch]).is_ok();
                 drop(_guard);
 
                 if worktree_removed {
@@ -987,36 +1023,45 @@ Then call `merge_agent` again."#,
                 if branch_deleted {
                     cleanup_status.push("branch deleted");
                 }
+            }
 
-                if worktree_removed || branch_deleted || force {
-                    let card_id_owned = card_id.to_string();
-                    let clear_worktree = worktree_removed;
-                    let clear_branch = branch_deleted;
-                    let expected_assignee = expected_assignee.clone();
-                    let expected_agent_chat_id = expected_agent_chat_id.clone();
-                    let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                        if let Some(card) = board.get_card_mut(&card_id_owned) {
-                            if clear_branch {
-                                card.agent_branch = None;
-                            }
-                            if clear_worktree {
-                                card.agent_worktree = None;
-                                card.agent_worktree_name = None;
-                            }
-                            if force {
-                                clear_force_merge_ownership_if_current(
-                                    card,
-                                    expected_assignee.as_deref(),
-                                    expected_agent_chat_id.as_deref(),
-                                );
-                            }
+            if worktree_removed || branch_deleted || force {
+                let card_id_owned = card_id.to_string();
+                let clear_worktree = worktree_removed;
+                let clear_branch = branch_deleted;
+                let expected_assignee = expected_assignee.clone();
+                let expected_agent_chat_id = expected_agent_chat_id.clone();
+                let (_, stats_changed) =
+                    storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                        let Some(card) = board.get_card_mut(&card_id_owned) else {
+                            return Ok(false);
+                        };
+                        if force
+                            && !force_merge_card_matches_current(
+                                card,
+                                expected_assignee.as_deref(),
+                                expected_agent_chat_id.as_deref(),
+                            )
+                        {
+                            return Ok(false);
                         }
-                        Ok(())
+                        if clear_branch {
+                            card.agent_branch = None;
+                        }
+                        if clear_worktree {
+                            card.agent_worktree = None;
+                            card.agent_worktree_name = None;
+                        }
+                        Ok(force
+                            && finalize_force_merge_card_if_current(
+                                card,
+                                expected_assignee.as_deref(),
+                                expected_agent_chat_id.as_deref(),
+                            ))
                     })
-                    .await;
-                    if force {
-                        let _ = storage::update_task_stats(gcx.clone(), &task_id).await;
-                    }
+                    .await?;
+                if stats_changed {
+                    storage::update_task_stats(gcx.clone(), &task_id).await?;
                 }
             }
 
@@ -1239,8 +1284,20 @@ Use `cat <file>` to see conflict markers in each file."#,
             let clear_branch = branch_deleted;
             let expected_assignee = expected_assignee.clone();
             let expected_agent_chat_id = expected_agent_chat_id.clone();
-            let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                if let Some(card) = board.get_card_mut(&card_id_owned) {
+            let (_, stats_changed) =
+                storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                    let Some(card) = board.get_card_mut(&card_id_owned) else {
+                        return Ok(false);
+                    };
+                    if force
+                        && !force_merge_card_matches_current(
+                            card,
+                            expected_assignee.as_deref(),
+                            expected_agent_chat_id.as_deref(),
+                        )
+                    {
+                        return Ok(false);
+                    }
                     if clear_branch {
                         card.agent_branch = None;
                     }
@@ -1248,19 +1305,16 @@ Use `cat <file>` to see conflict markers in each file."#,
                         card.agent_worktree = None;
                         card.agent_worktree_name = None;
                     }
-                    if force {
-                        clear_force_merge_ownership_if_current(
+                    Ok(force
+                        && finalize_force_merge_card_if_current(
                             card,
                             expected_assignee.as_deref(),
                             expected_agent_chat_id.as_deref(),
-                        );
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-            if force {
-                let _ = storage::update_task_stats(gcx.clone(), &task_id).await;
+                        ))
+                })
+                .await?;
+            if stats_changed {
+                storage::update_task_stats(gcx.clone(), &task_id).await?;
             }
         }
 
@@ -2142,6 +2196,17 @@ mod worktree_merge_tool_tests {
         let task_dir = source.join(".refact").join("tasks").join("task-1");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
         let now = chrono::Utc::now().to_rfc3339();
+        let cards_done = if card.column == "done" { 1 } else { 0 };
+        let cards_failed = if card.column == "failed" || card.column == "regressed" {
+            1
+        } else {
+            0
+        };
+        let agents_active = if card.column == "doing" && card.assignee.is_some() {
+            1
+        } else {
+            0
+        };
         let meta = TaskMeta {
             schema_version: 1,
             id: "task-1".to_string(),
@@ -2150,9 +2215,9 @@ mod worktree_merge_tool_tests {
             created_at: now.clone(),
             updated_at: now,
             cards_total: 1,
-            cards_done: 1,
-            cards_failed: 0,
-            agents_active: 0,
+            cards_done,
+            cards_failed,
+            agents_active,
             base_branch: Some("main".to_string()),
             base_commit: None,
             default_agent_model: None,
@@ -2530,35 +2595,55 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_cleanup_clears_current_ownership() {
+    fn merge_agent_force_finalize_clears_current_ownership() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
 
-        let changed = clear_force_merge_ownership_if_current(
-            &mut card,
-            Some("agent-1"),
-            Some("agent-chat-1"),
-        );
+        let changed =
+            finalize_force_merge_card_if_current(&mut card, Some("agent-1"), Some("agent-chat-1"));
 
         assert!(changed);
         assert!(card.assignee.is_none());
         assert!(card.agent_chat_id.is_none());
+        assert_eq!(card.column, "done");
     }
 
     #[test]
-    fn merge_agent_force_cleanup_preserves_newer_ownership() {
+    fn merge_agent_force_finalize_preserves_newer_ownership() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
         card.assignee = Some("agent-2".to_string());
         card.agent_chat_id = Some("agent-chat-2".to_string());
 
-        let changed = clear_force_merge_ownership_if_current(
-            &mut card,
-            Some("agent-1"),
-            Some("agent-chat-1"),
-        );
+        let changed =
+            finalize_force_merge_card_if_current(&mut card, Some("agent-1"), Some("agent-chat-1"));
 
         assert!(!changed);
         assert_eq!(card.assignee.as_deref(), Some("agent-2"));
         assert_eq!(card.agent_chat_id.as_deref(), Some("agent-chat-2"));
+        assert_eq!(card.column, "doing");
+        assert!(card.completed_at.is_none());
+        assert!(card.status_updates.is_empty());
+    }
+
+    #[test]
+    fn merge_agent_force_finalize_marks_active_card_done_with_audit() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.final_report = None;
+        card.completed_at = None;
+
+        let changed =
+            finalize_force_merge_card_if_current(&mut card, Some("agent-1"), Some("agent-chat-1"));
+
+        assert!(changed);
+        assert_eq!(card.column, "done");
+        assert!(card.completed_at.is_some());
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.status_updates.iter().any(|update| update
+            .message
+            .contains("Force-merged by planner without the normal agent_finish path")));
     }
 
     #[tokio::test]
@@ -2614,10 +2699,93 @@ mod worktree_merge_tool_tests {
         let text = tool_text(&result);
         assert!(text.contains("Force-merged"), "{text}");
 
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(!root.exists());
+        assert!(!branch_exists(&source, &branch));
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_err());
+
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "done");
+        assert!(card.completed_at.is_some());
         assert!(card.assignee.is_none());
         assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card.status_updates.iter().any(|update| update
+            .message
+            .contains("Force-merged by planner without the normal agent_finish path")));
+        let ready = board.get_ready_cards();
+        assert!(ready.in_progress.is_empty());
+        assert_eq!(ready.completed, vec!["T-1".to_string()]);
+        let meta = storage::load_task_meta(gcx, "task-1").await.unwrap();
+        assert_eq!(meta.cards_done, 1);
+        assert_eq!(meta.agents_active, 0);
+    }
+
+    #[tokio::test]
+    async fn merge_agent_legacy_force_true_finishes_doing_card() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-force-doing");
+        let branch = "refact/task/task-1/card/T-1/agent-force-doing-legacy";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        commit_file(
+            &agent_worktree,
+            "file.txt",
+            "legacy force doing\n",
+            "agent change",
+        );
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let mut card = test_card_with_branch(None, branch, &agent_worktree);
+        card.column = "doing".to_string();
+        card.final_report = None;
+        card.completed_at = None;
+        write_task(gcx.clone(), &source, card).await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("force".to_string(), json!(true)),
+        ]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "legacy force doing\n"
+        );
+        assert!(tool_text(&result).contains("Force-merged"));
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "done");
+        assert!(card.completed_at.is_some());
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card.status_updates.iter().any(|update| update
+            .message
+            .contains("Force-merged by planner without the normal agent_finish path")));
+        let ready = board.get_ready_cards();
+        assert!(ready.in_progress.is_empty());
+        assert_eq!(ready.completed, vec!["T-1".to_string()]);
+        let meta = storage::load_task_meta(gcx, "task-1").await.unwrap();
+        assert_eq!(meta.cards_done, 1);
+        assert_eq!(meta.agents_active, 0);
     }
 
     #[tokio::test]
