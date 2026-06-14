@@ -187,6 +187,7 @@ fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "human_schedule": human_schedule(cron),
         "description": task.description,
         "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
+        "action_kind": task.action_kind(),
         "chat_id": task.chat_id(),
         "target": if job_is_isolated(task) { "isolated" } else { "existing_chat" },
         "isolated": job_is_isolated(task),
@@ -203,6 +204,9 @@ fn job_is_isolated(task: &Job) -> bool {
     matches!(
         &task.action,
         Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        } | Action::Command {
             target: AgentTarget::Isolated,
             ..
         }
@@ -257,6 +261,20 @@ mod tests {
         task.set_existing_chat(Some("chat".to_string()));
         task.set_mode(Some("agent".to_string()));
         task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
+    }
+
+    fn command_task(id: &str) -> Job {
+        let mut task = session_task(id);
+        task.action = Action::Command {
+            argv: vec!["printf".to_string(), "hello".to_string()],
+            target: AgentTarget::ExistingChat {
+                chat_id: "chat".to_string(),
+            },
+            cwd: None,
+            env: None,
+            timeout_secs: None,
+        };
         task
     }
 
@@ -376,6 +394,23 @@ mod tests {
         assert_eq!(items[0]["target"], json!("existing_chat"));
         assert_eq!(items[0]["isolated"], json!(false));
         assert_eq!(items[0]["mode"], json!("agent"));
+        assert_eq!(items[0]["action_kind"], json!("agent_turn"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_command_action_kind() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        session_store
+            .add(command_task("cron_list_command_action"))
+            .await
+            .unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["action_kind"], json!("command"));
+        assert_eq!(items[0]["chat_id"], json!("chat"));
     }
 
     #[tokio::test]

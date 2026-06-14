@@ -33,13 +33,17 @@ impl ToolCronCreate {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct CronCreateInput {
     pub(crate) cron: Option<String>,
     pub(crate) every: Option<String>,
     pub(crate) at: Option<String>,
     pub(crate) tz: Option<String>,
-    pub(crate) prompt: String,
+    pub(crate) prompt: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) command_argv: Option<Vec<String>>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) timeout_secs: Option<u64>,
     pub(crate) recurring: Option<bool>,
     pub(crate) durable: bool,
     pub(crate) isolated: bool,
@@ -85,13 +89,17 @@ impl Tool for ToolCronCreate {
                     "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
                     "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
                     "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
-                    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
+                    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time. Mutually exclusive with command and command_argv." },
+                    "command": { "type": "string", "description": "Command line to shell-split and run without an agent turn. Mutually exclusive with prompt and command_argv." },
+                    "command_argv": { "type": "array", "items": { "type": "string" }, "description": "Command argv to run without an agent turn. Mutually exclusive with prompt and command." },
+                    "cwd": { "type": "string", "description": "Optional command working directory, resolved under the active project." },
+                    "timeout_secs": { "type": "integer", "description": "Optional command timeout in seconds." },
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "default": false },
                     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
                     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
                 },
-                "required": ["prompt", "description"]
+                "required": ["description"]
             }),
             output_schema: None,
             annotations: None,
@@ -123,6 +131,7 @@ impl Tool for ToolCronCreate {
             "human_schedule": outcome.human_schedule,
             "recurring": outcome.task.recurring,
             "durable": outcome.task.durable,
+            "action_kind": outcome.task.action_kind(),
             "isolated": job_is_isolated(&outcome.task),
         });
 
@@ -151,7 +160,10 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
     if cron.is_none() && every.is_none() && at.is_none() {
         return Err("argument `cron` is required".to_string());
     }
-    let prompt = required_string_arg(args, "prompt")?;
+    let prompt = optional_string_arg(args, "prompt")?;
+    let command = optional_string_arg(args, "command")?;
+    let command_argv = optional_string_array_arg(args, "command_argv")?;
+    validate_action_args(prompt.as_ref(), command.as_ref(), command_argv.as_ref())?;
     let description = required_string_arg(args, "description")?;
     if description.chars().count() > 80 {
         return Err("description must be at most 80 characters".to_string());
@@ -162,6 +174,10 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         at,
         tz,
         prompt,
+        command,
+        command_argv,
+        cwd: optional_string_arg(args, "cwd")?,
+        timeout_secs: optional_u64_arg(args, "timeout_secs")?,
         recurring: optional_bool_arg(args, "recurring")?,
         durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
         isolated: optional_bool_arg(args, "isolated")?.unwrap_or(false),
@@ -197,6 +213,63 @@ fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option
         Some(Value::Bool(value)) => Ok(Some(*value)),
         Some(Value::Null) | None => Ok(None),
         Some(value) => Err(format!("argument `{name}` is not a boolean: {value:?}")),
+    }
+}
+
+fn optional_u64_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<u64>, String> {
+    match args.get(name) {
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("argument `{name}` is not an unsigned integer: {value:?}")),
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => Err(format!("argument `{name}` is not an integer: {value:?}")),
+    }
+}
+
+fn optional_string_array_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+) -> Result<Option<Vec<String>>, String> {
+    match args.get(name) {
+        Some(Value::Array(values)) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Value::String(item) if !item.trim().is_empty() => out.push(item.clone()),
+                    Value::String(_) => {
+                        return Err(format!("argument `{name}` contains an empty string"));
+                    }
+                    other => {
+                        return Err(format!(
+                            "argument `{name}` contains a non-string value: {other:?}"
+                        ));
+                    }
+                }
+            }
+            if out.is_empty() {
+                Err(format!("argument `{name}` must not be empty"))
+            } else {
+                Ok(Some(out))
+            }
+        }
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => Err(format!("argument `{name}` is not an array: {value:?}")),
+    }
+}
+
+fn validate_action_args(
+    prompt: Option<&String>,
+    command: Option<&String>,
+    command_argv: Option<&Vec<String>>,
+) -> Result<(), String> {
+    let agent_turn = prompt.is_some();
+    let command_count = usize::from(command.is_some()) + usize::from(command_argv.is_some());
+    match (agent_turn, command_count) {
+        (true, 0) | (false, 1) => Ok(()),
+        (false, 0) => Err("one of `prompt`, `command`, or `command_argv` is required".to_string()),
+        (true, _) => Err("exactly one action is allowed: prompt XOR command".to_string()),
+        (false, _) => Err("exactly one of `command` or `command_argv` is allowed".to_string()),
     }
 }
 
@@ -293,15 +366,15 @@ pub(crate) async fn create_cron_job(
     }
 
     let mut task = Job::new_cron_agent_chat(
-        input.cron.unwrap_or_default(),
-        input.prompt,
-        input.description,
+        input.cron.clone().unwrap_or_default(),
+        input.prompt.clone().unwrap_or_default(),
+        input.description.clone(),
         recurring,
         input.durable,
         runtime.now_ms,
     );
     task.trigger = trigger;
-    apply_cron_create_target(&mut task, input.isolated, runtime.chat_id, runtime.model);
+    apply_cron_create_action(&mut task, &input, runtime.chat_id, runtime.model)?;
     task.set_mode(runtime.mode);
     validate_next_run(&task, runtime.now_ms, runtime.timezone)?;
     let human = human_schedule_for_trigger(&task.trigger);
@@ -320,33 +393,62 @@ pub(crate) async fn create_cron_job(
     })
 }
 
-fn apply_cron_create_target(
+fn apply_cron_create_action(
     task: &mut Job,
-    isolated: bool,
+    input: &CronCreateInput,
     chat_id: Option<String>,
     model: Option<String>,
-) {
-    if let Action::AgentTurn {
-        target,
-        model: task_model,
-        ..
-    } = &mut task.action
-    {
-        if isolated {
-            *target = AgentTarget::Isolated;
-            *task_model = model;
-        } else {
-            *target = AgentTarget::ExistingChat {
-                chat_id: chat_id.unwrap_or_default(),
-            };
-        }
+) -> Result<(), String> {
+    if let Some(prompt) = input.prompt.clone() {
+        task.action = Action::AgentTurn {
+            prompt,
+            target: if input.isolated {
+                AgentTarget::Isolated
+            } else {
+                AgentTarget::ExistingChat {
+                    chat_id: chat_id.unwrap_or_default(),
+                }
+            },
+            mode: None,
+            model: input.isolated.then_some(model).flatten(),
+            tools: None,
+        };
+        return Ok(());
     }
+    task.action = Action::Command {
+        argv: command_argv_from_input(input)?,
+        target: if input.isolated {
+            AgentTarget::Isolated
+        } else {
+            AgentTarget::ExistingChat {
+                chat_id: chat_id.unwrap_or_default(),
+            }
+        },
+        cwd: input.cwd.clone(),
+        env: None,
+        timeout_secs: input.timeout_secs,
+    };
+    Ok(())
+}
+
+fn command_argv_from_input(input: &CronCreateInput) -> Result<Vec<String>, String> {
+    if let Some(argv) = input.command_argv.clone() {
+        return Ok(argv);
+    }
+    let command = input
+        .command
+        .as_deref()
+        .ok_or_else(|| "command action requires `command` or `command_argv`".to_string())?;
+    shell_words::split(command).map_err(|error| format!("failed to parse command: {error}"))
 }
 
 fn job_is_isolated(task: &Job) -> bool {
     matches!(
         &task.action,
         Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        } | Action::Command {
             target: AgentTarget::Isolated,
             ..
         }
@@ -445,6 +547,7 @@ async fn emit_created_notice(
             "cron": task.cron_expr().unwrap_or_default(),
             "recurring": task.recurring,
             "durable": task.durable,
+            "action_kind": task.action_kind(),
             "isolated": job_is_isolated(task),
         }),
         summary.to_string(),
@@ -731,6 +834,93 @@ mod tests {
         assert_eq!(outcome.task.chat_id(), Some("chat-1"));
         assert_eq!(outcome.task.mode(), Some("agent"));
         assert_eq!(job_model(&outcome.task), None);
+    }
+
+    #[tokio::test]
+    async fn command_string_creates_command_action() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("command", json!("printf 'hi frog'")),
+                ("description", json!("Print frog")),
+                ("cwd", json!(".")),
+                ("timeout_secs", json!(12)),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.task.action_kind(), "command");
+        match outcome.task.action {
+            Action::Command {
+                argv,
+                target,
+                cwd,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(argv, vec!["printf".to_string(), "hi frog".to_string()]);
+                assert_eq!(
+                    target,
+                    AgentTarget::ExistingChat {
+                        chat_id: "chat-1".to_string()
+                    }
+                );
+                assert_eq!(cwd.as_deref(), Some("."));
+                assert_eq!(timeout_secs, Some(12));
+            }
+            _ => panic!("expected command action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn command_argv_creates_command_action() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("command_argv", json!(["printf", "hi frog"])),
+                ("description", json!("Print frog")),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        match outcome.task.action {
+            Action::Command { argv, .. } => {
+                assert_eq!(argv, vec!["printf".to_string(), "hi frog".to_string()]);
+            }
+            _ => panic!("expected command action"),
+        }
+    }
+
+    #[test]
+    fn prompt_and_command_are_rejected() {
+        let err = input_from_args(&args(&[
+            ("cron", json!("*/5 * * * *")),
+            ("prompt", json!("Check")),
+            ("command", json!("printf hi")),
+            ("description", json!("Check")),
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err, "exactly one action is allowed: prompt XOR command");
+    }
+
+    #[test]
+    fn command_and_command_argv_are_rejected() {
+        let err = input_from_args(&args(&[
+            ("cron", json!("*/5 * * * *")),
+            ("command", json!("printf hi")),
+            ("command_argv", json!(["printf", "hi"])),
+            ("description", json!("Check")),
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err, "exactly one of `command` or `command_argv` is allowed");
     }
 
     #[tokio::test]

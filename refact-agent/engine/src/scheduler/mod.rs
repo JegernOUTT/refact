@@ -1,4 +1,5 @@
 pub mod cron_expr;
+pub mod exec_action;
 pub mod jitter;
 pub mod runner;
 pub mod schedule;
@@ -10,7 +11,7 @@ pub use runner::{runner_change_notify, session_cron_store, CronRunner, spawn, sp
 pub use schedule::{ScheduleTarget, next_run_ms};
 pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCronStore};
 pub use types::{
-    Action, AgentTarget, CronCreatePolicy, CronRunRecord, Delivery,
+    Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, Delivery,
     DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job,
     RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger,
     cron_create_policy,

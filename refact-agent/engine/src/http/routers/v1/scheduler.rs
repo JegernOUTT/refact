@@ -11,7 +11,7 @@ use crate::custom_error::ScratchError;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    Action, CronRunRecord, CronStore, Job, Trigger,
+    Action, AgentTarget, CronRunRecord, CronStore, Job, Trigger,
 };
 use crate::tools::tool_cron_create::MAX_CRON_JOBS;
 
@@ -38,6 +38,10 @@ pub struct CronTaskResponse {
     pub last_status: Option<String>,
     pub last_error: Option<String>,
     pub recent_runs: Vec<CronRunRecord>,
+    pub action_kind: String,
+    pub chat_id: Option<String>,
+    pub target: String,
+    pub isolated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +50,11 @@ pub struct CronCreateRequest {
     pub every: Option<String>,
     pub at: Option<String>,
     pub tz: Option<String>,
-    pub prompt: String,
+    pub prompt: Option<String>,
+    pub command: Option<String>,
+    pub command_argv: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub recurring: Option<bool>,
     #[serde(default)]
@@ -62,6 +70,7 @@ pub struct CronCreateResponse {
     pub human_schedule: String,
     pub recurring: bool,
     pub durable: bool,
+    pub action_kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,12 +149,14 @@ pub async fn handle_v1_scheduler_cron_post(
         .await
         .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
     let human = job_human_schedule(&task);
+    let action_kind = task.action_kind().to_string();
 
     Ok(Json(CronCreateResponse {
         id: task.id,
         human_schedule: human,
         recurring: task.recurring,
         durable: task.durable,
+        action_kind,
     }))
 }
 
@@ -235,6 +246,15 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
     let next_fire_at_ms = next_run_ms(&task, now_ms, tz).unwrap_or(0);
     let (trigger_kind, tz, every_ms, at_ms) = trigger_response_fields(&task.trigger);
     let paused = task.is_paused();
+    let action_kind = task.action_kind().to_string();
+    let chat_id = task.chat_id().map(str::to_string);
+    let isolated = job_is_isolated(&task);
+    let target = if isolated {
+        "isolated"
+    } else {
+        "existing_chat"
+    }
+    .to_string();
     CronTaskResponse {
         id: task.id,
         cron,
@@ -255,6 +275,10 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
         last_status: task.last_status,
         last_error: task.last_error,
         recent_runs: task.recent_runs,
+        action_kind,
+        chat_id,
+        target,
+        isolated,
     }
 }
 
@@ -262,6 +286,7 @@ async fn create_http_cron_job(
     request: CronCreateRequest,
     durable_store: Option<std::sync::Arc<dyn CronStore>>,
 ) -> Result<Job, String> {
+    validate_http_action_args(&request)?;
     let now_ms = unix_now_ms();
     let trigger = parse_schedule(
         request.cron.as_deref(),
@@ -279,15 +304,14 @@ async fn create_http_cron_job(
     };
     let mut task = Job::new_cron_agent_chat(
         trigger_cron_expr(&trigger).unwrap_or_default().to_string(),
-        request.prompt,
-        request.description,
+        request.prompt.clone().unwrap_or_default(),
+        request.description.clone(),
         recurring,
         request.durable,
         now_ms,
     );
     task.trigger = trigger;
-    task.set_existing_chat(Some(request.chat_id));
-    task.set_mode(request.mode);
+    apply_http_action(&mut task, &request)?;
     validate_next_fire(&task, now_ms)?;
 
     let session_store = session_cron_store();
@@ -312,6 +336,83 @@ async fn create_http_cron_job(
     store.add(task.clone()).await?;
     crate::scheduler::runner_change_notify().notify_waiters();
     Ok(task)
+}
+
+fn validate_http_action_args(request: &CronCreateRequest) -> Result<(), String> {
+    let agent_turn = request
+        .prompt
+        .as_ref()
+        .is_some_and(|prompt| !prompt.trim().is_empty());
+    let command = request
+        .command
+        .as_ref()
+        .is_some_and(|command| !command.trim().is_empty());
+    let command_argv = request
+        .command_argv
+        .as_ref()
+        .is_some_and(|argv| !argv.is_empty());
+    match (agent_turn, usize::from(command) + usize::from(command_argv)) {
+        (true, 0) | (false, 1) => Ok(()),
+        (false, 0) => Err("one of `prompt`, `command`, or `command_argv` is required".to_string()),
+        (true, _) => Err("exactly one action is allowed: prompt XOR command".to_string()),
+        (false, _) => Err("exactly one of `command` or `command_argv` is allowed".to_string()),
+    }
+}
+
+fn job_is_isolated(task: &Job) -> bool {
+    matches!(
+        &task.action,
+        Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        } | Action::Command {
+            target: AgentTarget::Isolated,
+            ..
+        }
+    )
+}
+
+fn apply_http_action(task: &mut Job, request: &CronCreateRequest) -> Result<(), String> {
+    if let Some(prompt) = request
+        .prompt
+        .clone()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        task.action = Action::AgentTurn {
+            prompt: prompt.trim().to_string(),
+            target: AgentTarget::ExistingChat {
+                chat_id: request.chat_id.clone(),
+            },
+            mode: request.mode.clone(),
+            model: None,
+            tools: None,
+        };
+        return Ok(());
+    }
+    task.action = Action::Command {
+        argv: http_command_argv(request)?,
+        target: AgentTarget::ExistingChat {
+            chat_id: request.chat_id.clone(),
+        },
+        cwd: request.cwd.clone(),
+        env: None,
+        timeout_secs: request.timeout_secs,
+    };
+    Ok(())
+}
+
+fn http_command_argv(request: &CronCreateRequest) -> Result<Vec<String>, String> {
+    if let Some(argv) = request.command_argv.clone() {
+        if argv.iter().any(|item| item.trim().is_empty()) {
+            return Err("command_argv contains an empty argument".to_string());
+        }
+        return Ok(argv);
+    }
+    let command = request
+        .command
+        .as_deref()
+        .ok_or_else(|| "command action requires `command` or `command_argv`".to_string())?;
+    shell_words::split(command).map_err(|error| format!("failed to parse command: {error}"))
 }
 
 async fn find_task_store(

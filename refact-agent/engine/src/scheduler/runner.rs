@@ -22,10 +22,16 @@ use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
 use crate::scheduler::scheduler_timezone;
 
+use super::exec_action::{
+    command_error_notice_message, command_error_summary, command_output_message, run_command,
+    CommandRunResult,
+};
 use super::jitter::{jittered_next_run_ms_for, one_shot_jittered_next_run_ms_for, JitterConfig};
 use super::schedule::next_run_ms;
 use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
-use super::types::{Action, AgentTarget, CronRunRecord, Delivery, Job, Trigger, RECENT_RUNS_CAP};
+use super::types::{
+    Action, AgentTarget, CommandSpec, CronRunRecord, Delivery, Job, Trigger, RECENT_RUNS_CAP,
+};
 
 const DEFAULT_SLEEP_MS: u64 = 60_000;
 const IDLE_DEFER_MS: u64 = 30_000;
@@ -190,6 +196,10 @@ impl CronRunner {
     }
 
     async fn handle_due_task(&mut self, task: Job, now: u64) {
+        if matches!(&task.action, Action::Command { .. }) {
+            self.handle_due_command_task(task, now).await;
+            return;
+        }
         if job_is_isolated(&task) {
             self.handle_due_isolated_task(task, now).await;
             return;
@@ -320,6 +330,132 @@ impl CronRunner {
                 "failed to record fired scheduled task {}: {}",
                 task.id,
                 error
+            );
+        }
+        if final_fire {
+            match self.store.remove(&task.id).await {
+                Ok(true) => self.emit_auto_expired_notice(&task).await,
+                Ok(false) => {
+                    tracing::warn!("expired scheduled task {} was already removed", task.id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to remove expired scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                }
+            }
+        } else if !task.recurring {
+            if let Err(error) = self.remove_task(&task).await {
+                tracing::warn!(
+                    "failed to remove fired one-shot scheduled task {}: {}",
+                    task.id,
+                    error
+                );
+            }
+        }
+        self.deferred_until_ms.remove(&task.id);
+    }
+
+    async fn handle_due_command_task(&mut self, task: Job, now: u64) {
+        let cmd = match task.command_spec() {
+            Some(cmd) => cmd,
+            None => {
+                self.handle_unfireable_task(&task, now, "command action is missing")
+                    .await;
+                return;
+            }
+        };
+        if let Err(reason) = runnable_command_job(&task) {
+            self.handle_unfireable_task(&task, now, reason).await;
+            return;
+        }
+        if let AgentTarget::ExistingChat { chat_id } = &cmd.target {
+            if chat_id.is_empty() {
+                self.handle_unfireable_task(&task, now, "missing chat_id")
+                    .await;
+                return;
+            }
+            match chat_fire_status(&self.gcx, chat_id).await {
+                ChatFireStatus::Fireable => {}
+                ChatFireStatus::Busy => {
+                    if let Err(error) =
+                        record_run(&self.store, &task.id, "deferred", None, now).await
+                    {
+                        tracing::warn!(
+                            "failed to record deferred scheduled task {}: {}",
+                            task.id,
+                            error
+                        );
+                    }
+                    self.defer_task(&task, now);
+                    return;
+                }
+                ChatFireStatus::Missing => {
+                    if task.durable {
+                        let app = AppState::from_gcx(self.gcx.clone()).await;
+                        let restored = try_restore_session_if_trajectory_exists(
+                            app,
+                            &self.gcx.chat_sessions,
+                            chat_id,
+                        )
+                        .await;
+                        if !restored {
+                            if let Err(error) = record_run(
+                                &self.store,
+                                &task.id,
+                                "deferred",
+                                Some("no trajectory found".to_string()),
+                                now,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "failed to record deferred scheduled task {}: {}",
+                                    task.id,
+                                    error
+                                );
+                            }
+                            self.defer_invalid_target_task(&task, now);
+                            return;
+                        }
+                    } else {
+                        self.handle_unfireable_task(&task, now, "chat session not found")
+                            .await;
+                        return;
+                    }
+                }
+                ChatFireStatus::Closed => {
+                    self.handle_unfireable_task(&task, now, "chat session is closed")
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        let final_fire = task_final_after_fire(&task, now);
+        let result = match self
+            .fire_command_with_missed(&task, &cmd, final_fire, now, false)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
+                self.handle_unfireable_task(&task, now, &error).await;
+                return;
+            }
+        };
+
+        let error = (result.status == "error").then(|| command_record_error(&result));
+        if let Err(store_error) =
+            record_run(&self.store, &task.id, &result.status, error, now).await
+        {
+            tracing::warn!(
+                "failed to record scheduled task {} status {}: {}",
+                task.id,
+                result.status,
+                store_error
             );
         }
         if final_fire {
@@ -512,6 +648,12 @@ impl CronRunner {
         fired_at_ms: u64,
         missed: bool,
     ) -> Result<bool, String> {
+        if let Some(cmd) = task.command_spec() {
+            let _ = self
+                .fire_command_with_missed(task, &cmd, final_fire, fired_at_ms, missed)
+                .await?;
+            return Ok(true);
+        }
         if job_is_isolated(&task) {
             return self
                 .fire_isolated_with_missed(task, final_fire, fired_at_ms, missed)
@@ -582,6 +724,72 @@ impl CronRunner {
             tokio::spawn(process_command_queue(app, session_arc, processor_flag));
         }
         Ok(true)
+    }
+
+    async fn fire_command_with_missed(
+        &self,
+        task: &Job,
+        cmd: &CommandSpec,
+        final_fire: bool,
+        fired_at_ms: u64,
+        missed: bool,
+    ) -> Result<CommandRunResult, String> {
+        runnable_command_job(task).map_err(|reason| {
+            format!(
+                "Scheduled task {} is not a runnable command job: {reason}",
+                task.id
+            )
+        })?;
+        let app = AppState::from_gcx(self.gcx.clone()).await;
+        let result = run_command(&app, task, cmd).await;
+        self.deliver_command_result(&app, task, cmd, final_fire, fired_at_ms, missed, &result)
+            .await?;
+        Ok(result)
+    }
+
+    async fn deliver_command_result(
+        &self,
+        app: &AppState,
+        task: &Job,
+        cmd: &CommandSpec,
+        final_fire: bool,
+        fired_at_ms: u64,
+        missed: bool,
+        result: &CommandRunResult,
+    ) -> Result<(), String> {
+        let mut messages = Vec::new();
+        if result.status == "error" {
+            messages.push(command_error_notice_message(task, result));
+        } else if !result.stdout.is_empty() {
+            messages.push(if missed {
+                cron_fire_message_with_missed(task, final_fire, true)
+            } else {
+                cron_fire_message(task, final_fire)
+            });
+            messages.push(command_output_message(task, result));
+        }
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let session_arc = match &cmd.target {
+            AgentTarget::ExistingChat { chat_id } => {
+                let sessions = self.gcx.chat_sessions.read().await;
+                sessions
+                    .get(chat_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Chat session {chat_id} not found"))?
+            }
+            AgentTarget::Isolated => {
+                let chat_id = format!("cron_{}_{}", task.id, fired_at_ms);
+                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
+                    .await
+            }
+        };
+        let mut session = session_arc.lock().await;
+        for message in messages {
+            session.add_message(message);
+        }
+        Ok(())
     }
 
     async fn fire_isolated_with_missed(
@@ -784,7 +992,7 @@ fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
         ) if !chat_id.is_empty() => Ok(chat_id),
         (Action::AgentTurn { .. }, Delivery::Chat) => Err("missing chat_id"),
         (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
-        (Action::Command { .. }, _) => Err("command actions are not supported yet"),
+        (Action::Command { .. }, _) => Err("command actions use the command runner"),
     }
 }
 
@@ -805,7 +1013,31 @@ fn runnable_isolated_job(job: &Job) -> Result<(), &'static str> {
         ) => Ok(()),
         (Action::AgentTurn { .. }, Delivery::Chat) => Err("target is not isolated"),
         (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
-        (Action::Command { .. }, _) => Err("command actions are not supported yet"),
+        (Action::Command { .. }, _) => Err("command actions use the command runner"),
+    }
+}
+
+fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
+    if !matches!(
+        job.trigger,
+        Trigger::Cron { .. } | Trigger::Interval { .. } | Trigger::Once { .. }
+    ) {
+        return Err("trigger is not supported by the command runner yet");
+    }
+    match (&job.action, &job.delivery) {
+        (Action::Command { argv, .. }, Delivery::Chat) if argv.is_empty() => {
+            Err("command argv is empty")
+        }
+        (
+            Action::Command {
+                target: AgentTarget::ExistingChat { chat_id },
+                ..
+            },
+            Delivery::Chat,
+        ) if chat_id.is_empty() => Err("missing chat_id"),
+        (Action::Command { .. }, Delivery::Chat) => Ok(()),
+        (Action::Command { .. }, _) => Err("non-chat delivery is not supported yet"),
+        (Action::AgentTurn { .. }, _) => Err("action is not command"),
     }
 }
 
@@ -828,6 +1060,9 @@ fn job_is_isolated(task: &Job) -> bool {
     matches!(
         &task.action,
         Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        } | Action::Command {
             target: AgentTarget::Isolated,
             ..
         }
@@ -866,6 +1101,7 @@ fn cron_fire_message_with_missed(task: &Job, final_fire: bool, missed: bool) -> 
         "recurring": task.recurring,
         "fire_count": task.fire_count.saturating_add(1),
         "final": final_fire,
+        "action_kind": task.action_kind(),
     });
     if missed {
         payload["missed"] = json!(true);
@@ -874,8 +1110,12 @@ fn cron_fire_message_with_missed(task: &Job, final_fire: bool, missed: bool) -> 
         EventSubkind::CronFire,
         "scheduler.cron",
         payload,
-        task.prompt().unwrap_or_default().to_string(),
+        task.prompt().unwrap_or(&task.description).to_string(),
     )
+}
+
+fn command_record_error(result: &CommandRunResult) -> String {
+    command_error_summary(result)
 }
 
 fn catch_up_notice_message(missed_count: u64) -> ChatMessage {
@@ -956,7 +1196,7 @@ async fn record_run(
     }
     task.last_status = Some(status.to_string());
     task.last_error = error;
-    if status == "fired" {
+    if status == "fired" || status == "error" {
         task.last_fired_at_ms = Some(now_ms);
         task.fire_count = task.fire_count.saturating_add(1);
         if task
@@ -1083,6 +1323,51 @@ mod tests {
         set_job_isolated(&mut task);
         set_job_model(&mut task, Some("model-1".to_string()));
         task
+    }
+
+    fn command_due_task(id: &str, now: u64, argv: Vec<String>) -> Job {
+        let mut task = due_task(id, now);
+        task.description = format!("{id} command");
+        task.action = Action::Command {
+            argv,
+            target: AgentTarget::ExistingChat {
+                chat_id: "chat-1".to_string(),
+            },
+            cwd: None,
+            env: None,
+            timeout_secs: Some(5),
+        };
+        task
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn stdout_command(text: &str) -> Vec<String> {
+        vec!["printf".to_string(), text.to_string()]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn stdout_command(text: &str) -> Vec<String> {
+        vec!["Write-Output".to_string(), text.to_string()]
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn empty_command() -> Vec<String> {
+        vec!["true".to_string()]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn empty_command() -> Vec<String> {
+        vec!["cmd".to_string(), "/C".to_string(), "exit 0".to_string()]
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn failing_command() -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn failing_command() -> Vec<String> {
+        vec!["cmd".to_string(), "/C".to_string(), "exit 7".to_string()]
     }
 
     fn timezone_cron_task(id: &str, created_at_ms: u64) -> Job {
@@ -1350,6 +1635,93 @@ mod tests {
         assert_eq!(stored.fire_count, 1);
         assert!(!runner.task_is_due(&stored, now + 59_999));
         assert!(runner.task_is_due(&stored, now + 60_000));
+    }
+
+    #[tokio::test]
+    async fn command_job_runs_and_delivers_stdout() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(command_due_task(
+                "command_stdout",
+                now,
+                stdout_command("hello command"),
+            ))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_stdout").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.fire_count, 1);
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        let fire_event = event_message(&session, "cron_fire", "command_stdout");
+        assert_eq!(
+            fire_event.extra["event"]["payload"]["action_kind"],
+            json!("command")
+        );
+        let output = session
+            .messages
+            .iter()
+            .find(|message| message.role == "plain_text")
+            .expect("stdout message");
+        assert_eq!(output.content.content_text_only(), "hello command");
+    }
+
+    #[tokio::test]
+    async fn command_job_empty_stdout_is_silent_but_fired() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(command_due_task("command_silent", now, empty_command()))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_silent").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.fire_count, 1);
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        assert!(session.messages.is_empty());
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_job_nonzero_exit_records_error() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(command_due_task("command_error", now, failing_command()))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_error").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("error"));
+        assert_eq!(stored.fire_count, 1);
+        assert!(stored
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Scheduled command failed"));
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        let notice = event_message(&session, "system_notice", "command_error");
+        assert_eq!(
+            notice.extra["event"]["payload"]["action_kind"],
+            json!("command")
+        );
     }
 
     #[tokio::test]

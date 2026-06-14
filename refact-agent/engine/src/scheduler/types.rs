@@ -160,9 +160,39 @@ impl Job {
         }
     }
 
+    pub fn command_spec(&self) -> Option<CommandSpec> {
+        match &self.action {
+            Action::Command {
+                argv,
+                target,
+                cwd,
+                env,
+                timeout_secs,
+            } => Some(CommandSpec {
+                argv: argv.clone(),
+                target: target.clone(),
+                cwd: cwd.clone(),
+                env: env.clone(),
+                timeout_secs: *timeout_secs,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn action_kind(&self) -> &'static str {
+        match &self.action {
+            Action::AgentTurn { .. } => "agent_turn",
+            Action::Command { .. } => "command",
+        }
+    }
+
     pub fn chat_id(&self) -> Option<&str> {
         match &self.action {
             Action::AgentTurn {
+                target: AgentTarget::ExistingChat { chat_id },
+                ..
+            } if !chat_id.is_empty() => Some(chat_id),
+            Action::Command {
                 target: AgentTarget::ExistingChat { chat_id },
                 ..
             } if !chat_id.is_empty() => Some(chat_id),
@@ -182,10 +212,12 @@ impl Job {
     }
 
     pub fn set_existing_chat(&mut self, chat_id: Option<String>) {
-        if let Action::AgentTurn { target, .. } = &mut self.action {
-            *target = AgentTarget::ExistingChat {
-                chat_id: chat_id.unwrap_or_default(),
-            };
+        match &mut self.action {
+            Action::AgentTurn { target, .. } | Action::Command { target, .. } => {
+                *target = AgentTarget::ExistingChat {
+                    chat_id: chat_id.unwrap_or_default(),
+                };
+            }
         }
     }
 
@@ -219,10 +251,22 @@ pub enum Action {
     },
     Command {
         argv: Vec<String>,
+        #[serde(default = "default_command_target")]
+        target: AgentTarget,
         cwd: Option<String>,
         env: Option<BTreeMap<String, String>>,
         timeout_secs: Option<u64>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandSpec {
+    pub argv: Vec<String>,
+    #[serde(default = "default_command_target")]
+    pub target: AgentTarget,
+    pub cwd: Option<String>,
+    pub env: Option<BTreeMap<String, String>>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -347,6 +391,12 @@ fn default_job_enabled() -> bool {
 
 fn default_recurring_for_trigger(trigger: &Trigger) -> bool {
     !matches!(trigger, Trigger::Once { .. })
+}
+
+fn default_command_target() -> AgentTarget {
+    AgentTarget::ExistingChat {
+        chat_id: String::new(),
+    }
 }
 
 fn default_auto_expire_after_ms(recurring: bool) -> u64 {

@@ -159,6 +159,7 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
     let listed_task = list.iter().find(|task| task["id"] == json!(id)).unwrap();
     assert_eq!(listed_task["description"], json!("Hourly frog check"));
     assert_eq!(listed_task["prompt"], json!("Check the frogs"));
+    assert_eq!(listed_task["action_kind"], json!("agent_turn"));
     assert_eq!(listed_task["fire_count"], json!(0));
     assert!(listed_task["next_fire_at_ms"].as_u64().unwrap() > 0);
 
@@ -294,6 +295,105 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
     let task = tasks.iter().find(|t| t.id == id).unwrap();
     assert_eq!(task.chat_id(), Some("active-chat"));
     assert_eq!(task.mode(), Some("agent"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_command_creates_command_job() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "command-chat").await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/5 * * * *",
+                    "command": "printf 'hi frog'",
+                    "description": "Print frog",
+                    "chat_id": "command-chat",
+                    "cwd": ".",
+                    "timeout_secs": 9
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["action_kind"], json!("command"));
+    let id = created["id"].as_str().unwrap();
+
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    match &task.action {
+        Action::Command {
+            argv,
+            target,
+            cwd,
+            timeout_secs,
+            ..
+        } => {
+            assert_eq!(argv, &vec!["printf".to_string(), "hi frog".to_string()]);
+            assert_eq!(
+                target,
+                &AgentTarget::ExistingChat {
+                    chat_id: "command-chat".to_string()
+                }
+            );
+            assert_eq!(cwd.as_deref(), Some("."));
+            assert_eq!(*timeout_secs, Some(9));
+        }
+        _ => panic!("expected command action"),
+    }
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["action_kind"], json!("command"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_rejects_prompt_plus_command() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "command-chat").await;
+
+    let (status, _) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/5 * * * *",
+                    "prompt": "Check frogs",
+                    "command": "printf hi",
+                    "description": "Bad frogs",
+                    "chat_id": "command-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
