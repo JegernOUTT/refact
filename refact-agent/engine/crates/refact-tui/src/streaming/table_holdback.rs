@@ -36,6 +36,11 @@ impl TableHoldbackScanner {
         *self = Self::default();
     }
 
+    pub(crate) fn replace_prefix(&mut self, source: &str) {
+        self.reset();
+        self.push_source_chunk(source);
+    }
+
     pub(crate) fn state(&self) -> TableHoldbackState {
         if let Some(table_start) = self.confirmed_table_start {
             TableHoldbackState::Confirmed { table_start }
@@ -44,6 +49,10 @@ impl TableHoldbackScanner {
         } else {
             TableHoldbackState::None
         }
+    }
+
+    pub(crate) fn source_offset(&self) -> usize {
+        self.source_offset
     }
 
     pub(crate) fn push_source_chunk(&mut self, source_chunk: &str) {

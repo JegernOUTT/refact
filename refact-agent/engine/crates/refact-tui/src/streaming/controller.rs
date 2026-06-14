@@ -50,6 +50,8 @@ impl StreamController {
     pub fn replace_committed(&mut self, content: &str) {
         self.clear();
         self.committed.push_str(content);
+        self.table_scanner.replace_prefix(content);
+        self.assert_holdback_boundary();
     }
 
     pub fn push_delta(&mut self, delta: &str) {
@@ -101,6 +103,12 @@ impl StreamController {
     fn ingest_complete_source(&mut self, source: &str) {
         self.buffered.push_str(source);
         self.table_scanner.push_source_chunk(source);
+        let stable_len = self.stable_buffer_len();
+        self.rebuild_queue(stable_len);
+    }
+
+    fn stable_buffer_len(&self) -> usize {
+        self.assert_holdback_boundary();
         let stable_len = match self.table_scanner.state() {
             TableHoldbackState::None => self.buffered.len(),
             TableHoldbackState::PendingHeader { header_start }
@@ -109,15 +117,45 @@ impl StreamController {
             } => header_start.saturating_sub(self.committed.len()),
         }
         .min(self.buffered.len());
-        self.rebuild_queue(stable_len);
+        previous_char_boundary(&self.buffered, stable_len)
     }
 
     fn rebuild_queue(&mut self, stable_len: usize) {
         self.queue.clear();
         self.held.clear();
-        let stable = &self.buffered[..stable_len];
+        let stable_len =
+            previous_char_boundary(&self.buffered, stable_len.min(self.buffered.len()));
+        debug_assert!(self.buffered.is_char_boundary(stable_len));
+        let (stable, held) = self.buffered.split_at(stable_len);
         enqueue_stable_source(&mut self.queue, stable);
-        self.held.push_str(&self.buffered[stable_len..]);
+        self.held.push_str(held);
+    }
+
+    fn assert_holdback_boundary(&self) {
+        debug_assert_eq!(
+            self.table_scanner.source_offset(),
+            self.committed.len().saturating_add(self.buffered.len()),
+            "table scanner offset must match committed + buffered bytes"
+        );
+        let boundary = match self.table_scanner.state() {
+            TableHoldbackState::None => return,
+            TableHoldbackState::PendingHeader { header_start } => header_start,
+            TableHoldbackState::Confirmed { table_start } => table_start,
+        };
+        debug_assert!(
+            self.absolute_boundary_is_valid(boundary),
+            "invalid table holdback boundary {boundary} for committed {} buffered {}",
+            self.committed.len(),
+            self.buffered.len()
+        );
+    }
+
+    fn absolute_boundary_is_valid(&self, boundary: usize) -> bool {
+        if boundary <= self.committed.len() {
+            return self.committed.is_char_boundary(boundary);
+        }
+        let relative = boundary - self.committed.len();
+        relative <= self.buffered.len() && self.buffered.is_char_boundary(relative)
     }
 
     fn drain(&mut self, plan: DrainPlan) -> Option<String> {
@@ -138,10 +176,24 @@ impl StreamController {
         }
         if !drained.is_empty() {
             let drain_len = drained.len().min(self.buffered.len());
+            let drain_len = previous_char_boundary(&self.buffered, drain_len);
             self.buffered.drain(..drain_len);
+            self.assert_holdback_boundary();
         }
         (!drained.is_empty()).then_some(drained)
     }
+}
+
+fn previous_char_boundary(source: &str, index: usize) -> usize {
+    let mut index = index.min(source.len());
+    while !source.is_char_boundary(index) {
+        index = index.saturating_sub(1);
+    }
+    index
+}
+
+fn split_at_char_boundary(source: &str, index: usize) -> (&str, &str) {
+    source.split_at(previous_char_boundary(source, index))
 }
 
 fn enqueue_stable_source(queue: &mut VecDeque<String>, source: &str) {
@@ -149,8 +201,11 @@ fn enqueue_stable_source(queue: &mut VecDeque<String>, source: &str) {
         return;
     }
     if let Some((table_start, table_end)) = first_table_range(source) {
-        let (before, table_and_after) = source.split_at(table_start);
-        let (table, after) = table_and_after.split_at(table_end.saturating_sub(table_start));
+        let table_start = previous_char_boundary(source, table_start);
+        let table_end = previous_char_boundary(source, table_end);
+        let (before, table_and_after) = split_at_char_boundary(source, table_start);
+        let (table, after) =
+            split_at_char_boundary(table_and_after, table_end.saturating_sub(table_start));
         for line in before.split_inclusive('\n') {
             if !line.is_empty() {
                 queue.push_back(line.to_string());
@@ -293,6 +348,59 @@ mod tests {
         stream.push_delta("🦀\n");
         assert_eq!(stream.run_commit_tick(), Some("hello 🦀\n".to_string()));
         assert_eq!(stream.committed(), "hello 🦀\n");
+    }
+
+    #[test]
+    fn replace_committed_keeps_utf8_boundary_before_table() {
+        let mut stream = controller();
+        stream.replace_committed("1234567");
+        stream.push_delta("café — \n| A | B |\n");
+        assert_eq!(stream.run_commit_tick(), Some("café — \n".to_string()));
+        assert_eq!(stream.committed(), "1234567café — \n");
+        assert_eq!(stream.live(), "| A | B |\n");
+    }
+
+    #[test]
+    fn replace_committed_continues_like_single_shot_stream() {
+        let prefix = "Restored prefix\n";
+        let tail = "café — \n| A | B |\n| --- | --- |\n| one | two |\n\nafter\n";
+        let full = format!("{prefix}{tail}");
+
+        let mut resumed = controller();
+        resumed.replace_committed(prefix);
+        for chunk in utf8_chunks(tail, 4) {
+            resumed.push_delta(chunk);
+            while resumed.run_commit_tick().is_some() {}
+        }
+        let resumed = resumed.finalize();
+
+        let mut single_shot = controller();
+        for chunk in utf8_chunks(&full, 4) {
+            single_shot.push_delta(chunk);
+            while single_shot.run_commit_tick().is_some() {}
+        }
+        let single_shot = single_shot.finalize();
+
+        assert_eq!(resumed, full);
+        assert_eq!(resumed, single_shot);
+        assert_eq!(render_text(&resumed), render_text(&full));
+    }
+
+    #[test]
+    fn snapshot_resume_mid_table_holds_until_complete() {
+        let snapshot = "café — \n| A | B |\n";
+        let rest = "| --- | --- |\n| one | two |\n\nafter\n";
+        let mut stream = controller();
+        stream.replace_committed(snapshot);
+
+        stream.push_delta("| --- | --- |\n");
+        assert_eq!(stream.run_commit_tick(), None);
+        stream.push_delta("| one | two |\n");
+        assert_eq!(stream.run_commit_tick(), None);
+        stream.push_delta("\nafter\n");
+        while stream.run_commit_tick().is_some() {}
+
+        assert_eq!(stream.finalize(), format!("{snapshot}{rest}"));
     }
 
     #[test]
