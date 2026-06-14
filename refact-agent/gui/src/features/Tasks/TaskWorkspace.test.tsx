@@ -1877,3 +1877,172 @@ describe("TaskWorkspace CardDetail dialog", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });
+
+describe("TaskWorkspace new-chat mode picker", () => {
+  const RICH_MODES = {
+    modes: [
+      {
+        id: "agent",
+        title: "Agent",
+        description: "Autonomous task execution with the full toolset enabled",
+        tools_count: 57,
+        thread_defaults: {
+          include_project_info: true,
+          checkpoints_enabled: true,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 1, tags: ["coding", "autonomous"] },
+      },
+      {
+        id: "explore",
+        title: "Explore",
+        description: "Read-only context gathering with quick tools",
+        tools_count: 20,
+        thread_defaults: {
+          include_project_info: true,
+          checkpoints_enabled: false,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 2, tags: ["read-only"] },
+      },
+      {
+        id: "task_planner",
+        title: "Task Planner",
+        description: "Plan and manage a task",
+        tools_count: 0,
+        thread_defaults: {
+          include_project_info: false,
+          checkpoints_enabled: false,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 999, tags: ["tasks"] },
+      },
+    ],
+    errors: [],
+  };
+
+  function configWithModes(base: ReturnType<typeof workspacePreloadedState>) {
+    return { ...base.config, dev: true };
+  }
+
+  it("renders rich mode rows and excludes planner/agent modes", async () => {
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/chat-modes", () => HttpResponse.json(RICH_MODES)),
+    );
+
+    const preloaded = workspacePreloadedState();
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: { ...preloaded, config: configWithModes(preloaded) },
+    });
+
+    await user.click(await screen.findByRole("button", { name: "New chat" }));
+
+    // Rich row content reused from the chat composer's ModeSelect:
+    // title + description + tags + tool count (not a bare title + tools list).
+    expect(
+      await screen.findByText(
+        "Autonomous task execution with the full toolset enabled",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Read-only context gathering with quick tools"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("coding")).toBeInTheDocument();
+    expect(screen.getByText("read-only")).toBeInTheDocument();
+    expect(screen.getByText(/57 tools/)).toBeInTheDocument();
+
+    // task_planner / task_agent must not appear in the new-chat menu.
+    expect(screen.queryByText("Task Planner")).toBeNull();
+  });
+
+  it("stays on the just-created chat and does not bounce to an older planner", async () => {
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      // The saved-planner list lags behind and never returns the new chat,
+      // emulating the window before the trajectory index catches up.
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: "planner-existing",
+            title: "Existing planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-05T00:00:00Z",
+          },
+        ]),
+      ),
+      http.get("*/v1/chat-modes", () => HttpResponse.json(RICH_MODES)),
+      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({
+          chat_id: "planner-new",
+          mode: body.mode ?? "agent",
+        });
+      }),
+    );
+
+    const preloaded = workspacePreloadedState("planner-existing");
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...preloaded,
+        config: configWithModes(preloaded),
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task",
+              plannerChats: [
+                {
+                  id: "planner-existing",
+                  title: "Existing planner",
+                  createdAt: "2026-01-01T00:00:00Z",
+                  updatedAt: "2026-01-05T00:00:00Z",
+                },
+              ],
+              activeChat: { type: "planner", chatId: "planner-existing" },
+            },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("planner-existing"),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "New chat" }));
+    const agentRow = await screen.findByText(
+      "Autonomous task execution with the full toolset enabled",
+    );
+    const agentButton = agentRow.closest("button");
+    if (!agentButton) throw new Error("Agent mode row button not found");
+    await user.click(agentButton);
+
+    await waitFor(() =>
+      expect(store.getState().chat.threads["planner-new"]?.thread.mode).toBe(
+        "agent",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((t) => t.id === TASK_ID)
+          ?.activeChat,
+      ).toEqual({ type: "planner", chatId: "planner-new" }),
+    );
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("planner-new"),
+    );
+
+    // The new chat must remain in the list (not removed by reconciliation).
+    expect(
+      store
+        .getState()
+        .tasksUI.openTasks.find((t) => t.id === TASK_ID)
+        ?.plannerChats.some((p) => p.id === "planner-new"),
+    ).toBe(true);
+  });
+});

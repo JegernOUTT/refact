@@ -1196,6 +1196,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     (savedPlanners?.length ?? 0) > 0 ? "chat" : "board";
   const workspaceTab: TaskWorkspaceTab = explicitTab ?? smartDefaultTab;
   const prevTaskStatusRef = React.useRef<string | undefined>(undefined);
+  // Just-created chats are protected from reconciliation until the saved
+  // trajectory list refetch includes them (prevents bouncing to old planner).
+  const pendingCreatedPlannerIdsRef = React.useRef<Set<string>>(new Set());
   const worktreeRecords = useMemo(
     () => worktreesData?.worktrees ?? [],
     [worktreesData?.worktrees],
@@ -1241,8 +1244,16 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
     const savedPlannerIds = new Set(savedPlanners.map((planner) => planner.id));
 
+    const pendingCreatedIds = pendingCreatedPlannerIdsRef.current;
+    for (const id of Array.from(pendingCreatedIds)) {
+      if (savedPlannerIds.has(id)) pendingCreatedIds.delete(id);
+    }
+
     for (const planner of currentTaskUI.plannerChats) {
-      if (!savedPlannerIds.has(planner.id)) {
+      if (
+        !savedPlannerIds.has(planner.id) &&
+        !pendingCreatedIds.has(planner.id)
+      ) {
         dispatch(removePlannerChat({ taskId, chatId: planner.id }));
       }
     }
@@ -1326,7 +1337,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
     if (
       activeChat.type === "planner" &&
-      !savedPlannerIds.has(activeChat.chatId)
+      !savedPlannerIds.has(activeChat.chatId) &&
+      !pendingCreatedIds.has(activeChat.chatId)
     ) {
       dispatch(setTaskActiveChat({ taskId, activeChat: fallbackActiveChat }));
     }
@@ -1465,6 +1477,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           const newChatId = result.chat_id;
           const resolvedMode = result.mode ?? mode;
           const now = new Date().toISOString();
+          pendingCreatedPlannerIdsRef.current.add(newChatId);
           dispatch(
             createChatWithId({
               id: newChatId,
@@ -1519,6 +1532,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const handleRemovePlanner = useCallback(
     (chatId: string) => {
       const previous = plannerChats.find((p) => p.id === chatId);
+      pendingCreatedPlannerIdsRef.current.delete(chatId);
       dispatch(removePlannerChat({ taskId, chatId }));
       if (activeChat?.type === "planner" && activeChat.chatId === chatId) {
         const remaining = plannerChats.filter((p) => p.id !== chatId);
