@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::tools::tool_task_check_agents::{
     AgentStatus, agent_status_input_schema, format_agent_statuses, get_agent_statuses,
-    has_active_agent_statuses, parse_agent_status_query,
+    has_active_agent_statuses, parse_agent_status_query, waitable_agent_statuses,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -76,26 +76,16 @@ fn natural_card_id_key(id: &str) -> (String, u64) {
     }
 }
 
-pub(crate) fn resolve_waiting_card_ids(
-    statuses: &[AgentStatus],
-    card_ids_filter: Option<&HashSet<String>>,
-) -> Vec<String> {
-    let mut ids: Vec<String> = if let Some(filter) = card_ids_filter {
-        filter
-            .iter()
-            .filter(|id| statuses.iter().any(|s| &s.card_id == *id))
-            .cloned()
-            .collect()
-    } else {
-        statuses
-            .iter()
-            .filter(|s| s.column == "doing")
-            .map(|s| s.card_id.clone())
-            .collect()
-    };
+pub(crate) fn resolve_waiting_card_ids(statuses: &[&AgentStatus]) -> Vec<String> {
+    let mut ids: Vec<String> = statuses.iter().map(|s| s.card_id.clone()).collect();
     ids.sort_by(|a, b| natural_card_id_key(a).cmp(&natural_card_id_key(b)));
     ids.truncate(MAX_WAITING_CARD_IDS);
     ids
+}
+
+fn status_filter_was_explicit(args: &HashMap<String, Value>) -> bool {
+    args.get("status_filter")
+        .is_some_and(|value| !value.is_null())
 }
 
 pub struct ToolTaskWaitForAgents;
@@ -163,16 +153,33 @@ impl Tool for ToolTaskWaitForAgents {
 
         let statuses = get_agent_statuses(gcx, chat_facade, &task_id).await?;
         let mut result = format_agent_statuses(&statuses, &query)?;
+        let waitable = waitable_agent_statuses(&statuses, &query, status_filter_was_explicit(args));
+        let resolved_card_ids = resolve_waiting_card_ids(&waitable);
 
         if statuses.is_empty() {
             result.push_str("\nNo agents are currently running.\n");
-        } else if has_active_agent_statuses(&statuses) {
+        } else if !resolved_card_ids.is_empty() {
             result.push_str("\n⏳ **Agents are still working.** Do not check again, wait for the completion message to arrive.\n");
+        } else if has_active_agent_statuses(&statuses) {
+            result.push_str("\nNo matching live agents are running or awaiting approval.\n");
         } else {
             result.push_str("\nNo agents are currently running.\n");
         }
 
-        let resolved_card_ids = resolve_waiting_card_ids(&statuses, query.card_ids());
+        if resolved_card_ids.is_empty() {
+            result.push_str("\nNo matching live agents are running or awaiting approval; planner wait mode was not entered.\n");
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(result),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    tool_failed: Some(true),
+                    ..Default::default()
+                })],
+            ));
+        }
 
         {
             let sessions = app.chat.sessions.read().await;
@@ -224,13 +231,19 @@ mod tests {
             agent_chat_id: format!("agent-{}", card_id),
             column: column.to_string(),
             priority: "P1".to_string(),
-            session_state: None,
+            session_state: Some(refact_runtime_api::SessionState::Generating),
             last_status_update: None,
             last_activity_at: None,
-            final_report: None,
+            final_report: (column == "done").then(|| "done".to_string()),
             last_tool_name: None,
             change_seq: 0,
         }
+    }
+
+    fn offline_status(card_id: &str) -> AgentStatus {
+        let mut status = make_status(card_id, "doing");
+        status.session_state = None;
+        status
     }
 
     #[test]
@@ -307,8 +320,10 @@ mod tests {
             make_status("T-2", "doing"),
             make_status("T-3", "doing"),
         ];
-        let filter: HashSet<String> = ["T-1".to_string(), "T-2".to_string()].into();
-        let ids = resolve_waiting_card_ids(&statuses, Some(&filter));
+        let args = HashMap::from([("card_ids".to_string(), json!(["T-1", "T-2"]))]);
+        let query = parse_agent_status_query(&args).unwrap();
+        let waitable = waitable_agent_statuses(&statuses, &query, false);
+        let ids = resolve_waiting_card_ids(&waitable);
         assert_eq!(ids, vec!["T-1", "T-2"]);
     }
 
@@ -319,8 +334,40 @@ mod tests {
             make_status("T-2", "doing"),
             make_status("T-3", "done"),
         ];
-        let ids = resolve_waiting_card_ids(&statuses, None);
+        let query = parse_agent_status_query(&HashMap::new()).unwrap();
+        let waitable = waitable_agent_statuses(&statuses, &query, false);
+        let ids = resolve_waiting_card_ids(&waitable);
         assert_eq!(ids, vec!["T-1", "T-2"]);
+    }
+
+    #[test]
+    fn wait_agents_does_not_wait_for_offline_doing_cards() {
+        let statuses = vec![offline_status("T-1")];
+        let query = parse_agent_status_query(&HashMap::new()).unwrap();
+        let waitable = waitable_agent_statuses(&statuses, &query, false);
+        let ids = resolve_waiting_card_ids(&waitable);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn wait_agents_does_not_wait_when_card_filter_matches_no_live_agent() {
+        let statuses = vec![make_status("T-1", "doing")];
+        let args = HashMap::from([("card_ids".to_string(), json!(["T-404"]))]);
+        let query = parse_agent_status_query(&args).unwrap();
+        let waitable = waitable_agent_statuses(&statuses, &query, false);
+        let ids = resolve_waiting_card_ids(&waitable);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn wait_agents_default_query_can_wait_for_paused_live_agent() {
+        let mut status = make_status("T-1", "doing");
+        status.session_state = Some(refact_runtime_api::SessionState::Paused);
+        let statuses = vec![status];
+        let query = parse_agent_status_query(&HashMap::new()).unwrap();
+        let waitable = waitable_agent_statuses(&statuses, &query, false);
+        let ids = resolve_waiting_card_ids(&waitable);
+        assert_eq!(ids, vec!["T-1"]);
     }
 
     #[test]
@@ -328,7 +375,8 @@ mod tests {
         let statuses: Vec<AgentStatus> = (1..=60)
             .map(|i| make_status(&format!("T-{}", i), "doing"))
             .collect();
-        let ids = resolve_waiting_card_ids(&statuses, None);
+        let waitable: Vec<&AgentStatus> = statuses.iter().collect();
+        let ids = resolve_waiting_card_ids(&waitable);
         assert_eq!(ids.len(), 50);
     }
 
@@ -339,7 +387,8 @@ mod tests {
             make_status("T-2", "doing"),
             make_status("T-1", "doing"),
         ];
-        let ids = resolve_waiting_card_ids(&statuses, None);
+        let waitable: Vec<&AgentStatus> = statuses.iter().collect();
+        let ids = resolve_waiting_card_ids(&waitable);
         assert_eq!(ids, vec!["T-1", "T-2", "T-10"]);
     }
 }

@@ -126,6 +126,28 @@ fn mark_card_restarted_resume(card: &mut BoardCard, new_agent_id: &str, new_agen
     });
 }
 
+fn ensure_restart_source_current(card: &BoardCard, original: &BoardCard) -> Result<(), String> {
+    if card.column == original.column
+        && card.assignee == original.assignee
+        && card.agent_chat_id == original.agent_chat_id
+        && card.agent_branch == original.agent_branch
+        && card.agent_worktree == original.agent_worktree
+        && card.agent_worktree_name == original.agent_worktree_name
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Card {} changed while restart was preparing; expected column={}, assignee={}, agent_chat_id={}, found column={}, assignee={}, agent_chat_id={}. Run check_agents and retry.",
+        original.id,
+        original.column,
+        original.assignee.as_deref().unwrap_or("none"),
+        original.agent_chat_id.as_deref().unwrap_or("none"),
+        card.column,
+        card.assignee.as_deref().unwrap_or("none"),
+        card.agent_chat_id.as_deref().unwrap_or("none")
+    ))
+}
+
 async fn get_worktree_meta_for_resume(
     gcx: Arc<GlobalContext>,
     card: &BoardCard,
@@ -435,22 +457,14 @@ impl ToolTaskRestartAgent {
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
         let agent_chat_id_clone = agent_chat_id.clone();
+        let source_card = original_card.clone();
 
         let board_update_result =
             storage::update_board_atomic(gcx.clone(), task_id, move |board| {
                 let card = board
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
-                if card.column == "doing" {
-                    if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
-                        if !agent_chat_id.is_empty() {
-                            return Err(format!(
-                                "Card {} is already being worked on by agent_chat_id={}",
-                                card_id_owned, agent_chat_id
-                            ));
-                        }
-                    }
-                }
+                ensure_restart_source_current(card, &source_card)?;
                 mark_card_restarted_fresh(
                     card,
                     &agent_id_clone,
@@ -549,22 +563,14 @@ impl ToolTaskRestartAgent {
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
         let agent_chat_id_clone = agent_chat_id.clone();
-        let resume_chat_id = resume_chat_id.to_string();
+        let _ = resume_chat_id;
+        let source_card = original_card.clone();
 
         storage::update_board_atomic(gcx.clone(), task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_owned)
                 .ok_or(format!("Card {} not found", card_id_owned))?;
-            if card.column == "doing" {
-                if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
-                    if !agent_chat_id.is_empty() && agent_chat_id != resume_chat_id {
-                        return Err(format!(
-                            "Card {} is already being worked on by agent_chat_id={}",
-                            card_id_owned, agent_chat_id
-                        ));
-                    }
-                }
-            }
+            ensure_restart_source_current(card, &source_card)?;
             mark_card_restarted_resume(card, &agent_id_clone, &agent_chat_id_clone);
             Ok(())
         })
@@ -988,5 +994,29 @@ mod tests {
         assert_eq!(card.agent_chat_id, newer.agent_chat_id);
         assert_eq!(card.assignee, newer.assignee);
         assert_eq!(card.column, "doing");
+    }
+
+    #[test]
+    fn restart_agent_source_guard_accepts_exact_previous_binding() {
+        let original = failed_card(
+            "T-9",
+            Some("/tmp/original-wt".to_string()),
+            Some("refact/task/task-1/card/T-9/old".to_string()),
+        );
+
+        assert!(ensure_restart_source_current(&original, &original).is_ok());
+    }
+
+    #[test]
+    fn restart_agent_source_guard_rejects_stale_previous_binding() {
+        let original = failed_card("T-10", Some("/tmp/original-wt".to_string()), None);
+        let mut changed = original.clone();
+        changed.agent_chat_id = Some("agent-T-10-newer".to_string());
+        changed.assignee = Some("newer-agent".to_string());
+
+        let err = ensure_restart_source_current(&changed, &original).unwrap_err();
+
+        assert!(err.contains("changed while restart was preparing"), "{err}");
+        assert!(err.contains("agent-T-10-newer"), "{err}");
     }
 }
