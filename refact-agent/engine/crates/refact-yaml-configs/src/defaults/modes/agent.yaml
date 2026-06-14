@@ -227,7 +227,7 @@ prompt: |
 
   **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
 
-  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_update`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
 
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
@@ -306,6 +306,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - compress_chat_probe
   - compress_chat_apply
   - handoff_to_mode
@@ -371,4 +372,6 @@ tool_confirm:
     - match: "sleep"
       action: auto
     - match: "cron_list"
+      action: auto
+    - match: "cron_update"
       action: auto

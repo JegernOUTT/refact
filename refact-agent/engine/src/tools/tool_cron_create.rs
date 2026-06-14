@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex as AMutex, Notify};
@@ -13,9 +14,10 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::get_active_project_path;
 use crate::scheduler::{
-    human_schedule, next_run_ms, parse_cron, scheduler_timezone, session_cron_store, CronStore,
-    Job, JsonFileCronStore,
+    human_schedule, next_run_ms, scheduler_timezone, session_cron_store, CronStore, Job,
+    JsonFileCronStore, Trigger,
 };
+use crate::scheduler::schedule::parse_schedule;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub const MAX_CRON_JOBS: usize = 50;
@@ -33,9 +35,12 @@ impl ToolCronCreate {
 
 #[derive(Clone)]
 pub(crate) struct CronCreateInput {
-    pub(crate) cron: String,
+    pub(crate) cron: Option<String>,
+    pub(crate) every: Option<String>,
+    pub(crate) at: Option<String>,
+    pub(crate) tz: Option<String>,
     pub(crate) prompt: String,
-    pub(crate) recurring: bool,
+    pub(crate) recurring: Option<bool>,
     pub(crate) durable: bool,
     pub(crate) description: String,
 }
@@ -74,13 +79,16 @@ impl Tool for ToolCronCreate {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time." },
+                    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time. Required unless every or at is set." },
+                    "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
+                    "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
+                    "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
                     "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "default": false },
                     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
                 },
-                "required": ["cron", "prompt", "description"]
+                "required": ["prompt", "description"]
             }),
             output_schema: None,
             annotations: None,
@@ -131,7 +139,13 @@ impl Tool for ToolCronCreate {
 }
 
 fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, String> {
-    let cron = required_string_arg(args, "cron")?;
+    let cron = optional_string_arg(args, "cron")?;
+    let every = optional_string_arg(args, "every")?;
+    let at = optional_string_arg(args, "at")?;
+    let tz = optional_string_arg(args, "tz")?;
+    if cron.is_none() && every.is_none() && at.is_none() {
+        return Err("argument `cron` is required".to_string());
+    }
     let prompt = required_string_arg(args, "prompt")?;
     let description = required_string_arg(args, "description")?;
     if description.chars().count() > 80 {
@@ -139,8 +153,11 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
     }
     Ok(CronCreateInput {
         cron,
+        every,
+        at,
+        tz,
         prompt,
-        recurring: optional_bool_arg(args, "recurring")?.unwrap_or(true),
+        recurring: optional_bool_arg(args, "recurring")?,
         durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
         description,
     })
@@ -152,6 +169,19 @@ fn required_string_arg(args: &HashMap<String, Value>, name: &str) -> Result<Stri
         Some(Value::String(_)) | Some(Value::Null) | None => {
             Err(format!("argument `{name}` is required"))
         }
+        Some(value) => Err(format!("argument `{name}` is not a string: {value:?}")),
+    }
+}
+
+fn optional_string_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match args.get(name) {
+        Some(Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.trim().to_string()))
+        }
+        Some(Value::String(_)) | Some(Value::Null) | None => Ok(None),
         Some(value) => Err(format!("argument `{name}` is not a string: {value:?}")),
     }
 }
@@ -233,12 +263,12 @@ pub(crate) async fn create_cron_job(
     input: CronCreateInput,
     runtime: CronCreateRuntime,
 ) -> Result<CronCreateOutcome, String> {
-    parse_cron(&input.cron).map_err(|error| format!("Invalid cron expression: {error}"))?;
-    let next = next_run_ms(&input.cron, runtime.now_ms, runtime.timezone)
-        .ok_or_else(no_match_in_year_error)?;
-    if next.saturating_sub(runtime.now_ms) > ONE_YEAR_MS {
-        return Err(no_match_in_year_error());
-    }
+    let trigger = parse_create_schedule(&input, runtime.now_ms)?;
+    let recurring = if matches!(trigger, Trigger::Once { .. }) {
+        false
+    } else {
+        input.recurring.unwrap_or(true)
+    };
 
     let durable_count = match &runtime.durable_store {
         Some(store) => store.list().await.len(),
@@ -255,16 +285,18 @@ pub(crate) async fn create_cron_job(
     }
 
     let mut task = Job::new_cron_agent_chat(
-        input.cron,
+        input.cron.unwrap_or_default(),
         input.prompt,
         input.description,
-        input.recurring,
+        recurring,
         input.durable,
         runtime.now_ms,
     );
+    task.trigger = trigger;
     task.set_existing_chat(runtime.chat_id);
     task.set_mode(runtime.mode);
-    let human = human_schedule(task.cron_expr().unwrap_or_default());
+    validate_next_run(&task, runtime.now_ms, runtime.timezone)?;
+    let human = human_schedule_for_trigger(&task.trigger);
     let store = if task.durable {
         runtime.durable_store.as_ref().unwrap().clone()
     } else {
@@ -278,6 +310,65 @@ pub(crate) async fn create_cron_job(
         human_schedule: human,
         summary,
     })
+}
+
+fn parse_create_schedule(input: &CronCreateInput, now_ms: u64) -> Result<Trigger, String> {
+    parse_schedule(
+        input.cron.as_deref(),
+        input.every.as_deref(),
+        input.at.as_deref(),
+        input.tz.as_deref(),
+        now_ms,
+    )
+    .map_err(|error| {
+        if input.every.is_none() && input.at.is_none() {
+            format!(
+                "Invalid cron expression: {}",
+                error.trim_start_matches("Invalid cron expression: ")
+            )
+        } else {
+            format!("Invalid schedule: {error}")
+        }
+    })
+}
+
+fn validate_next_run(task: &Job, now_ms: u64, timezone: Tz) -> Result<(), String> {
+    let next = next_run_ms(task, now_ms, timezone).ok_or_else(no_match_in_year_error)?;
+    if matches!(task.trigger, Trigger::Cron { .. }) && next.saturating_sub(now_ms) > ONE_YEAR_MS {
+        return Err(no_match_in_year_error());
+    }
+    Ok(())
+}
+
+pub(crate) fn human_schedule_for_trigger(trigger: &Trigger) -> String {
+    match trigger {
+        Trigger::Cron { expr, .. } => human_schedule(expr),
+        Trigger::Interval { every_ms } => format!("every {}", human_duration(*every_ms)),
+        Trigger::Once { at_ms } => Utc
+            .timestamp_millis_opt(*at_ms as i64)
+            .single()
+            .map(|datetime| format!("once at {}", datetime.to_rfc3339()))
+            .unwrap_or_else(|| format!("once at {at_ms}")),
+        Trigger::Manual => "manual".to_string(),
+        Trigger::Webhook { hook_id } => format!("webhook {hook_id}"),
+        Trigger::OnProcessExit { match_kind } => format!("on process exit {match_kind}"),
+    }
+}
+
+fn human_duration(ms: u64) -> String {
+    for (unit_ms, singular, plural) in [
+        (24 * 60 * 60 * 1000, "day", "days"),
+        (60 * 60 * 1000, "hour", "hours"),
+        (60 * 1000, "minute", "minutes"),
+        (1000, "second", "seconds"),
+    ] {
+        if ms >= unit_ms && ms % unit_ms == 0 {
+            let amount = ms / unit_ms;
+            let unit = if amount == 1 { singular } else { plural };
+            return format!("{amount} {unit}");
+        }
+    }
+    format!("{ms}ms")
 }
 
 fn no_match_in_year_error() -> String {
@@ -463,6 +554,93 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("Invalid cron expression"));
+    }
+
+    #[tokio::test]
+    async fn every_creates_interval() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("every", json!("30m")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.task.trigger,
+            Trigger::Interval {
+                every_ms: 30 * 60_000
+            }
+        );
+        assert!(outcome.task.recurring);
+        assert_eq!(outcome.human_schedule, "every 30 minutes");
+    }
+
+    #[tokio::test]
+    async fn at_creates_once() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("at", json!("in 30m")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+                ("recurring", json!(true)),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.task.trigger,
+            Trigger::Once {
+                at_ms: fixed_now_ms() + 30 * 60_000
+            }
+        );
+        assert!(!outcome.task.recurring);
+        assert!(outcome.human_schedule.starts_with("once at "));
+    }
+
+    #[tokio::test]
+    async fn bad_schedule_combo_rejected() {
+        let err = input_from_args(&args(&[
+            ("cron", json!("*/5 * * * *")),
+            ("every", json!("30m")),
+            ("prompt", json!("Check")),
+            ("description", json!("Check")),
+        ]))
+        .and_then(|input| {
+            parse_create_schedule(&input, fixed_now_ms())?;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("exactly one of cron, every, or at must be set"));
+    }
+
+    #[tokio::test]
+    async fn cron_only_is_unchanged() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            default_input(),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.task.trigger,
+            Trigger::Cron {
+                expr: "*/5 * * * *".to_string(),
+                tz: None,
+            }
+        );
+        assert!(outcome.task.recurring);
+        assert_eq!(outcome.human_schedule, "every 5 minutes");
     }
 
     #[tokio::test]

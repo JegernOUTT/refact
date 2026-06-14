@@ -200,6 +200,9 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
         Box::new(crate::tools::tool_cron_delete::ToolCronDelete::new(
             config_path.clone(),
         )),
+        Box::new(crate::tools::tool_cron_update::ToolCronUpdate::new(
+            config_path.clone(),
+        )),
         Box::new(
             crate::tools::tool_add_workspace_folder::ToolAddWorkspaceFolder {
                 config_path: config_path.clone(),

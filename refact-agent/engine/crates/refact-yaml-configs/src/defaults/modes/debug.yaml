@@ -74,7 +74,7 @@ prompt: |
   ## Rules
   - Do NOT modify files (diagnosis only)
   - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. Use `tty=true` plus `process_write_stdin` for interactive programs. `sleep` waits without blocking a shell process.
-  - Use `cron_create` to schedule periodic checks; `cron_list`/`cron_delete` to manage them.
+  - Use `cron_create` to schedule periodic checks; `cron_list`/`cron_update`/`cron_delete` to manage them.
   - To apply fixes, suggest switching to Agent mode
 
   %RICH_CONTENT_INSTRUCTIONS%
@@ -118,6 +118,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - subagent
   - agent_list
   - agent_status
@@ -129,6 +130,8 @@ tools:
 tool_confirm:
   rules:
     - match: "cron_create"
+      action: ask
+    - match: "cron_update"
       action: ask
     - match: "process_start"
       action: ask

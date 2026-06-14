@@ -299,7 +299,7 @@ prompt: |
   **Execution:** `spawn_agent`, `wait_agents`, `check_agents`, `agent_diff`, `ready_cards`
   **Completion:** `task_verify_card`, `merge_agent`, `mark_done`, `mark_failed`
   **Direct fixes:** `update_textdoc`, `cat`, `shell`
-  **Shell**: Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled automation.
+  **Shell**: Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled automation.
   **Documents:** doc_list, doc_get, doc_create, doc_update, doc_pin, doc_history, doc_delete
   **Memory (typed):** task_mem_save (kind/namespace/pinned), task_mem_get, task_mem_search, task_mem_pin, task_mem_archive, task_mem_inbox
   **Observability:** agent_diff, agent_pulse, agent_chat_summary, task_overview
@@ -368,6 +368,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - subagent
   - deep_research
   - strategic_planning
@@ -429,6 +430,8 @@ tools:
 tool_confirm:
   rules:
     - match: "tree"
+      action: auto
+    - match: "cron_update"
       action: auto
     - match: "cat"
       action: auto
