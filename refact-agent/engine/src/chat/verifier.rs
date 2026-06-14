@@ -1077,15 +1077,9 @@ mod tests {
             .await
             .unwrap();
 
-        store_verifier_report(
-            gcx.clone(),
-            "task-1",
-            "T-1",
-            None,
-            verifier_report(true),
-        )
-        .await
-        .unwrap();
+        store_verifier_report(gcx.clone(), "task-1", "T-1", None, verifier_report(true))
+            .await
+            .unwrap();
 
         let stored = store_verifier_report(
             gcx.clone(),
