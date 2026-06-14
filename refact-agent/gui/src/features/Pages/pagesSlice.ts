@@ -8,10 +8,6 @@ export interface ChatPage {
   name: "chat";
 }
 
-export interface DocumentationSettingsPage {
-  name: "documentation settings";
-}
-
 export interface ChatThreadHistoryPage {
   name: "thread history page";
   // causes a bug with other pages
@@ -116,7 +112,6 @@ export interface IntegrationsSetupPage {
 export type Page =
   | ChatPage
   | HistoryList
-  | DocumentationSettingsPage
   | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage

@@ -15,8 +15,6 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
       return { name: "integrations page" };
     case "scheduler":
       return { name: "scheduler" };
-    case "documentation":
-      return { name: "documentation settings" };
     case "extensions":
       return { name: "extensions" };
     case "marketplace":
@@ -38,8 +36,6 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
       return "integrations";
     case "scheduler":
       return "scheduler";
-    case "documentation settings":
-      return "documentation";
     case "extensions":
       return "extensions";
     case "marketplace hub":

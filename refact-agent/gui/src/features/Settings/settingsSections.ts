@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  BookOpen,
   Bot,
   Cable,
   Paintbrush,
@@ -18,7 +17,6 @@ export type SettingsSectionId =
   | "customization"
   | "integrations"
   | "scheduler"
-  | "documentation"
   | "extensions"
   | "marketplace";
 
@@ -35,7 +33,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "customization", label: "Customization", icon: Paintbrush },
   { id: "integrations", label: "Integrations", icon: Cable },
   { id: "scheduler", label: "Scheduler", icon: Timer },
-  { id: "documentation", label: "Documentation", icon: BookOpen },
   { id: "extensions", label: "Extensions", icon: Sparkles },
   { id: "marketplace", label: "Marketplace", icon: Store },
 ];

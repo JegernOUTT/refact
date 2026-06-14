@@ -12,7 +12,7 @@ import {
 const ALL_SECTION_IDS: SettingsSectionId[] = SETTINGS_SECTIONS.map((s) => s.id);
 
 describe("isSettingsPage", () => {
-  it("returns true for all 9 settings page names", () => {
+  it("returns true for all 8 settings page names", () => {
     const settingsPages: Page[] = [
       { name: "general settings" },
       { name: "providers page" },
@@ -20,7 +20,6 @@ describe("isSettingsPage", () => {
       { name: "customization" },
       { name: "integrations page" },
       { name: "scheduler" },
-      { name: "documentation settings" },
       { name: "extensions" },
       { name: "marketplace hub" },
     ];
@@ -68,7 +67,6 @@ describe("settingsPageToSection", () => {
       [{ name: "customization" }, "customization"],
       [{ name: "integrations page" }, "integrations"],
       [{ name: "scheduler" }, "scheduler"],
-      [{ name: "documentation settings" }, "documentation"],
       [{ name: "extensions" }, "extensions"],
       [{ name: "marketplace hub" }, "marketplace"],
       [{ name: "skills marketplace" }, "marketplace"],

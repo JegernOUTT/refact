@@ -16,7 +16,6 @@ import { SchedulerPanel } from "../Scheduler";
 import { Extensions } from "../Extensions";
 import { MarketplaceHub } from "../MarketplaceHub";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
-import { DocumentationSettingsSection } from "./DocumentationSettingsSection";
 
 import styles from "./SettingsHub.module.css";
 
@@ -102,8 +101,6 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         );
       case "scheduler":
         return <SchedulerPanel embedded onBack={onBack} />;
-      case "documentation":
-        return <DocumentationSettingsSection />;
       case "extensions": {
         const tab = page.name === "extensions" ? page.tab : undefined;
         const itemId = page.name === "extensions" ? page.itemId : undefined;

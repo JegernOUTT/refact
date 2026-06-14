@@ -8,10 +8,6 @@ export const TOOLS_CHECK_CONFIRMATION =
 export const EDIT_TOOL_DRY_RUN_URL = "/v1/file_edit_tool_dry_run";
 export const CONFIG_PATH_URL = "/v1/config-path";
 export const FULL_PATH_URL = "/v1/fullpath";
-// TODO: add a service for the docs.
-export const DOCUMENTATION_LIST = `/v1/docs-list`;
-export const DOCUMENTATION_ADD = `/v1/docs-add`;
-export const DOCUMENTATION_REMOVE = `/v1/docs-remove`;
 export const PING_URL = `/v1/ping`;
 export const PATCH_URL = `/v1/patch-single-file-from-ticket`;
 export const APPLY_ALL_URL = "/v1/patch-apply-all";
