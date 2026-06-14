@@ -177,6 +177,10 @@ impl Job {
         }
     }
 
+    pub fn is_paused(&self) -> bool {
+        !self.enabled || self.paused_at_ms.is_some()
+    }
+
     pub fn set_existing_chat(&mut self, chat_id: Option<String>) {
         if let Action::AgentTurn { target, .. } = &mut self.action {
             *target = AgentTarget::ExistingChat {
