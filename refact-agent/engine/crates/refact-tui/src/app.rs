@@ -42,7 +42,7 @@ use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
 use crate::streaming::{run_commit_tick, StreamController};
-use crate::terminal::TerminalSession;
+use crate::terminal::{terminal_title, TerminalSession, TerminalTitleConfig};
 use crate::theme::TuiTheme;
 use crate::tools::{now_ms, ToolCard, ToolStatus};
 
@@ -594,6 +594,13 @@ impl App {
 
     pub fn session_state(&self) -> SessionState {
         self.session_state
+    }
+
+    pub fn terminal_title(&self) -> String {
+        terminal_title(
+            self.current_project().map(|project| project.slug.as_str()),
+            self.session_state.as_str(),
+        )
     }
 
     pub fn subscription_status(&self) -> SubscriptionStatus {
@@ -3894,9 +3901,14 @@ pub enum AppAction {
 
 async fn show_startup_notice(message: String) -> Result<(), TuiError> {
     let mut app = App::notice_only(message);
-    let mut terminal = TerminalSession::start()?;
+    let config_content = load_tui_config_content();
+    if let Some(config_content) = config_content.as_deref() {
+        app.apply_tui_config_content(config_content);
+    }
+    let title_config = TerminalTitleConfig::from_env(config_content.as_deref());
+    let mut terminal = TerminalSession::start_with_title_config(title_config)?;
     apply_terminal_mode(&mut app, &terminal);
-    render_frame(terminal.terminal_mut(), &mut app)?;
+    render_frame(&mut terminal, &mut app)?;
     let mut reader = EventStream::new();
     let started = Instant::now();
     loop {
@@ -3909,7 +3921,7 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
                 break;
             }
             Ok(Some(Ok(Event::Resize(_, _)))) => {
-                render_frame(terminal.terminal_mut(), &mut app)?;
+                render_frame(&mut terminal, &mut app)?;
             }
             Ok(Some(Ok(_))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => {}
         }
@@ -4071,10 +4083,12 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let project = client.open_project(&root).await?;
     let history_path = history_path_for_root(&project.root);
     let mut app = App::with_history_path(project, Some(history_path));
-    if let Some(config_content) = load_tui_config_content() {
-        app.apply_tui_config_content(&config_content);
+    let config_content = load_tui_config_content();
+    if let Some(config_content) = config_content.as_deref() {
+        app.apply_tui_config_content(config_content);
     }
-    let mut terminal = TerminalSession::start()?;
+    let title_config = TerminalTitleConfig::from_env(config_content.as_deref());
+    let mut terminal = TerminalSession::start_with_title_config(title_config)?;
     apply_terminal_mode(&mut app, &terminal);
     let (tx, mut rx) = mpsc::channel::<RuntimeEvent>(256);
     let mut subscriptions = SubscriptionManager::new();
@@ -4094,7 +4108,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     }
 
     loop {
-        render_frame(terminal.terminal_mut(), &mut app)?;
+        render_frame(&mut terminal, &mut app)?;
         if app.should_quit() {
             break;
         }
@@ -5359,17 +5373,17 @@ fn finalized_assistant_content_part(message: &TranscriptMessage) -> usize {
     usize::from(!message.reasoning.is_empty())
 }
 
-fn render_frame(
-    terminal: &mut crate::terminal::RefactTerminal,
-    app: &mut App,
-) -> Result<(), TuiError> {
+fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), TuiError> {
+    terminal.set_title(&app.terminal_title())?;
     if app.native_scrollback() {
-        let width = terminal.size()?.width;
+        let width = terminal.terminal_mut().size()?.width;
         for insertion in app.pending_history_insertions(width) {
-            insert_history(terminal, insertion)?;
+            insert_history(terminal.terminal_mut(), insertion)?;
         }
     }
-    terminal.draw(|frame| crate::ui::render(frame, app))?;
+    terminal
+        .terminal_mut()
+        .draw(|frame| crate::ui::render(frame, app))?;
     Ok(())
 }
 
