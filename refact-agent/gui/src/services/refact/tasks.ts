@@ -413,22 +413,24 @@ export const tasksApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
+        const requestBody: {
+          body: string;
+          author_role: "user";
+          reply_to?: string;
+        } = {
+          body,
+          author_role: authorRole,
+        };
+        if (replyTo !== undefined) {
+          requestBody.reply_to = replyTo;
+        }
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/cards/${cardId}/comments`,
+          ),
           method: "POST",
-          body: {
-            rev: 0,
-            patches: [
-              {
-                type: "AddComment",
-                card_id: cardId,
-                body,
-                author_role: authorRole,
-                author_id: null,
-                reply_to: replyTo ?? null,
-              },
-            ],
-          },
+          body: requestBody,
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskBoard };

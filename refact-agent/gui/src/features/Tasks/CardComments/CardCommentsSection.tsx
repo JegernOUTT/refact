@@ -46,7 +46,7 @@ function threadComments(comments: CardComment[]): CardComment[] {
 
 interface CommentItemProps {
   comment: CardComment;
-  onReply: () => void;
+  onReply?: () => void;
   isReply: boolean;
 }
 
@@ -99,11 +99,13 @@ const CommentItem: React.FC<CommentItemProps> = ({
       <Box className={styles.commentBody}>
         <Markdown canHaveInteractiveElements={false}>{comment.body}</Markdown>
       </Box>
-      <Flex justify="end">
-        <Button size="sm" variant="ghost" onClick={onReply}>
-          Reply
-        </Button>
-      </Flex>
+      {onReply && (
+        <Flex justify="end">
+          <Button size="sm" variant="ghost" onClick={onReply}>
+            Reply
+          </Button>
+        </Flex>
+      )}
     </Box>
   );
 };
@@ -178,7 +180,11 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
             <CommentItem
               key={comment.id}
               comment={comment}
-              onReply={() => setReplyTo(comment.id)}
+              onReply={
+                comment.reply_to === null
+                  ? () => setReplyTo(comment.id)
+                  : undefined
+              }
               isReply={comment.reply_to !== null}
             />
           ))
