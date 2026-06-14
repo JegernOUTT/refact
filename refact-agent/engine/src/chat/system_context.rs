@@ -1490,10 +1490,8 @@ pub async fn gather_system_context(
     include_tree: bool,
     tree_max_depth: usize,
 ) -> Result<SystemContext, String> {
-    // Load project information config to respect user settings
     let config = load_project_information_config(gcx.clone()).await;
 
-    // If project info is globally disabled, return empty context
     if !config.enabled {
         return Ok(SystemContext {
             system_info: SystemInfo::gather(),
@@ -1510,7 +1508,6 @@ pub async fn gather_system_context(
     let system_info = SystemInfo::gather();
     let project_dirs = get_project_dirs(gcx.clone()).await;
 
-    // Always detect environments if either section needs them
     let need_environments = config.sections.detected_environments.enabled
         || config.sections.environment_instructions.enabled;
     let all_environments = if need_environments {
@@ -1519,7 +1516,6 @@ pub async fn gather_system_context(
         vec![]
     };
 
-    // Detected environments - respect config (may be subset of all_environments)
     let detected_environments = if config.sections.detected_environments.enabled {
         let max_items = config
             .sections
@@ -1531,24 +1527,15 @@ pub async fn gather_system_context(
         vec![]
     };
 
-    // Helper to get relative path for override lookup
     let get_override_key =
         |abs_path: &str| -> Option<String> { to_relative_path(abs_path, &project_dirs) };
 
-    // Instruction files - respect config and per-file overrides
     let instruction_files = if config.sections.instruction_files.enabled {
         let max_items = config.sections.instruction_files.max_items.unwrap_or(20);
-        let default_max_chars = config
-            .sections
-            .instruction_files
-            .max_chars_per_item
-            .unwrap_or(8000);
         let overrides = &config.sections.instruction_files.overrides;
 
-        let mut files = find_instruction_files(&project_dirs).await;
-
-        // Filter out disabled files and apply per-file max_chars
-        files = files
+        find_instruction_files(&project_dirs)
+            .await
             .into_iter()
             .filter(|f| {
                 get_override_key(&f.file_path)
@@ -1556,32 +1543,12 @@ pub async fn gather_system_context(
                     .and_then(|o| o.enabled)
                     .unwrap_or(true)
             })
-            .map(|mut f| {
-                let max_chars = get_override_key(&f.file_path)
-                    .and_then(|key| overrides.get(&key))
-                    .and_then(|o| o.max_chars)
-                    .unwrap_or(default_max_chars);
-
-                // Apply truncation to processed_content if present
-                if let Some(ref content) = f.processed_content {
-                    if content.chars().count() > max_chars {
-                        f.processed_content = Some(truncate_to_chars(content, max_chars));
-                    }
-                }
-                // Store max_chars for later use when reading file content
-                // (truncation will be applied in create_instruction_files_message)
-                f.max_chars = Some(max_chars);
-                f
-            })
             .take(max_items)
-            .collect();
-
-        files
+            .collect()
     } else {
         vec![]
     };
 
-    // Project configs - respect config
     let project_configs = if config.sections.project_configs.enabled {
         let max_items = config.sections.project_configs.max_items.unwrap_or(30);
         let configs = find_project_configs(&project_dirs).await;
@@ -1590,14 +1557,12 @@ pub async fn gather_system_context(
         vec![]
     };
 
-    // Git info - respect config
     let git_info = if config.sections.git_info.enabled {
         gather_git_info(&project_dirs).await
     } else {
         vec![]
     };
 
-    // Project tree - respect config
     let effective_max_depth = config
         .sections
         .project_tree
@@ -1619,7 +1584,6 @@ pub async fn gather_system_context(
         None
     };
 
-    // Environment instructions - use all_environments (not the potentially limited detected_environments)
     let environment_instructions = if config.sections.environment_instructions.enabled {
         let max_chars = config
             .sections
@@ -1636,22 +1600,17 @@ pub async fn gather_system_context(
         String::new()
     };
 
-    // Memories - respect config and per-file overrides
     let memories = if config.sections.memories.enabled {
         let max_items = config
             .sections
             .memories
             .max_items
             .unwrap_or(MAX_MEMORIES_IN_CONTEXT);
-        let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
         let overrides = &config.sections.memories.overrides;
 
-        let mut memos = load_memories_by_tags(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
+        load_memories_by_tags(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
             .await
-            .unwrap_or_default();
-
-        // Filter out disabled memories and apply per-file max_chars
-        memos = memos
+            .unwrap_or_default()
             .into_iter()
             .filter(|m| {
                 m.file_path
@@ -1661,22 +1620,7 @@ pub async fn gather_system_context(
                     .and_then(|o| o.enabled)
                     .unwrap_or(true)
             })
-            .map(|mut m| {
-                let max_chars = m
-                    .file_path
-                    .as_ref()
-                    .and_then(|p| to_relative_path(&p.display().to_string(), &project_dirs))
-                    .and_then(|key| overrides.get(&key))
-                    .and_then(|o| o.max_chars)
-                    .unwrap_or(default_max_chars);
-                if m.content.chars().count() > max_chars {
-                    m.content = truncate_to_chars(&m.content, max_chars);
-                }
-                m
-            })
-            .collect();
-
-        memos
+            .collect()
     } else {
         vec![]
     };
@@ -1704,7 +1648,6 @@ pub fn create_memories_message(memories: &[MemoRecord]) -> Option<ChatMessage> {
         .iter()
         .filter_map(|memo| {
             let file_path = memo.file_path.as_ref()?;
-            // Content is already truncated by gather_system_context() based on config
             let content = memo.content.clone();
             let line_count = content.lines().count().max(1);
 
@@ -1739,9 +1682,6 @@ pub fn create_memories_message(memories: &[MemoRecord]) -> Option<ChatMessage> {
     })
 }
 
-fn max_file_size() -> usize {
-    limits().max_file_size
-}
 fn max_included_files() -> usize {
     limits().max_included_files
 }
@@ -1758,7 +1698,7 @@ pub async fn create_instruction_files_message(
             continue;
         }
 
-        let content = if let Some(ref processed) = instr_file.processed_content {
+        let mut content = if let Some(ref processed) = instr_file.processed_content {
             processed.clone()
         } else {
             match tokio::fs::read_to_string(&instr_file.file_path).await {
@@ -1774,34 +1714,16 @@ pub async fn create_instruction_files_message(
             }
         };
 
-        // Use per-file max_chars from config if available, otherwise fall back to global limit
-        let max_size = instr_file.max_chars.unwrap_or_else(max_file_size);
-        let content_char_count = content.chars().count();
-        let (mut final_content, was_truncated) = if content_char_count > max_size {
-            let truncated = content.chars().take(max_size).collect::<String>();
-            (truncated, true)
-        } else {
-            (content, false)
-        };
-
         if instr_file.processed_content.is_some() {
-            final_content = format!("# Filtered content\n\n{}", final_content);
-        }
-        if was_truncated {
-            final_content.push_str("\n\n[TRUNCATED]");
-            tracing::info!(
-                "Truncated instruction file {} from {} to {} chars",
-                instr_file.file_path,
-                content_char_count,
-                max_size
-            );
+            content = format!("# Filtered content\n\n{}", content);
         }
 
+        let line_count = content.lines().count().max(1);
         context_files.push(ContextFile {
             file_name: instr_file.file_path.clone(),
-            file_content: final_content.clone(),
+            file_content: content,
             line1: 1,
-            line2: final_content.lines().count().max(1),
+            line2: line_count,
             file_rev: None,
             symbols: vec![],
             gradient_type: 0,
