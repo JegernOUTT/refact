@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use hyper::{Body, Request, StatusCode};
 use serde_json::{json, Value};
@@ -10,8 +10,10 @@ use tower::ServiceExt;
 use crate::app_state::AppState;
 use crate::chat::types::ChatSession;
 use crate::http::routers::v1::scheduler::{
-    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_post,
+    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_patch,
+    handle_v1_scheduler_cron_post, handle_v1_scheduler_cron_run,
 };
+use crate::scheduler::{Action, AgentTarget, CronRunRecord, Delivery, Job, Trigger};
 
 async fn test_app() -> (tempfile::TempDir, AppState, Router) {
     let temp = tempfile::tempdir().unwrap();
@@ -25,7 +27,11 @@ async fn test_app() -> (tempfile::TempDir, AppState, Router) {
         )
         .route(
             "/scheduler/cron/:id",
-            delete(handle_v1_scheduler_cron_delete),
+            delete(handle_v1_scheduler_cron_delete).patch(handle_v1_scheduler_cron_patch),
+        )
+        .route(
+            "/scheduler/cron/:id/run",
+            post(handle_v1_scheduler_cron_run),
         )
         .with_state(app_state.clone());
     (temp, app_state, router)
@@ -56,6 +62,55 @@ async fn json_request(app: Router, request: Request<Body>) -> (StatusCode, Value
     let status = response.status();
     let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap())
+}
+
+fn interval_job(id: &str, every_ms: u64) -> Job {
+    Job {
+        id: id.to_string(),
+        description: "Interval frog check".to_string(),
+        enabled: true,
+        durable: false,
+        created_at_ms: 1_000,
+        recurring: true,
+        trigger: Trigger::Interval { every_ms },
+        action: Action::AgentTurn {
+            prompt: "Check interval frogs".to_string(),
+            target: AgentTarget::ExistingChat {
+                chat_id: "active-chat".to_string(),
+            },
+            mode: Some("agent".to_string()),
+            model: None,
+            tools: None,
+        },
+        delivery: Delivery::Chat,
+        last_fired_at_ms: Some(2_000),
+        fire_count: 2,
+        last_status: Some("fired".to_string()),
+        last_error: None,
+        recent_runs: vec![CronRunRecord {
+            at_ms: 2_000,
+            status: "fired".to_string(),
+            error: None,
+        }],
+        paused_at_ms: None,
+        trigger_at_ms: None,
+        auto_expire_after_ms: crate::scheduler::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+    }
+}
+
+fn paused_job(id: &str) -> Job {
+    let mut job = interval_job(id, 10 * 60_000);
+    job.description = "Paused frog check".to_string();
+    job.enabled = false;
+    job.paused_at_ms = Some(3_000);
+    job.last_status = Some("deferred".to_string());
+    job.last_error = Some("busy".to_string());
+    job.recent_runs = vec![CronRunRecord {
+        at_ms: 3_000,
+        status: "deferred".to_string(),
+        error: Some("busy".to_string()),
+    }];
+    job
 }
 
 #[tokio::test]
@@ -239,4 +294,231 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
     let task = tasks.iter().find(|t| t.id == id).unwrap();
     assert_eq!(task.chat_id(), Some("active-chat"));
     assert_eq!(task.mode(), Some("agent"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_get_returns_interval_and_paused_fields() {
+    let (_temp, _app_state, app) = test_app().await;
+    let interval_id = format!("cron_http_interval_{}", uuid::Uuid::now_v7());
+    let paused_id = format!("cron_http_paused_{}", uuid::Uuid::now_v7());
+    let store = crate::scheduler::session_cron_store();
+    store
+        .add(interval_job(&interval_id, 30 * 60_000))
+        .await
+        .unwrap();
+    store.add(paused_job(&paused_id)).await.unwrap();
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let list = listed.as_array().unwrap();
+    let interval = list
+        .iter()
+        .find(|task| task["id"] == json!(interval_id))
+        .unwrap();
+    assert_eq!(interval["cron"], json!(""));
+    assert_eq!(interval["trigger_kind"], json!("interval"));
+    assert_eq!(interval["every_ms"], json!(30 * 60_000));
+    assert_eq!(interval["at_ms"], Value::Null);
+    assert_eq!(interval["tz"], Value::Null);
+    assert_eq!(interval["enabled"], json!(true));
+    assert_eq!(interval["paused"], json!(false));
+    assert_eq!(interval["last_status"], json!("fired"));
+    assert_eq!(interval["last_error"], Value::Null);
+    assert_eq!(interval["recent_runs"][0]["status"], json!("fired"));
+
+    let paused = list
+        .iter()
+        .find(|task| task["id"] == json!(paused_id))
+        .unwrap();
+    assert_eq!(paused["enabled"], json!(false));
+    assert_eq!(paused["paused"], json!(true));
+    assert_eq!(paused["last_status"], json!("deferred"));
+    assert_eq!(paused["last_error"], json!("busy"));
+    assert_eq!(paused["recent_runs"][0]["error"], json!("busy"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_every_creates_interval_job() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "interval-chat").await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "every": "30m",
+                    "prompt": "Check interval frogs",
+                    "description": "Interval frog check",
+                    "chat_id": "interval-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["human_schedule"], json!("every 30m"));
+
+    let id = created["id"].as_str().unwrap();
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(
+        task.trigger,
+        Trigger::Interval {
+            every_ms: 30 * 60_000
+        }
+    );
+    assert_eq!(task.chat_id(), Some("interval-chat"));
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["trigger_kind"], json!("interval"));
+    assert_eq!(listed_task["every_ms"], json!(30 * 60_000));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "patch-chat").await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/15 * * * *",
+                    "prompt": "Patch frogs",
+                    "description": "Patch frog check",
+                    "chat_id": "patch-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, paused) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/scheduler/cron/{id}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({ "enabled": false }).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        paused,
+        json!({ "id": id.clone(), "updated": true, "human_schedule": "every 15 minutes" })
+    );
+    let stored = crate::scheduler::session_cron_store()
+        .get(&id)
+        .await
+        .unwrap();
+    assert!(!stored.enabled);
+    assert!(stored.paused_at_ms.is_some());
+
+    let (status, updated) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/scheduler/cron/{id}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({ "enabled": true, "every": "45m", "description": "Updated patch frogs" })
+                    .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["human_schedule"], json!("every 45m"));
+    let stored = crate::scheduler::session_cron_store()
+        .get(&id)
+        .await
+        .unwrap();
+    assert!(stored.enabled);
+    assert_eq!(stored.paused_at_ms, None);
+    assert_eq!(
+        stored.trigger,
+        Trigger::Interval {
+            every_ms: 45 * 60_000
+        }
+    );
+    assert_eq!(stored.description, "Updated patch frogs");
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_run_sets_trigger() {
+    let (_temp, _app_state, app) = test_app().await;
+    let id = format!("cron_http_run_{}", uuid::Uuid::now_v7());
+    let store = crate::scheduler::session_cron_store();
+    store.add(interval_job(&id, 30 * 60_000)).await.unwrap();
+
+    let before_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let (status, triggered) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/scheduler/cron/{id}/run"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(triggered, json!({ "id": id.clone(), "triggered": true }));
+    let stored = store.get(&id).await.unwrap();
+    assert!(stored.trigger_at_ms.unwrap() >= before_ms);
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_bad_patch_unknown_id_returns_4xx() {
+    let (_temp, _app_state, app) = test_app().await;
+
+    let (status, _) = json_request(
+        app,
+        Request::builder()
+            .method("PATCH")
+            .uri("/scheduler/cron/cron_missing_for_patch")
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({ "enabled": false }).to_string()))
+            .unwrap(),
+    )
+    .await;
+
+    assert_ne!(status, StatusCode::OK);
 }

@@ -99,7 +99,8 @@ use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_bootstrap,
 };
 use crate::http::routers::v1::scheduler::{
-    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_post,
+    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_patch,
+    handle_v1_scheduler_cron_post, handle_v1_scheduler_cron_run,
 };
 use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run, handle_v1_worktrees_create,
@@ -599,7 +600,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/scheduler/cron/:id",
-            delete(handle_v1_scheduler_cron_delete),
+            delete(handle_v1_scheduler_cron_delete).patch(handle_v1_scheduler_cron_patch),
+        )
+        .route(
+            "/scheduler/cron/:id/run",
+            post(handle_v1_scheduler_cron_run),
         )
         .route("/setup/status", get(handle_v1_setup_status))
         .route("/browser/start", post(handle_browser_start))
