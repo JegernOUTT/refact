@@ -21,6 +21,7 @@ use crate::http::routers::gui::{
 use crate::http::{gui_public_origin_candidates, GuiPublicOriginCandidates};
 
 const PICKER_TEMPLATE: &str = include_str!("web_picker.html");
+const DAEMON_GUI_BOOTSTRAP_SENTINEL: &str = "__REFACT_DAEMON_PROJECT_API_PREFIX__";
 
 #[derive(Debug, Serialize)]
 struct PickerData {
@@ -280,42 +281,105 @@ fn project_gui_index_body(
     let Ok(html) = std::str::from_utf8(body.as_ref()) else {
         return body;
     };
-    let html = inject_daemon_origin_candidates(html, &candidates);
-    Cow::Owned(inject_daemon_api_prefix(&html, project_id).into_bytes())
+    Cow::Owned(inject_daemon_gui_bootstrap(html, project_id, &candidates).into_bytes())
 }
 
-fn inject_daemon_origin_candidates(html: &str, candidates: &GuiPublicOriginCandidates) -> String {
-    let Ok(json) = serde_json::to_string(&candidates.origins) else {
+fn inject_daemon_gui_bootstrap(
+    html: &str,
+    project_id: &str,
+    candidates: &GuiPublicOriginCandidates,
+) -> String {
+    if html.contains(DAEMON_GUI_BOOTSTRAP_SENTINEL) {
         return html.to_string();
-    };
-    html.replace(
-        "window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || [];",
-        &format!("window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || {json};"),
-    )
+    }
+    let script = daemon_gui_bootstrap_script(project_id, candidates);
+    insert_head_script(html, &script)
 }
 
-fn inject_daemon_api_prefix(html: &str, project_id: &str) -> String {
+fn daemon_gui_bootstrap_script(project_id: &str, candidates: &GuiPublicOriginCandidates) -> String {
     let prefix = project_api_prefix(project_id);
-    let prefix_json = serde_json::to_string(&prefix).unwrap_or_else(|_| "\"\"".to_string());
-    let with_prefix = html.replace(
-        "        const loopbackOrigin = \"http://127.0.0.1:\" + port;\n",
-        &format!(
-            "        const loopbackOrigin = \"http://127.0.0.1:\" + port;\n        const daemonProjectApiPrefix = {prefix_json};\n        const prefixDaemonProjectApi = function (value) {{\n          if (typeof value === \"string\") {{\n            if (value.startsWith(\"/v1/\") || value === \"/v1\") {{\n              return daemonProjectApiPrefix + value;\n            }}\n            try {{\n              const url = new URL(value, origin);\n              if (url.origin === origin && (url.pathname.startsWith(\"/v1/\") || url.pathname === \"/v1\")) {{\n                return origin + daemonProjectApiPrefix + url.pathname + url.search + url.hash;\n              }}\n            }} catch (_error) {{}}\n          }}\n          if (value instanceof URL && value.origin === origin && (value.pathname.startsWith(\"/v1/\") || value.pathname === \"/v1\")) {{\n            return new URL(origin + daemonProjectApiPrefix + value.pathname + value.search + value.hash);\n          }}\n          if (value instanceof Request) {{\n            try {{\n              const url = new URL(value.url);\n              if (url.origin === origin && (url.pathname.startsWith(\"/v1/\") || url.pathname === \"/v1\")) {{\n                return new Request(origin + daemonProjectApiPrefix + url.pathname + url.search + url.hash, value);\n              }}\n            }} catch (_error) {{}}\n          }}\n          return value;\n        }};\n"
-        ),
-    );
-    with_prefix
-        .replace(
-            "            return originalFetch(rewriteEngineUrl(input, candidate), init).then(\n",
-            "            return originalFetch(prefixDaemonProjectApi(rewriteEngineUrl(input, candidate)), init).then(\n",
-        )
-        .replace(
-            "          const rewrittenInput = rewriteEngineUrl(input);\n",
-            "          const rewrittenInput = prefixDaemonProjectApi(rewriteEngineUrl(input));\n",
-        )
-        .replace(
-            "        };\n\n        const initialState = {\n",
-            "        };\n\n        if (typeof window.EventSource === \"function\") {\n          const originalEventSource = window.EventSource;\n          window.EventSource = function (input, init) {\n            return new originalEventSource(prefixDaemonProjectApi(input), init);\n          };\n          window.EventSource.prototype = originalEventSource.prototype;\n        }\n\n        const initialState = {\n",
-        )
+    let prefix_json = json_for_script(&prefix);
+    let origins_json = json_for_script(&candidates.origins);
+    r#"    <script>
+      (function () {
+        const daemonProjectApiPrefix = __PREFIX__;
+        window.__REFACT_DAEMON_PROJECT_API_PREFIX__ = daemonProjectApiPrefix;
+        const daemonOriginCandidates = __ORIGINS__;
+        const currentOriginCandidates = Array.isArray(window.__REFACT_ENGINE_ORIGIN_CANDIDATES__)
+          ? window.__REFACT_ENGINE_ORIGIN_CANDIDATES__
+          : [];
+        window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = Array.from(
+          new Set(currentOriginCandidates.concat(daemonOriginCandidates)),
+        );
+        const origin = window.location.origin;
+        const isApiPath = function (pathname) {
+          return pathname === "/v1" || pathname.startsWith("/v1/");
+        };
+        const prefixedApiUrl = function (url) {
+          return origin + daemonProjectApiPrefix + url.pathname + url.search + url.hash;
+        };
+        const prefixDaemonProjectApi = function (value) {
+          if (typeof value === "string") {
+            if (value === "/v1" || value.startsWith("/v1/")) {
+              return daemonProjectApiPrefix + value;
+            }
+            try {
+              const url = new URL(value, origin);
+              if (url.origin === origin && isApiPath(url.pathname)) {
+                return prefixedApiUrl(url);
+              }
+            } catch (_error) {}
+          }
+          if (typeof URL === "function" && value instanceof URL && value.origin === origin && isApiPath(value.pathname)) {
+            return new URL(prefixedApiUrl(value));
+          }
+          if (typeof Request === "function" && value instanceof Request) {
+            try {
+              const url = new URL(value.url);
+              if (url.origin === origin && isApiPath(url.pathname)) {
+                return new Request(prefixedApiUrl(url), value);
+              }
+            } catch (_error) {}
+          }
+          return value;
+        };
+        if (typeof window.fetch === "function") {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = function (input, init) {
+            return originalFetch(prefixDaemonProjectApi(input), init);
+          };
+        }
+        if (typeof window.EventSource === "function") {
+          const originalEventSource = window.EventSource;
+          window.EventSource = function (input, init) {
+            return new originalEventSource(prefixDaemonProjectApi(input), init);
+          };
+          window.EventSource.prototype = originalEventSource.prototype;
+          if (typeof Object.setPrototypeOf === "function") {
+            Object.setPrototypeOf(window.EventSource, originalEventSource);
+          }
+        }
+      })();
+    </script>"#
+        .replace("__PREFIX__", &prefix_json)
+        .replace("__ORIGINS__", &origins_json)
+}
+
+fn insert_head_script(html: &str, script: &str) -> String {
+    if let Some(index) = html.find("<head>") {
+        let insert_at = index + "<head>".len();
+        return format!("{}\n{}{}", &html[..insert_at], script, &html[insert_at..]);
+    }
+    if let Some(index) = html.find("<head ") {
+        if let Some(offset) = html[index..].find('>') {
+            let insert_at = index + offset + 1;
+            return format!("{}\n{}{}", &html[..insert_at], script, &html[insert_at..]);
+        }
+    }
+    if let Some(index) = html.find("</head>") {
+        return format!("{}{}\n{}", &html[..index], script, &html[index..]);
+    }
+    format!("{}\n{}", script, html)
 }
 
 fn daemon_origin_candidates(port: u16, project_id: &str) -> GuiPublicOriginCandidates {
@@ -436,19 +500,17 @@ mod tests {
 
     #[test]
     fn daemon_gui_index_injects_prefix_shim_and_escapes_project_id() {
-        let html = r#"<script>
-        const loopbackOrigin = "http://127.0.0.1:" + port;
-        const originalFetch = window.fetch.bind(window);
-            return originalFetch(rewriteEngineUrl(input, candidate), init).then(
-          const rewrittenInput = rewriteEngineUrl(input);
+        let candidates = GuiPublicOriginCandidates {
+            origins: vec!["http://127.0.0.1:8488/p/abc123".to_string()],
         };
+        let html = r#"<html><head><title>Refact</title></head><body></body></html>"#;
+        let injected = inject_daemon_gui_bootstrap(html, "abc\"</script>", &candidates);
 
-        const initialState = {
-        </script>"#;
-        let injected = inject_daemon_api_prefix(html, "abc\"</script>");
         assert!(injected.contains("const daemonProjectApiPrefix = \"/p/abc%22%3C%2Fscript%3E\";"));
-        assert!(injected.contains("prefixDaemonProjectApi(rewriteEngineUrl(input));"));
+        assert!(injected.contains("window.__REFACT_DAEMON_PROJECT_API_PREFIX__"));
+        assert!(injected.contains("window.fetch = function"));
         assert!(injected.contains("window.EventSource = function"));
+        assert!(injected.contains("http://127.0.0.1:8488/p/abc123"));
         assert!(!injected.contains("abc\"</script>"));
     }
 
@@ -466,14 +528,24 @@ mod tests {
     }
 
     #[test]
-    fn daemon_origin_candidates_inject_when_worker_marker_already_replaced() {
-        let candidates = GuiPublicOriginCandidates {
+    fn daemon_gui_bootstrap_composes_with_origin_marker_injection() {
+        let worker_candidates = GuiPublicOriginCandidates {
+            origins: vec!["http://127.0.0.1:8488".to_string()],
+        };
+        let daemon_candidates = GuiPublicOriginCandidates {
             origins: vec!["http://127.0.0.1:8488/p/abc123".to_string()],
         };
-        let html = "window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || [];";
-        let injected = inject_daemon_origin_candidates(html, &candidates);
+        let html = r#"<html><head><script>window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];</script></head><body></body></html>"#;
+        let body = crate::http::routers::gui::inject_gui_origin_candidates(
+            Cow::Borrowed(html.as_bytes()),
+            &worker_candidates,
+        );
+        let html = std::str::from_utf8(body.as_ref()).unwrap();
+        let injected = inject_daemon_gui_bootstrap(html, "abc123", &daemon_candidates);
+
+        assert!(injected.contains("http://127.0.0.1:8488"));
         assert!(injected.contains("http://127.0.0.1:8488/p/abc123"));
-        assert!(!injected.contains("|| [];"));
+        assert_eq!(injected.matches(DAEMON_GUI_BOOTSTRAP_SENTINEL).count(), 1);
     }
 
     #[test]
@@ -690,7 +762,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "F-0: daemon project-GUI prefix/origin injection must be reconciled with main's __REFACT_ENGINE_ORIGIN_CANDIDATES__ GUI bootstrap (anchors removed by GUI origin refactor merged from main)"]
     async fn project_index_route_injects_daemon_gui_for_registered_project() {
         let test = test_state().await;
         let state = test.state;
@@ -712,6 +783,9 @@ mod tests {
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("daemonProjectApiPrefix"));
+        assert!(body.contains("window.__REFACT_DAEMON_PROJECT_API_PREFIX__"));
+        assert!(body.contains("window.fetch = function"));
+        assert!(body.contains("window.EventSource = function"));
         assert!(body.contains(&format!("/p/{}", entry.id)));
         assert!(body.contains(&format!("http://127.0.0.1:8488/p/{}", entry.id)));
     }
