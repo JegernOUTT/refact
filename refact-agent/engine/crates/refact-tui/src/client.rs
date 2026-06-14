@@ -251,6 +251,148 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderListResponse {
+    #[serde(default)]
+    pub providers: Vec<ProviderListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderListItem {
+    pub name: String,
+    #[serde(default)]
+    pub base_provider: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub readonly: bool,
+    #[serde(default)]
+    pub has_credentials: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub model_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderOAuthLogoutResponse {
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default)]
+    pub auth_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HooksResponse {
+    #[serde(default)]
+    pub hooks: Vec<HookInfo>,
+    #[serde(default)]
+    pub raw_content: String,
+    #[serde(default)]
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookInfo {
+    pub event: String,
+    #[serde(default)]
+    pub matcher: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompetitorImportInfoResponse {
+    #[serde(default)]
+    pub sources: Vec<CompetitorImportSourceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompetitorImportSourceInfo {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportStatus {
+    Created,
+    Updated,
+    Unchanged,
+    Stale,
+    Conflict,
+    UserModified,
+    Unsupported,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportReportCounts {
+    #[serde(default)]
+    pub discovered: usize,
+    #[serde(default)]
+    pub created: usize,
+    #[serde(default)]
+    pub updated: usize,
+    #[serde(default)]
+    pub unchanged: usize,
+    #[serde(default)]
+    pub stale: usize,
+    #[serde(default)]
+    pub conflicts: usize,
+    #[serde(default)]
+    pub user_modified: usize,
+    #[serde(default)]
+    pub unsupported: usize,
+    #[serde(default)]
+    pub errors: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImportReportIssue {
+    #[serde(default)]
+    pub competitor: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    pub status: ImportStatus,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImportReport {
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub reported_sources: Vec<Value>,
+    #[serde(default)]
+    pub discovered_candidates: usize,
+    #[serde(default)]
+    pub status_counts: std::collections::BTreeMap<ImportStatus, usize>,
+    #[serde(default)]
+    pub competitor_counts: std::collections::BTreeMap<String, ImportReportCounts>,
+    #[serde(default)]
+    pub kind_counts: std::collections::BTreeMap<String, ImportReportCounts>,
+    #[serde(default)]
+    pub top_issues: Vec<ImportReportIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompetitorImportRunResponse {
+    pub scope: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub report: ImportReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KnowledgeGraphResponse {
     #[serde(default)]
     pub nodes: Vec<KnowledgeNode>,
@@ -552,6 +694,44 @@ impl DaemonClient {
         self.get_json(&path).await
     }
 
+    pub async fn providers(&self, project_id: &str) -> Result<ProviderListResponse, ClientError> {
+        let path = providers_path(project_id);
+        self.get_json(&path).await
+    }
+
+    pub async fn provider_oauth_logout(
+        &self,
+        project_id: &str,
+        provider: &str,
+    ) -> Result<ProviderOAuthLogoutResponse, ClientError> {
+        let path = provider_oauth_logout_path(project_id, provider);
+        self.post_json(&path, &json!({})).await
+    }
+
+    pub async fn hooks(&self, project_id: &str) -> Result<HooksResponse, ClientError> {
+        let path = hooks_path(project_id);
+        self.get_json(&path).await
+    }
+
+    pub async fn competitor_import_info(
+        &self,
+        project_id: &str,
+    ) -> Result<CompetitorImportInfoResponse, ClientError> {
+        let path = competitor_import_path(project_id);
+        self.get_json(&path).await
+    }
+
+    pub async fn competitor_import_run(
+        &self,
+        project_id: &str,
+        source: Option<&str>,
+        scope: &str,
+    ) -> Result<CompetitorImportRunResponse, ClientError> {
+        let path = competitor_import_path(project_id);
+        self.post_json(&path, &competitor_import_body(source, scope))
+            .await
+    }
+
     pub async fn at_command_completion(
         &self,
         project_id: &str,
@@ -800,6 +980,19 @@ impl DaemonClient {
         decode_response(response).await
     }
 
+    async fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<T, ClientError> {
+        let response = self
+            .with_auth(self.client.post(self.url(path)).json(body))
+            .send()
+            .await
+            .map_err(|error| ClientError::Http(error.to_string()))?;
+        decode_response(response).await
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -1027,7 +1220,7 @@ fn encode_query_value(value: &str) -> String {
 }
 
 fn encode_path_segment(value: &str) -> String {
-    url_encode(value)
+    url_encode(value).replace('+', "%20")
 }
 
 fn is_configured_mcp_integration(integration: &IntegrationRecord) -> bool {
@@ -1043,6 +1236,36 @@ fn mcp_transport(name: &str) -> Option<&'static str> {
         Some("http")
     } else {
         None
+    }
+}
+
+fn providers_path(project_id: &str) -> String {
+    format!("/p/{}/v1/providers", encode_path_segment(project_id))
+}
+
+fn provider_oauth_logout_path(project_id: &str, provider: &str) -> String {
+    format!(
+        "/p/{}/v1/providers/{}/oauth/logout",
+        encode_path_segment(project_id),
+        encode_path_segment(provider)
+    )
+}
+
+fn hooks_path(project_id: &str) -> String {
+    format!("/p/{}/v1/ext/hooks", encode_path_segment(project_id))
+}
+
+fn competitor_import_path(project_id: &str) -> String {
+    format!(
+        "/p/{}/v1/ext/competitor-import",
+        encode_path_segment(project_id)
+    )
+}
+
+fn competitor_import_body(source: Option<&str>, scope: &str) -> Value {
+    match source.filter(|source| !source.trim().is_empty()) {
+        Some(source) => json!({"source": source, "scope": scope}),
+        None => json!({"scope": scope}),
     }
 }
 
@@ -1177,5 +1400,64 @@ mod tests {
         .unwrap();
         assert_eq!(info.tools[0].internal_name, "demo_lookup");
         assert_eq!(info.status["status"], "connected");
+    }
+
+    #[test]
+    fn provider_logout_client_paths_encode_project_and_provider() {
+        assert_eq!(providers_path("abc/def"), "/p/abc%2Fdef/v1/providers");
+        assert_eq!(
+            provider_oauth_logout_path("abc/def", "openai codex"),
+            "/p/abc%2Fdef/v1/providers/openai%20codex/oauth/logout"
+        );
+    }
+
+    #[test]
+    fn hooks_and_competitor_import_client_paths_use_project_proxy() {
+        assert_eq!(hooks_path("p1"), "/p/p1/v1/ext/hooks");
+        assert_eq!(
+            competitor_import_path("p1"),
+            "/p/p1/v1/ext/competitor-import"
+        );
+        assert_eq!(
+            competitor_import_body(Some("claude_code"), "project"),
+            json!({"source":"claude_code","scope":"project"})
+        );
+        assert_eq!(
+            competitor_import_body(None, "global"),
+            json!({"scope":"global"})
+        );
+    }
+
+    #[test]
+    fn hooks_and_import_fixtures_parse_backend_responses() {
+        let hooks: HooksResponse = serde_json::from_str(
+            r#"{
+                "hooks":[{"event":"PreToolUse","matcher":"Bash","command":"./check.sh","timeout":30}],
+                "raw_content":"hooks: {}",
+                "file_path":"/repo/.refact/hooks.yaml"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(hooks.hooks[0].event, "PreToolUse");
+        assert_eq!(hooks.hooks[0].timeout, Some(30));
+
+        let info: CompetitorImportInfoResponse = serde_json::from_str(
+            r#"{"sources":[{"id":"claude_code","label":"Claude Code","roots":["~/.claude"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(info.sources[0].id, "claude_code");
+
+        let run: CompetitorImportRunResponse = serde_json::from_str(
+            r#"{
+                "scope":"project",
+                "source":"claude_code",
+                "report":{"discovered_candidates":1,"status_counts":{"created":1},"competitor_counts":{},"kind_counts":{},"top_issues":[]}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            run.report.status_counts.get(&ImportStatus::Created),
+            Some(&1)
+        );
     }
 }

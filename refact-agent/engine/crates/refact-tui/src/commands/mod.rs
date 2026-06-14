@@ -148,6 +148,9 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::MCP_COMMAND,
             misc::SKILLS_COMMAND,
             misc::MEMORIES_COMMAND,
+            misc::HOOKS_COMMAND,
+            misc::LOGOUT_COMMAND,
+            misc::IMPORT_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],
@@ -235,6 +238,9 @@ mod tests {
             "/mcp",
             "/skills",
             "/memories",
+            "/hooks",
+            "/logout",
+            "/import",
         ] {
             assert!(
                 items.iter().any(|item| item.title == title),

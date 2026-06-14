@@ -169,6 +169,7 @@ use crate::http::routers::v1::ext_management::{
     handle_v1_ext_skill_post, handle_v1_ext_skill_delete, handle_v1_ext_command_get,
     handle_v1_ext_command_put, handle_v1_ext_command_post, handle_v1_ext_command_delete,
     handle_v1_ext_hooks_get, handle_v1_ext_hooks_put, handle_v1_ext_hooks_delete_by_index,
+    handle_v1_ext_competitor_import_get, handle_v1_ext_competitor_import_post,
 };
 use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
 use crate::http::routers::v1::customization_editor::{
@@ -648,6 +649,14 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/ext/commands/:name", delete(handle_v1_ext_command_delete))
         .route("/ext/hooks", get(handle_v1_ext_hooks_get))
         .route("/ext/hooks", put(handle_v1_ext_hooks_put))
+        .route(
+            "/ext/competitor-import",
+            get(handle_v1_ext_competitor_import_get),
+        )
+        .route(
+            "/ext/competitor-import",
+            post(handle_v1_ext_competitor_import_post),
+        )
         .route(
             "/ext/hooks/:index",
             delete(handle_v1_ext_hooks_delete_by_index),

@@ -16,13 +16,14 @@ pub use refact_ext::competitor_import::{
     add_issues, collect_continue_scan, collect_opencode_scan, format_log_issue,
     import_reports_for_runtime_events, issue_matches_outcome, log_import_summary,
     persist_last_report_if_needed, plural_suffix, run_global_import_with_paths,
-    run_global_import_with_paths_and_filter, run_project_import_with_paths,
-    run_project_import_with_paths_and_filter, runtime_dedupe_key, runtime_scope_label,
+    run_global_import_with_paths_and_filter, run_global_import_with_paths_and_filter_for_source,
+    run_project_import_with_paths, run_project_import_with_paths_and_filter,
+    run_project_import_with_paths_and_filter_for_source, runtime_dedupe_key, runtime_scope_label,
     sanitize_log_path, scope_label, status_count_for_scope, unscoped_error_report,
     write_candidates_and_merge,
 };
 
-use types::{ImportIssue, ImportPrivacyFilter, ImportReport, ImportStatus, ImportSummary};
+use types::{Competitor, ImportIssue, ImportPrivacyFilter, ImportReport, ImportStatus, ImportSummary};
 
 pub async fn run_global_import(app: AppState) -> ImportSummary {
     let refact_config_dir = app.paths.config_dir.clone();
@@ -34,6 +35,64 @@ pub async fn run_global_import(app: AppState) -> ImportSummary {
             .await;
     apply_cache_invalidation(app.clone(), &summary).await;
     log_import_summary("global", &summary);
+    emit_buddy_import_events(app, &summary).await;
+    summary
+}
+
+pub async fn run_global_import_for_source(
+    app: AppState,
+    source: Option<Competitor>,
+) -> ImportSummary {
+    let refact_config_dir = app.paths.config_dir.clone();
+    let privacy_settings = app.workspace.privacy_settings.clone();
+    let home_dir = home::home_dir();
+    let filter = privacy_filter_from_settings(privacy_settings);
+    let summary = run_global_import_with_paths_and_filter_for_source(
+        &refact_config_dir,
+        home_dir.as_deref(),
+        &filter,
+        source,
+    )
+    .await;
+    apply_cache_invalidation(app.clone(), &summary).await;
+    log_import_summary("global", &summary);
+    emit_buddy_import_events(app, &summary).await;
+    summary
+}
+
+pub async fn run_project_import_for_source(
+    app: AppState,
+    source: Option<Competitor>,
+) -> ImportSummary {
+    let workspace_folders = app.workspace.documents_state.workspace_folders.clone();
+    let privacy_settings = app.workspace.privacy_settings.clone();
+    let workspace_roots_result = workspace_folders
+        .lock()
+        .map(|workspace_folders| workspace_folders.clone())
+        .map_err(|err| err.to_string());
+    let workspace_roots = match workspace_roots_result {
+        Ok(workspace_roots) => workspace_roots,
+        Err(err) => {
+            let mut summary = ImportSummary::default();
+            summary.add_issue(ImportIssue {
+                competitor: None,
+                kind: None,
+                scope: None,
+                path: None,
+                status: ImportStatus::Error,
+                message: format!("workspace folders unavailable: {err}"),
+            });
+            log_import_summary("project", &summary);
+            emit_buddy_import_events(app, &summary).await;
+            return summary;
+        }
+    };
+    let filter = privacy_filter_from_settings(privacy_settings);
+    let summary =
+        run_project_import_with_paths_and_filter_for_source(&workspace_roots, &filter, source)
+            .await;
+    apply_cache_invalidation(app.clone(), &summary).await;
+    log_import_summary("project", &summary);
     emit_buddy_import_events(app, &summary).await;
     summary
 }

@@ -13,6 +13,9 @@ pub enum MiscCommand {
     Mcp,
     Skills,
     Memories,
+    Hooks,
+    Logout,
+    Import,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -169,6 +172,39 @@ pub const MEMORIES_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const HOOKS_COMMAND: CommandDef = CommandDef {
+    name: "hooks",
+    aliases: &[],
+    description: "read-only overlay: list configured hooks",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Hooks,
+    },
+};
+
+pub const LOGOUT_COMMAND: CommandDef = CommandDef {
+    name: "logout",
+    aliases: &[],
+    description: "backend action: clear provider OAuth credentials",
+    args_hint: "[provider]",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Logout,
+    },
+};
+
+pub const IMPORT_COMMAND: CommandDef = CommandDef {
+    name: "import",
+    aliases: &[],
+    description: "backend action: import competitor customizations",
+    args_hint: "[source|all] [project|global]",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Import,
+    },
+};
+
 pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
     unavailable(
         "side",
@@ -180,7 +216,6 @@ pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
         &[],
         "background side-note routing has no Refact daemon chat command",
     ),
-    unavailable("hooks", &[], "hook editing is GUI-only today"),
     unavailable("apps", &[], "Refact daemon has no apps command surface"),
     unavailable(
         "plugins",
@@ -210,11 +245,6 @@ pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
         "interactive settings are GUI-only; edit the TUI config file for keymap and theme",
     ),
     unavailable("feedback", &[], "feedback submission has no TUI endpoint"),
-    unavailable(
-        "logout",
-        &[],
-        "daemon auth/logout is not enabled for the TUI",
-    ),
     unavailable(
         "rollout",
         &[],

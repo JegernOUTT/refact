@@ -18,8 +18,9 @@ use crate::ask_questions::{
 };
 use crate::client::{
     worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
-    KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry,
-    SlashCommandsListResponse, ToolDecision, WorkerInfo,
+    CompetitorImportInfoResponse, CompetitorImportRunResponse, HooksResponse,
+    KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry, ProviderListResponse,
+    ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision, WorkerInfo,
 };
 use crate::commands::{
     command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
@@ -40,7 +41,10 @@ use crate::pickers::{
     PickerAccept, PickerItem, PickerKind, PickerState,
 };
 use crate::protocol::{DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState};
-use crate::read_only_views::{mcp_overlay, memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay};
+use crate::read_only_views::{
+    hooks_overlay, import_run_notice, import_run_overlay, import_sources_overlay, mcp_overlay,
+    memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
+};
 use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
@@ -1157,6 +1161,21 @@ impl App {
                 self.apply_theme_name(&item.id);
                 AppAction::None
             }
+            (PickerKind::ProviderLogout, PickerAccept::Single(Some(item))) => {
+                self.composer.clear();
+                self.modal_picker = None;
+                self.add_notice(format!("Logging out provider {}", item.title));
+                AppAction::ProviderOAuthLogout { provider: item.id }
+            }
+            (PickerKind::CompetitorImport, PickerAccept::Single(Some(item))) => {
+                self.composer.clear();
+                self.modal_picker = None;
+                if item.id == "__list__" {
+                    self.open_read_only_view(ReadOnlyView::Import)
+                } else {
+                    self.run_competitor_import(&item.id, "project")
+                }
+            }
             _ => AppAction::None,
         }
     }
@@ -1394,6 +1413,64 @@ impl App {
             misc::MiscCommand::Mcp => self.open_read_only_view(ReadOnlyView::Mcp),
             misc::MiscCommand::Skills => self.open_read_only_view(ReadOnlyView::Skills),
             misc::MiscCommand::Memories => self.open_read_only_view(ReadOnlyView::Memories),
+            misc::MiscCommand::Hooks => self.open_read_only_view(ReadOnlyView::Hooks),
+            misc::MiscCommand::Logout => self.start_provider_logout(args),
+            misc::MiscCommand::Import => self.start_competitor_import(args),
+        }
+    }
+
+    fn start_provider_logout(&mut self, args: &str) -> AppAction {
+        self.composer.clear();
+        let provider = args.trim();
+        if provider.is_empty() {
+            self.add_notice("Loading providers for /logout…");
+            AppAction::LoadProviderLogoutChoices
+        } else {
+            self.add_notice(format!("Logging out provider {provider}"));
+            AppAction::ProviderOAuthLogout {
+                provider: provider.to_string(),
+            }
+        }
+    }
+
+    fn start_competitor_import(&mut self, args: &str) -> AppAction {
+        self.composer.clear();
+        let mut parts = args.split_whitespace();
+        let source = parts.next();
+        let scope = parts.next().unwrap_or("project");
+        if parts.next().is_some() {
+            self.add_notice("/import usage: /import [source|all] [project|global]");
+            return AppAction::None;
+        }
+        match source {
+            None => {
+                self.open_view_overlay(ReadOnlyView::Import.loading_overlay());
+                AppAction::LoadCompetitorImportSources
+            }
+            Some("list") | Some("sources") => self.open_read_only_view(ReadOnlyView::Import),
+            Some(source) => self.run_competitor_import(source, scope),
+        }
+    }
+
+    fn run_competitor_import(&mut self, source: &str, scope: &str) -> AppAction {
+        let source = source.trim();
+        let scope = scope.trim();
+        if !matches!(scope, "project" | "global") {
+            self.add_notice("/import scope must be project or global");
+            return AppAction::None;
+        }
+        let source = if source.eq_ignore_ascii_case("all") {
+            None
+        } else {
+            Some(source.to_string())
+        };
+        self.add_notice(format!(
+            "Running /import {} {scope}…",
+            source.as_deref().unwrap_or("all")
+        ));
+        AppAction::RunCompetitorImport {
+            source,
+            scope: scope.to_string(),
         }
     }
 
@@ -1434,6 +1511,155 @@ impl App {
         match result {
             Ok(data) => self.open_view_overlay(memories_overlay(&data)),
             Err(error) => self.open_failed_view(ReadOnlyView::Memories, error),
+        }
+    }
+
+    fn handle_hooks_view_loaded(&mut self, result: Result<HooksResponse, String>) {
+        match result {
+            Ok(data) => self.open_view_overlay(hooks_overlay(&data)),
+            Err(error) => self.open_failed_view(ReadOnlyView::Hooks, error),
+        }
+    }
+
+    fn handle_provider_logout_choices_loaded(
+        &mut self,
+        result: Result<ProviderListResponse, String>,
+    ) {
+        match result {
+            Ok(data) => self.open_provider_logout_picker(data),
+            Err(error) => {
+                self.retry_hint = retry_hint_from_message(&error);
+                self.add_notice(format!("Failed to load providers for /logout: {error}"));
+            }
+        }
+    }
+
+    fn open_provider_logout_picker(&mut self, data: ProviderListResponse) {
+        let mut items = data
+            .providers
+            .into_iter()
+            .filter(|provider| {
+                matches!(
+                    provider.base_provider.as_str(),
+                    "claude_code" | "openai_codex" | "github_copilot"
+                ) && provider.has_credentials
+            })
+            .map(|provider| PickerItem {
+                id: provider.name,
+                title: provider.display_name,
+                description: format!("{} · {}", provider.base_provider, provider.status),
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            left.title
+                .cmp(&right.title)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if items.is_empty() {
+            self.add_notice("No OAuth provider credentials available to log out");
+            self.modal_picker = None;
+        } else {
+            self.modal_picker = Some(PickerState::new(PickerKind::ProviderLogout, items));
+            self.composer_mode = ComposerMode::Chat;
+        }
+    }
+
+    fn handle_provider_logout_finished(
+        &mut self,
+        provider: String,
+        result: Result<ProviderOAuthLogoutResponse, String>,
+    ) {
+        match result {
+            Ok(response) if response.success => {
+                let status = if response.auth_status.trim().is_empty() {
+                    "logged out".to_string()
+                } else {
+                    response.auth_status
+                };
+                self.add_notice(format!("Logged out {provider}: {status}"));
+            }
+            Ok(response) => {
+                let status = if response.auth_status.trim().is_empty() {
+                    "backend returned success=false".to_string()
+                } else {
+                    response.auth_status
+                };
+                self.add_notice(format!("Failed to log out {provider}: {status}"));
+            }
+            Err(error) => {
+                self.retry_hint = retry_hint_from_message(&error);
+                self.add_notice(format!("Failed to log out {provider}: {error}"));
+            }
+        }
+    }
+
+    fn handle_competitor_import_view_loaded(
+        &mut self,
+        result: Result<CompetitorImportInfoResponse, String>,
+    ) {
+        match result {
+            Ok(data) => self.open_view_overlay(import_sources_overlay(&data)),
+            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
+        }
+    }
+
+    fn handle_competitor_import_sources_loaded(
+        &mut self,
+        result: Result<CompetitorImportInfoResponse, String>,
+    ) {
+        match result {
+            Ok(data) => self.open_competitor_import_picker(data),
+            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
+        }
+    }
+
+    fn open_competitor_import_picker(&mut self, data: CompetitorImportInfoResponse) {
+        let overlay = import_sources_overlay(&data);
+        let mut items = data
+            .sources
+            .iter()
+            .map(|source| PickerItem {
+                id: source.id.clone(),
+                title: if source.label.trim().is_empty() {
+                    source.id.clone()
+                } else {
+                    source.label.clone()
+                },
+                description: format!("roots: {}", source.roots.join(", ")),
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            left.title
+                .cmp(&right.title)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.open_view_overlay(overlay);
+        if items.is_empty() {
+            self.add_notice("No competitor import sources are available");
+        } else {
+            items.insert(
+                0,
+                PickerItem {
+                    id: "__list__".to_string(),
+                    title: "Show source list only".to_string(),
+                    description: "do not run an import".to_string(),
+                },
+            );
+            self.modal_picker = Some(PickerState::new(PickerKind::CompetitorImport, items));
+            self.composer_mode = ComposerMode::Chat;
+        }
+    }
+
+    fn handle_competitor_import_finished(
+        &mut self,
+        result: Result<CompetitorImportRunResponse, String>,
+    ) {
+        match result {
+            Ok(data) => {
+                self.add_notice(import_run_notice(&data));
+                self.open_view_overlay(import_run_overlay(&data));
+            }
+            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
         }
     }
 
@@ -4463,6 +4689,15 @@ pub enum AppAction {
     LoadReadOnlyView {
         view: ReadOnlyView,
     },
+    LoadProviderLogoutChoices,
+    ProviderOAuthLogout {
+        provider: String,
+    },
+    LoadCompetitorImportSources,
+    RunCompetitorImport {
+        source: Option<String>,
+        scope: String,
+    },
     LoadSessions,
     RefreshWorkers,
     LoadDaemonStatus,
@@ -4564,6 +4799,15 @@ enum RuntimeEvent {
     McpViewLoaded(Result<McpViewData, String>),
     SkillsViewLoaded(Result<SlashCommandsListResponse, String>),
     MemoriesViewLoaded(Result<KnowledgeGraphResponse, String>),
+    HooksViewLoaded(Result<HooksResponse, String>),
+    ProviderLogoutChoicesLoaded(Result<ProviderListResponse, String>),
+    ProviderLogoutFinished {
+        provider: String,
+        result: Result<ProviderOAuthLogoutResponse, String>,
+    },
+    CompetitorImportViewLoaded(Result<CompetitorImportInfoResponse, String>),
+    CompetitorImportSourcesLoaded(Result<CompetitorImportInfoResponse, String>),
+    CompetitorImportFinished(Result<CompetitorImportRunResponse, String>),
     SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
@@ -4835,6 +5079,22 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::McpViewLoaded(result) => app.handle_mcp_view_loaded(result),
             RuntimeEvent::SkillsViewLoaded(result) => app.handle_skills_view_loaded(result),
             RuntimeEvent::MemoriesViewLoaded(result) => app.handle_memories_view_loaded(result),
+            RuntimeEvent::HooksViewLoaded(result) => app.handle_hooks_view_loaded(result),
+            RuntimeEvent::ProviderLogoutChoicesLoaded(result) => {
+                app.handle_provider_logout_choices_loaded(result)
+            }
+            RuntimeEvent::ProviderLogoutFinished { provider, result } => {
+                app.handle_provider_logout_finished(provider, result)
+            }
+            RuntimeEvent::CompetitorImportSourcesLoaded(result) => {
+                app.handle_competitor_import_sources_loaded(result)
+            }
+            RuntimeEvent::CompetitorImportViewLoaded(result) => {
+                app.handle_competitor_import_view_loaded(result)
+            }
+            RuntimeEvent::CompetitorImportFinished(result) => {
+                app.handle_competitor_import_finished(result)
+            }
             RuntimeEvent::SessionsLoaded(Ok(trajectories)) => {
                 app.open_session_picker_from_trajectories(trajectories)
             }
@@ -5019,8 +5279,94 @@ async fn run_action(
                                 .map_err(|error| error.to_string());
                             let _ = tx.send(RuntimeEvent::MemoriesViewLoaded(result)).await;
                         }
+                        ReadOnlyView::Hooks => {
+                            let result = client
+                                .hooks(&project_id)
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = tx.send(RuntimeEvent::HooksViewLoaded(result)).await;
+                        }
+                        ReadOnlyView::Import => {
+                            let result = client
+                                .competitor_import_info(&project_id)
+                                .await
+                                .map_err(|error| error.to_string());
+                            let _ = tx
+                                .send(RuntimeEvent::CompetitorImportViewLoaded(result))
+                                .await;
+                        }
                     }
                 });
+            } else {
+                app.add_notice(format!("No active project for /{}", view.command_name()));
+            }
+        }
+        AppAction::LoadProviderLogoutChoices => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .providers(&project_id)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::ProviderLogoutChoicesLoaded(result))
+                        .await;
+                });
+            } else {
+                app.add_notice("No active project for /logout");
+            }
+        }
+        AppAction::ProviderOAuthLogout { provider } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .provider_oauth_logout(&project_id, &provider)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::ProviderLogoutFinished { provider, result })
+                        .await;
+                });
+            } else {
+                app.add_notice("No active project for /logout");
+            }
+        }
+        AppAction::LoadCompetitorImportSources => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .competitor_import_info(&project_id)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CompetitorImportSourcesLoaded(result))
+                        .await;
+                });
+            } else {
+                app.add_notice("No active project for /import");
+            }
+        }
+        AppAction::RunCompetitorImport { source, scope } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .competitor_import_run(&project_id, source.as_deref(), &scope)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CompetitorImportFinished(result))
+                        .await;
+                });
+            } else {
+                app.add_notice("No active project for /import");
             }
         }
         AppAction::LoadSessions => {
@@ -7395,6 +7741,26 @@ new-chat = "ctrl-x"
             overlay.title() == "Memories"
                 && overlay.lines().join("\n").contains("Loading /memories")
         }));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("hooks"),
+            AppAction::LoadReadOnlyView {
+                view: ReadOnlyView::Hooks
+            }
+        );
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Hooks" && overlay.lines().join("\n").contains("Loading /hooks")
+        }));
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("import"),
+            AppAction::LoadCompetitorImportSources
+        );
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Import" && overlay.lines().join("\n").contains("Loading /import")
+        }));
     }
 
     #[test]
@@ -7431,6 +7797,168 @@ new-chat = "ctrl-x"
         let overlay = app.transcript_overlay().unwrap();
         assert_eq!(overlay.title(), "Skills");
         assert!(overlay.lines().join("\n").contains("/explain"));
+    }
+
+    #[test]
+    fn hooks_view_loaded_opens_rendered_overlay() {
+        let mut app = App::new(project());
+        app.handle_hooks_view_loaded(Ok(HooksResponse {
+            hooks: vec![crate::client::HookInfo {
+                event: "PreToolUse".to_string(),
+                matcher: Some("Bash".to_string()),
+                command: "./check.sh".to_string(),
+                timeout: Some(30),
+            }],
+            raw_content: "hooks: {}".to_string(),
+            file_path: "/repo/.refact/hooks.yaml".to_string(),
+        }));
+
+        let overlay = app.transcript_overlay().unwrap();
+        assert_eq!(overlay.title(), "Hooks");
+        assert!(overlay.lines().join("\n").contains("./check.sh"));
+    }
+
+    #[test]
+    fn logout_command_dispatches_arg_or_picker_load() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("logout"),
+            AppAction::LoadProviderLogoutChoices
+        );
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("logout openai_codex"),
+            AppAction::ProviderOAuthLogout {
+                provider: "openai_codex".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn logout_provider_picker_filters_oauth_credentials() {
+        let mut app = App::new(project());
+        app.handle_provider_logout_choices_loaded(Ok(ProviderListResponse {
+            providers: vec![
+                crate::client::ProviderListItem {
+                    name: "openai_codex".to_string(),
+                    base_provider: "openai_codex".to_string(),
+                    display_name: "OpenAI Codex".to_string(),
+                    enabled: true,
+                    readonly: false,
+                    has_credentials: true,
+                    status: "configured".to_string(),
+                    model_count: 1,
+                },
+                crate::client::ProviderListItem {
+                    name: "openrouter".to_string(),
+                    base_provider: "openrouter".to_string(),
+                    display_name: "OpenRouter".to_string(),
+                    enabled: true,
+                    readonly: false,
+                    has_credentials: true,
+                    status: "configured".to_string(),
+                    model_count: 1,
+                },
+            ],
+        }));
+
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.kind, PickerKind::ProviderLogout);
+        assert_eq!(picker.filtered_items().len(), 1);
+        assert_eq!(picker.filtered_items()[0].id, "openai_codex");
+    }
+
+    #[test]
+    fn provider_logout_finished_reports_status() {
+        let mut app = App::new(project());
+        app.handle_provider_logout_finished(
+            "openai_codex".to_string(),
+            Ok(ProviderOAuthLogoutResponse {
+                success: true,
+                auth_status: "No credentials found".to_string(),
+            }),
+        );
+
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Logged out openai_codex"))
+        }));
+    }
+
+    #[test]
+    fn import_command_dispatches_list_and_run_forms() {
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("import"),
+            AppAction::LoadCompetitorImportSources
+        );
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("import claude_code global"),
+            AppAction::RunCompetitorImport {
+                source: Some("claude_code".to_string()),
+                scope: "global".to_string(),
+            }
+        );
+
+        let mut app = App::new(project());
+        assert_eq!(
+            app.execute_command_name("import all"),
+            AppAction::RunCompetitorImport {
+                source: None,
+                scope: "project".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn import_sources_loaded_opens_picker_and_overlay() {
+        let mut app = App::new(project());
+        app.handle_competitor_import_sources_loaded(Ok(CompetitorImportInfoResponse {
+            sources: vec![crate::client::CompetitorImportSourceInfo {
+                id: "claude_code".to_string(),
+                label: "Claude Code".to_string(),
+                roots: vec!["~/.claude".to_string()],
+            }],
+        }));
+
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.kind, PickerKind::CompetitorImport);
+        assert!(picker
+            .filtered_items()
+            .iter()
+            .any(|item| item.id == "claude_code"));
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Import" && overlay.lines().join("\n").contains("claude_code")
+        }));
+    }
+
+    #[test]
+    fn import_finished_reports_notice_and_overlay() {
+        let mut status_counts = std::collections::BTreeMap::new();
+        status_counts.insert(crate::client::ImportStatus::Created, 1);
+        let mut app = App::new(project());
+        app.handle_competitor_import_finished(Ok(CompetitorImportRunResponse {
+            scope: "project".to_string(),
+            source: Some("claude_code".to_string()),
+            report: crate::client::ImportReport {
+                completed_at: None,
+                reported_sources: Vec::new(),
+                discovered_candidates: 1,
+                status_counts,
+                competitor_counts: std::collections::BTreeMap::new(),
+                kind_counts: std::collections::BTreeMap::new(),
+                top_issues: Vec::new(),
+            },
+        }));
+
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("/import claude_code project complete"))
+        }));
+        assert!(app.transcript_overlay().is_some_and(|overlay| {
+            overlay.title() == "Import" && overlay.lines().join("\n").contains("created 1")
+        }));
     }
 
     #[test]

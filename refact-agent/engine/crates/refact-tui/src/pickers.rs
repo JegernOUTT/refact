@@ -10,6 +10,8 @@ pub enum PickerKind {
     Permissions,
     Reasoning,
     Theme,
+    ProviderLogout,
+    CompetitorImport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,8 @@ impl PickerState {
             PickerKind::Permissions => "permissions",
             PickerKind::Reasoning => "reasoning",
             PickerKind::Theme => "themes",
+            PickerKind::ProviderLogout => "providers",
+            PickerKind::CompetitorImport => "imports",
         }
     }
 

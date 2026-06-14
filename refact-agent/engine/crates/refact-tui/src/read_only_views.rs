@@ -2,7 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::client::{
-    KnowledgeGraphResponse, KnowledgeNode, McpServerInfoResponse, McpViewData,
+    CompetitorImportInfoResponse, CompetitorImportRunResponse, HookInfo, HooksResponse,
+    ImportStatus, KnowledgeGraphResponse, KnowledgeNode, McpServerInfoResponse, McpViewData,
     SlashCommandsListResponse,
 };
 
@@ -11,6 +12,8 @@ pub enum ReadOnlyView {
     Mcp,
     Skills,
     Memories,
+    Hooks,
+    Import,
 }
 
 impl ReadOnlyView {
@@ -19,6 +22,8 @@ impl ReadOnlyView {
             Self::Mcp => "mcp",
             Self::Skills => "skills",
             Self::Memories => "memories",
+            Self::Hooks => "hooks",
+            Self::Import => "import",
         }
     }
 
@@ -27,6 +32,8 @@ impl ReadOnlyView {
             Self::Mcp => "MCP",
             Self::Skills => "Skills",
             Self::Memories => "Memories",
+            Self::Hooks => "Hooks",
+            Self::Import => "Import",
         }
     }
 
@@ -213,6 +220,129 @@ pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
     }
 }
 
+pub fn hooks_overlay(data: &HooksResponse) -> ViewOverlay {
+    let mut lines = vec![
+        "Hooks".to_string(),
+        "Configured local hooks from /v1/ext/hooks.".to_string(),
+        format!("Hooks: {}", data.hooks.len()),
+    ];
+    if !data.file_path.trim().is_empty() {
+        lines.push(format!("File: {}", data.file_path));
+    }
+    lines.push(String::new());
+
+    if data.hooks.is_empty() {
+        lines.push("No configured hooks returned by /v1/ext/hooks.".to_string());
+    } else {
+        let mut hooks = data.hooks.iter().collect::<Vec<_>>();
+        hooks.sort_by(|left, right| {
+            left.event
+                .cmp(&right.event)
+                .then_with(|| left.command.cmp(&right.command))
+        });
+        for hook in hooks {
+            push_hook_lines(&mut lines, hook);
+        }
+    }
+
+    ViewOverlay {
+        title: "Hooks".to_string(),
+        rendered_lines: trim_trailing_blank(lines),
+        raw_lines: raw_lines(data),
+    }
+}
+
+pub fn import_sources_overlay(data: &CompetitorImportInfoResponse) -> ViewOverlay {
+    let mut lines = vec![
+        "Import".to_string(),
+        "Competitor import sources from /v1/ext/competitor-import.".to_string(),
+        format!("Sources: {}", data.sources.len()),
+        String::new(),
+    ];
+
+    if data.sources.is_empty() {
+        lines.push(
+            "No competitor import sources returned by /v1/ext/competitor-import.".to_string(),
+        );
+    } else {
+        for source in &data.sources {
+            let label = if source.label.trim().is_empty() {
+                source.id.as_str()
+            } else {
+                source.label.as_str()
+            };
+            lines.push(format!("• {} — {}", source.id, label));
+            if source.roots.is_empty() {
+                lines.push("  roots: none reported".to_string());
+            } else {
+                lines.push(format!("  roots: {}", source.roots.join(", ")));
+            }
+        }
+        lines.push(String::new());
+        lines.push("Run /import <source> to import into this project.".to_string());
+        lines.push("Use /import <source> global for global customizations.".to_string());
+        lines.push("Use /import all to scan every source.".to_string());
+    }
+
+    ViewOverlay {
+        title: "Import".to_string(),
+        rendered_lines: trim_trailing_blank(lines),
+        raw_lines: raw_lines(data),
+    }
+}
+
+pub fn import_run_overlay(data: &CompetitorImportRunResponse) -> ViewOverlay {
+    let report = &data.report;
+    let source = data.source.as_deref().unwrap_or("all");
+    let mut lines = vec![
+        "Import".to_string(),
+        format!("Imported {source} customizations in {} scope.", data.scope),
+        format!(
+            "Discovered: {} · created {} · updated {} · unchanged {} · stale {}",
+            report.discovered_candidates,
+            import_status_count(report, ImportStatus::Created),
+            import_status_count(report, ImportStatus::Updated),
+            import_status_count(report, ImportStatus::Unchanged),
+            import_status_count(report, ImportStatus::Stale),
+        ),
+        format!(
+            "Conflicts: {} · user-modified {} · unsupported {} · errors {}",
+            import_status_count(report, ImportStatus::Conflict),
+            import_status_count(report, ImportStatus::UserModified),
+            import_status_count(report, ImportStatus::Unsupported),
+            import_status_count(report, ImportStatus::Error),
+        ),
+    ];
+    if let Some(completed_at) = report.completed_at.as_deref() {
+        lines.push(format!("Completed: {completed_at}"));
+    }
+    lines.push(String::new());
+
+    if report.top_issues.is_empty() {
+        lines.push("No issues reported.".to_string());
+    } else {
+        lines.push("Top issues".to_string());
+        for issue in &report.top_issues {
+            let competitor = issue.competitor.as_deref().unwrap_or("unknown");
+            let kind = issue.kind.as_deref().unwrap_or("item");
+            let path = issue.path.as_deref().unwrap_or("no path");
+            lines.push(format!(
+                "• {:?} · {competitor} {kind} · {path}",
+                issue.status
+            ));
+            if !issue.message.trim().is_empty() {
+                lines.push(format!("  {}", compact_text(&issue.message)));
+            }
+        }
+    }
+
+    ViewOverlay {
+        title: "Import".to_string(),
+        rendered_lines: trim_trailing_blank(lines),
+        raw_lines: raw_lines(data),
+    }
+}
+
 fn push_mcp_server_lines(
     lines: &mut Vec<String>,
     server: &crate::client::McpServerSummary,
@@ -286,6 +416,35 @@ fn push_knowledge_doc_lines(lines: &mut Vec<String>, doc: &KnowledgeNode) {
     }
 }
 
+fn push_hook_lines(lines: &mut Vec<String>, hook: &HookInfo) {
+    let matcher = hook
+        .matcher
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("*");
+    let timeout = hook
+        .timeout
+        .map(|timeout| format!(" · timeout {timeout}s"))
+        .unwrap_or_default();
+    lines.push(format!("• {} · matcher {matcher}{timeout}", hook.event));
+    lines.push(format!("  {}", compact_text(&hook.command)));
+}
+
+fn import_status_count(data: &crate::client::ImportReport, status: ImportStatus) -> usize {
+    data.status_counts.get(&status).copied().unwrap_or_default()
+}
+
+pub fn import_run_notice(data: &CompetitorImportRunResponse) -> String {
+    let source = data.source.as_deref().unwrap_or("all");
+    let created = import_status_count(&data.report, ImportStatus::Created);
+    let updated = import_status_count(&data.report, ImportStatus::Updated);
+    let errors = import_status_count(&data.report, ImportStatus::Error);
+    format!(
+        "/import {source} {} complete: discovered {}, created {}, updated {}, errors {}",
+        data.scope, data.report.discovered_candidates, created, updated, errors
+    )
+}
+
 fn status_summary(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -332,8 +491,13 @@ fn trim_trailing_blank(mut lines: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{KnowledgeStats, McpServerSummary, McpToolInfo, SkillInfo};
+    use crate::client::{
+        CompetitorImportInfoResponse, CompetitorImportRunResponse, CompetitorImportSourceInfo,
+        HookInfo, HooksResponse, ImportReport, KnowledgeStats, McpServerSummary, McpToolInfo,
+        SkillInfo,
+    };
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn mcp_overlay_renders_empty_state_notice() {
@@ -425,5 +589,74 @@ mod tests {
         let text = overlay.rendered_lines.join("\n");
         assert!(text.contains("A decision"));
         assert!(text.contains("architecture"));
+    }
+
+    #[test]
+    fn hooks_overlay_renders_empty_state_notice() {
+        let overlay = hooks_overlay(&HooksResponse {
+            hooks: Vec::new(),
+            raw_content: String::new(),
+            file_path: "/repo/.refact/hooks.yaml".to_string(),
+        });
+        let text = overlay.rendered_lines.join("\n");
+        assert!(text.contains("No configured hooks"));
+        assert!(text.contains("/repo/.refact/hooks.yaml"));
+    }
+
+    #[test]
+    fn hooks_overlay_lists_hook_details() {
+        let overlay = hooks_overlay(&HooksResponse {
+            hooks: vec![HookInfo {
+                event: "PreToolUse".to_string(),
+                matcher: Some("Bash".to_string()),
+                command: "./check.sh".to_string(),
+                timeout: Some(30),
+            }],
+            raw_content: "hooks: {}".to_string(),
+            file_path: "/repo/.refact/hooks.yaml".to_string(),
+        });
+        let text = overlay.rendered_lines.join("\n");
+        assert!(text.contains("PreToolUse"));
+        assert!(text.contains("matcher Bash"));
+        assert!(text.contains("./check.sh"));
+    }
+
+    #[test]
+    fn import_sources_overlay_lists_available_sources() {
+        let overlay = import_sources_overlay(&CompetitorImportInfoResponse {
+            sources: vec![CompetitorImportSourceInfo {
+                id: "claude_code".to_string(),
+                label: "Claude Code".to_string(),
+                roots: vec!["~/.claude".to_string(), "<project>/.claude".to_string()],
+            }],
+        });
+        let text = overlay.rendered_lines.join("\n");
+        assert!(text.contains("claude_code"));
+        assert!(text.contains("Run /import <source>"));
+    }
+
+    #[test]
+    fn import_run_overlay_summarizes_status_counts() {
+        let mut status_counts = BTreeMap::new();
+        status_counts.insert(ImportStatus::Created, 2);
+        status_counts.insert(ImportStatus::Error, 1);
+        let data = CompetitorImportRunResponse {
+            scope: "project".to_string(),
+            source: Some("claude_code".to_string()),
+            report: ImportReport {
+                completed_at: None,
+                reported_sources: Vec::new(),
+                discovered_candidates: 3,
+                status_counts,
+                competitor_counts: BTreeMap::new(),
+                kind_counts: BTreeMap::new(),
+                top_issues: Vec::new(),
+            },
+        };
+        let text = import_run_overlay(&data).rendered_lines.join("\n");
+        assert!(text.contains("Discovered: 3"));
+        assert!(text.contains("created 2"));
+        assert!(text.contains("errors 1"));
+        assert!(import_run_notice(&data).contains("/import claude_code project complete"));
     }
 }

@@ -13,8 +13,8 @@ use super::manifest::{
     MAX_HASH_DIRECTORY_FILES, MAX_HASH_FILE_BYTES,
 };
 use super::types::{
-    ImportArtifact, ImportCandidate, ImportCandidateSummary, ImportIssue, ImportOutcome,
-    ImportReport, ImportScope, ImportStatus, ImportSummary,
+    Competitor, ImportArtifact, ImportCandidate, ImportCandidateSummary, ImportIssue,
+    ImportOutcome, ImportReport, ImportScope, ImportStatus, ImportSummary,
 };
 
 #[cfg(test)]
@@ -31,11 +31,29 @@ pub async fn write_candidates_for_scope(
     write_candidates_for_scope_with_issues(scope_root, scope, candidates, &[]).await
 }
 
+#[cfg(test)]
 pub(crate) async fn write_candidates_for_scope_with_issues(
     scope_root: &Path,
     scope: &ImportScope,
     candidates: &[ImportCandidate],
     existing_issues: &[ImportIssue],
+) -> ImportSummary {
+    write_candidates_for_scope_with_issues_and_filter(
+        scope_root,
+        scope,
+        candidates,
+        existing_issues,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn write_candidates_for_scope_with_issues_and_filter(
+    scope_root: &Path,
+    scope: &ImportScope,
+    candidates: &[ImportCandidate],
+    existing_issues: &[ImportIssue],
+    stale_filter: Option<Competitor>,
 ) -> ImportSummary {
     let mut summary = ImportSummary::default();
     let manifest_path = manifest_path_for_scope_root(scope_root);
@@ -67,6 +85,7 @@ pub(crate) async fn write_candidates_for_scope_with_issues(
         &manifest,
         candidates,
         existing_issues,
+        stale_filter,
         &mut summary,
     );
     for candidate in candidates {
@@ -109,9 +128,13 @@ fn record_stale_entries(
     manifest: &ImportManifest,
     candidates: &[ImportCandidate],
     existing_issues: &[ImportIssue],
+    stale_filter: Option<Competitor>,
     summary: &mut ImportSummary,
 ) {
     for entry in &manifest.entries {
+        if stale_filter.is_some_and(|source| entry.competitor != source) {
+            continue;
+        }
         if existing_issues
             .iter()
             .any(|issue| issue_matches_stale_entry(scope, entry, issue))

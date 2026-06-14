@@ -1,5 +1,6 @@
 use axum::extract::State;
 use axum::extract::{Path, Query};
+use hyper::body::Bytes;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,133 @@ use crate::files_correction::get_project_dirs;
 use crate::http::routers::v1::at_commands::invalidate_slash_cache;
 use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::types::DraftKind;
+use crate::ext::competitor_import::types::{Competitor, ImportReport};
+
+#[derive(Clone, Copy, Serialize)]
+pub struct CompetitorImportSourceInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub roots: &'static [&'static str],
+}
+
+#[derive(Serialize)]
+pub struct CompetitorImportInfoResponse {
+    pub sources: Vec<CompetitorImportSourceInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct CompetitorImportRequest {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CompetitorImportRunResponse {
+    pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub report: ImportReport,
+}
+
+const COMPETITOR_IMPORT_SOURCES: &[CompetitorImportSourceInfo] = &[
+    CompetitorImportSourceInfo {
+        id: "claude_code",
+        label: "Claude Code",
+        roots: &["~/.claude", "<project>/.claude"],
+    },
+    CompetitorImportSourceInfo {
+        id: "opencode",
+        label: "OpenCode",
+        roots: &["~/.config/opencode", "<project>/.opencode"],
+    },
+    CompetitorImportSourceInfo {
+        id: "kilo_code",
+        label: "Kilo Code",
+        roots: &[
+            "~/.config/kilo",
+            "~/.kilo",
+            "~/.kilocode",
+            "<project>/.kilo",
+            "<project>/.kilocode",
+        ],
+    },
+    CompetitorImportSourceInfo {
+        id: "continue_dev",
+        label: "Continue",
+        roots: &["~/.continue", "<project>/.continue"],
+    },
+];
+
+pub async fn handle_v1_ext_competitor_import_get() -> Result<Response<Body>, ScratchError> {
+    json_response(
+        StatusCode::OK,
+        &CompetitorImportInfoResponse {
+            sources: COMPETITOR_IMPORT_SOURCES.to_vec(),
+        },
+    )
+}
+
+pub async fn handle_v1_ext_competitor_import_post(
+    State(app): State<AppState>,
+    body_bytes: Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let req = if body_bytes.is_empty() {
+        CompetitorImportRequest {
+            scope: None,
+            source: None,
+        }
+    } else {
+        serde_json::from_slice::<CompetitorImportRequest>(&body_bytes).map_err(|e| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Invalid JSON: {}", e),
+            )
+        })?
+    };
+    let source = req
+        .source
+        .as_deref()
+        .map(parse_competitor_import_source)
+        .transpose()
+        .map_err(|message| ScratchError::new(StatusCode::BAD_REQUEST, message))?;
+    let scope = req.scope.as_deref().unwrap_or("project");
+    let mut summary = match scope {
+        "global" => {
+            crate::ext::competitor_import::run_global_import_for_source(app.clone(), source).await
+        }
+        "project" => {
+            crate::ext::competitor_import::run_project_import_for_source(app.clone(), source).await
+        }
+        other => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("unsupported competitor import scope: {other}"),
+            )
+        }
+    };
+    summary.mark_completed();
+    let report = ImportReport::from_summary(&summary);
+    json_response(
+        StatusCode::OK,
+        &CompetitorImportRunResponse {
+            scope: scope.to_string(),
+            source: source.map(|source| source.as_str().to_string()),
+            report,
+        },
+    )
+}
+
+fn parse_competitor_import_source(source: &str) -> Result<Competitor, String> {
+    match source.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => Ok(Competitor::ClaudeCode),
+        "opencode" | "open_code" | "open-code" => Ok(Competitor::OpenCode),
+        "kilo" | "kilocode" | "kilo_code" | "kilo-code" => Ok(Competitor::KiloCode),
+        "continue" | "continue_dev" | "continue-dev" => Ok(Competitor::ContinueDev),
+        other => Err(format!("unsupported competitor import source: {other}")),
+    }
+}
 
 #[derive(serde::Serialize)]
 struct DraftMetadata {
