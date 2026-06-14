@@ -193,6 +193,7 @@ rayon = "1.8.0"
 regex = "1.9.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
 eventsource-stream = "0.2"
+flate2 = "1.0"
 resvg = "0.44.0"
 ropey = "1.6"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
@@ -220,6 +221,7 @@ tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "
 tokio-rusqlite = "0.5.0"
 tokio-util = { version = "0.7.12", features = ["compat"] }
 tokio-tungstenite = { version = "0.21.0", features = ["rustls-tls-webpki-roots"] }
+tar = "0.4"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tower-lsp = "0.20"
 tracing = "0.1"
@@ -239,6 +241,7 @@ url = "2.4.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3"
 which = "7.0.2"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 petgraph = "0.6"
 zerocopy = "0.8.14"
 

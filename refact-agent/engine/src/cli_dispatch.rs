@@ -13,6 +13,7 @@ pub enum RefactCliCommand {
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
     Control(crate::daemon::cli::CliOptions),
+    SelfUpdate(crate::self_update::SelfUpdateOptions),
     Help(&'static str),
 }
 
@@ -35,6 +36,7 @@ pub enum DispatchResult {
     Run(crate::daemon::run_cmd::RunOptions),
     Tui(TuiOptions),
     Control(crate::daemon::cli::CliOptions),
+    SelfUpdate(crate::self_update::SelfUpdateOptions),
     Exit(i32),
 }
 
@@ -67,6 +69,7 @@ where
         "daemon" => parse_daemon(&args),
         "run" => parse_run(&args),
         "tui" => parse_tui(&args),
+        "self-update" => parse_self_update(&args),
         "ps" | "projects" | "restart" | "stop" | "logs" | "events" | "status" | "doctor"
         | "version" => parse_control(&args),
         "--version" | "-V" => parse_control(&[OsString::from("refact"), OsString::from("version")]),
@@ -82,6 +85,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
         RefactCliCommand::Run(options) => DispatchResult::Run(options),
         RefactCliCommand::Tui(options) => DispatchResult::Tui(options),
         RefactCliCommand::Control(options) => DispatchResult::Control(options),
+        RefactCliCommand::SelfUpdate(options) => DispatchResult::SelfUpdate(options),
         RefactCliCommand::Help(text) => {
             println!("{}", text);
             DispatchResult::Exit(0)
@@ -90,7 +94,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground]       Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
 }
 
 pub fn daemon_help_text() -> &'static str {
@@ -103,6 +107,10 @@ pub fn tui_help_text() -> &'static str {
 
 pub fn run_help_text() -> &'static str {
     "refact run [OPTIONS] <prompt>\n\nRun one headless chat turn through the daemon.\n\nOPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n    -h, --help                  Print this help text"
+}
+
+pub fn self_update_help_text() -> &'static str {
+    "refact self-update [OPTIONS]\n\nUpdate this refact binary from GitHub Releases.\n\nOPTIONS:\n    --check                     Print current/latest versions without downloading\n    --version <v>               Install an explicit engine release version\n    --force                     Reinstall latest even when it is not newer\n    --quiet                     Suppress successful text output\n    --json                      Emit JSON output\n    -h, --help                  Print this help text"
 }
 
 pub fn version_text() -> String {
@@ -169,6 +177,15 @@ fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
         i += 1;
     }
     Ok(RefactCliCommand::Tui(TuiOptions { project }))
+}
+
+fn parse_self_update(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
+    if contains_help(args.iter().skip(2)) {
+        return Ok(RefactCliCommand::Help(self_update_help_text()));
+    }
+    crate::self_update::parse_self_update_args(&args.iter().skip(2).cloned().collect::<Vec<_>>())
+        .map(RefactCliCommand::SelfUpdate)
+        .map_err(usage_error)
 }
 
 fn parse_control(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
@@ -259,6 +276,31 @@ mod tests {
             parse_from(["refact", "daemon", "--foreground"]).unwrap(),
             RefactCliCommand::Daemon { foreground: true }
         ));
+    }
+
+    #[test]
+    fn parse_self_update_options() {
+        let command = parse_from([
+            "refact",
+            "self-update",
+            "--check",
+            "--version",
+            "v8.2.0",
+            "--force",
+            "--quiet",
+            "--json",
+        ])
+        .unwrap();
+        match command {
+            RefactCliCommand::SelfUpdate(options) => {
+                assert!(options.check);
+                assert_eq!(options.version.as_deref(), Some("8.2.0"));
+                assert!(options.force);
+                assert!(options.quiet);
+                assert!(options.json);
+            }
+            _ => panic!("expected self-update command"),
+        }
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub mod postprocessing;
 pub mod scheduler;
 pub mod scratchpad_abstract;
 pub mod scratchpads;
+pub mod self_update;
 pub mod subchat;
 pub mod tokens;
 pub mod tools;

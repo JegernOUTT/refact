@@ -339,7 +339,7 @@ fn version_is_older(current: &str, mine: &str) -> bool {
     compare_versions(current, mine) == Ordering::Less
 }
 
-fn compare_versions(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
     match (parse_semver(left), parse_semver(right)) {
         (Some(left), Some(right)) => left.cmp(&right),
         _ => left.cmp(right),

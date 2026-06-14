@@ -65,6 +65,14 @@ fn main() {
             let code = runtime.block_on(refact_lsp::daemon::cli::run(options));
             std::process::exit(code);
         }
+        refact_lsp::cli_dispatch::DispatchResult::SelfUpdate(options) => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.enable_all();
+            builder.thread_stack_size(tokio_worker_stack_bytes());
+            let runtime = builder.build().expect("failed to build tokio runtime");
+            let code = runtime.block_on(refact_lsp::self_update::run(options));
+            std::process::exit(code);
+        }
         refact_lsp::cli_dispatch::DispatchResult::Exit(code) => std::process::exit(code),
     }
 }
