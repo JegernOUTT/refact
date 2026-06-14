@@ -77,6 +77,13 @@ vi.mock("../../services/refact/knowledgeGraphApi", () => ({
   }),
   useUpdateMemoryMutation: () => [vi.fn(), { isLoading: false }],
   useDeleteMemoryMutation: () => [vi.fn()],
+  useRelinkMemoriesMutation: () => [
+    vi.fn(() => ({
+      unwrap: () =>
+        Promise.resolve({ docs_scanned: 0, docs_updated: 0, links_added: 0 }),
+    })),
+    { isLoading: false },
+  ],
 }));
 
 interface MockMemory {
@@ -169,6 +176,37 @@ vi.mock("./MemoryDetailsEditor", () => ({
   ),
 }));
 
+interface MockTagFilterProps {
+  allTags: string[];
+  selectedTags: Set<string>;
+  onToggleTag: (tag: string) => void;
+  onClearTags: () => void;
+}
+
+vi.mock("./MemoryTagFilter", () => ({
+  MemoryTagFilter: ({
+    allTags,
+    selectedTags,
+    onToggleTag,
+    onClearTags,
+  }: MockTagFilterProps) => (
+    <div data-testid="tag-filter">
+      {allTags.map((tag) => (
+        <button
+          key={tag}
+          aria-pressed={selectedTags.has(tag)}
+          onClick={() => onToggleTag(tag)}
+        >
+          {tag}
+        </button>
+      ))}
+      {selectedTags.size > 0 ? (
+        <button onClick={onClearTags}>Clear</button>
+      ) : null}
+    </div>
+  ),
+}));
+
 function memoryListButtons() {
   return within(screen.getByTestId("memory-list")).getAllByRole("button");
 }
@@ -195,7 +233,7 @@ describe("KnowledgeWorkspace", () => {
     expect(screen.getByRole("tab", { name: "Memories" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Graph" })).toBeInTheDocument();
     expect(screen.getByTestId("memory-list")).toBeInTheDocument();
-    expect(screen.getByTestId("details-editor")).toBeInTheDocument();
+    expect(screen.queryByTestId("details-editor")).not.toBeInTheDocument();
     expect(screen.queryByTestId("graph-view")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Graph" }));
@@ -240,7 +278,7 @@ describe("KnowledgeWorkspace", () => {
     expect(screen.getByText("Memory: Code Memory 1")).toBeInTheDocument();
   });
 
-  it("updates editor when selection changes", async () => {
+  it("updates editor when a different memory is opened", async () => {
     const user = userEvent.setup();
     renderWorkspace();
 
@@ -248,12 +286,17 @@ describe("KnowledgeWorkspace", () => {
     expect(screen.getByText("Memory: Code Memory 1")).toBeInTheDocument();
 
     await user.click(
+      screen.getByRole("button", { name: "Close memory details" }),
+    );
+    expect(screen.queryByTestId("details-editor")).not.toBeInTheDocument();
+
+    await user.click(
       screen.getByRole("button", { name: /Decision Memory 2/i }),
     );
     expect(screen.getByText("Memory: Decision Memory 2")).toBeInTheDocument();
   });
 
-  it("clears selection when memory is deleted", async () => {
+  it("closes the details sheet when a memory is deleted", async () => {
     const user = userEvent.setup();
     renderWorkspace();
 
@@ -262,7 +305,7 @@ describe("KnowledgeWorkspace", () => {
 
     await user.click(screen.getByRole("button", { name: /Delete/i }));
 
-    expect(screen.getByText("Memory: none")).toBeInTheDocument();
+    expect(screen.queryByTestId("details-editor")).not.toBeInTheDocument();
     expect(screen.getByText("Selected: none")).toBeInTheDocument();
   });
 
@@ -515,5 +558,17 @@ describe("KnowledgeWorkspace", () => {
     expect(screen.getByTestId("graph-view")).toHaveTextContent("Nodes: 2");
     expect(screen.getByTestId("graph-view")).toHaveTextContent("Edges: 1");
     expect(screen.queryByText("Isolated C")).not.toBeInTheDocument();
+  });
+
+  it("rebuilds memory links from the graph tab", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    await user.click(screen.getByRole("tab", { name: "Graph" }));
+    await user.click(screen.getByRole("button", { name: "Rebuild links" }));
+
+    expect(
+      await screen.findByText(/Linked 0 connections across 0 memories/i),
+    ).toBeInTheDocument();
   });
 });

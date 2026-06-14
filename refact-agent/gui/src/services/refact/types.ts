@@ -1301,6 +1301,12 @@ export type KnowledgeGraphResponse = {
   stats: KnowledgeGraphStats;
 };
 
+export type RelinkMemoriesResponse = {
+  docs_scanned: number;
+  docs_updated: number;
+  links_added: number;
+};
+
 export type VecDbStatus = {
   files_unprocessed: number;
   files_total: number;

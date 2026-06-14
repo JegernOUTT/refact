@@ -58,6 +58,7 @@ use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_st
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::{
     handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
+    handle_v1_knowledge_relink_memories,
 };
 use crate::http::routers::v1::v1_integrations::{
     handle_v1_integration_get, handle_v1_integration_icon, handle_v1_integration_save,
@@ -427,6 +428,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/knowledge/delete-memory",
             post(handle_v1_knowledge_delete_memory),
+        )
+        .route(
+            "/knowledge/relink-memories",
+            post(handle_v1_knowledge_relink_memories),
         )
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
         .route("/trajectories", get(handle_v1_trajectories_list))

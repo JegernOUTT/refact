@@ -1,12 +1,28 @@
 import { useMemo, useState } from "react";
+import { X } from "lucide-react";
 
-import { Chip, LoadingState, Select, Surface, Tabs } from "../../components/ui";
-import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
-import type { KnowledgeMemoRecord } from "../../services/refact/types";
+import {
+  Button,
+  IconButton,
+  LoadingState,
+  Select,
+  Sheet,
+  Surface,
+  Tabs,
+} from "../../components/ui";
+import {
+  useGetKnowledgeGraphQuery,
+  useRelinkMemoriesMutation,
+} from "../../services/refact/knowledgeGraphApi";
+import type {
+  KnowledgeGraphNode,
+  KnowledgeMemoRecord,
+} from "../../services/refact/types";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
 import { isActiveKnowledgeDocNode } from "./knowledgeGraphFilters";
 import { MemoryDetailsEditor } from "./MemoryDetailsEditor";
 import { MemoryListView } from "./MemoryListView";
+import { MemoryTagFilter } from "./MemoryTagFilter";
 import styles from "./KnowledgeWorkspace.module.css";
 
 type KnowledgeTab = "memories" | "graph";
@@ -18,6 +34,18 @@ const sortLabels: Record<MemorySortKey, string> = {
   title: "Title",
   tagCount: "Tag count",
 };
+
+function nodeToRecord(node: KnowledgeGraphNode): KnowledgeMemoRecord {
+  return {
+    memid: node.id,
+    tags: node.tags ?? [],
+    content: node.content ?? "",
+    title: node.title ?? node.label,
+    kind: node.kind ?? node.node_type.replace("doc_", ""),
+    file_path: node.file_path,
+    created: node.created,
+  };
+}
 
 function timestampValue(value: string | undefined): number {
   if (!value) return 0;
@@ -67,28 +95,25 @@ export function KnowledgeWorkspace() {
     error,
   } = useGetKnowledgeGraphQuery({ includeContent: true });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<KnowledgeTab>("memories");
   const [sortKey, setSortKey] = useState<MemorySortKey>("date");
   const [selectedTags, setSelectedTags] = useState<Set<string>>(
     () => new Set(),
   );
+  const [relinkMemories, { isLoading: isRelinking }] =
+    useRelinkMemoriesMutation();
+  const [relinkResult, setRelinkResult] = useState<string | null>(null);
 
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
     return graph.nodes.filter(isActiveKnowledgeDocNode);
   }, [graph]);
 
-  const memoryRecords = useMemo((): KnowledgeMemoRecord[] => {
-    return allDocNodes.map((node) => ({
-      memid: node.id,
-      tags: node.tags ?? [],
-      content: node.content ?? "",
-      title: node.title ?? node.label,
-      kind: node.kind ?? node.node_type.replace("doc_", ""),
-      file_path: node.file_path,
-      created: node.created,
-    }));
-  }, [allDocNodes]);
+  const memoryRecords = useMemo(
+    () => allDocNodes.map(nodeToRecord),
+    [allDocNodes],
+  );
 
   const allTags = useMemo(() => {
     return [...new Set(memoryRecords.flatMap((memory) => memory.tags))].sort(
@@ -134,28 +159,29 @@ export function KnowledgeWorkspace() {
     [filteredDocNodes, linkedIds],
   );
 
-  const selectedMemory = useMemo((): KnowledgeMemoRecord | null => {
-    if (!selectedId) return null;
-    const node = allDocNodes.find((n) => n.id === selectedId);
-    if (!node) return null;
-    return {
-      memid: node.id,
-      tags: node.tags ?? [],
-      content: node.content ?? "",
-      title: node.title ?? node.label,
-      kind: node.kind ?? node.node_type.replace("doc_", ""),
-      file_path: node.file_path,
-      created: node.created,
-    };
-  }, [selectedId, allDocNodes]);
+  const editingMemory = useMemo((): KnowledgeMemoRecord | null => {
+    if (!editingId) return null;
+    const node = allDocNodes.find((n) => n.id === editingId);
+    return node ? nodeToRecord(node) : null;
+  }, [editingId, allDocNodes]);
 
   const activeTabIndex = activeTab === "memories" ? 0 : 1;
 
-  const handleSelectMemory = (id: string | null) => {
+  const handleOpenMemory = (id: string) => {
+    setSelectedId(id);
+    setEditingId(id);
+  };
+
+  const handleSelectNode = (id: string | null) => {
     setSelectedId(id);
   };
 
+  const handleCloseDetails = () => {
+    setEditingId(null);
+  };
+
   const handleMemoryDeleted = () => {
+    setEditingId(null);
     setSelectedId(null);
   };
 
@@ -173,6 +199,20 @@ export function KnowledgeWorkspace() {
 
   const handleClearTags = () => {
     setSelectedTags(new Set());
+  };
+
+  const handleRelink = () => {
+    setRelinkResult(null);
+    void relinkMemories(undefined)
+      .unwrap()
+      .then((stats) => {
+        setRelinkResult(
+          `Linked ${stats.links_added} connections across ${stats.docs_updated} memories`,
+        );
+      })
+      .catch(() => {
+        setRelinkResult("Failed to rebuild links");
+      });
   };
 
   if (error) {
@@ -208,103 +248,110 @@ export function KnowledgeWorkspace() {
               label="Loading memories..."
             />
           ) : (
-            <div className={styles.memoriesPanel}>
-              <Surface className={styles.listSection} variant="plain">
-                <div className={styles.controls}>
-                  <div className={styles.sortControl}>
-                    <span className={styles.controlLabel}>Sort</span>
-                    <Select
-                      value={sortKey}
-                      onValueChange={(value) =>
-                        setSortKey(value as MemorySortKey)
-                      }
-                    >
-                      <Select.Trigger
-                        aria-label="Sort memories"
-                        className={styles.sortTrigger}
-                      />
-                      <Select.Content maxWidth="220px">
-                        {Object.entries(sortLabels).map(([value, label]) => (
-                          <Select.Item key={value} value={value}>
-                            {label}
-                          </Select.Item>
-                        ))}
-                      </Select.Content>
-                    </Select>
-                  </div>
-
-                  {allTags.length > 0 ? (
-                    <div
-                      className={styles.tagFilters}
-                      aria-label="Filter by tags"
-                    >
-                      <span className={styles.controlLabel}>Tags</span>
-                      <div className={styles.tagList}>
-                        {allTags.map((tag) => {
-                          const selected = selectedTags.has(tag);
-                          return (
-                            <button
-                              key={tag}
-                              className={styles.tagButton}
-                              type="button"
-                              onClick={() => handleToggleTag(tag)}
-                              aria-pressed={selected}
-                            >
-                              <Chip
-                                className={styles.tagChip}
-                                radius="chip"
-                                selected={selected}
-                              >
-                                {tag}
-                              </Chip>
-                            </button>
-                          );
-                        })}
-                        {selectedTags.size > 0 ? (
-                          <button
-                            className={styles.clearTagsButton}
-                            type="button"
-                            onClick={handleClearTags}
-                          >
-                            Clear
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  ) : null}
+            <Surface className={styles.listSection} variant="plain">
+              <div className={styles.controls}>
+                <div className={styles.sortControl}>
+                  <span className={styles.controlLabel}>Sort</span>
+                  <Select
+                    value={sortKey}
+                    onValueChange={(value) =>
+                      setSortKey(value as MemorySortKey)
+                    }
+                  >
+                    <Select.Trigger
+                      aria-label="Sort memories"
+                      className={styles.sortTrigger}
+                    />
+                    <Select.Content maxWidth="220px">
+                      {Object.entries(sortLabels).map(([value, label]) => (
+                        <Select.Item key={value} value={value}>
+                          {label}
+                        </Select.Item>
+                      ))}
+                    </Select.Content>
+                  </Select>
                 </div>
 
-                <MemoryListView
-                  memories={filteredMemoryRecords}
-                  selectedId={selectedId}
-                  onSelectId={handleSelectMemory}
-                  linkedIds={linkedIds}
+                <MemoryTagFilter
+                  allTags={allTags}
+                  selectedTags={selectedTags}
+                  onToggleTag={handleToggleTag}
+                  onClearTags={handleClearTags}
                 />
-              </Surface>
+              </div>
 
-              <Surface className={styles.editorSection} variant="plain">
-                <MemoryDetailsEditor
-                  memory={selectedMemory}
-                  onMemoryDeleted={handleMemoryDeleted}
-                />
-              </Surface>
-            </div>
+              <MemoryListView
+                memories={filteredMemoryRecords}
+                selectedId={selectedId}
+                onSelectId={handleOpenMemory}
+                linkedIds={linkedIds}
+              />
+            </Surface>
           )}
         </Tabs.Content>
 
         <Tabs.Content className={styles.tabContent} value="graph">
           <Surface className={styles.graphSection} variant="plain">
-            <KnowledgeGraphView
-              nodes={linkedDocNodes}
-              edges={docDocEdges}
-              selectedId={selectedId}
-              onSelectId={handleSelectMemory}
-              isLoading={isLoading}
-              isActive={activeTab === "graph"}
-            />
+            <div className={styles.graphToolbar}>
+              <span className={styles.graphHint}>
+                {relinkResult ?? `${linkedDocNodes.length} linked memories`}
+              </span>
+              <Button
+                variant="soft"
+                size="sm"
+                onClick={handleRelink}
+                loading={isRelinking}
+              >
+                Rebuild links
+              </Button>
+            </div>
+            <div className={styles.graphBody}>
+              <KnowledgeGraphView
+                nodes={linkedDocNodes}
+                edges={docDocEdges}
+                selectedId={selectedId}
+                onSelectId={handleSelectNode}
+                isLoading={isLoading}
+                isActive={activeTab === "graph"}
+              />
+            </div>
           </Surface>
         </Tabs.Content>
       </Tabs>
+
+      <Sheet
+        open={editingMemory !== null}
+        onOpenChange={(open) => {
+          if (!open) handleCloseDetails();
+        }}
+      >
+        <Sheet.Content
+          className={styles.detailsSheet}
+          side="right"
+          scrollable={false}
+          maxWidth="560px"
+        >
+          <div className={styles.detailsHeader}>
+            <Sheet.Title className={styles.detailsTitle}>
+              {editingMemory?.title ?? "Memory"}
+            </Sheet.Title>
+            <Sheet.Close asChild>
+              <IconButton
+                icon={X}
+                aria-label="Close memory details"
+                variant="ghost"
+                size="sm"
+              />
+            </Sheet.Close>
+          </div>
+          <div className={styles.detailsBody}>
+            <MemoryDetailsEditor
+              memory={editingMemory}
+              onMemoryDeleted={handleMemoryDeleted}
+            />
+          </div>
+        </Sheet.Content>
+      </Sheet>
     </Surface>
   );
 }

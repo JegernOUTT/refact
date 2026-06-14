@@ -169,29 +169,31 @@ export function KnowledgeGraphView({
       layoutRef.current.stop();
     }
 
+    const animate = !reducedMotion && filteredNodes.length <= 160;
+
     const layout = cyRef.current.layout({
       name: "fcose",
       quality: "default",
-      randomize: false,
-      animate: !reducedMotion,
-      animationDuration: reducedMotion ? 0 : 500,
+      randomize: true,
+      animate,
+      animationDuration: animate ? 500 : 0,
       fit: true,
-      padding: 50,
-      nodeRepulsion: 4500,
-      idealEdgeLength: 100,
+      padding: 40,
+      nodeRepulsion: 8000,
+      idealEdgeLength: 80,
       edgeElasticity: 0.45,
-      nestingFactor: 0.1,
-      gravity: 0.25,
-      numIter: 2500,
-      tile: true,
-      tilingPaddingVertical: 10,
-      tilingPaddingHorizontal: 10,
+      gravity: 0.35,
+      gravityRange: 3.0,
+      numIter: 1200,
+      packComponents: true,
+      nodeSeparation: 90,
+      tile: false,
     } as Cytoscape.LayoutOptions);
 
     layoutRef.current = layout;
     layout.run();
     return layout;
-  }, [elements, reducedMotion]);
+  }, [elements.length, filteredNodes.length, reducedMotion]);
 
   const resizeAndFit = useCallback(
     (rerunLayout = false) => {
@@ -227,11 +229,13 @@ export function KnowledgeGraphView({
     const cy = cyRef.current;
     if (!cy || !cyReady) return;
 
+    let labelsVisible = cy.zoom() > 1.2;
     const handleZoom = () => {
-      const zoom = cy.zoom();
+      const shouldShow = cy.zoom() > 1.2;
+      if (shouldShow === labelsVisible) return;
+      labelsVisible = shouldShow;
       cy.elements("node").forEach((node) => {
-        const label = zoom > 1.2 ? (node.data("label") as string) : "";
-        node.style("label", label);
+        node.style("label", shouldShow ? (node.data("label") as string) : "");
       });
     };
 
@@ -285,7 +289,7 @@ export function KnowledgeGraphView({
   useEffect(() => {
     if (!cyReady || !isActive) return;
 
-    const timeoutId = window.setTimeout(() => resizeAndFit(true), 80);
+    const timeoutId = window.setTimeout(() => resizeAndFit(false), 80);
     return () => window.clearTimeout(timeoutId);
   }, [cyReady, isActive, resizeAndFit]);
 
@@ -375,7 +379,6 @@ export function KnowledgeGraphView({
             cyReadyRef.current = true;
             setCyReady(true);
             cy.resize();
-            window.setTimeout(() => resizeAndFit(true), 0);
           }
         }}
       />
