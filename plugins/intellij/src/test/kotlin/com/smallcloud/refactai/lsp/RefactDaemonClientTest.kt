@@ -4,19 +4,25 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.Comparator
+import java.util.zip.GZIPOutputStream
 
 class RefactDaemonClientTest {
     @Test
     fun versionComparisonDetectsOlderDaemon() {
         assertTrue(versionIsOlder("8.1.0", "8.2.0"))
         assertTrue(versionIsOlder("8.1.0-alpha", "8.1.1"))
+        assertTrue(versionIsOlder("8.1.0-alpha.1", "8.1.0"))
         assertFalse(versionIsOlder("8.2.0", "8.1.0"))
+        assertFalse(versionIsOlder("8.1.0", "8.1.0-alpha.1"))
         assertFalse(versionIsOlder("", "8.1.0"))
+        assertEquals(-1, compareRefactVersions("8.1.0-alpha.2", "8.1.0-alpha.10"))
+        assertEquals(-1, compareRefactVersions("8.1.0-alpha.1", "8.1.0-beta.1"))
         assertEquals("8.1.0", extractRefactVersion("refact 8.1.0\n"))
     }
 
@@ -146,6 +152,25 @@ class RefactDaemonClientTest {
     }
 
     @Test
+    fun tarTraversalEntryIsRejected() {
+        val root = Files.createTempDirectory("refact-binary-resolver-tar-slip")
+        try {
+            val archive = root.resolve("evil.tar.gz")
+            val dest = root.resolve("dest")
+            Files.createDirectories(dest)
+            Files.write(archive, tarGzEntry("../evil", "oops".toByteArray()))
+
+            val error = runCatching { extractArchive(archive, dest, false) }.exceptionOrNull()
+
+            assertTrue(error is IOException)
+            assertEquals("archive entry escapes target directory: ../evil", error?.message)
+            assertFalse(Files.exists(root.resolve("evil")))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun windowsDaemonCommandUsesPlainBinaryWithPathSpaces() {
         val bin = "C:\\Program Files\\Refact\\refact.exe"
 
@@ -227,7 +252,7 @@ class RefactDaemonClientTest {
             pluginVersion = "8.0.0",
             commands = listOf(DaemonSpawnCommand(listOf("refact-lsp", "daemon"))),
             spawnCandidate = { spawns += 1 },
-            pollCandidate = {
+            pollCandidate = { _, _ ->
                 polls += 1
                 DaemonStatus(pid = 44, version = "9.0.0")
             },
@@ -240,6 +265,36 @@ class RefactDaemonClientTest {
         assertEquals(0, polls)
         assertEquals(0, shutdowns)
         assertEquals(0, waitUntilDowns)
+    }
+
+    @Test
+    fun upgradePollReceivesExpectedVersionAndRejectedOldPid() {
+        val current = DaemonStatus(pid = 33, version = "8.1.0")
+        var spawns = 0
+        var shutdowns = 0
+        var waits = 0
+
+        val status = ensureDaemonWithHealthGate(
+            status = { current },
+            pluginVersion = "8.2.0",
+            commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
+            spawnCandidate = { spawns += 1 },
+            pollCandidate = { expectedVersion, rejectedPid ->
+                assertEquals("8.2.0", expectedVersion)
+                assertEquals(33, rejectedPid)
+                DaemonStatus(pid = 44, version = "8.2.0")
+            },
+            shutdown = { _, _ -> shutdowns += 1 },
+            waitUntilDown = { waits += 1 },
+        )
+
+        assertEquals(DaemonStatus(pid = 44, version = "8.2.0"), status)
+        assertEquals(1, spawns)
+        assertEquals(1, shutdowns)
+        assertEquals(1, waits)
+        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 33, version = "8.2.0"), "8.2.0", 33))
+        assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.1.0"), "8.2.0", 33))
+        assertTrue(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.2.0"), "8.2.0", 33))
     }
 }
 
@@ -254,4 +309,40 @@ private fun sha256(path: Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
     digest.update(Files.readAllBytes(path))
     return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+private fun tarGzEntry(name: String, data: ByteArray): ByteArray {
+    val raw = ByteArrayOutputStream()
+    raw.write(tarHeader(name, data.size, '0'))
+    raw.write(data)
+    raw.write(ByteArray((512 - (data.size % 512)) % 512))
+    raw.write(ByteArray(1024))
+    val compressed = ByteArrayOutputStream()
+    GZIPOutputStream(compressed).use { it.write(raw.toByteArray()) }
+    return compressed.toByteArray()
+}
+
+private fun tarHeader(name: String, size: Int, type: Char): ByteArray {
+    val header = ByteArray(512)
+    writeTarField(header, 0, 100, name)
+    writeTarField(header, 100, 8, "0000777")
+    writeTarField(header, 108, 8, "0000000")
+    writeTarField(header, 116, 8, "0000000")
+    writeTarField(header, 124, 12, size.toString(8).padStart(11, '0'))
+    writeTarField(header, 136, 12, "00000000000")
+    for (index in 148 until 156) header[index] = 32
+    header[156] = type.code.toByte()
+    writeTarField(header, 257, 6, "ustar")
+    writeTarField(header, 263, 2, "00")
+    val checksum = header.sumOf { it.toInt() and 0xff }
+    writeTarField(header, 148, 8, checksum.toString(8).padStart(6, '0'))
+    header[154] = 0
+    header[155] = 32
+    return header
+}
+
+private fun writeTarField(header: ByteArray, start: Int, length: Int, value: String) {
+    val bytes = value.toByteArray(Charsets.UTF_8)
+    val count = minOf(bytes.size, length)
+    bytes.copyInto(header, start, 0, count)
 }

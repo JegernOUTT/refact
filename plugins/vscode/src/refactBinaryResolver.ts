@@ -5,6 +5,7 @@ import * as http from "http";
 import * as https from "https";
 import * as os from "os";
 import * as path from "path";
+import * as zlib from "zlib";
 import { compareVersions } from "./refactDaemon";
 
 export const REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download";
@@ -228,23 +229,215 @@ function downloadFileToPath(
     request.once("error", error => reject(error));
 }
 
-async function defaultExtractArchive(archivePath: string, destDir: string, platform: string): Promise<void> {
+async function defaultExtractArchive(archivePath: string, destDir: string, _platform: string): Promise<void> {
+    await extractRefactArchive(archivePath, destDir);
+}
+
+export async function extractRefactArchive(archivePath: string, destDir: string): Promise<void> {
+    await fs.promises.mkdir(destDir, { recursive: true });
+    if (archivePath.endsWith(".zip")) {
+        await extractZipArchive(archivePath, destDir);
+        return;
+    }
+    await extractTarGzArchive(archivePath, destDir);
+}
+
+async function extractTarGzArchive(archivePath: string, destDir: string): Promise<void> {
+    const archive = zlib.gunzipSync(await fs.promises.readFile(archivePath));
+    const entries = tarEntries(archive, destDir);
+    for (const entry of entries) {
+        if (entry.type === "directory") {
+            await fs.promises.mkdir(path.dirname(entry.targetPath), { recursive: true });
+            await assertRealPathInside(path.dirname(entry.targetPath), destDir);
+            await assertNotSymlink(entry.targetPath);
+            await fs.promises.mkdir(entry.targetPath, { recursive: true });
+            await assertRealPathInside(entry.targetPath, destDir);
+            continue;
+        }
+        await fs.promises.mkdir(path.dirname(entry.targetPath), { recursive: true });
+        await assertRealPathInside(path.dirname(entry.targetPath), destDir);
+        await assertNotSymlink(entry.targetPath);
+        await fs.promises.writeFile(entry.targetPath, archive.subarray(entry.dataStart, entry.dataStart + entry.size));
+        await assertRealPathInside(entry.targetPath, destDir);
+    }
+}
+
+type TarEntry = {
+    type: "file" | "directory";
+    targetPath: string;
+    dataStart: number;
+    size: number;
+};
+
+function tarEntries(archive: Buffer, destDir: string): TarEntry[] {
+    const entries: TarEntry[] = [];
+    let offset = 0;
+    while (offset + 512 <= archive.length) {
+        const header = archive.subarray(offset, offset + 512);
+        if (header.every(byte => byte === 0)) {
+            break;
+        }
+        const name = tarString(header, 0, 100);
+        const prefix = tarString(header, 345, 155);
+        const entryName = prefix ? `${prefix}/${name}` : name;
+        const size = parseTarOctal(header, 124, 12);
+        const typeFlag = String.fromCharCode(header[156] || 48);
+        const dataStart = offset + 512;
+        const targetPath = safeArchiveEntryTarget(destDir, entryName);
+        if (typeFlag === "0" || typeFlag === "\0") {
+            entries.push({ type: "file", targetPath, dataStart, size });
+        } else if (typeFlag === "5") {
+            entries.push({ type: "directory", targetPath, dataStart, size: 0 });
+        } else if (typeFlag === "x" || typeFlag === "g") {
+        } else {
+            throw new Error(`unsupported tar entry type ${typeFlag} for ${entryName}`);
+        }
+        offset = dataStart + size + tarPadding(size);
+    }
+    return entries;
+}
+
+function tarString(buffer: Buffer, start: number, length: number): string {
+    const end = buffer.indexOf(0, start);
+    const realEnd = end >= start && end < start + length ? end : start + length;
+    return buffer.subarray(start, realEnd).toString("utf8").trim();
+}
+
+function parseTarOctal(buffer: Buffer, start: number, length: number): number {
+    const value = tarString(buffer, start, length).trim();
+    return value ? Number.parseInt(value, 8) : 0;
+}
+
+function tarPadding(size: number): number {
+    return (512 - (size % 512)) % 512;
+}
+
+type ZipEntry = {
+    name: string;
+    targetPath: string;
+    compressedSize: number;
+    compressionMethod: number;
+    localHeaderOffset: number;
+    isDirectory: boolean;
+};
+
+async function extractZipArchive(archivePath: string, destDir: string): Promise<void> {
+    const archive = await fs.promises.readFile(archivePath);
+    const entries = zipEntries(archive, destDir);
+    for (const entry of entries) {
+        if (entry.isDirectory) {
+            await fs.promises.mkdir(path.dirname(entry.targetPath), { recursive: true });
+            await assertRealPathInside(path.dirname(entry.targetPath), destDir);
+            await assertNotSymlink(entry.targetPath);
+            await fs.promises.mkdir(entry.targetPath, { recursive: true });
+            await assertRealPathInside(entry.targetPath, destDir);
+            continue;
+        }
+        await fs.promises.mkdir(path.dirname(entry.targetPath), { recursive: true });
+        await assertRealPathInside(path.dirname(entry.targetPath), destDir);
+        await assertNotSymlink(entry.targetPath);
+        await fs.promises.writeFile(entry.targetPath, zipEntryData(archive, entry));
+        await assertRealPathInside(entry.targetPath, destDir);
+    }
+}
+
+function zipEntries(archive: Buffer, destDir: string): ZipEntry[] {
+    const eocdOffset = findEndOfCentralDirectory(archive);
+    const centralDirectorySize = archive.readUInt32LE(eocdOffset + 12);
+    const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16);
+    const entries: ZipEntry[] = [];
+    let offset = centralDirectoryOffset;
+    const end = centralDirectoryOffset + centralDirectorySize;
+    while (offset < end) {
+        if (archive.readUInt32LE(offset) !== 0x02014b50) {
+            throw new Error("invalid zip central directory");
+        }
+        const flags = archive.readUInt16LE(offset + 8);
+        const compressionMethod = archive.readUInt16LE(offset + 10);
+        const compressedSize = archive.readUInt32LE(offset + 20);
+        const nameLength = archive.readUInt16LE(offset + 28);
+        const extraLength = archive.readUInt16LE(offset + 30);
+        const commentLength = archive.readUInt16LE(offset + 32);
+        const externalAttributes = archive.readUInt32LE(offset + 38);
+        const localHeaderOffset = archive.readUInt32LE(offset + 42);
+        const name = archive.subarray(offset + 46, offset + 46 + nameLength).toString((flags & 0x800) !== 0 ? "utf8" : "binary");
+        if ((flags & 1) !== 0) {
+            throw new Error(`encrypted zip entry is not supported: ${name}`);
+        }
+        if (compressionMethod !== 0 && compressionMethod !== 8) {
+            throw new Error(`unsupported zip compression method ${compressionMethod} for ${name}`);
+        }
+        if (((externalAttributes >>> 16) & 0o170000) === 0o120000) {
+            throw new Error(`zip entry is a symlink: ${name}`);
+        }
+        entries.push({
+            name,
+            targetPath: safeArchiveEntryTarget(destDir, name),
+            compressedSize,
+            compressionMethod,
+            localHeaderOffset,
+            isDirectory: name.endsWith("/"),
+        });
+        offset += 46 + nameLength + extraLength + commentLength;
+    }
+    return entries;
+}
+
+function findEndOfCentralDirectory(archive: Buffer): number {
+    const minimumOffset = Math.max(0, archive.length - 65557);
+    for (let offset = archive.length - 22; offset >= minimumOffset; offset--) {
+        if (archive.readUInt32LE(offset) === 0x06054b50) {
+            return offset;
+        }
+    }
+    throw new Error("zip archive is missing end of central directory");
+}
+
+function zipEntryData(archive: Buffer, entry: ZipEntry): Buffer {
+    const offset = entry.localHeaderOffset;
+    if (archive.readUInt32LE(offset) !== 0x04034b50) {
+        throw new Error(`invalid zip local header for ${entry.name}`);
+    }
+    const nameLength = archive.readUInt16LE(offset + 26);
+    const extraLength = archive.readUInt16LE(offset + 28);
+    const dataStart = offset + 30 + nameLength + extraLength;
+    const compressed = archive.subarray(dataStart, dataStart + entry.compressedSize);
+    return entry.compressionMethod === 0 ? compressed : zlib.inflateRawSync(compressed);
+}
+
+function safeArchiveEntryTarget(destDir: string, entryName: string): string {
+    if (!entryName || path.isAbsolute(entryName) || path.win32.isAbsolute(entryName) || path.posix.isAbsolute(entryName) || /^[A-Za-z]:/.test(entryName)) {
+        throw new Error(`archive entry escapes target directory: ${entryName}`);
+    }
+    const parts = entryName.split(/[\\/]+/).filter(part => part.length > 0 && part !== ".");
+    if (parts.length === 0 || parts.some(part => part === "..")) {
+        throw new Error(`archive entry escapes target directory: ${entryName}`);
+    }
+    const root = path.resolve(destDir);
+    const target = path.resolve(root, ...parts);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+        throw new Error(`archive entry escapes target directory: ${entryName}`);
+    }
+    return target;
+}
+
+async function assertRealPathInside(targetPath: string, destDir: string): Promise<void> {
+    const root = await fs.promises.realpath(destDir);
+    const realTarget = await fs.promises.realpath(targetPath);
+    if (realTarget !== root && !realTarget.startsWith(root + path.sep)) {
+        throw new Error(`archive entry escapes target directory: ${targetPath}`);
+    }
+}
+
+async function assertNotSymlink(targetPath: string): Promise<void> {
     try {
-        await runProcess("tar", archivePath.endsWith(".zip") ? ["-xf", archivePath, "-C", destDir] : ["-xzf", archivePath, "-C", destDir]);
+        if ((await fs.promises.lstat(targetPath)).isSymbolicLink()) {
+            throw new Error(`archive entry targets a symlink: ${targetPath}`);
+        }
     } catch (error) {
-        if (platform !== "win32" || !archivePath.endsWith(".zip")) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
             throw error;
         }
-        await runProcess("powershell.exe", [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-            archivePath,
-            destDir,
-        ]);
     }
 }
 
@@ -276,22 +469,6 @@ function runAndCapture(command: string, args: string[], timeoutMs: number): Prom
                 return;
             }
             resolve(Buffer.concat(chunks).toString("utf8"));
-        });
-    });
-}
-
-function runProcess(command: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
-        const stderr: Buffer[] = [];
-        child.stderr?.on("data", chunk => stderr.push(Buffer.from(chunk)));
-        child.once("error", reject);
-        child.once("close", code => {
-            if (code === 0) {
-                resolve();
-                return;
-            }
-            reject(new Error(`${command} exited with ${code}: ${Buffer.concat(stderr).toString("utf8")}`));
         });
     });
 }

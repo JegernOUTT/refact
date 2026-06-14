@@ -114,12 +114,12 @@ export function compareVersions(left: string | undefined, right: string | undefi
     const leftParts = parseVersion(left);
     const rightParts = parseVersion(right);
     for (let i = 0; i < 3; i++) {
-        const diff = leftParts[i] - rightParts[i];
+        const diff = leftParts.core[i] - rightParts.core[i];
         if (diff !== 0) {
             return diff > 0 ? 1 : -1;
         }
     }
-    return 0;
+    return comparePrerelease(leftParts.prerelease, rightParts.prerelease);
 }
 
 export function isPluginNewerThanDaemon(pluginVersion: string | undefined, daemonVersion: string | undefined): boolean {
@@ -129,15 +129,70 @@ export function isPluginNewerThanDaemon(pluginVersion: string | undefined, daemo
     return compareVersions(pluginVersion, daemonVersion) > 0;
 }
 
-function parseVersion(version: string | undefined): [number, number, number] {
-    const parts = (version ?? "")
+type ParsedVersion = {
+    core: [number, number, number];
+    prerelease: string[];
+};
+
+function parseVersion(version: string | undefined): ParsedVersion {
+    const match = (version ?? "")
         .trim()
-        .split(/[.\-+_\s]/)
-        .map(part => {
-            const match = part.match(/^\d+/);
-            return match ? Number.parseInt(match[0], 10) : 0;
-        });
-    return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+        .match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?/);
+    if (!match) {
+        return { core: [0, 0, 0], prerelease: [] };
+    }
+    return {
+        core: [toVersionNumber(match[1]), toVersionNumber(match[2]), toVersionNumber(match[3])],
+        prerelease: match[4]?.split(".").filter(part => part.length > 0) ?? [],
+    };
+}
+
+function toVersionNumber(part: string | undefined): number {
+    return part ? Number.parseInt(part, 10) : 0;
+}
+
+function comparePrerelease(left: string[], right: string[]): number {
+    if (left.length === 0 && right.length === 0) {
+        return 0;
+    }
+    if (left.length === 0) {
+        return 1;
+    }
+    if (right.length === 0) {
+        return -1;
+    }
+    const length = Math.max(left.length, right.length);
+    for (let i = 0; i < length; i++) {
+        const leftPart = left[i];
+        const rightPart = right[i];
+        if (leftPart === undefined) {
+            return -1;
+        }
+        if (rightPart === undefined) {
+            return 1;
+        }
+        const diff = comparePrereleaseIdentifier(leftPart, rightPart);
+        if (diff !== 0) {
+            return diff;
+        }
+    }
+    return 0;
+}
+
+function comparePrereleaseIdentifier(left: string, right: string): number {
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) {
+        const diff = Number.parseInt(left, 10) - Number.parseInt(right, 10);
+        return diff === 0 ? 0 : diff > 0 ? 1 : -1;
+    }
+    if (leftNumeric) {
+        return -1;
+    }
+    if (rightNumeric) {
+        return 1;
+    }
+    return left === right ? 0 : left > right ? 1 : -1;
 }
 
 export function missingBundledRefactError(assetPath: string): string {
@@ -250,8 +305,8 @@ async function waitForOldDaemonExit(
 ): Promise<void> {
     const deadline = now() + timeoutMs;
     while (true) {
-        const status = await readInfo(port);
-        if (!status || !isProcessRunning(oldPid)) {
+        await readInfo(port);
+        if (!isProcessRunning(oldPid)) {
             return;
         }
         const remainingMs = deadline - now();

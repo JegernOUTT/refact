@@ -18,6 +18,7 @@ import {
     type DaemonStatus,
 } from "./refactDaemon";
 import {
+    extractRefactArchive,
     extractRefactVersion,
     refactReleaseAsset,
     resolveRefactBinary,
@@ -42,13 +43,17 @@ export async function runRefactDaemonTests() {
     );
 
     assert.strictEqual(compareVersions("8.2.0", "8.1.9"), 1);
-    assert.strictEqual(compareVersions("8.1.0", "8.1.0-alpha.1"), 0);
+    assert.strictEqual(compareVersions("8.1.0", "8.1.0-alpha.1"), 1);
+    assert.strictEqual(compareVersions("8.1.0-alpha.2", "8.1.0-alpha.10"), -1);
+    assert.strictEqual(compareVersions("8.1.0-alpha.1", "8.1.0-beta.1"), -1);
     assert.strictEqual(compareVersions("8.1.0", "8.1.1"), -1);
     assert.strictEqual(isPluginNewerThanDaemon("8.2.0", "8.1.9"), true);
+    assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-alpha.1"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
 
     await runBundledRefactSpawnTests();
     await runStandaloneResolutionTests();
+    await runArchiveTraversalRejectedTest();
     await runDaemonUpgradeWaitsForExitTest();
     await runDaemonUpgradeTimeoutTest();
 }
@@ -184,6 +189,75 @@ function sha256FileSync(filePath: string): string {
     return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
+async function runArchiveTraversalRejectedTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-archive-slip-test-"));
+    try {
+        const archivePath = path.join(root, "evil.zip");
+        const destDir = path.join(root, "dest");
+        fs.mkdirSync(destDir);
+        fs.writeFileSync(archivePath, zipStoredEntry("../evil", Buffer.from("oops")));
+
+        let error: Error | undefined;
+        try {
+            await extractRefactArchive(archivePath, destDir);
+        } catch (caught) {
+            error = caught instanceof Error ? caught : new Error(String(caught));
+        }
+
+        assert.strictEqual(error?.message, "archive entry escapes target directory: ../evil");
+        assert.strictEqual(fs.existsSync(path.join(root, "evil")), false);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+function zipStoredEntry(name: string, data: Buffer): Buffer {
+    const nameBytes = Buffer.from(name, "utf8");
+    const crc = crc32(data);
+    const local = Buffer.alloc(30 + nameBytes.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    nameBytes.copy(local, 30);
+
+    const central = Buffer.alloc(46 + nameBytes.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    nameBytes.copy(central, 46);
+
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(1, 8);
+    eocd.writeUInt16LE(1, 10);
+    eocd.writeUInt32LE(central.length, 12);
+    eocd.writeUInt32LE(local.length + data.length, 16);
+
+    return Buffer.concat([local, data, central, eocd]);
+}
+
+function crc32(data: Buffer): number {
+    let crc = 0xffffffff;
+    for (const byte of data) {
+        crc ^= byte;
+        for (let i = 0; i < 8; i++) {
+            crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+        }
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+}
+
 async function spawnAndReturnStatus(
     refactPath: string,
     spawned: string[],
@@ -208,6 +282,7 @@ async function runDaemonUpgradeWaitsForExitTest() {
 
         let shutdownRequested = false;
         let oldStatusReadsAfterShutdown = 0;
+        let processRunningChecks = 0;
         let spawned = false;
         let time = 0;
         const sleeps: number[] = [];
@@ -237,7 +312,10 @@ async function runDaemonUpgradeWaitsForExitTest() {
                 }
                 return daemonStatus("8.2.0");
             },
-            isProcessRunning: () => oldStatusReadsAfterShutdown < 3,
+            isProcessRunning: () => {
+                processRunningChecks++;
+                return processRunningChecks < 4;
+            },
             sleep: async ms => {
                 sleeps.push(ms);
                 time += ms;
@@ -247,7 +325,8 @@ async function runDaemonUpgradeWaitsForExitTest() {
 
         assert.strictEqual(status.version, "8.2.0");
         assert.strictEqual(spawned, true);
-        assert.deepStrictEqual(sleeps, [200, 200]);
+        assert.strictEqual(oldStatusReadsAfterShutdown >= 3, true);
+        assert.deepStrictEqual(sleeps, [200, 200, 200]);
     } finally {
         fs.rmSync(assetPath, { recursive: true, force: true });
     }

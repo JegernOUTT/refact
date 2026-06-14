@@ -10,6 +10,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.Comparator
+import java.util.zip.GZIPInputStream
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
@@ -107,22 +108,64 @@ internal fun compareRefactVersions(left: String?, right: String?): Int {
     val leftParts = parseVersion(left)
     val rightParts = parseVersion(right)
     for (index in 0..2) {
-        val diff = leftParts[index] - rightParts[index]
+        val diff = leftParts.core[index] - rightParts.core[index]
         if (diff != 0) return if (diff > 0) 1 else -1
+    }
+    return comparePrerelease(leftParts.prerelease, rightParts.prerelease)
+}
+
+private data class ParsedVersion(
+    val core: List<Int>,
+    val prerelease: List<String>,
+)
+
+private fun parseVersion(version: String?): ParsedVersion {
+    val match = Regex("""(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?""")
+        .find(version.orEmpty().trim())
+        ?: return ParsedVersion(listOf(0, 0, 0), emptyList())
+    return ParsedVersion(
+        core = listOf(
+            match.groupValues.getOrNull(1).orEmpty().toIntOrNull() ?: 0,
+            match.groupValues.getOrNull(2).orEmpty().toIntOrNull() ?: 0,
+            match.groupValues.getOrNull(3).orEmpty().toIntOrNull() ?: 0,
+        ),
+        prerelease = match.groupValues.getOrNull(4)
+            ?.takeIf { it.isNotEmpty() }
+            ?.split('.')
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList(),
+    )
+}
+
+private fun comparePrerelease(left: List<String>, right: List<String>): Int {
+    if (left.isEmpty() && right.isEmpty()) return 0
+    if (left.isEmpty()) return 1
+    if (right.isEmpty()) return -1
+    val length = maxOf(left.size, right.size)
+    for (index in 0 until length) {
+        val leftPart = left.getOrNull(index) ?: return -1
+        val rightPart = right.getOrNull(index) ?: return 1
+        val diff = comparePrereleaseIdentifier(leftPart, rightPart)
+        if (diff != 0) return diff
     }
     return 0
 }
 
-private fun parseVersion(version: String?): List<Int> {
-    val parts = version.orEmpty()
-        .trim()
-        .split(Regex("[.\\-+_\\s]"))
-        .map { part -> Regex("^\\d+").find(part)?.value?.toIntOrNull() ?: 0 }
-    return listOf(
-        parts.getOrElse(0) { 0 },
-        parts.getOrElse(1) { 0 },
-        parts.getOrElse(2) { 0 },
-    )
+private fun comparePrereleaseIdentifier(left: String, right: String): Int {
+    val leftNumeric = left.all { it.isDigit() }
+    val rightNumeric = right.all { it.isDigit() }
+    if (leftNumeric && rightNumeric) {
+        return left.toLong().compareTo(right.toLong()).coerceSign()
+    }
+    if (leftNumeric) return -1
+    if (rightNumeric) return 1
+    return left.compareTo(right).coerceSign()
+}
+
+private fun Int.coerceSign(): Int = when {
+    this > 0 -> 1
+    this < 0 -> -1
+    else -> 0
 }
 
 private fun systemRefactCandidates(pathEnv: String, homeDir: Path, osName: String): List<Path> {
@@ -247,40 +290,129 @@ private fun sha256(filePath: Path): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
-private fun extractArchive(archivePath: Path, destDir: Path, isWindows: Boolean) {
+internal fun extractArchive(archivePath: Path, destDir: Path, isWindows: Boolean) {
     if (isWindows) {
         extractZip(archivePath, destDir)
         return
     }
-    val process = ProcessBuilder("tar", "-xzf", archivePath.toString(), "-C", destDir.toString())
-        .redirectErrorStream(true)
-        .start()
-    val output = process.inputStream.bufferedReader().readText()
-    if (!process.waitFor(120, TimeUnit.SECONDS)) {
-        process.destroyForcibly()
-        throw IOException("tar extraction timed out")
+    extractTarGz(archivePath, destDir)
+}
+
+private data class TarEntry(
+    val target: Path,
+    val type: Char,
+    val dataStart: Int,
+    val size: Int,
+)
+
+private fun extractTarGz(archivePath: Path, destDir: Path) {
+    Files.createDirectories(destDir)
+    val archive = GZIPInputStream(Files.newInputStream(archivePath)).use { it.readBytes() }
+    for (entry in tarEntries(archive, destDir)) {
+        if (entry.type == '5') {
+            val parent = entry.target.parent ?: throw IOException("archive entry has no parent: ${entry.target}")
+            Files.createDirectories(parent)
+            assertRealPathInside(parent, destDir)
+            assertNotSymlink(entry.target)
+            Files.createDirectories(entry.target)
+            assertRealPathInside(entry.target, destDir)
+        } else {
+            val parent = entry.target.parent ?: throw IOException("archive entry has no parent: ${entry.target}")
+            Files.createDirectories(parent)
+            assertRealPathInside(parent, destDir)
+            assertNotSymlink(entry.target)
+            Files.write(entry.target, archive.copyOfRange(entry.dataStart, entry.dataStart + entry.size))
+            assertRealPathInside(entry.target, destDir)
+        }
     }
-    if (process.exitValue() != 0) {
-        throw IOException("tar extraction failed: $output")
+}
+
+private fun tarEntries(archive: ByteArray, destDir: Path): List<TarEntry> {
+    val entries = mutableListOf<TarEntry>()
+    var offset = 0
+    while (offset + 512 <= archive.size) {
+        val header = archive.copyOfRange(offset, offset + 512)
+        if (header.all { it.toInt() == 0 }) break
+        val name = tarString(header, 0, 100)
+        val prefix = tarString(header, 345, 155)
+        val entryName = if (prefix.isEmpty()) name else "$prefix/$name"
+        val size = tarOctal(header, 124, 12)
+        val type = header[156].toInt().takeIf { it != 0 }?.toChar() ?: '0'
+        val dataStart = offset + 512
+        val target = safeArchiveEntryTarget(destDir, entryName)
+        when (type) {
+            '0', '5' -> entries.add(TarEntry(target, type, dataStart, size))
+            'x', 'g' -> {}
+            else -> throw IOException("unsupported tar entry type $type for $entryName")
+        }
+        offset = dataStart + size + tarPadding(size)
     }
+    return entries
+}
+
+private fun tarString(header: ByteArray, start: Int, length: Int): String {
+    val end = (start until start + length).firstOrNull { header[it].toInt() == 0 } ?: (start + length)
+    return header.copyOfRange(start, end).toString(Charsets.UTF_8).trim()
+}
+
+private fun tarOctal(header: ByteArray, start: Int, length: Int): Int {
+    val value = tarString(header, start, length).trim()
+    return value.takeIf { it.isNotEmpty() }?.toInt(8) ?: 0
+}
+
+private fun tarPadding(size: Int): Int = (512 - (size % 512)) % 512
+
+private fun safeArchiveEntryTarget(destDir: Path, entryName: String): Path {
+    if (entryName.isEmpty() || entryName.startsWith('/') || entryName.startsWith('\\') || Regex("^[A-Za-z]:").containsMatchIn(entryName)) {
+        throw IOException("archive entry escapes target directory: $entryName")
+    }
+    val parts = entryName.split(Regex("[\\\\/]+"))
+        .filter { it.isNotEmpty() && it != "." }
+    if (parts.isEmpty() || parts.any { it == ".." }) {
+        throw IOException("archive entry escapes target directory: $entryName")
+    }
+    val root = destDir.toAbsolutePath().normalize()
+    val target = parts.fold(root) { current, part -> current.resolve(part) }.normalize()
+    if (!target.startsWith(root)) {
+        throw IOException("archive entry escapes target directory: $entryName")
+    }
+    return target
 }
 
 private fun extractZip(archivePath: Path, destDir: Path) {
     ZipInputStream(Files.newInputStream(archivePath)).use { zip ->
         while (true) {
             val entry = zip.nextEntry ?: break
-            val target = destDir.resolve(entry.name).normalize()
-            if (!target.startsWith(destDir)) {
-                throw IOException("zip entry escapes target directory: ${entry.name}")
-            }
+            val target = safeArchiveEntryTarget(destDir, entry.name)
             if (entry.isDirectory) {
+                Files.createDirectories(target.parent)
+                assertRealPathInside(target.parent, destDir)
+                assertNotSymlink(target)
                 Files.createDirectories(target)
+                assertRealPathInside(target, destDir)
             } else {
                 Files.createDirectories(target.parent)
+                assertRealPathInside(target.parent, destDir)
+                assertNotSymlink(target)
                 Files.copy(zip, target, StandardCopyOption.REPLACE_EXISTING)
+                assertRealPathInside(target, destDir)
             }
             zip.closeEntry()
         }
+    }
+}
+
+private fun assertRealPathInside(target: Path, destDir: Path) {
+    val root = destDir.toRealPath()
+    val realTarget = target.toRealPath()
+    if (!realTarget.startsWith(root)) {
+        throw IOException("archive entry escapes target directory: $target")
+    }
+}
+
+private fun assertNotSymlink(target: Path) {
+    if (Files.isSymbolicLink(target)) {
+        throw IOException("archive entry targets a symlink: $target")
     }
 }
 

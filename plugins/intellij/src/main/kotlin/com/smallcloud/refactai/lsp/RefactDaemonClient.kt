@@ -20,7 +20,7 @@ interface RefactDaemonClient {
     fun status(): DaemonStatus
     fun ensureDaemon(binPath: String): DaemonStatus
     fun openProject(root: String, settings: LSPConfig): DaemonProject
-    fun closeProject(project: DaemonProject)
+    fun detachProject(project: DaemonProject)
 }
 
 data class DaemonStatus(
@@ -94,7 +94,7 @@ internal fun ensureDaemonWithHealthGate(
     pluginVersion: String,
     commands: List<DaemonSpawnCommand>,
     spawnCandidate: (DaemonSpawnCommand) -> Unit,
-    pollCandidate: () -> DaemonStatus,
+    pollCandidate: (String, Int?) -> DaemonStatus,
     shutdown: (DaemonStatus, String) -> Unit,
     waitUntilDown: () -> Unit,
 ): DaemonStatus {
@@ -106,7 +106,15 @@ internal fun ensureDaemonWithHealthGate(
         shutdown(current, "upgrade")
         waitUntilDown()
     }
-    return spawnDaemonCandidateUntilHealthy(commands, spawnCandidate, pollCandidate)
+    return spawnDaemonCandidateUntilHealthy(commands, spawnCandidate) {
+        pollCandidate(pluginVersion, current?.pid)
+    }
+}
+
+internal fun spawnedDaemonStatusAccepted(status: DaemonStatus, pluginVersion: String, rejectedPid: Int?): Boolean {
+    if (versionIsOlder(status.version, pluginVersion)) return false
+    if (rejectedPid != null && status.pid == rejectedPid) return false
+    return true
 }
 
 class HttpRefactDaemonClient(
@@ -148,7 +156,7 @@ class HttpRefactDaemonClient(
             pluginVersion = pluginVersionProvider(),
             commands = daemonCommandCandidates(binPath, currentDaemonSpawnOs()),
             spawnCandidate = { spawnDaemonProcess(it) },
-            pollCandidate = { pollStatus() },
+            pollCandidate = { expectedVersion, rejectedPid -> pollStatus(expectedVersion, rejectedPid) },
             shutdown = { current, reason -> shutdown(current, reason) },
             waitUntilDown = { waitUntilDown() },
         )
@@ -178,21 +186,17 @@ class HttpRefactDaemonClient(
         )
     }
 
-    override fun closeProject(project: DaemonProject) {
-        request(
-            URI("http://127.0.0.1:${project.daemon.port}/daemon/v1/projects/${project.projectId}/stop"),
-            "POST",
-            null,
-            project.daemon.authToken,
-        )
-    }
+    override fun detachProject(project: DaemonProject) {}
 
-    private fun pollStatus(): DaemonStatus {
+    private fun pollStatus(expectedVersion: String, rejectedPid: Int?): DaemonStatus {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS)
         var lastError: Throwable? = null
         while (System.nanoTime() < deadline) {
             runCatching { status() }
-                .onSuccess { return it }
+                .onSuccess {
+                    if (spawnedDaemonStatusAccepted(it, expectedVersion, rejectedPid)) return it
+                    lastError = IOException("daemon status still reports pid=${it.pid} version=${it.version}")
+                }
                 .onFailure { lastError = it }
             Thread.sleep(200)
         }
@@ -279,23 +283,5 @@ private data class OpenProjectResponseWire(
 
 fun versionIsOlder(current: String, mine: String): Boolean {
     if (current.isBlank() || mine.isBlank()) return false
-    val currentParts = parseVersion(current)
-    val mineParts = parseVersion(mine)
-    for (index in 0..2) {
-        val diff = currentParts[index].compareTo(mineParts[index])
-        if (diff != 0) return diff < 0
-    }
-    return false
-}
-
-private fun parseVersion(version: String): List<Int> {
-    val first = version.split(Regex("[^0-9.]"))
-        .firstOrNull { it.isNotBlank() }
-        .orEmpty()
-    val parts = first.split('.').map { it.toIntOrNull() ?: 0 }
-    return listOf(
-        parts.getOrElse(0) { 0 },
-        parts.getOrElse(1) { 0 },
-        parts.getOrElse(2) { 0 },
-    )
+    return compareRefactVersions(current, mine) < 0
 }

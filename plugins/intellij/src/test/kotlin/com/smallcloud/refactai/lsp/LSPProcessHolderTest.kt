@@ -35,8 +35,8 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     class FakeDaemonClient : RefactDaemonClient {
         val ensureDaemonCalls = AtomicInteger(0)
         val openProjectCalls = AtomicInteger(0)
-        val closeProjectCalls = AtomicInteger(0)
-        val closedProjects = Collections.synchronizedList(mutableListOf<DaemonProject>())
+        val detachProjectCalls = AtomicInteger(0)
+        val detachedProjects = Collections.synchronizedList(mutableListOf<DaemonProject>())
         val openedSettings = Collections.synchronizedList(mutableListOf<LSPConfig>())
         val openProjectEntered = CountDownLatch(1)
         val releaseOpenProject = CountDownLatch(1)
@@ -64,9 +64,9 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             return DaemonProject(projectId, baseUrlOverride ?: URI("http://127.0.0.1:$port/p/$projectId/"), status())
         }
 
-        override fun closeProject(project: DaemonProject) {
-            closeProjectCalls.incrementAndGet()
-            closedProjects.add(project)
+        override fun detachProject(project: DaemonProject) {
+            detachProjectCalls.incrementAndGet()
+            detachedProjects.add(project)
         }
     }
 
@@ -253,7 +253,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
-    fun testDisposeClosesDaemonProjectAndForgetsAttachState() {
+    fun testDisposeDetachesDaemonProjectAndForgetsAttachState() {
         val root = createTempDir().canonicalPath
         val fake = FakeDaemonClient()
         val holder = TestLspProcessHolder(mockProject(root), fake)
@@ -265,8 +265,8 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         assertNull(holder.baseUrlOrNull())
         assertEquals(1, fake.openProjectCalls.get())
-        assertEquals(1, fake.closeProjectCalls.get())
-        assertEquals("project-123", fake.closedProjects.single().projectId)
+        assertEquals(1, fake.detachProjectCalls.get())
+        assertEquals("project-123", fake.detachedProjects.single().projectId)
     }
 
     @Test

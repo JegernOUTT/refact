@@ -514,7 +514,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     private fun closeAttachedProject() {
         val projectToClose = attachedProject ?: return
         try {
-            daemonClient.closeProject(projectToClose)
+            daemonClient.detachProject(projectToClose)
         } catch (e: Exception) {
             logger.warn("LSP daemon project close failed: ${e.message}")
         }
