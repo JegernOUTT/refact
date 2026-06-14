@@ -31,6 +31,7 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
 use crate::privacy::PrivacySettings;
 use crate::background_tasks::BackgroundTasksHolder;
+use crate::ext::hooks_runner::HooksConfig;
 use crate::scheduler::SchedulerConfig;
 use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
@@ -229,12 +230,15 @@ impl CommandLine {
 struct EngineGlobalConfig {
     #[serde(default)]
     scheduler: SchedulerConfig,
+    #[serde(default)]
+    hooks: HooksConfig,
 }
 
 impl Default for EngineGlobalConfig {
     fn default() -> Self {
         Self {
             scheduler: SchedulerConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -316,6 +320,7 @@ pub struct GlobalContext {
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
     pub scheduler_config: SchedulerConfig,
+    pub hooks_config: HooksConfig,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -406,7 +411,10 @@ impl GlobalContext {
     }
 }
 
-async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) -> SchedulerConfig {
+async fn load_engine_global_config(
+    config_dir: &PathBuf,
+    cmdline: &CommandLine,
+) -> (SchedulerConfig, HooksConfig) {
     let path = if cmdline.privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
     } else {
@@ -416,7 +424,7 @@ async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) 
         Ok(content) => {
             serde_yaml::from_str::<EngineGlobalConfig>(&content).unwrap_or_else(|error| {
                 tracing::warn!(
-                    "failed to parse scheduler config from {}: {error}",
+                    "failed to parse engine global config from {}: {error}",
                     path.display()
                 );
                 EngineGlobalConfig::default()
@@ -424,15 +432,16 @@ async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) 
         }
         Err(error) => {
             tracing::warn!(
-                "failed to read scheduler config from {}: {error}",
+                "failed to read engine global config from {}: {error}",
                 path.display()
             );
             EngineGlobalConfig::default()
         }
     };
-    config
+    let scheduler = config
         .scheduler
-        .with_startup_overrides(cmdline.no_scheduler)
+        .with_startup_overrides(cmdline.no_scheduler);
+    (scheduler, config.hooks)
 }
 
 impl ShutdownAccess for GlobalContext {
@@ -709,7 +718,7 @@ pub async fn create_global_context(
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
     }
     let http_client = http_client_builder.build().unwrap();
-    let scheduler_config = load_engine_global_config(&config_dir, &cmdline).await;
+    let (scheduler_config, hooks_config) = load_engine_global_config(&config_dir, &cmdline).await;
 
     let mut workspace_dirs: Vec<PathBuf> = vec![];
     if !cmdline.workspace_folder.is_empty() {
@@ -787,6 +796,7 @@ pub async fn create_global_context(
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
         scheduler_config,
+        hooks_config,
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -799,6 +809,24 @@ pub async fn create_global_context(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn test_engine_global_config_parses_trusted_projects() {
+        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\n";
+        let cfg: EngineGlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.hooks.trusted_projects,
+            vec!["/home/me/repo".to_string()]
+        );
+        assert!(cfg.scheduler.enabled);
+    }
+
+    #[test]
+    fn test_engine_global_config_hooks_default_empty() {
+        let cfg: EngineGlobalConfig =
+            serde_yaml::from_str("scheduler:\n  enabled: true\n").unwrap();
+        assert!(cfg.hooks.trusted_projects.is_empty());
+    }
 
     #[tokio::test]
     async fn app_state_from_test_gcx_clones() {
@@ -968,6 +996,7 @@ pub mod tests {
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,
             scheduler_config: SchedulerConfig::default(),
+            hooks_config: HooksConfig::default(),
         };
         Arc::new(cx)
     }

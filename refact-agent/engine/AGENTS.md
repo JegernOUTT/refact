@@ -491,4 +491,4 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 - **User**: `~/.config/refact/` (default_privacy.yaml, providers.d/*.yaml)
 - **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations)
 - **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/)
-- **System prompts**: `yaml_configs/defaults/` — modes, subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.
+- **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.

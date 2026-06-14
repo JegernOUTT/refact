@@ -191,6 +191,9 @@ const SETUP_START_MESSAGES: Record<string, string> = {
   setup_mcp: "Help me find and configure MCPs for this project.",
   setup_commands: "Help me define project commands.",
   setup_subagents: "Help me define project subagents.",
+  setup_modes: "Help me create a custom chat mode for this project.",
+  setup_hooks: "Help me set up lifecycle hooks for this project.",
+  setup_knowledge: "Help me seed durable project knowledge.",
 };
 
 export const openChatInModeAndStart = createAsyncThunk<

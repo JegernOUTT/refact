@@ -23,3 +23,12 @@ scheduler:
   enabled: true
   disable_durable: false
   max_jobs: 50
+# Lifecycle hooks run shell commands on agent events (see .refact/hooks.yaml or
+# ~/.config/refact/hooks.yaml). Global hooks always run. Project-local hooks are
+# DISABLED by default: a cloned repository could otherwise execute arbitrary shell
+# commands on your machine. To run a project's hooks, add its absolute root path
+# to trusted_projects below; only listed repositories run hooks, so trusting one
+# repo never trusts another. This is read at startup, so restart after changing it.
+hooks:
+  trusted_projects: []
+  # - /absolute/path/to/a/repo/you/trust

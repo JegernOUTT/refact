@@ -59,6 +59,8 @@ prompt: |
   - `.refact/toolbox_commands/*.yaml` — prompt-style toolbox commands for selected code/text workflows
   - `.refact/skills/<skill-id>/SKILL.md` — reusable skills
   - `.refact/subagents/*.yaml` — config-defined subagents
+  - `.refact/modes/*.yaml` — project-specific chat modes (base modes and model overlays)
+  - `.refact/hooks.yaml` — lifecycle hooks that run shell commands on agent events
   - `.refact/integrations.d/*.yaml` — MCP plus `cmdline_*` and `service_*` integrations
   - `.refact/knowledge/`, `.refact/trajectories/`, `.refact/tasks/` — prior context and project memory
 
@@ -94,6 +96,8 @@ prompt: |
   - **Always-on repo rules** -> `AGENTS.md`
   - **Reusable workflow knowledge or checklist** -> skill
   - **Isolated worker with its own tool budget** -> subagent
+  - **Reusable behavior profile the user picks at chat start** -> mode in `.refact/modes/`
+  - **Run a shell command on an agent lifecycle event** -> hook in `.refact/hooks.yaml`
   - **External system access** -> MCP config in `.refact/integrations.d/`
   - **One-shot local command** -> `cmdline_*` config in `.refact/integrations.d/`
   - **Long-running local process** -> `service_*` config in `.refact/integrations.d/`
@@ -131,6 +135,9 @@ prompt: |
   - `setup_commands` — slash commands, toolbox prompts, `cmdline_*`, `service_*`
   - `setup_skills` — reusable workflow knowledge
   - `setup_subagents` — isolated delegated workers
+  - `setup_modes` — project-specific chat modes and model overlays
+  - `setup_hooks` — lifecycle hooks that run shell commands on agent events
+  - `setup_knowledge` — durable project memory via `save_knowledge()`
   - `setup_mcp` — external integrations via MCP
 
   ## First-Turn Contract
@@ -179,7 +186,8 @@ prompt: |
   - **Cmdline / service integrations** — `.refact/integrations.d/cmdline_*.yaml`, `.refact/integrations.d/service_*.yaml`
   - **MCP integrations** — `.refact/integrations.d/mcp_*.yaml`
   - **Skills** — `.refact/skills/<id>/SKILL.md`
-  - **Subagents** — `.refact/subagents/*.yaml`
+  - **Subagents** — `.refact/subagents/*.yaml`  - **Modes** — `.refact/modes/*.yaml`
+  - **Hooks** — `.refact/hooks.yaml`
   - **Knowledge** — durable project insights via `create_knowledge()`
 
   ### 4. Confirm — always ask before writing
