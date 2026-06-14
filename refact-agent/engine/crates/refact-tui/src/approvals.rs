@@ -148,6 +148,8 @@ impl ApprovalQueueKey {
                 .map(|reason| format!("{}:{}:{}", reason.tool_name, reason.command, reason.rule))
                 .collect();
         }
+        tool_call_ids.sort();
+        tool_call_ids.dedup();
         Self {
             scope: scope.into(),
             tool_call_ids,
@@ -201,6 +203,14 @@ impl ApprovalModalState {
 
     pub fn reasons(&self) -> &[PauseReason] {
         &self.reasons
+    }
+
+    pub fn scope(&self) -> &str {
+        &self.key.scope
+    }
+
+    pub fn tool_call_ids(&self) -> &[String] {
+        &self.key.tool_call_ids
     }
 
     pub fn full_args(&self) -> bool {
@@ -275,7 +285,11 @@ impl ApprovalModalState {
     }
 
     fn same_key(&self, other: &Self) -> bool {
-        self.key == other.key
+        self.key.scope == other.key.scope
+    }
+
+    fn has_scope(&self, scope: &str) -> bool {
+        self.key.scope == scope
     }
 }
 
@@ -310,6 +324,16 @@ impl ApprovalQueue {
 
     pub fn pop_front(&mut self) -> Option<ApprovalModalState> {
         let modal = self.pending.pop_front();
+        self.refresh_pending_counts();
+        modal
+    }
+
+    pub fn remove_scope(&mut self, scope: &str) -> Option<ApprovalModalState> {
+        let position = self
+            .pending
+            .iter()
+            .position(|modal| modal.has_scope(scope))?;
+        let modal = self.pending.remove(position);
         self.refresh_pending_counts();
         modal
     }
@@ -571,15 +595,15 @@ mod tests {
     fn approval_queue_preserves_fifo_and_pending_count() {
         let mut queue = ApprovalQueue::new();
         assert!(queue.push(ApprovalModalState::with_scope(
-            "chat-1",
+            "chat-1:call-1",
             vec![reason("call-1")]
         )));
         assert!(queue.push(ApprovalModalState::with_scope(
-            "chat-1",
+            "chat-1:call-2",
             vec![reason("call-2")]
         )));
         assert!(!queue.push(ApprovalModalState::with_scope(
-            "chat-1",
+            "chat-1:call-2",
             vec![reason("call-2")]
         )));
 
@@ -601,11 +625,11 @@ mod tests {
     fn render_modal_lines_reports_queue_count() {
         let mut queue = ApprovalQueue::new();
         queue.push(ApprovalModalState::with_scope(
-            "chat-1",
+            "chat-1:call-1",
             vec![reason("call-1")],
         ));
         queue.push(ApprovalModalState::with_scope(
-            "chat-1",
+            "chat-1:call-2",
             vec![reason("call-2")],
         ));
 

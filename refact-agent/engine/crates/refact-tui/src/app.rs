@@ -1,4 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -202,6 +202,12 @@ struct PendingSendRetry {
     params: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingApprovalClear {
+    scope: String,
+    tool_call_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CommandContextTag {
     SendMessage { prompt: String, params: Value },
@@ -284,7 +290,7 @@ pub struct App {
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
     approval_queue: ApprovalQueue,
-    pending_approval_clears: usize,
+    pending_approval_clears: VecDeque<PendingApprovalClear>,
     events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
@@ -359,7 +365,7 @@ impl App {
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
-            pending_approval_clears: 0,
+            pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
@@ -417,7 +423,7 @@ impl App {
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
-            pending_approval_clears: 0,
+            pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
@@ -701,7 +707,7 @@ impl App {
 
     #[cfg(test)]
     fn approval_pending_clear_count(&self) -> usize {
-        self.pending_approval_clears
+        self.pending_approval_clears.len()
     }
 
     pub fn events_pane(&self) -> &EventsPaneState {
@@ -2278,37 +2284,115 @@ impl App {
             .or_else(|| raw.get("id"))
             .or_else(|| raw.get("message_id"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| event_seq.map(|seq| seq.to_string()));
-        match pause_id {
-            Some(pause_id) if !pause_id.is_empty() => format!("{}:{pause_id}", self.chat_id),
-            _ => self.chat_id.clone(),
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(pause_id) = pause_id {
+            return format!("{}:{pause_id}", self.chat_id);
+        }
+        let tool_call_ids = approval_tool_call_ids(raw);
+        if !tool_call_ids.is_empty() {
+            return format!(
+                "{}:tools:{:016x}",
+                self.chat_id,
+                stable_scope_hash(&tool_call_ids)
+            );
+        }
+        match event_seq {
+            Some(seq) => format!("{}:seq:{seq}", self.chat_id),
+            None => self.chat_id.clone(),
+        }
+    }
+
+    fn explicit_approval_scope(&self, raw: &Value) -> Option<String> {
+        let has_pause_id = raw
+            .get("pause_id")
+            .or_else(|| raw.get("id"))
+            .or_else(|| raw.get("message_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty());
+        if has_pause_id || !approval_tool_call_ids(raw).is_empty() {
+            Some(self.approval_scope(raw, None))
+        } else {
+            None
         }
     }
 
     fn clear_approvals(&mut self) {
         self.approval_queue.clear();
-        self.pending_approval_clears = 0;
+        self.pending_approval_clears.clear();
     }
 
     fn enqueue_approval(&mut self, modal: ApprovalModalState) {
+        if self.approval_scope_pending_clear(modal.scope()) {
+            return;
+        }
         self.approval_queue.push(modal);
     }
 
     fn pop_current_approval(&mut self) -> Option<ApprovalModalState> {
         let modal = self.approval_queue.pop_front();
-        if modal.is_some() {
-            self.pending_approval_clears = self.pending_approval_clears.saturating_add(1);
+        if let Some(modal) = &modal {
+            self.mark_approval_pending_clear(modal);
         }
         modal
     }
 
-    fn handle_pause_cleared(&mut self) {
-        if self.pending_approval_clears > 0 {
-            self.pending_approval_clears -= 1;
-        } else {
-            self.approval_queue.pop_front();
+    fn approval_scope_pending_clear(&self, scope: &str) -> bool {
+        self.pending_approval_clears
+            .iter()
+            .any(|pending| pending.scope == scope)
+    }
+
+    fn mark_approval_pending_clear(&mut self, modal: &ApprovalModalState) {
+        if !self.approval_scope_pending_clear(modal.scope()) {
+            self.pending_approval_clears
+                .push_back(PendingApprovalClear {
+                    scope: modal.scope().to_string(),
+                    tool_call_ids: modal.tool_call_ids().to_vec(),
+                });
         }
+        self.approval_queue.remove_scope(modal.scope());
+    }
+
+    fn handle_pause_cleared(&mut self, raw: &Value) {
+        if let Some(scope) = self.explicit_approval_scope(raw) {
+            self.pending_approval_clears
+                .retain(|pending| pending.scope != scope);
+            self.approval_queue.remove_scope(&scope);
+        } else {
+            self.pending_approval_clears.pop_front();
+        }
+    }
+
+    fn pending_clear_tool_call_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .pending_approval_clears
+            .iter()
+            .flat_map(|pending| pending.tool_call_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    fn filtered_approval_raw(&self, raw: &Value) -> Value {
+        let pending_ids = self.pending_clear_tool_call_ids();
+        if pending_ids.is_empty() {
+            return raw.clone();
+        }
+        let mut filtered = raw.clone();
+        let Some(map) = filtered.as_object_mut() else {
+            return filtered;
+        };
+        for key in ["reasons", "pause_reasons"] {
+            if let Some(Value::Array(reasons)) = map.get_mut(key) {
+                reasons.retain(|reason| {
+                    let reason_ids = approval_tool_call_ids(reason);
+                    reason_ids.is_empty() || reason_ids.iter().any(|id| !pending_ids.contains(id))
+                });
+            }
+        }
+        filtered
     }
 
     pub fn apply_chat_event(&mut self, event: ChatEvent) -> AppAction {
@@ -2370,7 +2454,7 @@ impl App {
                 queued_items,
             } => self.update_server_queue(queue_size, queued_items),
             SseEvent::PauseRequired => self.handle_pause_required(&raw, event.seq),
-            SseEvent::PauseCleared => self.handle_pause_cleared(),
+            SseEvent::PauseCleared => self.handle_pause_cleared(&raw),
             SseEvent::MessageAdded { message } => {
                 self.handle_message_added_payload(message.as_ref())
             }
@@ -2444,18 +2528,45 @@ impl App {
             self.apply_runtime_state(runtime);
             self.update_usage(runtime);
             self.update_server_queue_from_runtime(runtime);
-            self.clear_approvals();
-            if let Some(modal) =
-                ApprovalModalState::from_event_in_scope(self.approval_scope(runtime, None), runtime)
-            {
-                self.enqueue_approval(modal);
-            }
+            self.sync_runtime_approvals(runtime);
         }
     }
 
     fn handle_runtime_updated(&mut self, raw: &Value) {
         self.apply_runtime_state(raw);
         self.update_server_queue_from_runtime(raw);
+        self.sync_runtime_approvals(raw);
+    }
+
+    fn sync_runtime_approvals(&mut self, runtime: &Value) {
+        let paused_tool_call_ids = approval_tool_call_ids(runtime);
+        if approval_reasons_present(runtime) {
+            self.retain_pending_clears_still_paused(&paused_tool_call_ids);
+        }
+        let filtered_runtime = self.filtered_approval_raw(runtime);
+        if let Some(modal) = ApprovalModalState::from_event_in_scope(
+            self.approval_scope(&filtered_runtime, None),
+            &filtered_runtime,
+        ) {
+            self.enqueue_approval(modal);
+        } else if self.session_state != SessionState::Paused
+            || (approval_reasons_present(runtime) && paused_tool_call_ids.is_empty())
+        {
+            self.clear_approvals();
+        }
+    }
+
+    fn retain_pending_clears_still_paused(&mut self, paused_tool_call_ids: &[String]) {
+        if paused_tool_call_ids.is_empty() {
+            return;
+        }
+        self.pending_approval_clears.retain(|pending| {
+            pending.tool_call_ids.is_empty()
+                || pending
+                    .tool_call_ids
+                    .iter()
+                    .any(|id| paused_tool_call_ids.contains(id))
+        });
     }
 
     fn update_server_queue_from_runtime(&mut self, raw: &Value) {
@@ -2521,9 +2632,16 @@ impl App {
 
     fn handle_pause_required(&mut self, raw: &Value, event_seq: Option<u64>) {
         self.session_state = SessionState::Paused;
-        match ApprovalModalState::from_event_in_scope(self.approval_scope(raw, event_seq), raw) {
+        let filtered = self.filtered_approval_raw(raw);
+        match ApprovalModalState::from_event_in_scope(
+            self.approval_scope(&filtered, event_seq),
+            &filtered,
+        ) {
             Some(modal) => self.enqueue_approval(modal),
-            None => self.add_notice("Approval required but no tool metadata was provided"),
+            None if !approval_reasons_present(raw) => {
+                self.add_notice("Approval required but no tool metadata was provided")
+            }
+            None => {}
         }
     }
 
@@ -4812,6 +4930,68 @@ fn stable_revision<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
+fn stable_scope_hash(values: &[String]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for value in values {
+        for byte in value.as_bytes().iter().copied().chain(std::iter::once(0)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+fn approval_reasons_present(raw: &Value) -> bool {
+    raw.get("reasons").is_some() || raw.get("pause_reasons").is_some()
+}
+
+fn approval_tool_call_ids(raw: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    collect_tool_call_ids(raw, &mut ids);
+    for key in ["tool_call_ids", "tool_ids"] {
+        if let Some(value) = raw.get(key) {
+            collect_tool_call_ids(value, &mut ids);
+        }
+    }
+    for key in ["reasons", "pause_reasons", "decisions"] {
+        if let Some(values) = raw.get(key).and_then(Value::as_array) {
+            for value in values {
+                collect_tool_call_ids(value, &mut ids);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn collect_tool_call_ids(value: &Value, ids: &mut Vec<String>) {
+    match value {
+        Value::String(id) if !id.is_empty() => ids.push(id.clone()),
+        Value::Object(map) => {
+            if let Some(id) = map
+                .get("tool_call_id")
+                .or_else(|| map.get("tool_id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                ids.push(id.to_string());
+            }
+            for key in ["tool_call_ids", "tool_ids"] {
+                if let Some(value) = map.get(key) {
+                    collect_tool_call_ids(value, ids);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_tool_call_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
     match message.role {
         TranscriptRole::User => (!message.content.is_empty())
@@ -4963,8 +5143,12 @@ mod tests {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
             kind: "pause_required".to_string(),
-            raw: json!({"reasons": [{"type": "confirmation", "tool_name": tool_name, "command": format!("{tool_name}({tool_call_id})"), "rule": "*", "tool_call_id": tool_call_id}]}),
+            raw: json!({"reasons": [pause_reason_value(tool_call_id, tool_name)]}),
         }
+    }
+
+    fn pause_reason_value(tool_call_id: &str, tool_name: &str) -> Value {
+        json!({"type": "confirmation", "tool_name": tool_name, "command": format!("{tool_name}({tool_call_id})"), "rule": "*", "tool_call_id": tool_call_id})
     }
 
     fn assistant_text(app: &App) -> String {
@@ -6456,6 +6640,134 @@ new-chat = "ctrl-x"
             }
         );
         assert!(app.approval_modal().is_none());
+    }
+
+    #[test]
+    fn decided_approval_snapshot_replay_skips_decided_scope_and_keeps_pending() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        let first_action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            first_action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-a".to_string(),
+                    accepted: true,
+                }],
+                patch: None,
+            }
+        );
+        assert_eq!(app.approval_pending_clear_count(), 1);
+        assert_eq!(
+            app.approval_modal().unwrap().reasons()[0].tool_call_id,
+            "call-b"
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "paused", "pause_reasons": [pause_reason_value("call-a", "shell")]}, "messages": []}),
+        });
+        assert_eq!(app.approval_pending_clear_count(), 1);
+        assert_eq!(
+            app.approval_modal().unwrap().reasons()[0].tool_call_id,
+            "call-b"
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_cleared".to_string(),
+            raw: json!({}),
+        });
+        assert_eq!(app.approval_pending_clear_count(), 0);
+        assert_eq!(
+            app.approval_modal().unwrap().reasons()[0].tool_call_id,
+            "call-b"
+        );
+
+        let second_action = app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            second_action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-b".to_string(),
+                    accepted: false,
+                }],
+                patch: None,
+            }
+        );
+        assert!(app.approval_modal().is_none());
+    }
+
+    #[test]
+    fn snapshot_brand_new_pause_preserves_existing_pending_order() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "paused", "pause_reasons": [pause_reason_value("call-c", "cat")]}, "messages": []}),
+        });
+
+        let first = app.approval_modal().unwrap();
+        assert_eq!(first.reasons()[0].tool_call_id, "call-a");
+        assert_eq!(first.pending_after(), 1);
+
+        let first_action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            first_action,
+            AppAction::SendToolDecisions {
+                decisions: vec![ToolDecision {
+                    tool_call_id: "call-a".to_string(),
+                    accepted: true,
+                }],
+                patch: None,
+            }
+        );
+        assert_eq!(
+            app.approval_modal().unwrap().reasons()[0].tool_call_id,
+            "call-c"
+        );
+    }
+
+    #[test]
+    fn pause_cleared_with_empty_approval_queue_is_noop() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_cleared".to_string(),
+            raw: json!({}),
+        });
+
+        assert!(app.approval_modal().is_none());
+        assert_eq!(app.approval_pending_clear_count(), 0);
+    }
+
+    #[test]
+    fn pause_cleared_with_tool_call_id_clears_matching_scope_only() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "pause_cleared".to_string(),
+            raw: json!({"tool_call_id": "call-b"}),
+        });
+
+        assert_eq!(
+            app.approval_modal().unwrap().reasons()[0].tool_call_id,
+            "call-a"
+        );
+        assert_eq!(app.approval_modal().unwrap().pending_after(), 0);
     }
 
     #[test]
