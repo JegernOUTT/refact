@@ -10,10 +10,13 @@ import {
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
+  type UpdateCronRequest,
   schedulerErrorMessage,
   useCreateCronMutation,
   useDeleteCronMutation,
   useGetCronTasksQuery,
+  useRunCronMutation,
+  useUpdateCronMutation,
 } from "../../services/refact/schedulerApi";
 import {
   selectCurrentThreadId,
@@ -30,6 +33,8 @@ type SchedulerPanelProps = {
   embedded?: boolean;
 };
 
+type CronListUpdate = Omit<UpdateCronRequest, "id">;
+
 export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   onBack,
   embedded,
@@ -42,14 +47,21 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   } = useGetCronTasksQuery(undefined);
   const [createCron, createState] = useCreateCronMutation();
   const [deleteCron, deleteState] = useDeleteCronMutation();
+  const [updateCron, updateState] = useUpdateCronMutation();
+  const [runCron, runState] = useRunCronMutation();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [runningId, setRunningId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [updateError, setUpdateError] = useState<unknown>(null);
+  const [runError, setRunError] = useState<unknown>(null);
   const lastCronFireAt = useAppSelector(selectLastCronFireAt);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const currentMode = useAppSelector(selectThreadMode);
 
   const recurringCount = tasks.filter((task) => task.recurring).length;
   const durableCount = tasks.filter((task) => task.durable).length;
+  const enabledCount = tasks.filter((task) => task.enabled).length;
 
   const sortedTasks = useMemo(
     () =>
@@ -60,7 +72,13 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       ),
     [tasks],
   );
-  const renderedDeleteError = deleteState.error ?? deleteError;
+  const renderedMutationError =
+    deleteState.error ??
+    updateState.error ??
+    runState.error ??
+    deleteError ??
+    updateError ??
+    runError;
 
   const handleCreate = async (
     request: Omit<CreateCronRequest, "chat_id" | "mode">,
@@ -84,8 +102,44 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
     }
   };
 
+  const handleUpdate = async (id: string, request: CronListUpdate) => {
+    setUpdatingId(id);
+    setUpdateError(null);
+    try {
+      await updateCron({ id, ...request }).unwrap();
+    } catch (err) {
+      setUpdateError(err);
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleRunNow = async (id: string) => {
+    setRunningId(id);
+    setRunError(null);
+    try {
+      await runCron({ id }).unwrap();
+    } catch (err) {
+      setRunError(err);
+    } finally {
+      setRunningId(null);
+    }
+  };
+
   const deleteTask = (id: string) => {
-    handleDelete(id).catch(setDeleteError);
+    void handleDelete(id);
+  };
+
+  const toggleEnabled = (id: string, enabled: boolean) => {
+    void handleUpdate(id, { enabled });
+  };
+
+  const runNow = (id: string) => {
+    void handleRunNow(id);
+  };
+
+  const updateTask = (id: string, request: CronListUpdate) => {
+    void handleUpdate(id, request);
   };
 
   const actions = (
@@ -113,6 +167,10 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       </Badge>
       <Badge tone="success" variant="glass">
         <StatusDot status="success" />
+        {enabledCount} enabled
+      </Badge>
+      <Badge tone="success" variant="glass">
+        <StatusDot status="success" />
         {recurringCount} recurring
       </Badge>
       <Badge tone="accent" variant="glass">
@@ -130,7 +188,7 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   return (
     <SettingsSection
       title="Scheduler"
-      description="Create, review, and delete scheduled prompts for the current chat."
+      description="Create, review, and manage scheduled prompts for the current chat."
       actions={actions}
       subNav={summary}
     >
@@ -160,24 +218,29 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
                   Scheduled prompts
                 </h3>
                 <p className={styles.sectionHint}>
-                  Review the next fire time, schedule scope, recurrence, and
-                  prompt description.
+                  Review lifecycle status, next and last fire times, schedule
+                  scope, recurrence, and prompt description.
                 </p>
               </div>
             </div>
             {error ? (
               <FieldError>{schedulerErrorMessage(error)}</FieldError>
             ) : null}
-            {renderedDeleteError ? (
+            {renderedMutationError ? (
               <FieldError>
-                {schedulerErrorMessage(renderedDeleteError)}
+                {schedulerErrorMessage(renderedMutationError)}
               </FieldError>
             ) : null}
             <CronList
               tasks={sortedTasks}
               isLoading={isFetching}
               deletingId={deletingId}
+              updatingId={updatingId}
+              runningId={runningId}
               onDelete={deleteTask}
+              onToggleEnabled={toggleEnabled}
+              onRunNow={runNow}
+              onUpdate={updateTask}
             />
           </section>
         </div>

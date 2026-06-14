@@ -24,6 +24,8 @@
 .createCard,
 .listPane,
 .form,
+.editForm,
+.editGrid,
 .listTitleBlock,
 .jobCard,
 .jobTitleBlock,
@@ -52,6 +54,11 @@
 
 .form {
   gap: var(--rf-space-4);
+}
+
+.editForm,
+.editGrid {
+  gap: var(--rf-space-3);
 }
 
 .sectionHint,
@@ -139,7 +146,8 @@
   min-width: 0;
 }
 
-.toggles {
+.toggles,
+.editGrid {
   display: grid;
   min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -259,7 +267,8 @@
 
 @container (width <= 880px) {
   .layout,
-  .toggles {
+  .toggles,
+  .editGrid {
     grid-template-columns: minmax(0, 1fr);
   }
 }
