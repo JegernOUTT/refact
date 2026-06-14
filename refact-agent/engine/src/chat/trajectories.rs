@@ -86,7 +86,8 @@ async fn atomic_write_json_with_tmp_path(
 }
 
 use super::types::{
-    ChatSession, ExternalReloadPending, SessionState, ThreadParams, TrajectorySourceIdentity,
+    ChatSession, ExternalReloadPending, SessionState, TaskMeta, ThreadParams,
+    TrajectorySourceIdentity,
 };
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
@@ -1860,6 +1861,86 @@ pub async fn load_generic_trajectory_for_chat(
 ) -> Option<LoadedTrajectory> {
     let candidate = find_trajectory_file(gcx.clone(), chat_id).await?;
     load_trajectory_candidate(gcx, chat_id, candidate).await
+}
+
+fn task_meta_is_planner_for_task(task_meta: Option<&TaskMeta>, task_id: &str) -> bool {
+    task_meta.is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+}
+
+async fn chat_id_is_planner_for_task(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    task_id: &str,
+) -> bool {
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        let session = session_arc.lock().await;
+        if task_meta_is_planner_for_task(session.thread.task_meta.as_ref(), task_id) {
+            return true;
+        }
+    }
+
+    load_trajectory_for_chat(gcx, chat_id)
+        .await
+        .is_some_and(|loaded| {
+            task_meta_is_planner_for_task(loaded.thread.task_meta.as_ref(), task_id)
+        })
+}
+
+pub(crate) async fn verified_planner_linked_root_chat_id(
+    gcx: Arc<GlobalContext>,
+    current_chat_id: &str,
+    current_root_chat_id: Option<&str>,
+    task_meta: &TaskMeta,
+) -> Option<String> {
+    if task_meta.role == "planner" {
+        return None;
+    }
+    let root_chat_id =
+        current_root_chat_id.filter(|id| !id.is_empty() && *id != current_chat_id)?;
+    if task_meta.planner_chat_id.as_deref() == Some(root_chat_id) {
+        return Some(root_chat_id.to_string());
+    }
+    if chat_id_is_planner_for_task(gcx, root_chat_id, &task_meta.task_id).await {
+        return Some(root_chat_id.to_string());
+    }
+    None
+}
+
+pub(crate) async fn resolve_task_planner_controller_chat_id(
+    gcx: Arc<GlobalContext>,
+    current_chat_id: &str,
+    current_root_chat_id: Option<&str>,
+    task_meta: Option<&TaskMeta>,
+) -> String {
+    let Some(task_meta) = task_meta else {
+        return current_chat_id.to_string();
+    };
+    if let Some(root_chat_id) =
+        verified_planner_linked_root_chat_id(gcx, current_chat_id, current_root_chat_id, task_meta)
+            .await
+    {
+        return root_chat_id;
+    }
+    if task_meta.role == "planner" {
+        return task_meta
+            .planner_chat_id
+            .clone()
+            .filter(|id| {
+                !id.is_empty()
+                    && current_root_chat_id.filter(|root_id| *root_id != current_chat_id)
+                        != Some(id.as_str())
+            })
+            .unwrap_or_else(|| current_chat_id.to_string());
+    }
+    task_meta
+        .planner_chat_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| current_chat_id.to_string())
 }
 
 fn trajectory_source_matches_hint(
@@ -11040,6 +11121,63 @@ mod tests {
                 None,
                 None,
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn planner_chat_id_verified_root_requires_planner_for_same_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _app) = make_app_with_workspace(dir.path()).await;
+        let child_meta = task_meta(
+            "task-root-check",
+            "subchats",
+            None,
+            None,
+            Some("stale-planner"),
+        );
+        let planner_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-root-check")
+            .join("trajectories")
+            .join("planner")
+            .join("planner-root-check.json");
+        write_task_trajectory_file_with_user_message(
+            &planner_path,
+            "planner-root-check",
+            "Planner Root Check",
+            "planner root",
+            &task_meta(
+                "task-root-check",
+                "planner",
+                None,
+                None,
+                Some("planner-root-check"),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            verified_planner_linked_root_chat_id(
+                gcx.clone(),
+                "child-root-check",
+                Some("normal-root"),
+                &child_meta,
+            )
+            .await,
+            None
+        );
+        assert_eq!(
+            verified_planner_linked_root_chat_id(
+                gcx,
+                "child-root-check",
+                Some("planner-root-check"),
+                &child_meta,
+            )
+            .await
+            .as_deref(),
+            Some("planner-root-check")
         );
     }
 

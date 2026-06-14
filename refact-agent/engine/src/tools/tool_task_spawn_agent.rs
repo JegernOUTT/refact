@@ -11,6 +11,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::trajectories::resolve_task_planner_controller_chat_id;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
@@ -504,21 +505,13 @@ pub(crate) fn build_agent_thread_params(
     }
 }
 
-fn resolve_invoking_planner_chat_id(
+async fn resolve_invoking_planner_chat_id(
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
     root_chat_id: &str,
     task_meta: Option<&TaskMeta>,
 ) -> String {
-    if !root_chat_id.is_empty() && root_chat_id != chat_id {
-        return root_chat_id.to_string();
-    }
-    if task_meta.is_some_and(|meta| meta.role == "planner") {
-        return chat_id.to_string();
-    }
-    task_meta
-        .and_then(|meta| meta.planner_chat_id.clone())
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| chat_id.to_string())
+    resolve_task_planner_controller_chat_id(gcx, chat_id, Some(root_chat_id), task_meta).await
 }
 
 fn resolve_files_to_open_path(worktree_root: &Path, source_root: &Path, path_str: &str) -> PathBuf {
@@ -664,7 +657,7 @@ impl Tool for ToolTaskSpawnAgent {
 
         drop(ccx_lock);
 
-        let (task_id, planner_chat_id) = {
+        let (gcx, current_model, task_id, chat_id, root_chat_id, task_meta) = {
             let ccx_lock = ccx.lock().await;
             let task_id = ccx_lock
                 .task_meta
@@ -676,14 +669,22 @@ impl Tool for ToolTaskSpawnAgent {
                         .map(|s| s.to_string())
                         .unwrap_or_default()
                 });
-            let planner_chat_id = ccx_lock.task_meta.as_ref();
-            let planner_chat_id = resolve_invoking_planner_chat_id(
-                &ccx_lock.chat_id,
-                &ccx_lock.root_chat_id,
-                planner_chat_id,
-            );
-            (task_id, planner_chat_id)
+            (
+                ccx_lock.app.gcx.clone(),
+                ccx_lock.current_model.clone(),
+                task_id,
+                ccx_lock.chat_id.clone(),
+                ccx_lock.root_chat_id.clone(),
+                ccx_lock.task_meta.clone(),
+            )
         };
+        let planner_chat_id = resolve_invoking_planner_chat_id(
+            gcx.clone(),
+            &chat_id,
+            &root_chat_id,
+            task_meta.as_ref(),
+        )
+        .await;
         let task_id = if task_id.is_empty() {
             get_task_id(&ccx, args).await?
         } else {
@@ -703,9 +704,6 @@ impl Tool for ToolTaskSpawnAgent {
             _ => 30,
         };
         let suggested_steps = suggested_steps.min(50).max(1);
-
-        let gcx = ccx.lock().await.app.gcx.clone();
-        let current_model = ccx.lock().await.current_model.clone();
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
 
@@ -1515,8 +1513,21 @@ mod tests {
         assert!(thread.worktree.as_ref().unwrap().enforce);
     }
 
-    #[test]
-    fn spawn_agent_planner_chat_id_uses_active_root_before_legacy_meta() {
+    #[tokio::test]
+    async fn spawn_agent_planner_chat_id_uses_active_root_before_legacy_meta() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = crate::chat::types::ChatSession::new("controller-planner".to_string());
+        session.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("controller-planner".to_string()),
+        });
+        gcx.chat_sessions.write().await.insert(
+            "controller-planner".to_string(),
+            Arc::new(tokio::sync::Mutex::new(session)),
+        );
         let task_meta = refact_chat_api::TaskMeta {
             task_id: "task-1".to_string(),
             role: "subchats".to_string(),
@@ -1526,12 +1537,41 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_invoking_planner_chat_id("child-chat", "controller-planner", Some(&task_meta)),
+            resolve_invoking_planner_chat_id(
+                gcx.clone(),
+                "child-chat",
+                "controller-planner",
+                Some(&task_meta)
+            )
+            .await,
             "controller-planner"
         );
         assert_eq!(
-            resolve_invoking_planner_chat_id("child-chat", "", Some(&task_meta)),
+            resolve_invoking_planner_chat_id(gcx, "child-chat", "", Some(&task_meta)).await,
             "stale-planner"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_planner_chat_id_ignores_non_planner_root() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let task_meta = refact_chat_api::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("planner-chat".to_string()),
+        };
+
+        assert_eq!(
+            resolve_invoking_planner_chat_id(
+                gcx,
+                "planner-chat",
+                "normal-source-chat",
+                Some(&task_meta)
+            )
+            .await,
+            "planner-chat"
         );
     }
 
