@@ -16,6 +16,7 @@ import styles from "./Scheduler.module.css";
 
 type CronPreset = "hourly" | "daily" | "weekdays" | "five-min" | "custom";
 type ScheduleKind = "cron" | "interval" | "once";
+type ActionKind = "agent" | "command";
 
 type CronCreateFormData = Omit<CreateCronRequest, "chat_id" | "mode">;
 
@@ -48,8 +49,14 @@ const SCHEDULE_OPTIONS = [
   { value: "once", label: "One-shot" },
 ];
 
+const ACTION_OPTIONS = [
+  { value: "agent", label: "Agent turn", ariaLabel: "Agent turn action" },
+  { value: "command", label: "Command", ariaLabel: "Command action" },
+];
+
 const CRON_PATTERN = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
 const INTERVAL_PATTERN = /^\d+\s*[smhd]$/;
+const POSITIVE_INTEGER_PATTERN = /^\d+$/;
 
 function validateCron(value: string): string | null {
   if (!value.trim()) return "Cron expression is required.";
@@ -72,6 +79,12 @@ function validateOneShot(value: string): string | null {
   return null;
 }
 
+function parseTimeout(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return Number(trimmed);
+}
+
 export const CronCreateForm: React.FC<CronCreateFormProps> = ({
   onSubmit,
   isLoading = false,
@@ -80,12 +93,17 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
   maxTasks = 50,
 }) => {
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>("cron");
+  const [actionKind, setActionKind] = useState<ActionKind>("agent");
   const [preset, setPreset] = useState<CronPreset>("hourly");
   const [cron, setCron] = useState(PRESETS.hourly);
   const [every, setEvery] = useState("30m");
   const [at, setAt] = useState("in 30m");
   const [tz, setTz] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [isolated, setIsolated] = useState(false);
+  const [command, setCommand] = useState("");
+  const [cwd, setCwd] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
   const [description, setDescription] = useState("");
   const [recurring, setRecurring] = useState(true);
   const [durable, setDurable] = useState(false);
@@ -114,10 +132,34 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     setLocalError(null);
   };
 
+  const handleActionKindChange = (value: string) => {
+    setActionKind(value as ActionKind);
+    setLocalError(null);
+  };
+
   const validateSchedule = (): string | null => {
     if (scheduleKind === "interval") return validateInterval(every);
     if (scheduleKind === "once") return validateOneShot(at);
     return validateCron(cron);
+  };
+
+  const validateAction = (): string | null => {
+    if (actionKind === "agent") {
+      if (!prompt.trim()) return "Prompt is required.";
+      return null;
+    }
+    if (!command.trim()) return "Command is required.";
+    if (timeoutSecs.trim()) {
+      const timeout = parseTimeout(timeoutSecs);
+      if (
+        !POSITIVE_INTEGER_PATTERN.test(timeoutSecs.trim()) ||
+        timeout === undefined ||
+        timeout <= 0
+      ) {
+        return "Timeout must be a positive number of seconds.";
+      }
+    }
+    return null;
   };
 
   const buildScheduleRequest = (): Pick<
@@ -134,6 +176,25 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
       cron: cron.trim(),
       recurring,
       ...(tz.trim() ? { tz: tz.trim() } : {}),
+    };
+  };
+
+  const buildActionRequest = (): Pick<
+    CreateCronRequest,
+    "prompt" | "isolated" | "command" | "cwd" | "timeout_secs"
+  > => {
+    if (actionKind === "agent") {
+      return {
+        prompt: prompt.trim(),
+        ...(isolated ? { isolated } : {}),
+      };
+    }
+    return {
+      command: command.trim(),
+      ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
+      ...(timeoutSecs.trim()
+        ? { timeout_secs: Number(timeoutSecs.trim()) }
+        : {}),
     };
   };
 
@@ -158,15 +219,16 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
       setLocalError("Description must be 80 characters or less.");
       return;
     }
-    if (!prompt.trim()) {
-      setLocalError("Prompt is required.");
+    const actionError = validateAction();
+    if (actionError) {
+      setLocalError(actionError);
       return;
     }
 
     setLocalError(null);
     await onSubmit({
       ...buildScheduleRequest(),
-      prompt: prompt.trim(),
+      ...buildActionRequest(),
       durable,
       description: description.trim(),
     });
@@ -182,7 +244,7 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     <form className={styles.form} onSubmit={submitForm}>
       <p className={styles.sectionHint}>
         Use cron expressions for calendar schedules, intervals for repeated
-        delays, or one-shot times for a single future prompt.
+        delays, or one-shot times for a single future action.
       </p>
 
       <Field label="Schedule kind">
@@ -279,15 +341,78 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
         />
       </Field>
 
-      <Field label="Prompt" required>
-        <FieldTextarea
-          className={styles.fieldControl}
-          value={prompt}
-          onChange={setPrompt}
-          aria-label="Prompt"
-          rows={4}
+      <Field label="Action">
+        <SegmentedControl
+          aria-label="Action"
+          name="scheduler-action-kind"
+          options={ACTION_OPTIONS}
+          value={actionKind}
+          onValueChange={handleActionKindChange}
         />
       </Field>
+
+      {actionKind === "agent" ? (
+        <>
+          <Field label="Prompt" required>
+            <FieldTextarea
+              className={styles.fieldControl}
+              value={prompt}
+              onChange={setPrompt}
+              aria-label="Prompt"
+              rows={4}
+            />
+          </Field>
+          <Field
+            label="Isolated session"
+            helper="Start a fresh session for each scheduled agent turn."
+          >
+            <FieldSwitch
+              checked={isolated}
+              onChange={setIsolated}
+              aria-label="Isolated session"
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {actionKind === "command" ? (
+        <>
+          <Field
+            label="Command"
+            helper="Runs without an agent turn and sends output to this chat."
+            required
+          >
+            <FieldText
+              className={styles.monoField}
+              value={command}
+              onChange={setCommand}
+              aria-label="Command"
+              placeholder="npm test"
+            />
+          </Field>
+          <div className={styles.commandGrid}>
+            <Field label="Working directory" helper="Optional project path.">
+              <FieldText
+                className={styles.fieldControl}
+                value={cwd}
+                onChange={setCwd}
+                aria-label="Working directory"
+                placeholder="refact-agent/gui"
+              />
+            </Field>
+            <Field label="Timeout" helper="Optional seconds.">
+              <FieldText
+                className={styles.fieldControl}
+                inputMode="numeric"
+                value={timeoutSecs}
+                onChange={setTimeoutSecs}
+                aria-label="Timeout"
+                placeholder="600"
+              />
+            </Field>
+          </div>
+        </>
+      ) : null}
 
       <div className={styles.toggles}>
         {scheduleKind !== "once" ? (

@@ -31,6 +31,10 @@ const task: CronTask = {
       error: null,
     },
   ],
+  action_kind: "agent_turn",
+  chat_id: "chat-1",
+  target: "existing_chat",
+  isolated: false,
 };
 
 describe("SchedulerPanel", () => {

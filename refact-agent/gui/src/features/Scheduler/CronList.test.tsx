@@ -29,6 +29,10 @@ const task: CronTask = {
       error: null,
     },
   ],
+  action_kind: "agent_turn",
+  chat_id: "chat-1",
+  target: "existing_chat",
+  isolated: false,
 };
 
 const defaultProps = {
@@ -48,10 +52,32 @@ describe("CronList", () => {
     expect(screen.getByText("Enabled")).toBeInTheDocument();
     expect(screen.getByText("fired")).toBeInTheDocument();
     expect(screen.getByText("Cron")).toBeInTheDocument();
+    expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("Durable")).toBeInTheDocument();
     expect(screen.getByText("Recurring")).toBeInTheDocument();
     expect(screen.getByText("Last fired")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("renders command and isolated action badges", () => {
+    render(
+      <CronList
+        tasks={[
+          { ...task, id: "cron_command", action_kind: "command" },
+          {
+            ...task,
+            id: "cron_isolated",
+            action_kind: "agent_turn",
+            target: "isolated",
+            isolated: true,
+          },
+        ]}
+        {...defaultProps}
+      />,
+    );
+
+    expect(screen.getByText("Command")).toBeInTheDocument();
+    expect(screen.getByText("Isolated")).toBeInTheDocument();
   });
 
   it("calls delete with the task id", async () => {

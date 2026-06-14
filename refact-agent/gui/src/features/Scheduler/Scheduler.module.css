@@ -26,6 +26,7 @@
 .form,
 .editForm,
 .editGrid,
+.commandGrid,
 .listTitleBlock,
 .jobCard,
 .jobTitleBlock,
@@ -57,7 +58,8 @@
 }
 
 .editForm,
-.editGrid {
+.editGrid,
+.commandGrid {
   gap: var(--rf-space-3);
 }
 
@@ -147,7 +149,8 @@
 }
 
 .toggles,
-.editGrid {
+.editGrid,
+.commandGrid {
   display: grid;
   min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -268,7 +271,8 @@
 @container (width <= 880px) {
   .layout,
   .toggles,
-  .editGrid {
+  .editGrid,
+  .commandGrid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

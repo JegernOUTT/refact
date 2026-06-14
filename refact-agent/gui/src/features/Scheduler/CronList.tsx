@@ -123,6 +123,18 @@ function triggerLabel(task: CronTask): string {
   return "Manual";
 }
 
+function actionLabel(task: CronTask): string {
+  if (task.action_kind === "command") return "Command";
+  if (task.isolated || task.target === "isolated") return "Isolated";
+  return "Agent";
+}
+
+function actionTone(task: CronTask) {
+  if (task.action_kind === "command") return "accent";
+  if (task.isolated || task.target === "isolated") return "warning";
+  return "default";
+}
+
 function scheduleCode(task: CronTask): string {
   if (task.cron) return task.cron;
   return task.human_schedule;
@@ -267,6 +279,7 @@ export const CronList: React.FC<CronListProps> = ({
                   {task.last_status ?? "Pending"}
                 </Badge>
                 <Badge tone="default">{triggerLabel(task)}</Badge>
+                <Badge tone={actionTone(task)}>{actionLabel(task)}</Badge>
                 <Badge tone={task.durable ? "accent" : "muted"}>
                   {task.durable ? "Durable" : "Session"}
                 </Badge>

@@ -17,6 +17,9 @@ export type CronRunRecord = {
   error: string | null;
 };
 
+export type CronActionKind = "agent_turn" | "command";
+export type CronActionTarget = "existing_chat" | "isolated";
+
 export type CronTask = {
   id: string;
   cron: string;
@@ -37,6 +40,10 @@ export type CronTask = {
   last_status: string | null;
   last_error: string | null;
   recent_runs: CronRunRecord[];
+  action_kind: CronActionKind;
+  chat_id: string | null;
+  target: CronActionTarget;
+  isolated: boolean;
 };
 
 export type CreateCronRequest = {
@@ -44,7 +51,12 @@ export type CreateCronRequest = {
   every?: string;
   at?: string;
   tz?: string;
-  prompt: string;
+  prompt?: string;
+  isolated?: boolean;
+  command?: string;
+  command_argv?: string[];
+  cwd?: string;
+  timeout_secs?: number;
   recurring?: boolean;
   durable: boolean;
   description: string;
@@ -57,6 +69,7 @@ export type CreateCronResponse = {
   human_schedule: string;
   recurring: boolean;
   durable: boolean;
+  action_kind: CronActionKind;
 };
 
 export type UpdateCronRequest = {
