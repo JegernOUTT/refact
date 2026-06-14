@@ -21,6 +21,7 @@ pub enum SessionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningLevel {
     Off,
+    On,
     Low,
     Medium,
     High,
@@ -30,6 +31,7 @@ impl ReasoningLevel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::On => "on",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -39,6 +41,7 @@ impl ReasoningLevel {
     pub fn title(self) -> &'static str {
         match self {
             Self::Off => "Off",
+            Self::On => "On",
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
@@ -46,8 +49,9 @@ impl ReasoningLevel {
     }
 }
 
-pub const REASONING_LEVELS: [ReasoningLevel; 4] = [
+pub const REASONING_LEVELS: [ReasoningLevel; 5] = [
     ReasoningLevel::Off,
+    ReasoningLevel::On,
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
     ReasoningLevel::High,
@@ -170,8 +174,8 @@ pub const REASONING_COMMAND: CommandDef = CommandDef {
     name: "reasoning",
     aliases: &[],
     description: "session params: set reasoning effort for subsequent turns",
-    args_hint: "<off|low|medium|high>",
-    availability: CommandAvailability::Always,
+    args_hint: "<off|on|low|medium|high>",
+    availability: CommandAvailability::IdleOnly,
     action: CommandAction::Session {
         command: SessionCommand::Reasoning,
     },
@@ -256,11 +260,12 @@ pub fn parse_reasoning_level(args: &str) -> Result<Option<ReasoningLevel>, Strin
     }
     match arg.as_str() {
         "off" | "none" => Ok(Some(ReasoningLevel::Off)),
+        "on" | "boost" | "thinking" => Ok(Some(ReasoningLevel::On)),
         "low" => Ok(Some(ReasoningLevel::Low)),
         "medium" => Ok(Some(ReasoningLevel::Medium)),
         "high" => Ok(Some(ReasoningLevel::High)),
         _ => Err(format!(
-            "expected one of: off, low, medium, high; got {args}"
+            "expected one of: off, on, low, medium, high; got {args}"
         )),
     }
 }
@@ -284,6 +289,11 @@ pub fn reasoning_patch(level: ReasoningLevel) -> Value {
             "reasoning_effort": null,
             "thinking_budget": null,
         }),
+        ReasoningLevel::On => json!({
+            "boost_reasoning": true,
+            "reasoning_effort": null,
+            "thinking_budget": null,
+        }),
         _ => json!({
             "boost_reasoning": true,
             "reasoning_effort": level.as_str(),
@@ -295,6 +305,7 @@ pub fn reasoning_patch(level: ReasoningLevel) -> Value {
 fn reasoning_level_description(level: ReasoningLevel) -> &'static str {
     match level {
         ReasoningLevel::Off => "Disable reasoning for subsequent turns",
+        ReasoningLevel::On => "Enable model-native reasoning boost",
         ReasoningLevel::Low => "Use low reasoning effort",
         ReasoningLevel::Medium => "Use medium reasoning effort",
         ReasoningLevel::High => "Use high reasoning effort",
@@ -473,10 +484,15 @@ mod tests {
             Ok(Some(ReasoningLevel::High))
         );
         assert_eq!(parse_reasoning_level("none"), Ok(Some(ReasoningLevel::Off)));
+        assert_eq!(parse_reasoning_level("boost"), Ok(Some(ReasoningLevel::On)));
         assert!(parse_reasoning_level("turbo").is_err());
         assert_eq!(
             reasoning_patch(ReasoningLevel::High),
             json!({"boost_reasoning": true, "reasoning_effort": "high", "thinking_budget": null})
+        );
+        assert_eq!(
+            reasoning_patch(ReasoningLevel::On),
+            json!({"boost_reasoning": true, "reasoning_effort": null, "thinking_budget": null})
         );
         assert_eq!(
             reasoning_patch(ReasoningLevel::Off),

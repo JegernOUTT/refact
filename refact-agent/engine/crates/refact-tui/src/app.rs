@@ -1,4 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -270,11 +270,26 @@ struct PendingApprovalClear {
     tool_call_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReasoningStateSnapshot {
+    boost_reasoning: bool,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingReasoningRollback {
+    patch: Value,
+    previous: ReasoningStateSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CommandContextTag {
     SendMessage {
         prompt: String,
         params: Value,
+    },
+    Reasoning {
+        previous: ReasoningStateSnapshot,
     },
     Abort,
     Rename {
@@ -369,6 +384,8 @@ pub struct App {
     modal_picker: Option<PickerState>,
     approval_queue: ApprovalQueue,
     ask_questions_form: Option<AskQuestionsForm>,
+    pending_manual_ask_questions: Option<AskQuestionsRequest>,
+    handled_ask_questions_tool_ids: HashSet<String>,
     pending_approval_clears: VecDeque<PendingApprovalClear>,
     events_pane: EventsPaneState,
     current_project: Option<OpenProjectResponse>,
@@ -379,6 +396,7 @@ pub struct App {
     mode: Option<String>,
     boost_reasoning: bool,
     reasoning_effort: Option<String>,
+    pending_reasoning_rollback: Option<PendingReasoningRollback>,
     pending_model: Option<String>,
     pending_mode: Option<String>,
     pending_send_retry: Option<PendingSendRetry>,
@@ -456,6 +474,8 @@ impl App {
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
+            pending_manual_ask_questions: None,
+            handled_ask_questions_tool_ids: HashSet::new(),
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
@@ -466,6 +486,7 @@ impl App {
             mode: None,
             boost_reasoning: false,
             reasoning_effort: None,
+            pending_reasoning_rollback: None,
             pending_model: None,
             pending_mode: None,
             pending_send_retry: None,
@@ -526,6 +547,8 @@ impl App {
             modal_picker: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
+            pending_manual_ask_questions: None,
+            handled_ask_questions_tool_ids: HashSet::new(),
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: None,
@@ -536,6 +559,7 @@ impl App {
             mode: None,
             boost_reasoning: false,
             reasoning_effort: None,
+            pending_reasoning_rollback: None,
             pending_model: None,
             pending_mode: None,
             pending_send_retry: None,
@@ -1274,6 +1298,12 @@ impl App {
             }
             session::SessionCommand::Reasoning => {
                 self.composer.clear();
+                if self.is_chat_active() {
+                    self.add_notice(
+                        "/reasoning is available between turns only; retry after the current turn finishes",
+                    );
+                    return AppAction::None;
+                }
                 match session::parse_reasoning_level(args) {
                     Ok(Some(level)) => self.set_reasoning_level(level),
                     Ok(None) => {
@@ -1301,24 +1331,50 @@ impl App {
     }
 
     fn set_reasoning_level(&mut self, level: session::ReasoningLevel) -> AppAction {
+        if self.is_chat_active() {
+            self.add_notice(
+                "/reasoning is available between turns only; retry after the current turn finishes",
+            );
+            return AppAction::None;
+        }
         if !self.reasoning_level_supported(level) {
             self.add_reasoning_unsupported_notice();
             return AppAction::None;
         }
+        let previous = self.reasoning_snapshot();
+        let patch = session::reasoning_patch(level);
         self.apply_reasoning_level(level);
+        self.pending_reasoning_rollback = Some(PendingReasoningRollback {
+            patch: patch.clone(),
+            previous: previous.clone(),
+        });
         self.add_notice(format!(
-            "Reasoning effort set to {} for subsequent turns",
+            "Reasoning set to {} for subsequent turns",
             level.as_str()
         ));
-        AppAction::SetParams {
-            patch: session::reasoning_patch(level),
+        AppAction::SetParams { patch }
+    }
+
+    fn reasoning_snapshot(&self) -> ReasoningStateSnapshot {
+        ReasoningStateSnapshot {
+            boost_reasoning: self.boost_reasoning,
+            reasoning_effort: self.reasoning_effort.clone(),
         }
+    }
+
+    fn restore_reasoning_snapshot(&mut self, snapshot: ReasoningStateSnapshot) {
+        self.boost_reasoning = snapshot.boost_reasoning;
+        self.reasoning_effort = snapshot.reasoning_effort;
     }
 
     fn apply_reasoning_level(&mut self, level: session::ReasoningLevel) {
         match level {
             session::ReasoningLevel::Off => {
                 self.clear_reasoning_level();
+            }
+            session::ReasoningLevel::On => {
+                self.boost_reasoning = true;
+                self.reasoning_effort = None;
             }
             _ => {
                 self.boost_reasoning = true;
@@ -1337,7 +1393,11 @@ impl App {
             return true;
         }
         self.current_reasoning_caps()
-            .is_some_and(|caps| caps.supports_effort(level))
+            .is_some_and(|caps| match level {
+                session::ReasoningLevel::On => caps.has_reasoning_support(),
+                session::ReasoningLevel::Off => true,
+                _ => caps.supports_effort(level),
+            })
     }
 
     fn supported_reasoning_levels(&self) -> Vec<session::ReasoningLevel> {
@@ -1347,16 +1407,13 @@ impl App {
         if !caps.has_reasoning_support() {
             return Vec::new();
         }
-        let mut levels = vec![session::ReasoningLevel::Off];
-        levels.extend(
-            [
-                session::ReasoningLevel::Low,
-                session::ReasoningLevel::Medium,
-                session::ReasoningLevel::High,
-            ]
-            .into_iter()
-            .filter(|level| caps.supports_effort(*level)),
-        );
+        let mut levels = vec![session::ReasoningLevel::Off, session::ReasoningLevel::On];
+        levels.extend(session::REASONING_LEVELS.into_iter().filter(|level| {
+            !matches!(
+                level,
+                session::ReasoningLevel::Off | session::ReasoningLevel::On
+            ) && caps.supports_effort(*level)
+        }));
         levels
     }
 
@@ -1942,7 +1999,7 @@ impl App {
         self.clear_reasoning_level();
         self.model_context_windows.clear();
         self.model_reasoning_caps.clear();
-        self.ask_questions_form = None;
+        self.clear_ask_questions_state();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
     }
@@ -1976,7 +2033,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
-        self.ask_questions_form = None;
+        self.clear_ask_questions_state();
         self.retry_hint = None;
     }
 
@@ -2006,7 +2063,7 @@ impl App {
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
-        self.ask_questions_form = None;
+        self.clear_ask_questions_state();
         self.retry_hint = None;
         AppAction::SubscribeCurrent
     }
@@ -2082,7 +2139,14 @@ impl App {
         if self.input_queue.is_editing() {
             return self.finish_queue_edit();
         }
-        let prompt = self.composer.submit_text()?;
+        let mut prompt = self.composer.submit_text()?;
+        if let Some(request) = self.pending_manual_ask_questions.take() {
+            if !prompt.starts_with(&format!("[QA:{}]", request.tool_call_id)) {
+                prompt = request.format_manual_reply(&prompt);
+            }
+            self.handled_ask_questions_tool_ids
+                .insert(request.tool_call_id.clone());
+        }
         self.persist_history();
         if self.backtrack_pending.is_some() {
             return Some(self.start_backtrack_turn(prompt));
@@ -2128,7 +2192,7 @@ impl App {
 
     fn start_prompt_turn(&mut self, prompt: String, params: Value) -> AppAction {
         self.cancel_backtrack();
-        self.ask_questions_form = None;
+        self.clear_active_ask_questions();
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
@@ -2167,6 +2231,19 @@ impl App {
         self.start_prompt_turn(prompt, params)
     }
 
+    fn set_params_context(&mut self, patch: &Value) -> CommandContextTag {
+        match self.pending_reasoning_rollback.take() {
+            Some(pending) if pending.patch == *patch => CommandContextTag::Reasoning {
+                previous: pending.previous,
+            },
+            Some(pending) => {
+                self.pending_reasoning_rollback = Some(pending);
+                CommandContextTag::Other
+            }
+            None => CommandContextTag::Other,
+        }
+    }
+
     fn handle_command_finished(
         &mut self,
         context: CommandContextTag,
@@ -2187,7 +2264,7 @@ impl App {
                 self.abort_in_flight = false;
                 self.set_session_state(SessionState::Idle);
                 self.clear_approvals();
-                self.ask_questions_form = None;
+                self.clear_active_ask_questions();
                 self.dispatch_next_queued_input()
             }
             CommandContextTag::Rename { title } => {
@@ -2199,6 +2276,7 @@ impl App {
                 title,
             } => self.open_forked_chat(target_chat_id, title),
             CommandContextTag::Archive { chat_id } => self.apply_archived_chat(chat_id),
+            CommandContextTag::Reasoning { .. } => AppAction::None,
             _ => AppAction::None,
         }
     }
@@ -2224,6 +2302,11 @@ impl App {
             }
             CommandContextTag::Archive { .. } => {
                 self.add_notice(format!("Archive failed: {error}"));
+                AppAction::None
+            }
+            CommandContextTag::Reasoning { previous } => {
+                self.restore_reasoning_snapshot(previous);
+                self.add_notice(format!("/reasoning failed: {error}"));
                 AppAction::None
             }
             _ => {
@@ -2658,6 +2741,18 @@ impl App {
         self.pending_model = None;
         self.pending_mode = None;
         self.pending_send_retry = None;
+        self.pending_reasoning_rollback = None;
+    }
+
+    fn clear_ask_questions_state(&mut self) {
+        self.ask_questions_form = None;
+        self.pending_manual_ask_questions = None;
+        self.handled_ask_questions_tool_ids.clear();
+    }
+
+    fn clear_active_ask_questions(&mut self) {
+        self.ask_questions_form = None;
+        self.pending_manual_ask_questions = None;
     }
 
     fn take_pending_params(&mut self) -> Value {
@@ -3736,6 +3831,12 @@ impl App {
         {
             return;
         }
+        if self
+            .handled_ask_questions_tool_ids
+            .contains(&request.tool_call_id)
+        {
+            return;
+        }
         if self.has_later_user_message_after_tool(&request.tool_call_id) {
             return;
         }
@@ -4191,7 +4292,7 @@ impl App {
         if abort_active {
             self.abort_in_flight = true;
         } else {
-            self.ask_questions_form = None;
+            self.clear_active_ask_questions();
             self.should_quit = true;
         }
         AppAction::Quit { abort_active }
@@ -4254,20 +4355,29 @@ impl App {
         let dispatch = self.keymap.dispatch(KeyContext::Main, key);
         match dispatch.action {
             Some(KeyAction::Cancel) => {
+                let request = form.request().clone();
                 form.cancel();
+                self.handled_ask_questions_tool_ids
+                    .insert(request.tool_call_id.clone());
+                self.pending_manual_ask_questions = Some(request);
                 self.ask_questions_form = None;
                 self.add_notice(
                     "Question form canceled; type your answer in the composer to reply manually",
                 );
                 AppAction::None
             }
-            Some(KeyAction::Accept) => match form.accept() {
-                AskQuestionsOutcome::Submitted(prompt) => {
-                    self.ask_questions_form = None;
-                    self.submit_ask_questions_reply(prompt)
+            Some(KeyAction::Accept) => {
+                let tool_call_id = form.tool_call_id().to_string();
+                match form.accept() {
+                    AskQuestionsOutcome::Submitted(prompt) => {
+                        self.handled_ask_questions_tool_ids.insert(tool_call_id);
+                        self.pending_manual_ask_questions = None;
+                        self.ask_questions_form = None;
+                        self.submit_ask_questions_reply(prompt)
+                    }
+                    AskQuestionsOutcome::None | AskQuestionsOutcome::Canceled => AppAction::None,
                 }
-                AskQuestionsOutcome::None | AskQuestionsOutcome::Canceled => AppAction::None,
-            },
+            }
             Some(KeyAction::MoveUp) => {
                 form.previous_option();
                 AppAction::None
@@ -4567,7 +4677,10 @@ impl App {
     }
 
     fn delete_action(&mut self) -> AppAction {
-        if self.input_queue.selected_index().is_some() && !self.input_queue.is_editing() {
+        if self.composer.is_empty()
+            && self.input_queue.selected_index().is_some()
+            && !self.input_queue.is_editing()
+        {
             return self.remove_selected_queue_item();
         }
         self.input_queue.clear_selection();
@@ -5869,6 +5982,7 @@ async fn run_action(
             }
         }
         AppAction::SetParams { patch } => {
+            let context = app.set_params_context(&patch);
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
                 let generation = subscriptions.command_generation();
@@ -5882,7 +5996,7 @@ async fn run_action(
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
                             generation,
-                            context: CommandContextTag::Other,
+                            context,
                             result,
                         })
                         .await;
@@ -6056,7 +6170,7 @@ impl App {
         self.abort_in_flight = false;
         self.set_session_state(SessionState::Idle);
         self.clear_approvals();
-        self.ask_questions_form = None;
+        self.clear_active_ask_questions();
         self.should_quit = true;
     }
 
@@ -7312,6 +7426,35 @@ mod tests {
             .collect()
     }
 
+    fn ask_questions_tool_event(app: &App, tool_call_id: &str, questions: Value) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({
+                "message": {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "tool_failed": false,
+                    "content": json!({
+                        "type": "ask_questions",
+                        "tool_call_id": tool_call_id,
+                        "questions": questions,
+                    }).to_string()
+                }
+            }),
+        }
+    }
+
+    fn waiting_user_input_event(app: &App) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "waiting_user_input"}),
+        }
+    }
+
     #[derive(Clone, Default)]
     struct CommandState(Arc<(Mutex<Vec<Value>>, Condvar)>);
 
@@ -7842,34 +7985,35 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn composer_submit_preserves_multiline_whitespace_and_history() {
+        let mut app = App::new(project());
+        let prompt = "  indented\nkeep trailing line\n";
+        app.composer.set_text(prompt);
+
+        let action = app.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            action,
+            AppAction::SendMessage { prompt: sent, .. } if sent == prompt
+        ));
+        assert_eq!(
+            app.composer_state().history_entries(),
+            &[prompt.to_string()]
+        );
+    }
+
+    #[test]
     fn ask_questions_tool_result_opens_form_and_submits_canonical_reply() {
         let mut app = App::new(project());
-        app.handle_chat_event(ChatEvent {
-            chat_id: Some(app.chat_id().to_string()),
-            seq: None,
-            kind: "message_added".to_string(),
-            raw: json!({
-                "message": {
-                    "role": "tool",
-                    "tool_call_id": "call-ask",
-                    "tool_failed": false,
-                    "content": json!({
-                        "type": "ask_questions",
-                        "tool_call_id": "call-ask",
-                        "questions": [
-                            {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
-                        ]
-                    }).to_string()
-                }
-            }),
-        });
+        app.handle_chat_event(ask_questions_tool_event(
+            &app,
+            "call-ask",
+            json!([
+                {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+            ]),
+        ));
         assert!(app.ask_questions_form().is_none());
-        app.handle_chat_event(ChatEvent {
-            chat_id: Some(app.chat_id().to_string()),
-            seq: None,
-            kind: "runtime_updated".to_string(),
-            raw: json!({"state": "waiting_user_input"}),
-        });
+        app.handle_chat_event(waiting_user_input_event(&app));
 
         assert!(app.ask_questions_form().is_some());
         assert_eq!(app.session_state(), SessionState::WaitingUserInput);
@@ -7882,47 +8026,55 @@ new-chat = "ctrl-x"
             AppAction::SendMessage { prompt, .. }
                 if prompt == "[QA:call-ask]\n> [confirm] Proceed?\nNo"
         ));
+        app.handle_chat_event(waiting_user_input_event(&app));
+        assert!(app.ask_questions_form().is_none());
     }
 
     #[test]
-    fn ask_questions_escape_keeps_manual_composer_fallback() {
+    fn ask_questions_cancel_stays_canceled_and_manual_reply_is_canonical() {
         let mut app = App::new(project());
+        let tool_message = json!({
+            "role": "tool",
+            "tool_call_id": "call-ask",
+            "tool_failed": false,
+            "content": json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": [
+                    {"id": "notes", "type": "free_text", "text": "Notes?"}
+                ]
+            }).to_string()
+        });
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
             kind: "message_added".to_string(),
-            raw: json!({
-                "message": {
-                    "role": "tool",
-                    "tool_call_id": "call-ask",
-                    "tool_failed": false,
-                    "content": json!({
-                        "type": "ask_questions",
-                        "tool_call_id": "call-ask",
-                        "questions": [
-                            {"id": "notes", "type": "free_text", "text": "Notes?"}
-                        ]
-                    }).to_string()
-                }
-            }),
+            raw: json!({"message": tool_message.clone()}),
         });
-        app.handle_chat_event(ChatEvent {
-            chat_id: Some(app.chat_id().to_string()),
-            seq: None,
-            kind: "runtime_updated".to_string(),
-            raw: json!({"state": "waiting_user_input"}),
-        });
+        app.handle_chat_event(waiting_user_input_event(&app));
 
         assert!(app.ask_questions_form().is_some());
         assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
         assert!(app.ask_questions_form().is_none());
         assert_eq!(app.session_state(), SessionState::WaitingUserInput);
+
+        app.handle_chat_event(waiting_user_input_event(&app));
+        assert!(app.ask_questions_form().is_none());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {}, "runtime": {"state": "waiting_user_input"}, "messages": [tool_message]}),
+        });
+        assert!(app.ask_questions_form().is_none());
+
         app.composer.set_text("manual answer");
         let action = app.handle_key(key(KeyCode::Enter));
 
         assert!(matches!(
             action,
-            AppAction::SendMessage { prompt, .. } if prompt == "manual answer"
+            AppAction::SendMessage { prompt, .. }
+                if prompt == "[QA:call-ask]\n> [notes] Notes?\n(no answer)\n\n> [__additional__] Additional comments\nmanual answer"
         ));
     }
 
@@ -8074,9 +8226,29 @@ new-chat = "ctrl-x"
         assert_eq!(app.composer(), "keep draft");
         assert_eq!(app.input_queue().items()[0].text, "edited");
 
+        app.composer.clear();
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.handle_key(key(KeyCode::Delete)), AppAction::None);
         assert!(app.input_queue().is_empty());
+    }
+
+    #[test]
+    fn delete_with_draft_does_not_remove_selected_queue_item() {
+        let mut app = App::new(project());
+        app.set_session_state(SessionState::Generating);
+        app.composer.set_text("queued");
+        app.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("draft");
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.input_queue().selected_index(), Some(0));
+
+        assert_eq!(app.handle_key(key(KeyCode::Delete)), AppAction::None);
+
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.input_queue().items()[0].text, "queued");
+        assert_eq!(app.composer(), "draf");
+        assert_eq!(app.input_queue().selected_index(), None);
     }
 
     #[test]
@@ -8835,6 +9007,84 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn reasoning_command_is_guarded_mid_turn() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-demo": {"reasoning_effort_options": ["high"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-demo", "mode": "agent"}, "runtime": {"state": "generating"}, "messages": []}),
+        });
+
+        assert_eq!(app.execute_command_name("reasoning high"), AppAction::None);
+        assert_eq!(app.reasoning_effort_label(), "off");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("between turns only"))
+        }));
+    }
+
+    #[test]
+    fn reasoning_command_supports_boost_only_models() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-boost": {"supports_thinking_budget": true}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-boost", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+
+        let action = app.execute_command_name("reasoning on");
+
+        assert_eq!(
+            action,
+            AppAction::SetParams {
+                patch: json!({"boost_reasoning": true, "reasoning_effort": null, "thinking_budget": null})
+            }
+        );
+        assert_eq!(app.reasoning_effort_label(), "on");
+    }
+
+    #[test]
+    fn reasoning_command_failure_rolls_back_optimistic_state() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-demo": {"reasoning_effort_options": ["low", "high"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-demo", "mode": "agent", "boost_reasoning": true, "reasoning_effort": "low"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+        let action = app.execute_command_name("reasoning high");
+        let AppAction::SetParams { patch } = action else {
+            panic!("expected set params action");
+        };
+        assert_eq!(app.reasoning_effort_label(), "high");
+        let context = app.set_params_context(&patch);
+
+        let result = app.handle_command_finished(context, Err("backend rejected".to_string()));
+
+        assert_eq!(result, AppAction::None);
+        assert_eq!(app.reasoning_effort_label(), "low");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("/reasoning failed") && text.contains("backend rejected"))
+        }));
+    }
+
+    #[test]
     fn reasoning_picker_lists_only_supported_effort_levels() {
         let mut app = App::new(project());
         app.apply_caps(&json!({
@@ -8858,7 +9108,7 @@ new-chat = "ctrl-x"
             .into_iter()
             .map(|item| item.id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["off", "low", "high"]);
+        assert_eq!(ids, vec!["off", "on", "low", "high"]);
     }
 
     #[test]
@@ -9257,7 +9507,7 @@ new-chat = "ctrl-x"
             rx.recv().await,
             Some(RuntimeEvent::CommandFinished {
                 generation: 0,
-                context: CommandContextTag::Other,
+                context: CommandContextTag::Reasoning { .. },
                 result: Ok(())
             })
         ));

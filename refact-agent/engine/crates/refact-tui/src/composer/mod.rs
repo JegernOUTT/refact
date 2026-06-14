@@ -164,8 +164,8 @@ impl ComposerState {
 
     pub fn submit_text(&mut self) -> Option<String> {
         self.flush_pending_paste_force();
-        let prompt = self.editor.text().trim().to_string();
-        if prompt.is_empty() {
+        let prompt = self.editor.text().to_string();
+        if prompt.trim().is_empty() {
             return None;
         }
         self.history.push(prompt.clone());
@@ -1139,8 +1139,7 @@ impl InputHistory {
     }
 
     pub fn push(&mut self, prompt: String) {
-        let prompt = prompt.trim().to_string();
-        if prompt.is_empty() {
+        if prompt.trim().is_empty() {
             return;
         }
         self.entries.retain(|entry| entry != &prompt);
@@ -1401,6 +1400,17 @@ mod tests {
         assert_eq!(composer.enter(t(120)), EnterDecision::Submit);
         assert_eq!(composer.submit_text().as_deref(), Some("h"));
         assert_eq!(composer.text(), "");
+    }
+
+    #[test]
+    fn submit_text_preserves_leading_and_trailing_whitespace_in_history() {
+        let mut composer = ComposerState::new(Vec::new());
+        let prompt = "  indented\nkeep trailing line\n";
+        composer.set_text(prompt);
+
+        assert_eq!(composer.submit_text().as_deref(), Some(prompt));
+        assert_eq!(composer.history_entries(), &[prompt.to_string()]);
+        assert!(composer.submit_text().is_none());
     }
 
     #[test]

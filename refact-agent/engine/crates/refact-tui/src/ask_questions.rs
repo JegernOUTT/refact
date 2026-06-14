@@ -66,6 +66,21 @@ impl AskQuestionsRequest {
             questions,
         })
     }
+
+    pub fn format_manual_reply(&self, answer: &str) -> String {
+        let mut lines = vec![format!("[QA:{}]", self.tool_call_id)];
+        for question in &self.questions {
+            lines.push(format!("> [{}] {}", question.id, question.text));
+            lines.push("(no answer)".to_string());
+            lines.push(String::new());
+        }
+        let answer = answer.trim();
+        if !answer.is_empty() {
+            lines.push("> [__additional__] Additional comments".to_string());
+            push_answer_lines(&mut lines, answer);
+        }
+        lines.join("\n").trim().to_string()
+    }
 }
 
 fn parse_question(raw: &Value) -> Option<AskQuestion> {
@@ -154,6 +169,10 @@ impl AskQuestionsForm {
 
     pub fn tool_call_id(&self) -> &str {
         &self.request.tool_call_id
+    }
+
+    pub fn request(&self) -> &AskQuestionsRequest {
+        &self.request
     }
 
     pub fn questions(&self) -> &[AskQuestion] {
@@ -292,13 +311,7 @@ impl AskQuestionsForm {
             let question = &self.request.questions[index];
             lines.push(format!("> [{}] {}", question.id, question.text));
             let answer = self.answer_text(index);
-            if answer.contains('\n') {
-                lines.push("```".to_string());
-                lines.push(answer);
-                lines.push("```".to_string());
-            } else {
-                lines.push(answer);
-            }
+            push_answer_lines(&mut lines, &answer);
             lines.push(String::new());
         }
         lines.join("\n").trim().to_string()
@@ -335,6 +348,16 @@ impl AskQuestionsForm {
                 }
             }
         }
+    }
+}
+
+fn push_answer_lines(lines: &mut Vec<String>, answer: &str) {
+    if answer.contains('\n') {
+        lines.push("```".to_string());
+        lines.push(answer.to_string());
+        lines.push("```".to_string());
+    } else {
+        lines.push(answer.to_string());
     }
 }
 
