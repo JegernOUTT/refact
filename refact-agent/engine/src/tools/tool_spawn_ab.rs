@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::verifier::{schedule_card_verifier_after_finish, ExpectedCardState};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
@@ -179,6 +180,7 @@ fn variant_info(variant: &PreparedAbVariant) -> AbVariantInfo {
         worktree_name: Some(variant.prepared.worktree_name()),
         branch: variant.prepared.branch_name(),
         model: Some(variant.model.clone()),
+        finish: None,
     }
 }
 
@@ -404,7 +406,19 @@ async fn pick_ab_winner_impl(
         .ab_variants
         .clone()
         .ok_or_else(|| format!("Card {} has no A/B variants", card_id))?;
+    if let Some(existing_winner) = variants.winner.as_deref() {
+        return Err(format!(
+            "Card {} already picked A/B winner {}",
+            card_id, existing_winner
+        ));
+    }
     let (winner_variant, loser_variant) = winner_parts(&variants, winner)?;
+    let winner_finish = winner_variant.finish.clone().ok_or_else(|| {
+        format!(
+            "A/B winner {} for card {} has not finished yet",
+            winner, card_id
+        )
+    })?;
     let winner_variant = winner_variant.clone();
     let loser_variant = loser_variant.clone();
 
@@ -414,24 +428,51 @@ async fn pick_ab_winner_impl(
     let winner_owned = winner.to_string();
     let loser_key = if winner == "a" { "b" } else { "a" }.to_string();
     let winner_for_board = winner_variant.clone();
-    storage::update_board_atomic(gcx.clone(), task_id, move |board| {
-        let card = board
-            .get_card_mut(&card_id_owned)
-            .ok_or(format!("Card {} not found", card_id_owned))?;
-        card.agent_worktree = Some(winner_for_board.worktree.clone());
-        card.agent_worktree_name = winner_for_board.worktree_name.clone();
-        card.agent_branch = winner_for_board.branch.clone();
-        card.agent_chat_id = Some(winner_for_board.chat_id.clone());
-        card.assignee = Some(winner_for_board.agent_id.clone());
-        card.ab_variants = None;
-        card.status_updates.push(StatusUpdate {
-            timestamp: Utc::now().to_rfc3339(),
-            message: format!("A/B winner: {}, loser cleaned up", winner_owned),
-        });
-        Ok(())
-    })
-    .await?;
-    storage::update_task_stats(gcx, task_id).await?;
+    let winner_finish_for_board = winner_finish.clone();
+    let success_for_board = winner_finish.success;
+    let (_, verifier_expected_state) =
+        storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+            let next_board_rev = board.rev + 1;
+            let card = board
+                .get_card_mut(&card_id_owned)
+                .ok_or(format!("Card {} not found", card_id_owned))?;
+            card.agent_worktree = Some(winner_for_board.worktree.clone());
+            card.agent_worktree_name = winner_for_board.worktree_name.clone();
+            card.agent_branch = winner_for_board.branch.clone();
+            card.agent_chat_id = Some(winner_for_board.chat_id.clone());
+            card.assignee = Some(winner_for_board.agent_id.clone());
+            card.final_report = Some(if winner_finish_for_board.success {
+                winner_finish_for_board.final_report.clone()
+            } else {
+                format!("FAILED: {}", winner_finish_for_board.final_report)
+            });
+            card.final_report_structured = winner_finish_for_board.final_report_structured.clone();
+            card.column = if winner_finish_for_board.success {
+                "done".to_string()
+            } else {
+                "failed".to_string()
+            };
+            card.completed_at = Some(Utc::now().to_rfc3339());
+            if let Some(variants) = card.ab_variants.as_mut() {
+                variants.winner = Some(winner_owned.clone());
+            }
+            card.status_updates.push(StatusUpdate {
+                timestamp: Utc::now().to_rfc3339(),
+                message: format!("A/B winner: {}, loser cleaned up", winner_owned),
+            });
+            Ok(ExpectedCardState::from_card(next_board_rev, card))
+        })
+        .await?;
+    storage::update_task_stats(gcx.clone(), task_id).await?;
+    if success_for_board {
+        schedule_card_verifier_after_finish(
+            gcx,
+            task_id.to_string(),
+            card_id.to_string(),
+            verifier_expected_state,
+        )
+        .await;
+    }
     Ok((winner_variant.chat_id, loser_key))
 }
 
@@ -536,6 +577,7 @@ impl Tool for ToolSpawnAb {
         let variants = AbVariants {
             a: variant_info(&prepared.a),
             b: variant_info(&prepared.b),
+            winner: None,
         };
 
         let card_id_owned = card_id.to_string();
@@ -716,7 +758,7 @@ impl Tool for ToolPickAbWinner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
+    use crate::tasks::types::{AbVariantFinish, TaskBoard, TaskMeta, TaskStatus};
     use std::path::Path;
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
@@ -911,7 +953,16 @@ mod tests {
         let variants = AbVariants {
             a: variant_info(&prepared.a),
             b: variant_info(&prepared.b),
+            winner: None,
         };
+        let mut variants = variants;
+        variants.a.finish = Some(AbVariantFinish {
+            success: true,
+            final_report: "winner report".to_string(),
+            final_report_structured: None,
+            completed_at: Utc::now().to_rfc3339(),
+            commit_hash: Some("abc123".to_string()),
+        });
         storage::update_board_atomic(gcx.clone(), "task-1", move |board| {
             let card = board.get_card_mut("T-1").unwrap();
             card.column = "doing".to_string();
@@ -934,7 +985,14 @@ mod tests {
             card.agent_worktree.as_deref(),
             Some(winner_root.to_str().unwrap())
         );
-        assert!(card.ab_variants.is_none());
+        assert_eq!(card.column, "done");
+        assert_eq!(card.final_report.as_deref(), Some("winner report"));
+        assert_eq!(
+            card.ab_variants
+                .as_ref()
+                .and_then(|variants| variants.winner.as_deref()),
+            Some("a")
+        );
         assert!(winner_root.is_dir());
         assert!(!loser_root.exists());
         let branches = run_git(
@@ -943,9 +1001,54 @@ mod tests {
         );
         assert!(branches.trim().is_empty());
 
+        let err = pick_ab_winner_impl(gcx.clone(), "task-1", "T-1", "a")
+            .await
+            .unwrap_err();
+        assert!(err.contains("already picked A/B winner"), "{err}");
+
         cleanup_ab_variant(gcx, &variant_info(&prepared.a))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pick_ab_winner_requires_finished_variant() {
+        let (gcx, _temp, _source) = setup_repo_task().await;
+        let meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let prepared = prepare_ab_worktrees(
+            gcx.clone(),
+            &meta,
+            "task-1",
+            "T-1",
+            "model-a".to_string(),
+            "model-b".to_string(),
+        )
+        .await
+        .unwrap();
+        let variants = AbVariants {
+            a: variant_info(&prepared.a),
+            b: variant_info(&prepared.b),
+            winner: None,
+        };
+        storage::update_board_atomic(gcx.clone(), "task-1", move |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.column = "doing".to_string();
+            card.assignee = Some("ab".to_string());
+            card.ab_variants = Some(variants.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let error = pick_ab_winner_impl(gcx.clone(), "task-1", "T-1", "a")
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("has not finished yet"), "{error}");
+        prepared.a.prepared.cleanup_unlinked(gcx.clone()).await;
+        prepared.b.prepared.cleanup_unlinked(gcx).await;
     }
 
     #[tokio::test]

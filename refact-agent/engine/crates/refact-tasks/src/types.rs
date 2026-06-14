@@ -160,12 +160,60 @@ pub struct AbVariantInfo {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<AbVariantFinish>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AbVariantFinish {
+    pub success: bool,
+    pub final_report: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_report_structured: Option<FinalReport>,
+    pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbVariants {
     pub a: AbVariantInfo,
     pub b: AbVariantInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+}
+
+impl AbVariants {
+    pub fn variant(&self, key: &str) -> Option<&AbVariantInfo> {
+        match key {
+            "a" => Some(&self.a),
+            "b" => Some(&self.b),
+            _ => None,
+        }
+    }
+
+    pub fn variant_mut(&mut self, key: &str) -> Option<&mut AbVariantInfo> {
+        match key {
+            "a" => Some(&mut self.a),
+            "b" => Some(&mut self.b),
+            _ => None,
+        }
+    }
+
+    pub fn variant_key_for_chat_id(&self, chat_id: &str) -> Option<&'static str> {
+        if self.a.chat_id == chat_id {
+            Some("a")
+        } else if self.b.chat_id == chat_id {
+            Some("b")
+        } else {
+            None
+        }
+    }
+
+    pub fn all_finished(&self) -> bool {
+        self.a.finish.is_some() && self.b.finish.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -634,6 +682,48 @@ mod tests {
         .unwrap();
 
         assert!(card.ab_variants.is_none());
+    }
+
+    #[test]
+    fn spawn_ab_legacy_ab_variants_deserialize_without_finish_state() {
+        let card: BoardCard = serde_json::from_str(
+            r#"{
+                "id": "T-1",
+                "title": "A/B legacy card",
+                "column": "doing",
+                "created_at": "2026-05-16T00:00:00Z",
+                "started_at": "2026-05-16T00:00:00Z",
+                "completed_at": null,
+                "assignee": "ab",
+                "agent_chat_id": null,
+                "ab_variants": {
+                    "a": {
+                        "agent_id": "agent-a",
+                        "chat_id": "chat-a",
+                        "worktree": "/tmp/a",
+                        "worktree_name": "wt-a",
+                        "branch": "branch-a",
+                        "model": "model-a"
+                    },
+                    "b": {
+                        "agent_id": "agent-b",
+                        "chat_id": "chat-b",
+                        "worktree": "/tmp/b",
+                        "worktree_name": "wt-b",
+                        "branch": "branch-b",
+                        "model": "model-b"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let variants = card.ab_variants.unwrap();
+        assert!(variants.winner.is_none());
+        assert!(variants.a.finish.is_none());
+        assert!(variants.b.finish.is_none());
+        assert_eq!(variants.variant_key_for_chat_id("chat-a"), Some("a"));
+        assert_eq!(variants.variant_key_for_chat_id("chat-b"), Some("b"));
     }
 
     #[test]
