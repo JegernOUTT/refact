@@ -14,7 +14,7 @@ use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::get_active_project_path;
 use crate::scheduler::{
     human_schedule, next_run_ms, parse_cron, scheduler_timezone, session_cron_store, CronStore,
-    JsonFileCronStore, ScheduledTask,
+    Job, JsonFileCronStore,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -53,7 +53,7 @@ pub(crate) struct CronCreateRuntime {
 
 #[derive(Debug)]
 pub(crate) struct CronCreateOutcome {
-    pub(crate) task: ScheduledTask,
+    pub(crate) task: Job,
     pub(crate) human_schedule: String,
     pub(crate) summary: String,
 }
@@ -254,7 +254,7 @@ pub(crate) async fn create_cron_job(
         return Err("No project root available for durable scheduled jobs".to_string());
     }
 
-    let mut task = ScheduledTask::new(
+    let mut task = Job::new_cron_agent_chat(
         input.cron,
         input.prompt,
         input.description,
@@ -262,9 +262,9 @@ pub(crate) async fn create_cron_job(
         input.durable,
         runtime.now_ms,
     );
-    task.chat_id = runtime.chat_id;
-    task.mode = runtime.mode;
-    let human = human_schedule(&task.cron);
+    task.set_existing_chat(runtime.chat_id);
+    task.set_mode(runtime.mode);
+    let human = human_schedule(task.cron_expr().unwrap_or_default());
     let store = if task.durable {
         runtime.durable_store.as_ref().unwrap().clone()
     } else {
@@ -287,7 +287,7 @@ fn no_match_in_year_error() -> String {
 async fn emit_created_notice(
     app: crate::app_state::AppState,
     chat_id: &str,
-    task: &ScheduledTask,
+    task: &Job,
     summary: &str,
 ) {
     let session_arc = crate::chat::get_or_create_session_with_trajectory(
@@ -302,7 +302,7 @@ async fn emit_created_notice(
         "scheduler.cron",
         json!({
             "id": task.id,
-            "cron": task.cron,
+            "cron": task.cron_expr().unwrap_or_default(),
             "recurring": task.recurring,
             "durable": task.durable,
         }),
@@ -377,8 +377,8 @@ mod tests {
         }
     }
 
-    fn test_task(id: &str) -> ScheduledTask {
-        let mut task = ScheduledTask::new(
+    fn test_task(id: &str) -> Job {
+        let mut task = Job::new_cron_agent_chat(
             "*/5 * * * *".to_string(),
             "Check".to_string(),
             "Check".to_string(),
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(output["human_schedule"], json!("every 5 minutes"));
         assert!(created.recurring);
         assert!(!created.durable);
-        assert_eq!(created.chat_id.as_deref(), Some("cron-chat"));
+        assert_eq!(created.chat_id(), Some("cron-chat"));
         tokio::time::timeout(std::time::Duration::from_secs(1), notified)
             .await
             .unwrap();

@@ -12,8 +12,8 @@ pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCron
 pub use types::{
     Action, AgentTarget, CronCreatePolicy, CronRunRecord, Delivery,
     DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job,
-    RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, ScheduledTask,
-    SchedulerConfig, Trigger, cron_create_policy,
+    RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger,
+    cron_create_policy,
 };
 
 pub fn scheduler_timezone() -> chrono_tz::Tz {

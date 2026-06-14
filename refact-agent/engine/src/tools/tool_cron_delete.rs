@@ -130,24 +130,23 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::scheduler::{
-        InMemoryCronStore, JsonFileCronStore, ScheduledTask, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+        InMemoryCronStore, Job, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
     };
 
-    fn test_task(id: &str, durable: bool) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "*/5 * * * *".to_string(),
-            prompt: "Check the build".to_string(),
-            description: "Check build".to_string(),
-            recurring: true,
+    fn test_task(id: &str, durable: bool) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "*/5 * * * *".to_string(),
+            "Check the build".to_string(),
+            "Check build".to_string(),
+            true,
             durable,
-            created_at_ms: 1000,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+            1000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
     async fn test_ccx() -> Arc<AMutex<AtCommandsContext>> {

@@ -237,6 +237,6 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
 
     let tasks = crate::scheduler::session_cron_store().list().await;
     let task = tasks.iter().find(|t| t.id == id).unwrap();
-    assert_eq!(task.chat_id.as_deref(), Some("active-chat"));
-    assert_eq!(task.mode.as_deref(), Some("agent"));
+    assert_eq!(task.chat_id(), Some("active-chat"));
+    assert_eq!(task.mode(), Some("agent"));
 }

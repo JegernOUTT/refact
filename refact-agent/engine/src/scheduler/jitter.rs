@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use chrono::{TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 
-use super::cron_expr::next_run_ms;
+use super::schedule::{next_run_ms, ScheduleTarget};
 
 pub struct JitterConfig {
     pub recurring_frac: f64,
@@ -50,6 +50,23 @@ pub fn jittered_next_run_ms(
     Some(t1 + jitter)
 }
 
+pub fn jittered_next_run_ms_for<T: ScheduleTarget + ?Sized>(
+    target: &T,
+    from_ms: u64,
+    task_id: &str,
+    cfg: &JitterConfig,
+    tz: Tz,
+) -> Option<u64> {
+    let t1 = next_run_ms(target, from_ms, tz)?;
+    let Some(t2) = next_run_ms(target, t1, tz) else {
+        return Some(t1);
+    };
+    let gap = t2 - t1;
+    let jitter = (jitter_frac(task_id) * cfg.recurring_frac * gap as f64)
+        .min(cfg.recurring_cap_ms as f64) as u64;
+    Some(t1 + jitter)
+}
+
 pub fn one_shot_jittered_next_run_ms(
     expr: &str,
     from_ms: u64,
@@ -58,6 +75,22 @@ pub fn one_shot_jittered_next_run_ms(
     tz: Tz,
 ) -> Option<u64> {
     let t1 = next_run_ms(expr, from_ms, tz)?;
+    if local_minute(t1, tz)? % cfg.one_shot_minute_mod != 0 {
+        return Some(t1);
+    }
+    let range_ms = cfg.one_shot_max_ms - cfg.one_shot_floor_ms;
+    let lead = cfg.one_shot_floor_ms + (jitter_frac(task_id) * range_ms as f64) as u64;
+    Some(t1.saturating_sub(lead).max(from_ms))
+}
+
+pub fn one_shot_jittered_next_run_ms_for<T: ScheduleTarget + ?Sized>(
+    target: &T,
+    from_ms: u64,
+    task_id: &str,
+    cfg: &JitterConfig,
+    tz: Tz,
+) -> Option<u64> {
+    let t1 = next_run_ms(target, from_ms, tz)?;
     if local_minute(t1, tz)? % cfg.one_shot_minute_mod != 0 {
         return Some(t1);
     }

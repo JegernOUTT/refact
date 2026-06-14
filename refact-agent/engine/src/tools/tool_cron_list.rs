@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    CronStore, ScheduledTask,
+    CronStore, Job,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -179,18 +179,19 @@ fn parse_scope(args: &HashMap<String, Value>) -> Result<CronListScope, String> {
     }
 }
 
-fn task_value(task: &ScheduledTask, now_ms: u64, tz: chrono_tz::Tz) -> Value {
+fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
+    let cron = task.cron_expr().unwrap_or_default();
     json!({
         "id": task.id,
-        "cron": task.cron,
-        "human_schedule": human_schedule(&task.cron),
+        "cron": cron,
+        "human_schedule": human_schedule(cron),
         "description": task.description,
-        "prompt": first_chars(&task.prompt, 200),
-        "chat_id": task.chat_id,
-        "mode": task.mode,
+        "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
+        "chat_id": task.chat_id(),
+        "mode": task.mode(),
         "recurring": task.recurring,
         "durable": task.durable,
-        "next_fire_at_ms": next_run_ms(&task.cron, now_ms, tz).unwrap_or(0),
+        "next_fire_at_ms": next_run_ms(task, now_ms, tz).unwrap_or(0),
         "fire_count": task.fire_count,
         "created_at_ms": task.created_at_ms,
     })
@@ -208,38 +209,36 @@ mod tests {
         InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
     };
 
-    fn session_task(id: &str) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "*/5 * * * *".to_string(),
-            prompt: "session prompt".to_string(),
-            description: format!("{id} desc"),
-            recurring: true,
-            durable: false,
-            created_at_ms: 1000,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+    fn session_task(id: &str) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "*/5 * * * *".to_string(),
+            "session prompt".to_string(),
+            format!("{id} desc"),
+            true,
+            false,
+            1000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
-    fn durable_task(id: &str) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "0 9 * * *".to_string(),
-            prompt: "durable prompt".to_string(),
-            description: format!("{id} desc"),
-            recurring: true,
-            durable: true,
-            created_at_ms: 1000,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+    fn durable_task(id: &str) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "0 9 * * *".to_string(),
+            "durable prompt".to_string(),
+            format!("{id} desc"),
+            true,
+            true,
+            1000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
     async fn test_ccx() -> Arc<AMutex<AtCommandsContext>> {

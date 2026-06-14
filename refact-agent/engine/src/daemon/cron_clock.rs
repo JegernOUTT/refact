@@ -10,7 +10,10 @@ use tokio::task::JoinHandle;
 use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{now_ms, DaemonState};
 use crate::daemon::supervisor::WorkerState;
-use crate::scheduler::{next_run_ms, scheduled_tasks_path, scheduler_timezone, ScheduledTask};
+use crate::scheduler::{
+    next_run_ms, scheduled_tasks_path, scheduler_timezone, Action, AgentTarget, Delivery, Job,
+    Trigger,
+};
 
 pub(crate) const WAKE_LEAD_MS: u64 = 90_000;
 pub const CRON_PENDING_HORIZON_MS: u64 = crate::daemon::idle::CRON_SOON_MS;
@@ -232,7 +235,7 @@ async fn scan_project_file(
             };
         }
     };
-    let tasks = match serde_json::from_str::<Vec<ScheduledTask>>(&content) {
+    let tasks = match serde_json::from_str::<Vec<Job>>(&content) {
         Ok(tasks) => tasks,
         Err(error) => {
             if cache.warned_mtime != mtime || !cache.parse_failed {
@@ -258,7 +261,7 @@ async fn scan_project_file(
     }
 }
 
-fn next_pending_task(tasks: &[ScheduledTask], now: u64, tz: Tz) -> Option<PendingCron> {
+fn next_pending_task(tasks: &[Job], now: u64, tz: Tz) -> Option<PendingCron> {
     tasks
         .iter()
         .filter_map(|task| {
@@ -274,8 +277,15 @@ fn next_pending_task(tasks: &[ScheduledTask], now: u64, tz: Tz) -> Option<Pendin
         })
 }
 
-fn next_fire_for_task(task: &ScheduledTask, now: u64, tz: Tz) -> Option<u64> {
+fn next_fire_for_task(task: &Job, now: u64, tz: Tz) -> Option<u64> {
     if !task.durable {
+        return None;
+    }
+    if !is_supported_chat_job(task) {
+        tracing::warn!(
+            "skipping unsupported scheduled task {} in daemon cron clock",
+            task.id
+        );
         return None;
     }
     if task.recurring {
@@ -285,17 +295,31 @@ fn next_fire_for_task(task: &ScheduledTask, now: u64, tz: Tz) -> Option<u64> {
             return None;
         }
         let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
-        return next_run_ms(&task.cron, from_ms, tz);
+        return next_run_ms(task, from_ms, tz);
     }
     if task.fire_count != 0 {
         return None;
     }
-    let scheduled_ms = next_run_ms(&task.cron, task.created_at_ms, tz)?;
+    let scheduled_ms = next_run_ms(task, task.created_at_ms, tz)?;
     Some(if scheduled_ms <= now {
         now
     } else {
         scheduled_ms
     })
+}
+
+fn is_supported_chat_job(task: &Job) -> bool {
+    matches!(task.trigger, Trigger::Cron { .. })
+        && matches!(
+            (&task.action, &task.delivery),
+            (
+                Action::AgentTurn {
+                    target: AgentTarget::ExistingChat { .. },
+                    ..
+                },
+                Delivery::Chat,
+            )
+        )
 }
 
 #[cfg(test)]
@@ -366,21 +390,20 @@ mod tests {
             .timestamp_millis() as u64
     }
 
-    fn task(id: &str, cron: &str, created_at_ms: u64) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: cron.to_string(),
-            prompt: "wake up".to_string(),
-            description: "wake".to_string(),
-            recurring: true,
-            durable: true,
+    fn task(id: &str, cron: &str, created_at_ms: u64) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            cron.to_string(),
+            "wake up".to_string(),
+            "wake".to_string(),
+            true,
+            true,
             created_at_ms,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
     fn project_entry(root: std::path::PathBuf, id: &str) -> ProjectEntry {
@@ -394,7 +417,7 @@ mod tests {
         }
     }
 
-    async fn write_tasks(root: &std::path::Path, tasks: &[ScheduledTask]) -> Vec<u8> {
+    async fn write_tasks(root: &std::path::Path, tasks: &[Job]) -> Vec<u8> {
         let path = scheduled_tasks_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await

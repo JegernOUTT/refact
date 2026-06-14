@@ -79,52 +79,6 @@ fn default_scheduler_max_jobs() -> u32 {
     DEFAULT_SCHEDULER_MAX_JOBS
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ScheduledTask {
-    pub id: String,
-    pub cron: String,
-    pub prompt: String,
-    pub description: String,
-    pub recurring: bool,
-    pub durable: bool,
-    pub created_at_ms: u64,
-    pub chat_id: Option<String>,
-    pub mode: Option<String>,
-    pub last_fired_at_ms: Option<u64>,
-    pub fire_count: u32,
-    pub auto_expire_after_ms: u64,
-}
-
-impl ScheduledTask {
-    pub fn new(
-        cron: String,
-        prompt: String,
-        description: String,
-        recurring: bool,
-        durable: bool,
-        created_at_ms: u64,
-    ) -> Self {
-        Self {
-            id: format!("cron_{}", Uuid::now_v7()),
-            cron,
-            prompt,
-            description,
-            recurring,
-            durable,
-            created_at_ms,
-            chat_id: None,
-            mode: None,
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: if recurring {
-                DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS
-            } else {
-                0
-            },
-        }
-    }
-}
-
 pub const RECENT_RUNS_CAP: usize = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -149,6 +103,93 @@ pub struct Job {
     pub paused_at_ms: Option<u64>,
     pub trigger_at_ms: Option<u64>,
     pub auto_expire_after_ms: u64,
+}
+
+impl Job {
+    pub fn new_cron_agent_chat(
+        cron: String,
+        prompt: String,
+        description: String,
+        recurring: bool,
+        durable: bool,
+        created_at_ms: u64,
+    ) -> Self {
+        Self {
+            id: format!("cron_{}", Uuid::now_v7()),
+            description,
+            enabled: true,
+            durable,
+            created_at_ms,
+            recurring,
+            trigger: Trigger::Cron {
+                expr: cron,
+                tz: None,
+            },
+            action: Action::AgentTurn {
+                prompt,
+                target: AgentTarget::ExistingChat {
+                    chat_id: String::new(),
+                },
+                mode: None,
+                model: None,
+                tools: None,
+            },
+            delivery: Delivery::Chat,
+            last_fired_at_ms: None,
+            fire_count: 0,
+            last_status: None,
+            last_error: None,
+            recent_runs: Vec::new(),
+            paused_at_ms: None,
+            trigger_at_ms: None,
+            auto_expire_after_ms: default_auto_expire_after_ms(recurring),
+        }
+    }
+
+    pub fn cron_expr(&self) -> Option<&str> {
+        match &self.trigger {
+            Trigger::Cron { expr, .. } => Some(expr),
+            _ => None,
+        }
+    }
+
+    pub fn prompt(&self) -> Option<&str> {
+        match &self.action {
+            Action::AgentTurn { prompt, .. } => Some(prompt),
+            _ => None,
+        }
+    }
+
+    pub fn chat_id(&self) -> Option<&str> {
+        match &self.action {
+            Action::AgentTurn {
+                target: AgentTarget::ExistingChat { chat_id },
+                ..
+            } if !chat_id.is_empty() => Some(chat_id),
+            _ => None,
+        }
+    }
+
+    pub fn mode(&self) -> Option<&str> {
+        match &self.action {
+            Action::AgentTurn { mode, .. } => mode.as_deref().filter(|mode| !mode.is_empty()),
+            _ => None,
+        }
+    }
+
+    pub fn set_existing_chat(&mut self, chat_id: Option<String>) {
+        if let Action::AgentTurn { target, .. } = &mut self.action {
+            *target = AgentTarget::ExistingChat {
+                chat_id: chat_id.unwrap_or_default(),
+            };
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: Option<String>) {
+        if let Action::AgentTurn { mode: target, .. } = &mut self.action {
+            *target = mode;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -21,10 +21,10 @@ use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
 use crate::scheduler::scheduler_timezone;
 
-use super::cron_expr::next_run_ms;
-use super::jitter::{jittered_next_run_ms, one_shot_jittered_next_run_ms, JitterConfig};
+use super::jitter::{jittered_next_run_ms_for, one_shot_jittered_next_run_ms_for, JitterConfig};
+use super::schedule::next_run_ms;
 use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
-use super::types::ScheduledTask;
+use super::types::{Action, AgentTarget, Delivery, Job, Trigger};
 
 const DEFAULT_SLEEP_MS: u64 = 60_000;
 const IDLE_DEFER_MS: u64 = 30_000;
@@ -105,7 +105,7 @@ impl CronRunner {
             if !missed_one_shot_task(&task, now) {
                 continue;
             }
-            let Some(chat_id) = task.chat_id.clone() else {
+            let Some(chat_id) = task.chat_id().map(str::to_string) else {
                 continue;
             };
             let app = AppState::from_gcx(self.gcx.clone()).await;
@@ -143,7 +143,7 @@ impl CronRunner {
         }
     }
 
-    async fn resume_recurring_task(&self, task: &ScheduledTask, now: u64) {
+    async fn resume_recurring_task(&self, task: &Job, now: u64) {
         if self
             .scheduled_fire_at_ms(task, now)
             .is_some_and(|fire_at| fire_at < now)
@@ -175,11 +175,19 @@ impl CronRunner {
         }
     }
 
-    async fn handle_due_task(&mut self, task: ScheduledTask, now: u64) {
-        let Some(chat_id) = task.chat_id.as_deref() else {
-            self.handle_unfireable_task(&task, now, "missing chat_id")
-                .await;
-            return;
+    async fn handle_due_task(&mut self, task: Job, now: u64) {
+        let chat_id = match runnable_chat_id(&task) {
+            Ok(chat_id) => chat_id,
+            Err("missing chat_id") => {
+                self.handle_unfireable_task(&task, now, "missing chat_id")
+                    .await;
+                return;
+            }
+            Err(reason) => {
+                tracing::warn!("skipping scheduled task {} because {}", task.id, reason);
+                self.defer_invalid_target_task(&task, now);
+                return;
+            }
         };
 
         match chat_fire_status(&self.gcx, chat_id).await {
@@ -276,7 +284,7 @@ impl CronRunner {
         self.deferred_until_ms.remove(&task.id);
     }
 
-    async fn handle_unfireable_task(&mut self, task: &ScheduledTask, now: u64, reason: &str) {
+    async fn handle_unfireable_task(&mut self, task: &Job, now: u64, reason: &str) {
         if task.recurring || task.durable {
             tracing::warn!(
                 "deferred scheduled task {} because it is not fireable: {}",
@@ -301,23 +309,23 @@ impl CronRunner {
         }
     }
 
-    async fn remove_task(&mut self, task: &ScheduledTask) -> Result<(), String> {
+    async fn remove_task(&mut self, task: &Job) -> Result<(), String> {
         let _ = self.store.remove(&task.id).await?;
         self.deferred_until_ms.remove(&task.id);
         Ok(())
     }
 
-    fn defer_task(&mut self, task: &ScheduledTask, now: u64) {
+    fn defer_task(&mut self, task: &Job, now: u64) {
         self.deferred_until_ms
             .insert(task.id.clone(), now + IDLE_DEFER_MS);
     }
 
-    fn defer_invalid_target_task(&mut self, task: &ScheduledTask, now: u64) {
+    fn defer_invalid_target_task(&mut self, task: &Job, now: u64) {
         self.deferred_until_ms
             .insert(task.id.clone(), now + INVALID_TARGET_DEFER_MS);
     }
 
-    fn scheduled_fire_at_ms(&self, task: &ScheduledTask, now: u64) -> Option<u64> {
+    fn scheduled_fire_at_ms(&self, task: &Job, now: u64) -> Option<u64> {
         self.deferred_until_ms
             .get(&task.id)
             .copied()
@@ -325,25 +333,27 @@ impl CronRunner {
             .or_else(|| scheduled_fire_at_ms(task, now, &self.jitter_cfg))
     }
 
-    fn task_is_due(&self, task: &ScheduledTask, now: u64) -> bool {
+    fn task_is_due(&self, task: &Job, now: u64) -> bool {
         self.scheduled_fire_at_ms(task, now)
             .is_some_and(|fire_at| fire_at <= now)
     }
 
-    async fn fire(&self, task: &ScheduledTask, final_fire: bool) -> Result<bool, String> {
+    async fn fire(&self, task: &Job, final_fire: bool) -> Result<bool, String> {
         self.fire_with_missed(task, final_fire, false).await
     }
 
     async fn fire_with_missed(
         &self,
-        task: &ScheduledTask,
+        task: &Job,
         final_fire: bool,
         missed: bool,
     ) -> Result<bool, String> {
-        let chat_id = task
-            .chat_id
-            .as_ref()
-            .ok_or_else(|| format!("Scheduled task {} has no chat_id", task.id))?;
+        let chat_id = runnable_chat_id(task).map_err(|reason| {
+            format!(
+                "Scheduled task {} is not a runnable chat job: {reason}",
+                task.id
+            )
+        })?;
         let session_arc = {
             let sessions = self.gcx.chat_sessions.read().await;
             sessions.get(chat_id).cloned()
@@ -355,8 +365,8 @@ impl CronRunner {
         } else {
             cron_fire_message(task, final_fire)
         };
-        let prompt = task.prompt.clone();
-        let mode = task.mode.clone().filter(|m| !m.is_empty());
+        let prompt = task.prompt().unwrap_or_default().to_string();
+        let mode = task.mode().map(str::to_string);
         let processor_flag = {
             let mut session = session_arc.lock().await;
             if session.closed {
@@ -416,8 +426,8 @@ impl CronRunner {
         session.add_message(catch_up_notice_message(missed_count));
     }
 
-    async fn emit_auto_expired_notice(&self, task: &ScheduledTask) {
-        let Some(chat_id) = task.chat_id.as_ref() else {
+    async fn emit_auto_expired_notice(&self, task: &Job) {
+        let Some(chat_id) = task.chat_id() else {
             return;
         };
         let session_arc = {
@@ -521,18 +531,32 @@ async fn chat_fire_status(gcx: &SharedGlobalContext, chat_id: &str) -> ChatFireS
     }
 }
 
-fn cron_fire_message(task: &ScheduledTask, final_fire: bool) -> ChatMessage {
+fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
+    if !matches!(job.trigger, Trigger::Cron { .. }) {
+        return Err("non-cron trigger is not supported yet");
+    }
+    match (&job.action, &job.delivery) {
+        (
+            Action::AgentTurn {
+                target: AgentTarget::ExistingChat { chat_id },
+                ..
+            },
+            Delivery::Chat,
+        ) if !chat_id.is_empty() => Ok(chat_id),
+        (Action::AgentTurn { .. }, Delivery::Chat) => Err("missing chat_id"),
+        (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
+        (Action::Command { .. }, _) => Err("command actions are not supported yet"),
+    }
+}
+
+fn cron_fire_message(task: &Job, final_fire: bool) -> ChatMessage {
     cron_fire_message_with_missed(task, final_fire, false)
 }
 
-fn cron_fire_message_with_missed(
-    task: &ScheduledTask,
-    final_fire: bool,
-    missed: bool,
-) -> ChatMessage {
+fn cron_fire_message_with_missed(task: &Job, final_fire: bool, missed: bool) -> ChatMessage {
     let mut payload = json!({
         "task_id": task.id,
-        "cron": task.cron,
+        "cron": task.cron_expr().unwrap_or_default(),
         "recurring": task.recurring,
         "fire_count": task.fire_count.saturating_add(1),
         "final": final_fire,
@@ -544,7 +568,7 @@ fn cron_fire_message_with_missed(
         EventSubkind::CronFire,
         "scheduler.cron",
         payload,
-        task.prompt.clone(),
+        task.prompt().unwrap_or_default().to_string(),
     )
 }
 
@@ -557,7 +581,7 @@ fn catch_up_notice_message(missed_count: u64) -> ChatMessage {
     )
 }
 
-fn auto_expired_notice_message(task: &ScheduledTask) -> ChatMessage {
+fn auto_expired_notice_message(task: &Job) -> ChatMessage {
     event(
         EventSubkind::SystemNotice,
         "scheduler.cron",
@@ -573,13 +597,13 @@ fn auto_expired_notice_message(task: &ScheduledTask) -> ChatMessage {
     )
 }
 
-fn scheduled_fire_at_ms(task: &ScheduledTask, _now: u64, jitter_cfg: &JitterConfig) -> Option<u64> {
+fn scheduled_fire_at_ms(task: &Job, _now: u64, jitter_cfg: &JitterConfig) -> Option<u64> {
     let tz = scheduler_timezone();
     let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
     let next = if task.recurring {
-        jittered_next_run_ms(&task.cron, from_ms, &task.id, jitter_cfg, tz)
+        jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz)
     } else {
-        one_shot_jittered_next_run_ms(&task.cron, from_ms, &task.id, jitter_cfg, tz)
+        one_shot_jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz)
     }?;
     if task.recurring || task.last_fired_at_ms.is_none() {
         Some(next)
@@ -588,15 +612,16 @@ fn scheduled_fire_at_ms(task: &ScheduledTask, _now: u64, jitter_cfg: &JitterConf
     }
 }
 
-fn missed_one_shot_task(task: &ScheduledTask, now: u64) -> bool {
+fn missed_one_shot_task(task: &Job, now: u64) -> bool {
     !task.recurring
+        && matches!(task.trigger, Trigger::Cron { .. })
         && task.last_fired_at_ms.is_none()
         && task.fire_count == 0
-        && next_run_ms(&task.cron, task.created_at_ms, scheduler_timezone())
+        && next_run_ms(task, task.created_at_ms, scheduler_timezone())
             .is_some_and(|next| next < now)
 }
 
-fn task_final_after_fire(task: &ScheduledTask, now: u64) -> bool {
+fn task_final_after_fire(task: &Job, now: u64) -> bool {
     task.recurring
         && task.auto_expire_after_ms > 0
         && now.saturating_sub(task.created_at_ms) > task.auto_expire_after_ms
@@ -624,31 +649,31 @@ mod tests {
     use crate::scheduler::store::InMemoryCronStore;
     use crate::scheduler::types::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
 
-    fn task(id: &str, now: u64) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "*/1 * * * *".to_string(),
-            prompt: "scheduled prompt".to_string(),
-            description: "scheduled prompt".to_string(),
-            recurring: true,
-            durable: false,
-            created_at_ms: now - 120_000,
-            chat_id: Some("chat-1".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: Some(now - 120_000),
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+    fn task(id: &str, now: u64) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "*/1 * * * *".to_string(),
+            "scheduled prompt".to_string(),
+            "scheduled prompt".to_string(),
+            true,
+            false,
+            now - 120_000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat-1".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.last_fired_at_ms = Some(now - 120_000);
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
-    fn expired_task(id: &str, now: u64) -> ScheduledTask {
+    fn expired_task(id: &str, now: u64) -> Job {
         let mut task = task(id, now);
         task.created_at_ms = now - 2 * DAY_MS - 1;
         task.auto_expire_after_ms = 2 * DAY_MS;
         task
     }
 
-    fn one_shot_task(id: &str, now: u64) -> ScheduledTask {
+    fn one_shot_task(id: &str, now: u64) -> Job {
         let mut task = task(id, now);
         task.recurring = false;
         task.last_fired_at_ms = None;
@@ -656,7 +681,7 @@ mod tests {
         task
     }
 
-    fn due_task(id: &str, now: u64) -> ScheduledTask {
+    fn due_task(id: &str, now: u64) -> Job {
         let mut task = task(id, now);
         task.created_at_ms = now - 120_000;
         task.last_fired_at_ms = Some(now - 120_000);
@@ -816,10 +841,10 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut one_shot = one_shot_task("cron_no_chat_one_shot", now);
-        one_shot.chat_id = None;
+        one_shot.set_existing_chat(None);
         store.add(one_shot).await.unwrap();
         let mut recurring = due_task("cron_no_chat_recurring", now);
-        recurring.chat_id = None;
+        recurring.set_existing_chat(None);
         store.add(recurring).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
@@ -841,7 +866,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut one_shot = one_shot_task("cron_missing_chat_one_shot", now);
-        one_shot.chat_id = Some("missing-chat".to_string());
+        one_shot.set_existing_chat(Some("missing-chat".to_string()));
         store.add(one_shot).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut runner = CronRunner::new(store.clone(), gcx);
@@ -987,7 +1012,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut one_shot = one_shot_task("cron_durable_no_traj", now);
-        one_shot.chat_id = Some("missing-traj-chat".to_string());
+        one_shot.set_existing_chat(Some("missing-traj-chat".to_string()));
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1018,7 +1043,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut recurring = due_task("cron_durable_recurring_no_traj", now);
-        recurring.chat_id = Some("missing-traj-recurring".to_string());
+        recurring.set_existing_chat(Some("missing-traj-recurring".to_string()));
         recurring.durable = true;
         store.add(recurring).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1050,7 +1075,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut one_shot = one_shot_task("cron_catch_up_missed", now);
-        one_shot.chat_id = Some("catch-up-chat".to_string());
+        one_shot.set_existing_chat(Some("catch-up-chat".to_string()));
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
 
@@ -1091,7 +1116,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut one_shot = one_shot_task("cron_catch_up_no_traj", now);
-        one_shot.chat_id = Some("no-traj-catch-up-chat".to_string());
+        one_shot.set_existing_chat(Some("no-traj-catch-up-chat".to_string()));
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
 
@@ -1116,7 +1141,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut task = due_task("cron_mode_apply", now);
-        task.mode = Some("explore".to_string());
+        task.set_mode(Some("explore".to_string()));
         store.add(task).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
@@ -1149,7 +1174,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut task = due_task("cron_no_mode", now);
-        task.mode = None;
+        task.set_mode(None);
         store.add(task).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
@@ -1173,7 +1198,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut task = due_task("cron_mode_nonempty_queue", now);
-        task.mode = Some("explore".to_string());
+        task.set_mode(Some("explore".to_string()));
         store.add(task).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
 
@@ -1225,7 +1250,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut task = due_task("cron_mode_persist", now);
-        task.mode = Some("agent".to_string());
+        task.set_mode(Some("agent".to_string()));
         store.add(task).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
@@ -1250,7 +1275,7 @@ mod tests {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         let mut t = due_task("cron_defer_non_priority", now);
-        t.mode = Some("agent".to_string());
+        t.set_mode(Some("agent".to_string()));
         store.add(t).await.unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
 

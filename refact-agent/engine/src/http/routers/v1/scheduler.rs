@@ -157,20 +157,20 @@ pub async fn handle_v1_scheduler_cron_delete(
     Ok(Json(CronDeleteResponse { removed }))
 }
 
-fn task_response(
-    task: crate::scheduler::ScheduledTask,
-    now_ms: u64,
-    tz: chrono_tz::Tz,
-) -> CronTaskResponse {
+fn task_response(task: crate::scheduler::Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse {
+    let cron = task.cron_expr().unwrap_or_default().to_string();
+    let human_schedule = human_schedule(&cron);
+    let prompt = first_chars(task.prompt().unwrap_or_default(), 200);
+    let next_fire_at_ms = next_run_ms(&task, now_ms, tz).unwrap_or(0);
     CronTaskResponse {
         id: task.id,
-        cron: task.cron.clone(),
-        human_schedule: human_schedule(&task.cron),
+        cron,
+        human_schedule,
         description: task.description,
-        prompt: first_chars(&task.prompt, 200),
+        prompt,
         recurring: task.recurring,
         durable: task.durable,
-        next_fire_at_ms: next_run_ms(&task.cron, now_ms, tz).unwrap_or(0),
+        next_fire_at_ms,
         fire_count: task.fire_count,
         created_at_ms: task.created_at_ms,
     }
