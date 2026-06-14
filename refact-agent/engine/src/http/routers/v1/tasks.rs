@@ -11,19 +11,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use chrono::Utc;
-use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
-use crate::tasks::types::{
-    BoardCard, CardComment, StatusUpdate, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo,
-};
+use crate::tasks::comments::{self, CreateCardComment};
+use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
 use crate::chat::trajectories::TrajectoryEvent;
 use crate::chat::types::SessionState;
 use crate::tasks::events::{TaskEvent, TaskEventEnvelope};
 use crate::tasks::storage;
-use crate::tools::task_tool_helpers::truncate_chars;
 use crate::tools::tool_task_documents::{
     CreateDocumentRequest, TaskDocumentDetail, TaskDocumentHistoryResponse,
     TaskDocumentListResponse, append_task_document_for_api, create_task_document_for_api,
@@ -67,6 +64,16 @@ pub struct UpdateBoardRequest {
     pub rev: u64,
     #[serde(flatten)]
     pub patch: BoardPatch,
+}
+
+#[derive(Deserialize)]
+pub struct CreateCardCommentRequest {
+    pub body: String,
+    pub author_role: String,
+    #[serde(default)]
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -422,6 +429,27 @@ pub async fn handle_get_board(
     Ok(Json(board))
 }
 
+pub async fn handle_create_card_comment(
+    State(app): State<AppState>,
+    Path((task_id, card_id)): Path<(String, String)>,
+    Json(req): Json<CreateCardCommentRequest>,
+) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    let (board, _) = comments::create_card_comment(
+        app.gcx.clone(),
+        &task_id,
+        CreateCardComment {
+            card_id,
+            body: req.body,
+            author_role: req.author_role,
+            author_id: req.author_id,
+            reply_to: req.reply_to,
+        },
+    )
+    .await
+    .map_err(map_patch_board_error)?;
+    Ok(Json(board))
+}
+
 fn map_patch_board_error(error: String) -> (StatusCode, String) {
     if error.starts_with("Board rev mismatch:") || error.starts_with("active agent card:") {
         return (StatusCode::CONFLICT, error);
@@ -573,30 +601,16 @@ pub async fn handle_patch_board(
                 author_id,
                 reply_to,
             } => {
-                let valid_roles = ["planner", "agents", "user", "system", "http"];
-                if !valid_roles.contains(&author_role.as_str()) {
-                    return Err("invalid author_role".to_string());
-                }
-                let trimmed_body = body.trim();
-                if trimmed_body.is_empty() {
-                    return Err("comment body is empty".to_string());
-                }
-                let card = board
-                    .get_card_mut(&card_id)
-                    .ok_or_else(|| format!("Card {} not found", card_id))?;
-                if let Some(reply_id) = &reply_to {
-                    if !card.comments.iter().any(|c| &c.id == reply_id) {
-                        return Err("reply_to references unknown comment".to_string());
-                    }
-                }
-                card.comments.push(CardComment {
-                    id: Uuid::new_v4().to_string(),
-                    author_role,
-                    author_id,
-                    timestamp: Utc::now().to_rfc3339(),
-                    body: truncate_chars(trimmed_body, 4000),
-                    reply_to,
-                });
+                comments::add_comment_to_board(
+                    board,
+                    CreateCardComment {
+                        card_id,
+                        body,
+                        author_role,
+                        author_id,
+                        reply_to,
+                    },
+                )?;
             }
             BoardPatch::SetFinalReport { card_id, report } => {
                 let card = board
@@ -1439,6 +1453,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use refact_chat_api::{ChatMessage, TaskMeta as ChatTaskMeta};
     use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
+    use uuid::Uuid;
 
     async fn setup_task(root: &std::path::Path, task_id: &str) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;

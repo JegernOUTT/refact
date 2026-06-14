@@ -298,9 +298,12 @@ async fn refetch_marketplace_into_cache(
             .await
             .map_err(|e| format!("remove stale marketplace cache {:?}: {}", final_dir, e))?;
     }
-    tokio::fs::rename(&tmp_dir, &final_dir)
-        .await
-        .map_err(|e| format!("rename marketplace dir {:?} -> {:?}: {}", tmp_dir, final_dir, e))?;
+    tokio::fs::rename(&tmp_dir, &final_dir).await.map_err(|e| {
+        format!(
+            "rename marketplace dir {:?} -> {:?}: {}",
+            tmp_dir, final_dir, e
+        )
+    })?;
     Ok(())
 }
 

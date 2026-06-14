@@ -81,14 +81,14 @@ use crate::http::routers::v1::voice::{
 };
 use crate::http::routers::v1::tasks::{
     handle_list_tasks, handle_create_task, handle_get_task, handle_delete_task, handle_get_board,
-    handle_patch_board, handle_get_planner_instructions, handle_set_planner_instructions,
-    handle_get_ready_cards, handle_update_task_status, handle_update_task_meta,
-    handle_list_task_trajectories, handle_create_planner_chat, handle_delete_planner_chat,
-    handle_tasks_subscribe, handle_list_task_memories, handle_pin_task_memory,
-    handle_archive_task_memory, handle_task_memories_triage_done, handle_task_memory_facets,
-    handle_list_task_documents, handle_get_task_document, handle_create_task_document,
-    handle_update_task_document, handle_append_task_document, handle_delete_task_document,
-    handle_pin_task_document, handle_history_task_document,
+    handle_create_card_comment, handle_patch_board, handle_get_planner_instructions,
+    handle_set_planner_instructions, handle_get_ready_cards, handle_update_task_status,
+    handle_update_task_meta, handle_list_task_trajectories, handle_create_planner_chat,
+    handle_delete_planner_chat, handle_tasks_subscribe, handle_list_task_memories,
+    handle_pin_task_memory, handle_archive_task_memory, handle_task_memories_triage_done,
+    handle_task_memory_facets, handle_list_task_documents, handle_get_task_document,
+    handle_create_task_document, handle_update_task_document, handle_append_task_document,
+    handle_delete_task_document, handle_pin_task_document, handle_history_task_document,
 };
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
@@ -531,6 +531,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/tasks/:task_id/board", get(handle_get_board))
         .route("/tasks/:task_id/board", post(handle_patch_board))
+        .route(
+            "/tasks/:task_id/cards/:card_id/comments",
+            post(handle_create_card_comment),
+        )
         .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
         .route(
             "/tasks/:task_id/planner-instructions",
