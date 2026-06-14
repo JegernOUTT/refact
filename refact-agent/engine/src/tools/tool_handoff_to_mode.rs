@@ -94,13 +94,38 @@ async fn ensure_task_for_planner_handoff(
     gcx: Arc<crate::global_context::GlobalContext>,
     canonical_mode: &str,
     existing_task_meta: Option<refact_chat_api::TaskMeta>,
+    current_chat_id: &str,
+    current_root_chat_id: Option<&str>,
 ) -> Result<Option<refact_chat_api::TaskMeta>, String> {
     if canonical_mode != "task_planner" {
         return Ok(existing_task_meta);
     }
     if let Some(task_meta) = existing_task_meta {
-        if task_meta.role == "planner" && task_meta.planner_chat_id.is_some() {
-            return Ok(Some(task_meta));
+        if task_meta.role == "planner" {
+            let planner_chat_id = current_root_chat_id
+                .filter(|id| !id.is_empty() && *id != current_chat_id)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| current_chat_id.to_string());
+            return Ok(Some(refact_chat_api::TaskMeta {
+                task_id: task_meta.task_id,
+                role: "planner".to_string(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: Some(planner_chat_id),
+            }));
+        }
+        if let Some(planner_chat_id) = current_root_chat_id
+            .filter(|id| !id.is_empty() && *id != current_chat_id)
+            .map(ToString::to_string)
+            .or_else(|| task_meta.planner_chat_id.clone().filter(|id| !id.is_empty()))
+        {
+            return Ok(Some(refact_chat_api::TaskMeta {
+                task_id: task_meta.task_id,
+                role: "planner".to_string(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: Some(planner_chat_id),
+            }));
         }
         let chat_id = storage::next_planner_chat_id(gcx, &task_meta.task_id).await?;
         return Ok(Some(refact_chat_api::TaskMeta {
@@ -372,9 +397,14 @@ impl Tool for ToolHandoffToMode {
             .map_err(|e| format!("handoff assembly failed: {}", e))?;
 
         let new_messages = sanitize_messages_for_new_thread(&new_messages);
-        let task_meta =
-            ensure_task_for_planner_handoff(gcx.clone(), &canonical_mode, existing_task_meta)
-                .await?;
+        let task_meta = ensure_task_for_planner_handoff(
+            gcx.clone(),
+            &canonical_mode,
+            existing_task_meta,
+            &chat_id,
+            thread.root_chat_id.as_deref(),
+        )
+        .await?;
         let new_chat_id = if canonical_mode == "task_planner" {
             task_meta
                 .as_ref()
@@ -666,6 +696,46 @@ mod tests {
         assert!(raw.contains("kind: \"plan\""));
         assert!(raw.contains("pinned: true"));
         assert!(raw.contains("Card T-1"));
+    }
+
+    #[tokio::test]
+    async fn handoff_to_task_planner_uses_active_root_as_planner_chat_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        let mut snapshot = source_snapshot();
+        snapshot.thread.id = "child-chat".to_string();
+        snapshot.thread.root_chat_id = Some("controller-planner".to_string());
+        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "task-lineage".to_string(),
+            role: "subchats".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("stale-planner".to_string()),
+        });
+        facade.snapshot.lock().unwrap().replace(snapshot);
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"handoff-call".to_string(),
+            &handoff_args("Lineage plan"),
+        )
+        .await
+        .unwrap();
+
+        let saved = facade.saved.lock().unwrap().clone();
+        let task_meta = saved[0].task_meta.as_ref().unwrap();
+        assert_eq!(saved[0].chat_id, "controller-planner");
+        assert_eq!(task_meta.role, "planner");
+        assert_eq!(
+            task_meta.planner_chat_id.as_deref(),
+            Some("controller-planner")
+        );
+        assert_eq!(saved[0].root_chat_id.as_deref(), Some("controller-planner"));
     }
 
     async fn tool_with_snapshot(

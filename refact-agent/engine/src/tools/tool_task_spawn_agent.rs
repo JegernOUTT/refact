@@ -504,6 +504,23 @@ pub(crate) fn build_agent_thread_params(
     }
 }
 
+fn resolve_invoking_planner_chat_id(
+    chat_id: &str,
+    root_chat_id: &str,
+    task_meta: Option<&TaskMeta>,
+) -> String {
+    if !root_chat_id.is_empty() && root_chat_id != chat_id {
+        return root_chat_id.to_string();
+    }
+    if task_meta.is_some_and(|meta| meta.role == "planner") {
+        return chat_id.to_string();
+    }
+    task_meta
+        .and_then(|meta| meta.planner_chat_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| chat_id.to_string())
+}
+
 fn resolve_files_to_open_path(worktree_root: &Path, source_root: &Path, path_str: &str) -> PathBuf {
     let requested = Path::new(path_str);
     if requested.is_absolute() {
@@ -659,11 +676,12 @@ impl Tool for ToolTaskSpawnAgent {
                         .map(|s| s.to_string())
                         .unwrap_or_default()
                 });
-            let planner_chat_id = ccx_lock
-                .task_meta
-                .as_ref()
-                .and_then(|m| m.planner_chat_id.clone())
-                .unwrap_or_else(|| ccx_lock.chat_id.clone());
+            let planner_chat_id = ccx_lock.task_meta.as_ref();
+            let planner_chat_id = resolve_invoking_planner_chat_id(
+                &ccx_lock.chat_id,
+                &ccx_lock.root_chat_id,
+                planner_chat_id,
+            );
             (task_id, planner_chat_id)
         };
         let task_id = if task_id.is_empty() {
@@ -1495,6 +1513,26 @@ mod tests {
         assert_eq!(thread.root_chat_id.as_deref(), Some("planner-task-1-1"));
         assert_eq!(thread.worktree.as_ref(), Some(&worktree));
         assert!(thread.worktree.as_ref().unwrap().enforce);
+    }
+
+    #[test]
+    fn spawn_agent_planner_chat_id_uses_active_root_before_legacy_meta() {
+        let task_meta = refact_chat_api::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "subchats".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("stale-planner".to_string()),
+        };
+
+        assert_eq!(
+            resolve_invoking_planner_chat_id("child-chat", "controller-planner", Some(&task_meta)),
+            "controller-planner"
+        );
+        assert_eq!(
+            resolve_invoking_planner_chat_id("child-chat", "", Some(&task_meta)),
+            "stale-planner"
+        );
     }
 
     #[test]

@@ -3334,14 +3334,7 @@ fn trajectory_source_identity_from_path(
 ) -> TrajectorySourceIdentity {
     task_trajectory_context_from_path(path, task_roots)
         .map(|(task_id, role, agent_id)| {
-            let planner_chat_id = if role == "planner" {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(ToString::to_string)
-            } else {
-                None
-            };
-            TrajectorySourceIdentity::task(task_id, role, agent_id, None, planner_chat_id)
+            TrajectorySourceIdentity::task(task_id, role, agent_id, None, None)
         })
         .unwrap_or(TrajectorySourceIdentity::Normal)
 }
@@ -11016,6 +11009,38 @@ mod tests {
         );
         drop(session);
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn planner_chat_id_path_hint_does_not_use_file_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _app) = make_app_with_workspace(dir.path()).await;
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-path-hint-planner")
+            .join("trajectories")
+            .join("planner")
+            .join("misleading-file-stem.json");
+        tokio::fs::create_dir_all(task_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&task_path, "{}").await.unwrap();
+
+        let source =
+            trajectory_source_identity_from_path(&task_path, &get_all_task_roots(gcx).await);
+
+        assert_eq!(
+            source,
+            TrajectorySourceIdentity::task(
+                "task-path-hint-planner".to_string(),
+                "planner".to_string(),
+                None,
+                None,
+                None,
+            )
+        );
     }
 
     #[tokio::test]
