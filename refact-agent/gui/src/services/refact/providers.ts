@@ -230,6 +230,16 @@ export type OpenAICodexUsageResponse = {
   error?: string | null;
 };
 
+export type OpenAICodexResetRedeemData = {
+  code: string;
+  windows_reset?: number | null;
+};
+
+export type OpenAICodexResetRedeemResponse = {
+  data?: OpenAICodexResetRedeemData | null;
+  error?: string | null;
+};
+
 export type OpenRouterAccountInfoResponse = {
   data: {
     key_name?: string | null;
@@ -807,6 +817,55 @@ export const providersApi = createApi({
         }
 
         return { data: result.data as OpenAICodexUsageResponse };
+      },
+    }),
+
+    redeemOpenAICodexResetCredit: builder.mutation<
+      OpenAICodexResetRedeemResponse,
+      ProviderScopedQueryRequiredArg & { redeemRequestId: string }
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(
+            args.providerName,
+          )}/usage/redeem`,
+        );
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "POST",
+            url,
+            body: { redeem_request_id: args.redeemRequestId },
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/usage/redeem`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as OpenAICodexResetRedeemResponse };
       },
     }),
 
@@ -1567,6 +1626,7 @@ export const {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useRedeemOpenAICodexResetCreditMutation,
   useToggleModelMutation,
   useSetModelProviderMutation,
   useAddCustomModelMutation,

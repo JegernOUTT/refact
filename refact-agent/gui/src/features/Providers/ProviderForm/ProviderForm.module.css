@@ -73,6 +73,15 @@
   gap: var(--rf-space-1);
 }
 
+.resetCreditsRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
 .usageRowHeader {
   display: flex;
   min-width: 0;

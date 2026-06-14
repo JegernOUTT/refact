@@ -51,7 +51,8 @@ use crate::providers::http::{
     handle_v1_provider_oauth_exchange, handle_v1_provider_oauth_logout,
     handle_v1_provider_oauth_start, handle_v1_provider_remove_custom_model,
     handle_v1_provider_remove_custom_model_post, handle_v1_provider_schema,
-    handle_v1_provider_update, handle_v1_provider_usage, handle_v1_providers_list,
+    handle_v1_provider_update, handle_v1_provider_usage, handle_v1_provider_usage_redeem,
+    handle_v1_providers_list,
 };
 
 use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
@@ -384,6 +385,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/providers/:name/health", get(handle_v1_provider_health))
         .route("/providers/:name/usage", get(handle_v1_provider_usage))
+        .route(
+            "/providers/:name/usage/redeem",
+            post(handle_v1_provider_usage_redeem),
+        )
         .route(
             "/providers/:name/oauth/start",
             post(handle_v1_provider_oauth_start),

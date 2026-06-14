@@ -1,4 +1,5 @@
 import React from "react";
+import { v4 as uuidv4 } from "uuid";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
@@ -23,6 +24,7 @@ import {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
 import {
   clampPercent,
@@ -256,71 +258,142 @@ const AdditionalRateLimitRow: React.FC<{
   </div>
 );
 
-const CodexUsagePanel: React.FC<{ data: OpenAICodexUsageData }> = ({
-  data,
-}) => (
-  <Surface className={styles.usagePanel} variant="glass" animated="rise">
-    <div className={styles.usageHeader}>
-      <div>
-        <div className={styles.usageTitle}>Usage</div>
-        {data.email ? (
-          <div className={styles.usageMeta}>{data.email}</div>
-        ) : null}
-      </div>
-      {data.plan_type ? <Badge tone="accent">{data.plan_type}</Badge> : null}
-    </div>
-    <div className={styles.usageRows}>
-      <RateLimitSection title="Main quota" rl={data.rate_limit} />
-      {data.rate_limit_reached_type ? (
-        <InfoRow label="Reached type" value={data.rate_limit_reached_type} />
-      ) : null}
-      {data.additional_rate_limits?.length ? (
-        <div className={styles.usageRow}>
-          <div className={styles.usageTitle}>Additional quotas</div>
-          {data.additional_rate_limits.map((limit, index) => (
-            <AdditionalRateLimitRow
-              key={`${limit.limit_name ?? "quota"}-${index}`}
-              limit={limit}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className={styles.usageMeta}>Additional quotas not reported.</div>
-      )}
-      <RateLimitSection
-        title="Code review quota"
-        rl={data.code_review_rate_limit}
-      />
-      {data.credits ? (
-        <div className={styles.usageRow}>
-          <InfoRow
-            label="Credits"
-            value={formatCodexCreditsSummary(data.credits)}
-          />
-          {formatCodexCreditsDetails(data.credits) ? (
-            <div className={styles.usageMeta}>
-              {formatCodexCreditsDetails(data.credits)}
-            </div>
+const formatRedeemCode = (code: string): string => {
+  switch (code) {
+    case "reset":
+      return "Usage reset.";
+    case "already_redeemed":
+      return "Already redeemed.";
+    case "nothing_to_reset":
+      return "Your usage does not need a reset right now.";
+    case "no_credit":
+      return "No rate-limit resets are available.";
+    default:
+      return "Reset request completed.";
+  }
+};
+
+const CodexUsagePanel: React.FC<{
+  data: OpenAICodexUsageData;
+  providerName: string;
+  onRedeemed: () => void;
+}> = ({ data, providerName, onRedeemed }) => {
+  const [redeem, { isLoading: isRedeeming }] =
+    useRedeemOpenAICodexResetCreditMutation();
+  const [redeemMessage, setRedeemMessage] = React.useState<string | null>(null);
+  const redeemRequestIdRef = React.useRef<string | null>(null);
+  const availableResets = data.rate_limit_reset_credits?.available_count;
+  const showResetCredits = typeof availableResets === "number";
+
+  const handleRedeem = async () => {
+    if (!redeemRequestIdRef.current) {
+      redeemRequestIdRef.current = uuidv4();
+    }
+    setRedeemMessage(null);
+    const response = await redeem({
+      providerName,
+      redeemRequestId: redeemRequestIdRef.current,
+      useInstanceRoute: true,
+    });
+    if ("error" in response) {
+      setRedeemMessage("Couldn't redeem reset. Please try again.");
+      return;
+    }
+    const payload = response.data;
+    if (payload.error != null || !payload.data) {
+      setRedeemMessage(
+        payload.error ?? "Couldn't redeem reset. Please try again.",
+      );
+      return;
+    }
+    // Idempotency key is reused on retry and only cleared after success.
+    redeemRequestIdRef.current = null;
+    setRedeemMessage(formatRedeemCode(payload.data.code));
+    onRedeemed();
+  };
+
+  return (
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageHeader}>
+        <div>
+          <div className={styles.usageTitle}>Usage</div>
+          {data.email ? (
+            <div className={styles.usageMeta}>{data.email}</div>
           ) : null}
         </div>
-      ) : (
-        <div className={styles.usageMeta}>Credits not reported.</div>
-      )}
-      {typeof data.rate_limit_reset_credits?.available_count === "number" ? (
-        <InfoRow
-          label="Reset credits"
-          value={`${data.rate_limit_reset_credits.available_count} available`}
+        {data.plan_type ? <Badge tone="accent">{data.plan_type}</Badge> : null}
+      </div>
+      <div className={styles.usageRows}>
+        <RateLimitSection title="Main quota" rl={data.rate_limit} />
+        {data.rate_limit_reached_type ? (
+          <InfoRow label="Reached type" value={data.rate_limit_reached_type} />
+        ) : null}
+        {data.additional_rate_limits?.length ? (
+          <div className={styles.usageRow}>
+            <div className={styles.usageTitle}>Additional quotas</div>
+            {data.additional_rate_limits.map((limit, index) => (
+              <AdditionalRateLimitRow
+                key={`${limit.limit_name ?? "quota"}-${index}`}
+                limit={limit}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>
+            Additional quotas not reported.
+          </div>
+        )}
+        <RateLimitSection
+          title="Code review quota"
+          rl={data.code_review_rate_limit}
         />
-      ) : null}
-      {data.spend_control ? (
-        <InfoRow
-          label="Spend control"
-          value={formatCodexSpendControl(data.spend_control)}
-        />
-      ) : null}
-    </div>
-  </Surface>
-);
+        {data.credits ? (
+          <div className={styles.usageRow}>
+            <InfoRow
+              label="Credits"
+              value={formatCodexCreditsSummary(data.credits)}
+            />
+            {formatCodexCreditsDetails(data.credits) ? (
+              <div className={styles.usageMeta}>
+                {formatCodexCreditsDetails(data.credits)}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>Credits not reported.</div>
+        )}
+        {showResetCredits ? (
+          <div className={styles.usageRow}>
+            <div className={styles.resetCreditsRow}>
+              <InfoRow
+                label="Reset credits"
+                value={`${availableResets} available`}
+              />
+              <Button
+                size="1"
+                variant="soft"
+                loading={isRedeeming}
+                disabled={isRedeeming || availableResets <= 0}
+                onClick={() => void handleRedeem()}
+              >
+                Redeem reset
+              </Button>
+            </div>
+            {redeemMessage ? (
+              <div className={styles.usageMeta}>{redeemMessage}</div>
+            ) : null}
+          </div>
+        ) : null}
+        {data.spend_control ? (
+          <InfoRow
+            label="Spend control"
+            value={formatCodexSpendControl(data.spend_control)}
+          />
+        ) : null}
+      </div>
+    </Surface>
+  );
+};
 
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
@@ -335,11 +408,14 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
       { providerName: currentProvider.name, useInstanceRoute: true },
       { skip: baseProvider !== "claude_code", pollingInterval: 60_000 },
     );
-  const { data: codexUsage, isError: codexUsageError } =
-    useGetOpenAICodexUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
-    );
+  const {
+    data: codexUsage,
+    isError: codexUsageError,
+    refetch: refetchCodexUsage,
+  } = useGetOpenAICodexUsageQuery(
+    { providerName: currentProvider.name, useInstanceRoute: true },
+    { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
+  );
   const {
     areShowingExtraFields,
     formValues,
@@ -390,7 +466,11 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         ) : null}
 
         {codexUsage?.data && !codexUsage.error ? (
-          <CodexUsagePanel data={codexUsage.data} />
+          <CodexUsagePanel
+            data={codexUsage.data}
+            providerName={currentProvider.name}
+            onRedeemed={() => void refetchCodexUsage()}
+          />
         ) : null}
         {codexUsage?.error != null || codexUsageError ? (
           <div className={styles.defaultDescription}>

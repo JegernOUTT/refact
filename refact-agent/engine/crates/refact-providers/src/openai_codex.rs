@@ -23,6 +23,8 @@ const CODEX_ORIGINATOR: &str = "refact-lsp";
 const CHATGPT_CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=999.999.999";
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
+const CHATGPT_CODEX_RESET_REDEEM_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
 #[allow(dead_code)]
@@ -205,6 +207,12 @@ pub struct OpenAICodexAdditionalRateLimit {
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenAICodexResetCredits {
     pub available_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexResetRedeem {
+    pub code: String,
+    pub windows_reset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -448,6 +456,57 @@ impl OpenAICodexProvider {
         .map_err(|error| Self::usage_request_error_to_string(error, context.source))
     }
 
+    pub async fn redeem_reset_credit_once(
+        &self,
+        http_client: &reqwest::Client,
+        token: &str,
+        chatgpt_account_id: &str,
+        redeem_request_id: &str,
+    ) -> Result<OpenAICodexResetRedeem, UsageRequestError> {
+        let mut req = http_client
+            .post(CHATGPT_CODEX_RESET_REDEEM_URL)
+            .timeout(CODEX_USAGE_TIMEOUT)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({ "redeem_request_id": redeem_request_id }));
+        for (key, value) in self.chatgpt_backend_metadata_headers(chatgpt_account_id) {
+            req = req.header(key, value);
+        }
+        let resp = req.send().await.map_err(|e| {
+            UsageRequestError::Other(format!("OpenAI Codex reset redeem request failed: {}", e))
+        })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(UsageRequestError::Status(status, body));
+        }
+
+        let root: Value = resp.json().await.map_err(|e| {
+            UsageRequestError::Other(format!(
+                "Failed to parse OpenAI Codex reset redeem response: {}",
+                e
+            ))
+        })?;
+
+        Ok(Self::parse_redeem_payload(&root))
+    }
+
+    pub async fn redeem_reset_credit(
+        &self,
+        http_client: &reqwest::Client,
+        redeem_request_id: &str,
+    ) -> Result<OpenAICodexResetRedeem, String> {
+        let context = self.resolve_wham_context()?;
+        self.redeem_reset_credit_once(
+            http_client,
+            &context.access_token,
+            &context.chatgpt_account_id,
+            redeem_request_id,
+        )
+        .await
+        .map_err(|error| Self::usage_request_error_to_string(error, context.source))
+    }
+
     fn parse_usage_payload(root: &Value) -> OpenAICodexUsage {
         let data = root.get("data").unwrap_or(root);
         let raw_extra = Self::collect_raw_extra(
@@ -640,6 +699,15 @@ impl OpenAICodexProvider {
             available_count: Self::field(value, &["available_count", "availableCount"])
                 .and_then(Self::as_u64_loose),
         })
+    }
+
+    fn parse_redeem_payload(root: &Value) -> OpenAICodexResetRedeem {
+        let data = root.get("data").unwrap_or(root);
+        OpenAICodexResetRedeem {
+            code: Self::string_field(data, &["code", "status"]).unwrap_or_default(),
+            windows_reset: Self::field(data, &["windows_reset", "windowsReset"])
+                .and_then(Self::as_u64_loose),
+        }
     }
 
     fn parse_credits(c: &Value) -> OpenAICodexCredits {
@@ -2014,6 +2082,28 @@ http_response_header_retry_max_attempts: 12
             usage.raw_extra["future_quota"]["provider_added"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn openai_codex_redeem_payload_parses_code_and_windows() {
+        let redeem = OpenAICodexProvider::parse_redeem_payload(&json!({
+            "code": "reset",
+            "windows_reset": 2
+        }));
+        assert_eq!(redeem.code, "reset");
+        assert_eq!(redeem.windows_reset, Some(2));
+
+        // Tolerates a `data` wrapper, camelCase key, and string-encoded number.
+        let wrapped = OpenAICodexProvider::parse_redeem_payload(&json!({
+            "data": { "code": "already_redeemed", "windowsReset": "1" }
+        }));
+        assert_eq!(wrapped.code, "already_redeemed");
+        assert_eq!(wrapped.windows_reset, Some(1));
+
+        // Missing fields degrade gracefully.
+        let empty = OpenAICodexProvider::parse_redeem_payload(&json!({}));
+        assert_eq!(empty.code, "");
+        assert_eq!(empty.windows_reset, None);
     }
 
     #[test]

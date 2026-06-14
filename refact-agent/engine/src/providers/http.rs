@@ -2856,6 +2856,20 @@ async fn openai_codex_usage_response(
     }
 }
 
+async fn openai_codex_redeem_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    redeem_request_id: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let result =
+        redeem_openai_codex_reset_credit_with_refresh(gcx, provider_name, redeem_request_id).await;
+
+    match result {
+        Ok(redeem) => json_response(StatusCode::OK, &json!({"data": redeem})),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
 pub async fn handle_v1_provider_usage(
     State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
@@ -2877,6 +2891,47 @@ pub async fn handle_v1_provider_usage(
             format!("Provider '{}' does not support usage", params.name),
         )),
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ResetRedeemRequest {
+    #[serde(default)]
+    redeem_request_id: Option<String>,
+}
+
+pub async fn handle_v1_provider_usage_redeem(
+    State(app): State<AppState>,
+    Path(params): Path<ProviderPathParams>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    validate_instance_id_for_http(&params.name)?;
+    let request: ResetRedeemRequest = if body_bytes.is_empty() {
+        ResetRedeemRequest::default()
+    } else {
+        serde_json::from_slice(&body_bytes).map_err(|e| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Invalid JSON: {}", e),
+            )
+        })?
+    };
+    let identity = resolve_provider_identity(&gcx, &params.name).await?;
+    if identity.base_provider != "openai_codex" {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Provider '{}' does not support rate-limit reset redemption",
+                params.name
+            ),
+        ));
+    }
+    let redeem_request_id = request
+        .redeem_request_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    openai_codex_redeem_response(gcx, &params.name, &redeem_request_id).await
 }
 
 async fn current_openai_codex_provider(
@@ -3044,6 +3099,93 @@ async fn fetch_openai_codex_usage_with_refresh(
                     &http_client,
                     &retry_context.access_token,
                     &retry_context.chatgpt_account_id,
+                )
+                .await
+                .map_err(|error| {
+                    OpenAICodexProvider::usage_request_error_to_string(error, retry_context.source)
+                })
+        }
+        Err(error) => Err(OpenAICodexProvider::usage_request_error_to_string(
+            error,
+            context.source,
+        )),
+    }
+}
+
+async fn redeem_openai_codex_reset_credit_with_refresh(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    redeem_request_id: &str,
+) -> Result<crate::providers::openai_codex::OpenAICodexResetRedeem, String> {
+    let (mut request_provider, http_client, _) =
+        current_openai_codex_provider(&gcx, provider_name).await?;
+    if !request_provider.oauth_tokens.has_refresh_token() {
+        return request_provider
+            .redeem_reset_credit(&http_client, redeem_request_id)
+            .await;
+    }
+
+    let mut refresh_attempted = false;
+    let context = match request_provider.resolve_wham_context() {
+        Ok(context) => context,
+        Err(_) if request_provider.oauth_tokens.has_refresh_token() => {
+            refresh_attempted = true;
+            let rejected_access_token = request_provider.oauth_tokens.access_token.clone();
+            request_provider = force_refresh_openai_codex_usage_for_retry(
+                gcx.clone(),
+                &http_client,
+                provider_name,
+                &rejected_access_token,
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                "OpenAI Codex reset access token is expired and refresh returned no access token. Log in again in OpenAI Codex provider settings."
+                    .to_string()
+            })?;
+            request_provider.resolve_wham_context()?
+        }
+        Err(error) => return Err(error),
+    };
+
+    match request_provider
+        .redeem_reset_credit_once(
+            &http_client,
+            &context.access_token,
+            &context.chatgpt_account_id,
+            redeem_request_id,
+        )
+        .await
+    {
+        Ok(redeem) => Ok(redeem),
+        Err(UsageRequestError::Status(status, _body))
+            if OpenAICodexProvider::should_force_refresh_for_status(
+                status,
+                &request_provider.oauth_tokens.refresh_token,
+                refresh_attempted,
+            ) =>
+        {
+            let Some(retry_provider) = force_refresh_openai_codex_usage_for_retry(
+                gcx,
+                &http_client,
+                provider_name,
+                &context.access_token,
+                Some(status),
+            )
+            .await?
+            else {
+                return Err(
+                    "OpenAI Codex reset API rejected the access token and refresh returned no access token. Log in again in OpenAI Codex provider settings."
+                        .to_string(),
+                );
+            };
+            let retry_context = retry_provider.resolve_wham_context()?;
+            retry_provider
+                .redeem_reset_credit_once(
+                    &http_client,
+                    &retry_context.access_token,
+                    &retry_context.chatgpt_account_id,
+                    redeem_request_id,
                 )
                 .await
                 .map_err(|error| {
