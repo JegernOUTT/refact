@@ -506,7 +506,7 @@ const SlashApp = (props: Partial<ComboBoxProps>) => {
       (query: string, cursor: number) => {
         if (query === "/" && cursor === 1) {
           setCommands({
-            completions: ["/optimize", "/review"],
+            completions: ["/optimize", "/review", "/move"],
             completion_details: {
               "/optimize": {
                 description: "Optimize code for performance",
@@ -518,6 +518,12 @@ const SlashApp = (props: Partial<ComboBoxProps>) => {
                 description: "Review code for issues",
                 source: "global_refact",
                 kind: "skill",
+              },
+              "/move": {
+                description: "Move text from one place to another",
+                argument_hint: "<from> <to>",
+                source: "project_refact",
+                kind: "cmd",
               },
             },
             replace: [0, cursor],
@@ -608,17 +614,26 @@ describe("ComboBox slash commands", () => {
     const { user, ...app } = render(<SlashApp />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
-    expect(app.queryByText("cmd")).not.toBeNull();
+    expect(app.queryAllByText("cmd").length).toBeGreaterThan(0);
     expect(app.queryByText("skill")).not.toBeNull();
   });
 
-  test("selecting a slash command replaces input text", async () => {
+  test("selecting a slash command without arguments inserts a trailing space", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    const suggestion = app.getByText("/review");
+    await user.click(suggestion);
+    expect(textarea.textContent).toEqual("/review ");
+  });
+
+  test("selecting a slash command with arguments inserts the hint", async () => {
     const { user, ...app } = render(<SlashApp />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
     const suggestion = app.getByText("/optimize");
     await user.click(suggestion);
-    expect(textarea.textContent).toEqual("/optimize");
+    expect(textarea.textContent).toEqual("/optimize [file-path]");
   });
 
   test("filtering narrows slash completions", async () => {
@@ -654,50 +669,79 @@ describe("ComboBox slash commands", () => {
     expect(app.queryByText("/optimize")).toBeNull();
   });
 
-  test("selecting slash command without argument_hint via Enter auto-submits", async () => {
+  test("Enter on a command without arguments pastes it with a trailing space and does not submit", async () => {
     const onSubmitSpy = vi.fn();
     const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
     await user.keyboard("{ArrowDown}{Enter}");
     await waitFor(() => {
-      expect(onSubmitSpy).toHaveBeenCalled();
-    });
-  });
-
-  test("auto-submit uses the accepted slash command value", async () => {
-    const onSubmitAcceptedValueSpy = vi.fn();
-    const { user, ...app } = render(
-      <SlashApp onSubmitAcceptedValue={onSubmitAcceptedValueSpy} />,
-    );
-    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
-    await user.type(textarea, "/");
-    await user.keyboard("{ArrowDown}{Enter}");
-    await waitFor(() => {
-      expect(onSubmitAcceptedValueSpy).toHaveBeenCalledWith("/review");
-    });
-  });
-
-  test("pressing Space accepts the active slash completion without auto-submitting", async () => {
-    const onSubmitSpy = vi.fn();
-    const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
-    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
-    await user.type(textarea, "/opt");
-    await user.keyboard(" ");
-
-    await waitFor(() => {
-      expect(textarea.textContent).toEqual("/optimize");
+      expect(textarea.textContent).toEqual("/review ");
     });
     expect(onSubmitSpy).not.toHaveBeenCalled();
   });
 
-  test("selecting slash command with argument_hint via Enter does not auto-submit", async () => {
+  test("Enter on a command with arguments inserts the hint and selects the first placeholder", async () => {
     const onSubmitSpy = vi.fn();
     const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
     const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
     await user.type(textarea, "/");
     await user.keyboard("{Enter}");
-    await pause(50);
+    await waitFor(() => {
+      expect(textarea.textContent).toEqual("/optimize [file-path]");
+      expect(textarea.selectionStart).toEqual(10);
+      expect(textarea.selectionEnd).toEqual(21);
+    });
     expect(onSubmitSpy).not.toHaveBeenCalled();
+  });
+
+  test("Tab and Shift+Tab cycle through argument placeholders", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    await waitFor(() => {
+      expect(textarea.textContent).toEqual("/move <from> <to>");
+      expect(textarea.selectionStart).toEqual(6);
+      expect(textarea.selectionEnd).toEqual(12);
+    });
+    await user.keyboard("{Tab}");
+    await waitFor(() => {
+      expect(textarea.selectionStart).toEqual(13);
+      expect(textarea.selectionEnd).toEqual(17);
+    });
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    await waitFor(() => {
+      expect(textarea.selectionStart).toEqual(6);
+      expect(textarea.selectionEnd).toEqual(12);
+    });
+  });
+
+  test("pressing Space does not accept a completion or submit", async () => {
+    const onSubmitSpy = vi.fn();
+    const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/opt");
+    await waitFor(() => expect(app.queryByText("/optimize")).not.toBeNull());
+    await user.keyboard(" ");
+    await waitFor(() => {
+      expect(textarea.textContent).toEqual("/opt ");
+    });
+    expect(onSubmitSpy).not.toHaveBeenCalled();
+  });
+
+  test("Esc hides the menu for the current token but a fresh / reopens it", async () => {
+    const { user, ...app } = render(<SlashApp />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    expect(app.queryByText("/optimize")).not.toBeNull();
+    await user.keyboard("{Escape}");
+    expect(app.queryByText("/optimize")).toBeNull();
+    await user.type(textarea, "opt");
+    await pause(50);
+    expect(app.queryByText("/optimize")).toBeNull();
+    await user.clear(textarea);
+    await user.type(textarea, "/");
+    await waitFor(() => expect(app.queryByText("/optimize")).not.toBeNull());
   });
 });

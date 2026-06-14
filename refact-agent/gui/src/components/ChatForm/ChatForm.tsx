@@ -139,6 +139,7 @@ import { ChatSettingsDropdown } from "./ChatSettingsDropdown";
 import { ModeSelect } from "./ModeSelect";
 import { WorktreeControl } from "../../features/Worktrees";
 import { addCheckboxValuesToInput } from "./utils";
+import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector, useAppDispatch } from "../../hooks";
 import { getErrorMessage } from "../../features/Errors/errorsSlice";
@@ -350,6 +351,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
+  const argumentPlaceholdersRef = React.useRef<string[]>([]);
+
   const onClearInformation = useCallback(
     () => dispatch(clearInformation()),
     [dispatch],
@@ -363,7 +366,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const handleSubmit = useCallback(
     (sendPolicy: SendPolicy = "after_flow", inputValue = value) => {
-      const trimmedValue = inputValue.trim();
+      const trimmedValue = stripUnfilledPlaceholders(
+        inputValue,
+        argumentPlaceholdersRef.current,
+      ).trim();
       const hasImages = attachedImages.length > 0;
       const hasTextFiles = textFiles.length > 0;
       const canSubmit =
@@ -383,6 +389,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         );
         setLineSelectionInteracted(false);
         onSubmit(valueIncludingChecks, sendPolicy);
+        argumentPlaceholdersRef.current = [];
         setValue("");
         setInputResetKey((k) => k + 1);
         unCheckAll();
@@ -757,8 +764,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   onSubmit={(event) => {
                     handleEnter(event);
                   }}
-                  onSubmitAcceptedValue={(acceptedValue) => {
-                    handleSubmit("after_flow", acceptedValue);
+                  onArgumentPlaceholdersChange={(placeholders) => {
+                    argumentPlaceholdersRef.current = placeholders;
                   }}
                   placeholder={
                     isVoiceActive

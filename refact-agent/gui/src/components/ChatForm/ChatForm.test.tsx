@@ -202,7 +202,7 @@ describe("ChatForm", () => {
     expect(fakeOnSubmit).toHaveBeenCalledWith(expected, "after_flow");
   });
 
-  test("submits the accepted slash command instead of the typed prefix", async () => {
+  test("accepting a slash command pastes it without submitting, then Enter sends it", async () => {
     const fakeOnSubmit = vi.fn();
     server.use(
       http.post("*/v1/at-command-completion", () => {
@@ -233,7 +233,54 @@ describe("ChatForm", () => {
     await user.keyboard("{Enter}");
 
     await waitFor(() => {
+      expect(textarea.value).toEqual("/review ");
+    });
+    expect(fakeOnSubmit).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+    await waitFor(() => {
       expect(fakeOnSubmit).toHaveBeenCalledWith("/review\n", "after_flow");
+    });
+  });
+
+  test("strips unfilled argument placeholders before sending", async () => {
+    const fakeOnSubmit = vi.fn();
+    server.use(
+      http.post("*/v1/at-command-completion", () => {
+        return HttpResponse.json({
+          completions: ["/optimize"],
+          completion_details: {
+            "/optimize": {
+              description: "Optimize code for performance",
+              argument_hint: "[file-path]",
+              source: "project_refact",
+              kind: "cmd",
+            },
+          },
+          replace: [0, 1],
+          is_cmd_executable: false,
+        });
+      }),
+    );
+
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: engineConfigState,
+    });
+    const textarea = app.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) return;
+
+    await user.type(textarea, "/");
+    await waitFor(() => expect(app.queryByText("/optimize")).not.toBeNull());
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(textarea.value).toEqual("/optimize [file-path]");
+    });
+
+    await user.keyboard("{Enter}");
+    await waitFor(() => {
+      expect(fakeOnSubmit).toHaveBeenCalledWith("/optimize\n", "after_flow");
     });
   });
 
