@@ -153,6 +153,27 @@ pub struct UsageSummary {
     pub total_tokens: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReasoningModelCaps {
+    effort_options: Vec<String>,
+    supports_thinking_budget: bool,
+    supports_adaptive_thinking_budget: bool,
+}
+
+impl ReasoningModelCaps {
+    fn has_reasoning_support(&self) -> bool {
+        !self.effort_options.is_empty()
+            || self.supports_thinking_budget
+            || self.supports_adaptive_thinking_budget
+    }
+
+    fn supports_effort(&self, level: session::ReasoningLevel) -> bool {
+        self.effort_options
+            .iter()
+            .any(|option| option == level.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardCopySource {
     LastAssistant,
@@ -310,6 +331,8 @@ pub struct App {
     show_session_header: bool,
     model: Option<String>,
     mode: Option<String>,
+    boost_reasoning: bool,
+    reasoning_effort: Option<String>,
     pending_model: Option<String>,
     pending_mode: Option<String>,
     pending_send_retry: Option<PendingSendRetry>,
@@ -321,6 +344,7 @@ pub struct App {
     permission_policy: session::PermissionPolicy,
     retry_hint: Option<String>,
     model_context_windows: HashMap<String, u64>,
+    model_reasoning_caps: HashMap<String, ReasoningModelCaps>,
     default_context_window_tokens: Option<u64>,
     scroll_offset: usize,
     selected_tool_index: Option<usize>,
@@ -390,6 +414,8 @@ impl App {
             show_session_header: false,
             model: None,
             mode: None,
+            boost_reasoning: false,
+            reasoning_effort: None,
             pending_model: None,
             pending_mode: None,
             pending_send_retry: None,
@@ -401,6 +427,7 @@ impl App {
             permission_policy: session::PermissionPolicy::default(),
             retry_hint: None,
             model_context_windows: HashMap::new(),
+            model_reasoning_caps: HashMap::new(),
             default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
@@ -453,6 +480,8 @@ impl App {
             show_session_header: false,
             model: None,
             mode: None,
+            boost_reasoning: false,
+            reasoning_effort: None,
             pending_model: None,
             pending_mode: None,
             pending_send_retry: None,
@@ -464,6 +493,7 @@ impl App {
             permission_policy: session::PermissionPolicy::default(),
             retry_hint: None,
             model_context_windows: HashMap::new(),
+            model_reasoning_caps: HashMap::new(),
             default_context_window_tokens: None,
             scroll_offset: 0,
             selected_tool_index: None,
@@ -600,6 +630,12 @@ impl App {
 
     pub fn mode(&self) -> Option<&str> {
         self.mode.as_deref()
+    }
+
+    pub fn reasoning_effort_label(&self) -> &str {
+        self.reasoning_effort
+            .as_deref()
+            .unwrap_or(if self.boost_reasoning { "on" } else { "off" })
     }
 
     pub fn session_state(&self) -> SessionState {
@@ -877,6 +913,7 @@ impl App {
 
     pub fn apply_caps(&mut self, caps: &Value) {
         self.model_context_windows = model_context_windows(caps);
+        self.model_reasoning_caps = model_reasoning_caps(caps);
         self.default_context_window_tokens =
             default_context_window(caps, &self.model_context_windows);
     }
@@ -937,6 +974,19 @@ impl App {
             PickerKind::Permissions,
             session::permission_picker_items(),
             session::selected_permission_ids(self.permission_policy),
+        ));
+        self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn open_reasoning_picker(&mut self) {
+        let levels = self.supported_reasoning_levels();
+        if levels.is_empty() {
+            self.add_reasoning_unsupported_notice();
+            return;
+        }
+        self.modal_picker = Some(PickerState::new(
+            PickerKind::Reasoning,
+            session::reasoning_picker_items(&levels),
         ));
         self.composer_mode = ComposerMode::Chat;
     }
@@ -1064,6 +1114,16 @@ impl App {
                     patch: session::permission_policy_patch(policy),
                 }
             }
+            (PickerKind::Reasoning, PickerAccept::Single(Some(item))) => {
+                match session::parse_reasoning_level(&item.id) {
+                    Ok(Some(level)) => self.set_reasoning_level(level),
+                    Ok(None) => AppAction::None,
+                    Err(error) => {
+                        self.add_notice(format!("/reasoning {error}"));
+                        AppAction::None
+                    }
+                }
+            }
             (PickerKind::Theme, PickerAccept::Single(Some(item))) => {
                 self.apply_theme_name(&item.id);
                 AppAction::None
@@ -1142,6 +1202,20 @@ impl App {
                 self.composer.clear();
                 AppAction::LoadModes
             }
+            session::SessionCommand::Reasoning => {
+                self.composer.clear();
+                match session::parse_reasoning_level(args) {
+                    Ok(Some(level)) => self.set_reasoning_level(level),
+                    Ok(None) => {
+                        self.open_reasoning_picker();
+                        AppAction::None
+                    }
+                    Err(error) => {
+                        self.add_notice(format!("/reasoning {error}"));
+                        AppAction::None
+                    }
+                }
+            }
             session::SessionCommand::Permissions => {
                 self.composer.clear();
                 self.open_permissions_picker();
@@ -1154,6 +1228,79 @@ impl App {
             }
             session::SessionCommand::Init => self.submit_structured_prompt(session::init_prompt()),
         }
+    }
+
+    fn set_reasoning_level(&mut self, level: session::ReasoningLevel) -> AppAction {
+        if !self.reasoning_level_supported(level) {
+            self.add_reasoning_unsupported_notice();
+            return AppAction::None;
+        }
+        self.apply_reasoning_level(level);
+        self.add_notice(format!(
+            "Reasoning effort set to {} for subsequent turns",
+            level.as_str()
+        ));
+        AppAction::SetParams {
+            patch: session::reasoning_patch(level),
+        }
+    }
+
+    fn apply_reasoning_level(&mut self, level: session::ReasoningLevel) {
+        match level {
+            session::ReasoningLevel::Off => {
+                self.clear_reasoning_level();
+            }
+            _ => {
+                self.boost_reasoning = true;
+                self.reasoning_effort = Some(level.as_str().to_string());
+            }
+        }
+    }
+
+    fn clear_reasoning_level(&mut self) {
+        self.boost_reasoning = false;
+        self.reasoning_effort = None;
+    }
+
+    fn reasoning_level_supported(&self, level: session::ReasoningLevel) -> bool {
+        if level == session::ReasoningLevel::Off {
+            return true;
+        }
+        self.current_reasoning_caps()
+            .is_some_and(|caps| caps.supports_effort(level))
+    }
+
+    fn supported_reasoning_levels(&self) -> Vec<session::ReasoningLevel> {
+        let Some(caps) = self.current_reasoning_caps() else {
+            return Vec::new();
+        };
+        if !caps.has_reasoning_support() {
+            return Vec::new();
+        }
+        let mut levels = vec![session::ReasoningLevel::Off];
+        levels.extend(
+            [
+                session::ReasoningLevel::Low,
+                session::ReasoningLevel::Medium,
+                session::ReasoningLevel::High,
+            ]
+            .into_iter()
+            .filter(|level| caps.supports_effort(*level)),
+        );
+        levels
+    }
+
+    fn current_reasoning_caps(&self) -> Option<&ReasoningModelCaps> {
+        self.model
+            .as_deref()
+            .and_then(|model| reasoning_caps_for_model(&self.model_reasoning_caps, model))
+    }
+
+    fn add_reasoning_unsupported_notice(&mut self) {
+        let model = self.model().unwrap_or("current model");
+        self.add_notice(format!(
+            "Reasoning effort is not available for {model}. Choose a reasoning-capable model first."
+        ));
     }
 
     fn execute_workflow_command(&mut self, command: workflow::WorkflowCommand) -> AppAction {
@@ -1316,6 +1463,7 @@ impl App {
                 .map(|project| project.root.display().to_string()),
             model: self.model().unwrap_or("default").to_string(),
             mode: self.mode().unwrap_or("agent").to_string(),
+            reasoning: self.reasoning_effort_label().to_string(),
             session_id: self.chat_id.clone(),
             usage: self.usage().map(|usage| session::StatusUsage {
                 prompt_tokens: usage.prompt_tokens,
@@ -1371,7 +1519,9 @@ impl App {
         self.selected_tool_index = None;
         self.usage = None;
         self.pending_send_retry = None;
+        self.clear_reasoning_level();
         self.model_context_windows.clear();
+        self.model_reasoning_caps.clear();
         self.ask_questions_form = None;
         self.default_context_window_tokens = None;
         self.retry_hint = None;
@@ -1398,6 +1548,7 @@ impl App {
         self.selected_tool_index = None;
         self.usage = None;
         self.pending_send_retry = None;
+        self.clear_reasoning_level();
         self.ask_questions_form = None;
         self.retry_hint = None;
     }
@@ -1418,6 +1569,7 @@ impl App {
         self.server_queue_previews.clear();
         self.model = None;
         self.mode = None;
+        self.clear_reasoning_level();
         self.pending_model = None;
         self.pending_mode = None;
         self.replace_with_session(format!("Resuming {title}"), subtitle);
@@ -2639,6 +2791,15 @@ impl App {
                 .map(str::to_string);
             self.mode = thread
                 .get("mode")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            self.boost_reasoning = thread
+                .get("boost_reasoning")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            self.reasoning_effort = thread
+                .get("reasoning_effort")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
@@ -5038,6 +5199,20 @@ fn model_context_windows(caps: &Value) -> HashMap<String, u64> {
     windows
 }
 
+fn model_reasoning_caps(caps: &Value) -> HashMap<String, ReasoningModelCaps> {
+    let mut out = HashMap::new();
+    if let Some(models) = caps.get("chat_models") {
+        collect_model_reasoning_caps(models, &mut out);
+    }
+    if let Some(models) = caps.get("models").and_then(|models| models.get("chat")) {
+        collect_model_reasoning_caps(models, &mut out);
+    }
+    if let Some(models) = caps.get("available_models") {
+        collect_model_reasoning_caps(models, &mut out);
+    }
+    out
+}
+
 fn collect_model_context_windows(models: &Value, windows: &mut HashMap<String, u64>) {
     match models {
         Value::Object(map) => {
@@ -5049,6 +5224,27 @@ fn collect_model_context_windows(models: &Value, windows: &mut HashMap<String, u
             for model in items {
                 if let Some(id) = model.get("id").and_then(Value::as_str) {
                     insert_model_context_window(id, model, windows);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_model_reasoning_caps(
+    models: &Value,
+    reasoning: &mut HashMap<String, ReasoningModelCaps>,
+) {
+    match models {
+        Value::Object(map) => {
+            for (id, model) in map {
+                insert_model_reasoning_caps(id, model, reasoning);
+            }
+        }
+        Value::Array(items) => {
+            for model in items {
+                if let Some(id) = model.get("id").and_then(Value::as_str) {
+                    insert_model_reasoning_caps(id, model, reasoning);
                 }
             }
         }
@@ -5070,6 +5266,43 @@ fn insert_model_context_window(id: &str, model: &Value, windows: &mut HashMap<St
     {
         windows.insert(model_id.to_string(), window);
     }
+}
+
+fn insert_model_reasoning_caps(
+    id: &str,
+    model: &Value,
+    reasoning: &mut HashMap<String, ReasoningModelCaps>,
+) {
+    let caps = reasoning_caps_from_model(model);
+    if !id.is_empty() {
+        reasoning.insert(id.to_string(), caps.clone());
+    }
+    if let Some(model_id) = model
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        reasoning.insert(model_id.to_string(), caps);
+    }
+}
+
+fn reasoning_caps_from_model(model: &Value) -> ReasoningModelCaps {
+    ReasoningModelCaps {
+        effort_options: model
+            .get("reasoning_effort_options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        supports_thinking_budget: bool_field(model, "supports_thinking_budget"),
+        supports_adaptive_thinking_budget: bool_field(model, "supports_adaptive_thinking_budget"),
+    }
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn context_window_from_model(model: &Value) -> Option<u64> {
@@ -5136,6 +5369,18 @@ fn context_window_for_model(windows: &HashMap<String, u64>, model: &str) -> Opti
         windows.iter().find_map(|(id, window)| {
             id.rsplit('/').next().filter(|suffix| *suffix == model)?;
             Some(*window)
+        })
+    })
+}
+
+fn reasoning_caps_for_model<'a>(
+    reasoning: &'a HashMap<String, ReasoningModelCaps>,
+    model: &str,
+) -> Option<&'a ReasoningModelCaps> {
+    reasoning.get(model).or_else(|| {
+        reasoning.iter().find_map(|(id, caps)| {
+            id.rsplit('/').next().filter(|suffix| *suffix == model)?;
+            Some(caps)
         })
     })
 }
@@ -6580,6 +6825,23 @@ new-chat = "ctrl-x"
             .is_some_and(|picker| picker.kind == PickerKind::Permissions));
 
         let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-demo": {"reasoning_effort_options": ["low", "medium", "high"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-demo"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+        assert_eq!(app.execute_command_name("reasoning"), AppAction::None);
+        assert!(app
+            .modal_picker()
+            .is_some_and(|picker| picker.kind == PickerKind::Reasoning));
+
+        let mut app = App::new(project());
         assert_eq!(
             app.execute_command_name("status"),
             AppAction::LoadDaemonStatus
@@ -6665,7 +6927,7 @@ new-chat = "ctrl-x"
         assert_eq!(
             text,
             format!(
-                "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready · pid 42 · http 9000 · lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent\nSession: {}\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left",
+                "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready · pid 42 · http 9000 · lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:off\nSession: {}\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left",
                 &app.chat_id()[..8]
             )
         );
@@ -6732,6 +6994,79 @@ new-chat = "ctrl-x"
             }
         );
         assert_eq!(app.mode(), Some("agent"));
+    }
+
+    #[test]
+    fn reasoning_command_emits_set_params_and_updates_footer_state() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "openai/gpt-demo": {"reasoning_effort_options": ["low", "medium", "high"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "openai/gpt-demo", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+
+        let action = app.execute_command_name("reasoning high");
+
+        assert_eq!(
+            action,
+            AppAction::SetParams {
+                patch: json!({"boost_reasoning": true, "reasoning_effort": "high", "thinking_budget": null})
+            }
+        );
+        assert_eq!(app.reasoning_effort_label(), "high");
+        let footer = crate::ui::footer::footer_text(&crate::ui::footer::FooterData::from_app(&app));
+        assert!(footer.contains("reason:high"));
+    }
+
+    #[test]
+    fn reasoning_command_reports_unsupported_model_without_set_params() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({"chat_models": {"gpt-basic": {"reasoning_effort_options": null}}}));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-basic", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+
+        assert_eq!(app.execute_command_name("reasoning high"), AppAction::None);
+        assert_eq!(app.reasoning_effort_label(), "off");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Reasoning effort is not available"))
+        }));
+    }
+
+    #[test]
+    fn reasoning_picker_lists_only_supported_effort_levels() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-demo": {"reasoning_effort_options": ["low", "high", "xhigh"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-demo", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+
+        assert_eq!(app.execute_command_name("reasoning"), AppAction::None);
+
+        let ids = app
+            .modal_picker()
+            .unwrap()
+            .filtered_items()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["off", "low", "high"]);
     }
 
     #[test]
@@ -6843,6 +7178,41 @@ new-chat = "ctrl-x"
         let command = state.find_command("set_params").unwrap();
         assert_eq!(command["patch"]["mode"], "agent");
         assert_eq!(command["patch"]["tool_use"], "agent");
+    }
+
+    #[tokio::test]
+    async fn reasoning_command_posts_set_params() {
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "chat_models": {
+                "gpt-demo": {"reasoning_effort_options": ["low", "medium", "high"]}
+            }
+        }));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "gpt-demo", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
+        });
+        let action = app.execute_command_name("reasoning high");
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut subscriptions = SubscriptionManager::new();
+        run_action(&mut app, action, &client, &tx, &mut subscriptions).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeEvent::CommandFinished {
+                context: CommandContextTag::Other,
+                result: Ok(())
+            })
+        ));
+
+        let command = state.find_command("set_params").unwrap();
+        assert_eq!(command["patch"]["boost_reasoning"], true);
+        assert_eq!(command["patch"]["reasoning_effort"], "high");
+        assert!(command["patch"]["thinking_budget"].is_null());
     }
 
     #[tokio::test]

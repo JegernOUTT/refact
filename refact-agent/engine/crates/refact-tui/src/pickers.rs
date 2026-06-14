@@ -8,6 +8,7 @@ pub enum PickerKind {
     FileMention,
     Session,
     Permissions,
+    Reasoning,
     Theme,
 }
 
@@ -94,6 +95,7 @@ impl PickerState {
             PickerKind::FileMention => "files",
             PickerKind::Session => "sessions",
             PickerKind::Permissions => "permissions",
+            PickerKind::Reasoning => "reasoning",
             PickerKind::Theme => "themes",
         }
     }

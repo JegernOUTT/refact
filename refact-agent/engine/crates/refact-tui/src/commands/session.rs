@@ -12,10 +12,46 @@ pub enum SessionCommand {
     Archive,
     Model,
     Mode,
+    Reasoning,
     Permissions,
     Status,
     Init,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningLevel {
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+}
+
+pub const REASONING_LEVELS: [ReasoningLevel; 4] = [
+    ReasoningLevel::Off,
+    ReasoningLevel::Low,
+    ReasoningLevel::Medium,
+    ReasoningLevel::High,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSessionCommand {
@@ -48,6 +84,7 @@ pub struct StatusSnapshot {
     pub project_root: Option<String>,
     pub model: String,
     pub mode: String,
+    pub reasoning: String,
     pub session_id: String,
     pub usage: Option<StatusUsage>,
 }
@@ -129,6 +166,17 @@ pub const MODE_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const REASONING_COMMAND: CommandDef = CommandDef {
+    name: "reasoning",
+    aliases: &[],
+    description: "session params: set reasoning effort for subsequent turns",
+    args_hint: "<off|low|medium|high>",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Session {
+        command: SessionCommand::Reasoning,
+    },
+};
+
 pub const PERMISSIONS_COMMAND: CommandDef = CommandDef {
     name: "permissions",
     aliases: &["approval"],
@@ -162,7 +210,7 @@ pub const INIT_COMMAND: CommandDef = CommandDef {
     },
 };
 
-pub const SESSION_COMMANDS: [CommandDef; 10] = [
+pub const SESSION_COMMANDS: [CommandDef; 11] = [
     NEW_COMMAND,
     RESUME_COMMAND,
     FORK_COMMAND,
@@ -170,6 +218,7 @@ pub const SESSION_COMMANDS: [CommandDef; 10] = [
     ARCHIVE_COMMAND,
     MODEL_COMMAND,
     MODE_COMMAND,
+    REASONING_COMMAND,
     PERMISSIONS_COMMAND,
     STATUS_COMMAND,
     INIT_COMMAND,
@@ -198,6 +247,58 @@ pub fn parse_session_command(input: &str) -> Option<ParsedSessionCommand> {
 
 pub fn init_prompt() -> &'static str {
     "Please bootstrap this project for future coding sessions. Inspect the repository structure, identify the main build/test commands, summarize the coding conventions, and create or update an AGENTS.md file with concise project-specific instructions if one is missing or stale. Keep changes minimal and explain what you changed."
+}
+
+pub fn parse_reasoning_level(args: &str) -> Result<Option<ReasoningLevel>, String> {
+    let arg = args.trim().to_ascii_lowercase();
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    match arg.as_str() {
+        "off" | "none" => Ok(Some(ReasoningLevel::Off)),
+        "low" => Ok(Some(ReasoningLevel::Low)),
+        "medium" => Ok(Some(ReasoningLevel::Medium)),
+        "high" => Ok(Some(ReasoningLevel::High)),
+        _ => Err(format!(
+            "expected one of: off, low, medium, high; got {args}"
+        )),
+    }
+}
+
+pub fn reasoning_picker_items(levels: &[ReasoningLevel]) -> Vec<PickerItem> {
+    levels
+        .iter()
+        .copied()
+        .map(|level| PickerItem {
+            id: level.as_str().to_string(),
+            title: level.title().to_string(),
+            description: reasoning_level_description(level).to_string(),
+        })
+        .collect()
+}
+
+pub fn reasoning_patch(level: ReasoningLevel) -> Value {
+    match level {
+        ReasoningLevel::Off => json!({
+            "boost_reasoning": false,
+            "reasoning_effort": null,
+            "thinking_budget": null,
+        }),
+        _ => json!({
+            "boost_reasoning": true,
+            "reasoning_effort": level.as_str(),
+            "thinking_budget": null,
+        }),
+    }
+}
+
+fn reasoning_level_description(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::Off => "Disable reasoning for subsequent turns",
+        ReasoningLevel::Low => "Use low reasoning effort",
+        ReasoningLevel::Medium => "Use medium reasoning effort",
+        ReasoningLevel::High => "Use high reasoning effort",
+    }
 }
 
 pub fn permission_picker_items() -> Vec<PickerItem> {
@@ -260,12 +361,13 @@ pub fn permission_policy_notice(policy: PermissionPolicy) -> String {
 
 pub fn status_card_text(snapshot: &StatusSnapshot) -> String {
     format!(
-        "Status\nDaemon: {}\nWorker: {}\nProject: {}\nModel: {} · mode {}\nSession: {}\nUsage: {}",
+        "Status\nDaemon: {}\nWorker: {}\nProject: {}\nModel: {} · mode {} · reason:{}\nSession: {}\nUsage: {}",
         daemon_line(snapshot),
         snapshot.worker,
         project_line(snapshot),
         snapshot.model,
         snapshot.mode,
+        snapshot.reasoning,
         short_session_id(&snapshot.session_id),
         usage_line(snapshot.usage.as_ref())
     )
@@ -338,6 +440,7 @@ mod tests {
             ("/remove", SessionCommand::Archive, ""),
             ("/model", SessionCommand::Model, ""),
             ("/tool-use", SessionCommand::Mode, ""),
+            ("/reasoning high", SessionCommand::Reasoning, "high"),
             ("/approval", SessionCommand::Permissions, ""),
             ("/status", SessionCommand::Status, ""),
             ("/init", SessionCommand::Init, ""),
@@ -364,6 +467,24 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_patch_maps_effort_and_off_to_setparams() {
+        assert_eq!(
+            parse_reasoning_level("high"),
+            Ok(Some(ReasoningLevel::High))
+        );
+        assert_eq!(parse_reasoning_level("none"), Ok(Some(ReasoningLevel::Off)));
+        assert!(parse_reasoning_level("turbo").is_err());
+        assert_eq!(
+            reasoning_patch(ReasoningLevel::High),
+            json!({"boost_reasoning": true, "reasoning_effort": "high", "thinking_budget": null})
+        );
+        assert_eq!(
+            reasoning_patch(ReasoningLevel::Off),
+            json!({"boost_reasoning": false, "reasoning_effort": null, "thinking_budget": null})
+        );
+    }
+
+    #[test]
     fn status_snapshot_formats_daemon_worker_session_and_usage() {
         let text = status_card_text(&StatusSnapshot {
             daemon_online: true,
@@ -375,6 +496,7 @@ mod tests {
             project_root: Some("/tmp/demo".to_string()),
             model: "gpt-demo".to_string(),
             mode: "agent".to_string(),
+            reasoning: "high".to_string(),
             session_id: "abcdef123456".to_string(),
             usage: Some(StatusUsage {
                 prompt_tokens: 100,
@@ -385,7 +507,7 @@ mod tests {
         });
         assert_eq!(
             text,
-            "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
+            "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
         );
     }
 }

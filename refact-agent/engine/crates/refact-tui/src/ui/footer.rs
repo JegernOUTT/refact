@@ -68,6 +68,7 @@ pub struct FooterData {
     pub project: String,
     pub model: String,
     pub mode: String,
+    pub reasoning: String,
     pub runtime_state: FooterRuntimeState,
     pub worker: String,
     pub usage: Option<UsageSummary>,
@@ -84,6 +85,7 @@ impl FooterData {
                 .unwrap_or_else(|| "-".to_string()),
             model: app.model().unwrap_or("default").to_string(),
             mode: app.mode().unwrap_or("agent").to_string(),
+            reasoning: app.reasoning_effort_label().to_string(),
             runtime_state: FooterRuntimeState::from_app(app),
             worker: app
                 .current_worker()
@@ -126,6 +128,8 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
     spans.push(Span::raw(data.model.clone()));
     spans.push(separator());
     spans.push(Span::raw(data.mode.clone()));
+    spans.push(separator());
+    spans.push(Span::raw(format!("reason:{}", data.reasoning)));
     spans.push(separator());
     spans.push(runtime_span(data.runtime_state));
     spans.push(separator());
@@ -211,6 +215,7 @@ mod tests {
             project: "demo".to_string(),
             model: "model".to_string(),
             mode: "agent".to_string(),
+            reasoning: "off".to_string(),
             runtime_state,
             worker: "ready".to_string(),
             usage: Some(UsageSummary {
@@ -270,7 +275,7 @@ mod tests {
 
         assert_eq!(
             snapshot,
-            " 90% context left (10 used) · demo · model · agent · ● idle · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · ◆ generating · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · ◐ waking · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · ○ offline · daemon offline · worker ready "
+            " 90% context left (10 used) · demo · model · agent · reason:off · ● idle · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◆ generating · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◐ waking · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ○ offline · daemon offline · worker ready "
         );
 
         let colors = [

@@ -490,7 +490,7 @@ code · rust
 ┌ message ─────────────────────────────────────────────────────────────┐
 │Ask Refact…                                                           │
 └──────────────────────────────────────────────────────────────────────┘
- 30 used · fixture · gpt-demo · agent · ● idle · daemon online · worker…"#;
+ 30 used · fixture · gpt-demo · agent · reason:off · ● idle · daemon on…"#;
     assert_eq!(snapshot, expected);
 }
 
