@@ -535,11 +535,9 @@ mod tests {
         let daemon_candidates = GuiPublicOriginCandidates {
             origins: vec!["http://127.0.0.1:8488/p/abc123".to_string()],
         };
-        let html = r#"<html><head><script>window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];</script></head><body></body></html>"#;
-        let body = crate::http::routers::gui::inject_gui_origin_candidates(
-            Cow::Borrowed(html.as_bytes()),
-            &worker_candidates,
-        );
+        let asset = ChatGuiAsset::get(INDEX_PATH).expect("embedded index.html");
+        let body =
+            crate::http::routers::gui::inject_gui_origin_candidates(asset.data, &worker_candidates);
         let html = std::str::from_utf8(body.as_ref()).unwrap();
         let injected = inject_daemon_gui_bootstrap(html, "abc123", &daemon_candidates);
 

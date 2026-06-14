@@ -18,8 +18,11 @@
           window.localStorage.removeItem("lspUrl");
         } catch (_error) {}
 
-        window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ =
-          window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || [];
+        const engineOriginCandidates =
+          /*__REFACT_ORIGIN_CANDIDATES__*/ window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || [];
+        window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = Array.isArray(engineOriginCandidates)
+          ? engineOriginCandidates
+          : [];
 
         const initialState = {
           config: {
