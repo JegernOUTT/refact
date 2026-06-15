@@ -581,11 +581,7 @@ mod tests {
             let _ = accepted_tx.send(());
             std::future::pending::<()>().await;
         });
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .no_proxy()
-            .build()
-            .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let request = client.get(format!("http://127.0.0.1:{port}/v1/chats/subscribe"));
         let task = tokio::spawn(send_worker_request(request, true));
 
@@ -614,11 +610,7 @@ mod tests {
             socket.write_all(b"data: late\n\n").await.unwrap();
             std::future::pending::<()>().await;
         });
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .no_proxy()
-            .build()
-            .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let request = client.get(format!("http://127.0.0.1:{port}/v1/chats/subscribe"));
         let response = send_worker_request(request, true).await.unwrap();
         let mut stream = response.bytes_stream();
