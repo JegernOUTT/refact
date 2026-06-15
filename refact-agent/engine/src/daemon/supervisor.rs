@@ -168,6 +168,18 @@ impl Supervisor {
         self.spawn_worker(slot.clone(), spec, "ensure").await
     }
 
+    pub async fn ensure_ready_worker(
+        self: &Arc<Self>,
+        entry: &ProjectEntry,
+    ) -> Result<WorkerInfo, String> {
+        let info = self.ensure_worker(entry).await?;
+        if matches!(info.state, WorkerState::Ready) {
+            Ok(info)
+        } else {
+            Err("worker unavailable".to_string())
+        }
+    }
+
     pub async fn restart_worker(
         self: &Arc<Self>,
         entry: &ProjectEntry,
@@ -250,6 +262,11 @@ impl Supervisor {
             record.info.state,
             WorkerState::Ready | WorkerState::Starting
         ) && record.info.pid == Some(pid)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_daemon_auth_token(&self) -> Option<String> {
+        self.daemon_auth_token.clone()
     }
 
     #[cfg(test)]

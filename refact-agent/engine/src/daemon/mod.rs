@@ -11,6 +11,7 @@ pub mod client;
 pub mod config;
 pub mod cron_clock;
 pub mod events;
+pub mod hooks;
 pub mod idle;
 pub mod lock;
 pub mod mdns;

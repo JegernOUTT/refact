@@ -8,6 +8,7 @@ pub(crate) const DAEMON_AUTH_COOKIE: &str = "refact_daemon_auth";
 pub(crate) const DAEMON_AUTH_QUERY: &str = "daemon_token";
 const PROJECT_COOKIE_PREFIX: &str = "project:";
 const REDACTED_DAEMON_TOKEN: &str = "<redacted>";
+const REFACT_TOKEN_HEADER: &str = "x-refact-token";
 
 pub(crate) fn generate_token() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -38,6 +39,21 @@ fn request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
         || cookie_token_matches(req, expected)
         || (query_token_allowed(req)
             && matching_daemon_query_token(req.uri().query(), expected).is_some())
+}
+
+fn hook_request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
+    if query_contains_daemon_token(req.uri().query()) {
+        return false;
+    }
+    bearer_token(req)
+        .map(|token| token_matches(token, expected))
+        .unwrap_or(false)
+        || req
+            .headers()
+            .get(REFACT_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(|token| token_matches(token, expected))
+            .unwrap_or(false)
 }
 
 fn bearer_token<B>(req: &Request<B>) -> Option<&str> {
@@ -96,6 +112,11 @@ fn query_token_allowed<B>(req: &Request<B>) -> bool {
 fn is_public_request<B>(req: &Request<B>) -> bool {
     (req.method() == Method::GET && req.uri().path() == "/daemon/v1/status")
         || (req.method() == Method::GET && is_static_asset_path(req.uri().path()))
+}
+
+fn is_hook_request<B>(req: &Request<B>) -> bool {
+    let path = req.uri().path();
+    path == "/hooks" || path == "/hooks/" || path.starts_with("/hooks/")
 }
 
 fn is_static_asset_path(path: &str) -> bool {
@@ -167,6 +188,14 @@ pub(crate) fn matching_daemon_query_token(query: Option<&str>, expected: &str) -
             .find(|(name, token)| name == DAEMON_AUTH_QUERY && token_matches(token, expected))
             .map(|(_, token)| token.into_owned())
     })
+}
+
+fn query_contains_daemon_token(query: Option<&str>) -> bool {
+    query
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == DAEMON_AUTH_QUERY)
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn query_without_daemon_token(query: Option<&str>) -> Option<String> {
@@ -251,10 +280,32 @@ fn is_token_delimiter(ch: char) -> bool {
     )
 }
 
-pub(crate) async fn check<B>(token: Option<String>, req: Request<B>, next: Next<B>) -> Response
+pub(crate) async fn check_with_hooks<B>(
+    token: Option<String>,
+    hook_token: Option<String>,
+    req: Request<B>,
+    next: Next<B>,
+) -> Response
 where
     B: Send + 'static,
 {
+    if is_hook_request(&req) {
+        let expected = hook_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .or_else(|| token.as_deref().filter(|token| !token.is_empty()));
+        if !expected
+            .map(|expected| hook_request_authorized(&req, expected))
+            .unwrap_or(false)
+        {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Unauthorized"})),
+            )
+                .into_response();
+        }
+        return next.run(req).await;
+    }
     if let Some(expected) = token {
         if !is_public_request(&req) {
             if !request_authorized(&req, &expected) {

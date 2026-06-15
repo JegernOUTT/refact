@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -21,6 +22,59 @@ impl Default for AuthConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookKind {
+    Wake,
+    Agent,
+}
+
+impl Default for HookKind {
+    fn default() -> Self {
+        Self::Wake
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookMapping {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub kind: HookKind,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub deliver: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub mappings: HashMap<String, HookMapping>,
+    #[serde(default)]
+    pub default_project: Option<String>,
+    #[serde(default)]
+    pub allowed_projects: Option<Vec<String>>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token: None,
+            mappings: HashMap::new(),
+            default_project: None,
+            allowed_projects: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -30,6 +84,8 @@ pub struct DaemonConfig {
     pub idle_timeout_secs: u64,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 impl Default for DaemonConfig {
@@ -39,6 +95,7 @@ impl Default for DaemonConfig {
             bind: default_bind(),
             idle_timeout_secs: default_idle_timeout_secs(),
             auth: AuthConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -97,5 +154,44 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 5);
         assert_eq!(config.auth.enabled, true);
         assert_eq!(config.auth.token.as_deref(), Some("secret"));
+    }
+
+    #[tokio::test]
+    async fn daemon_config_parses_hooks_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.yaml");
+        tokio::fs::write(
+            &path,
+            "hooks:\n  enabled: true\n  token: hook-secret\n  default_project: demo\n  allowed_projects: [demo, other]\n  mappings:\n    deploy:\n      project: demo\n      kind: agent\n      mode: agent\n      model: test-model\n      deliver:\n        type: chat\n",
+        )
+        .await
+        .unwrap();
+
+        let config = load_from_path(&path).await.unwrap();
+
+        assert!(config.hooks.enabled);
+        assert_eq!(config.hooks.token.as_deref(), Some("hook-secret"));
+        assert_eq!(config.hooks.default_project.as_deref(), Some("demo"));
+        assert_eq!(
+            config.hooks.allowed_projects.as_deref().unwrap(),
+            ["demo".to_string(), "other".to_string()]
+        );
+        let mapping = config.hooks.mappings.get("deploy").unwrap();
+        assert_eq!(mapping.kind, HookKind::Agent);
+        assert_eq!(mapping.project.as_deref(), Some("demo"));
+        assert_eq!(mapping.mode.as_deref(), Some("agent"));
+        assert_eq!(mapping.model.as_deref(), Some("test-model"));
+        assert_eq!(mapping.deliver.as_ref().unwrap()["type"], "chat");
+    }
+
+    #[test]
+    fn hooks_config_defaults_disabled() {
+        let config = DaemonConfig::default();
+
+        assert!(!config.hooks.enabled);
+        assert!(config.hooks.token.is_none());
+        assert!(config.hooks.mappings.is_empty());
+        assert!(config.hooks.default_project.is_none());
+        assert!(config.hooks.allowed_projects.is_none());
     }
 }

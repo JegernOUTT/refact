@@ -108,13 +108,20 @@ impl DaemonState {
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
+        let worker_auth_token = auth_token.clone().or_else(|| {
+            config
+                .hooks
+                .enabled
+                .then(|| config.hooks.token.clone())
+                .flatten()
+        });
         let supervisor = crate::daemon::supervisor::Supervisor::new_with_cron_pending(
             events.clone(),
             daemon_dir.clone(),
             daemon_port,
             cron_pending.clone(),
             config.idle_timeout_secs,
-            auth_token.clone(),
+            worker_auth_token,
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -764,6 +771,25 @@ mod tests {
         let projects_path = state.projects.read().await.path().to_path_buf();
         assert_eq!(state.daemon_dir, daemon_dir);
         assert_eq!(projects_path, daemon_dir.join("projects.json"));
+    }
+
+    #[test]
+    fn new_uses_hook_token_for_worker_link_when_daemon_auth_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                token: Some("hook-secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(config, EventBus::new(dir.path().join("e.jsonl")), None);
+
+        assert_eq!(
+            state.supervisor.test_daemon_auth_token().as_deref(),
+            Some("hook-secret")
+        );
     }
 
     #[tokio::test]

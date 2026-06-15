@@ -68,8 +68,14 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
 
 pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
     let auth_token = state.auth_token.clone();
+    let hook_token = state.config.hooks.token.clone();
     Router::new()
         .route("/", get(crate::daemon::web::handle_project_picker))
+        .route("/hooks", post(crate::daemon::hooks::bare))
+        .route("/hooks/", post(crate::daemon::hooks::bare))
+        .route("/hooks/wake", post(crate::daemon::hooks::wake))
+        .route("/hooks/agent", post(crate::daemon::hooks::agent))
+        .route("/hooks/:name", post(crate::daemon::hooks::named))
         .route(
             "/p/:project_id/",
             get(crate::daemon::web::handle_project_gui_index),
@@ -122,7 +128,8 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         ))
         .layer(middleware::from_fn(move |req, next| {
             let token = auth_token.clone();
-            crate::daemon::auth::check(token, req, next)
+            let hook_token = hook_token.clone();
+            crate::daemon::auth::check_with_hooks(token, hook_token, req, next)
         }))
         .layer(CorsLayer::permissive())
         .with_state((state, port))

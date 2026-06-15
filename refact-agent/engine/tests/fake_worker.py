@@ -54,6 +54,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("content-length", "0") or "0")
             self.send_echo(self.rfile.read(length))
             return
+        if self.path == "/v1/hooks/fire":
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
         if self.path.startswith("/v1/chats/") and self.path.endswith("/commands"):
             self.handle_chat_command()
             return
