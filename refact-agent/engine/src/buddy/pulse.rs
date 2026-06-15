@@ -36,9 +36,11 @@ pub async fn build_pulse(
 async fn build_tasks_pulse(gcx: AppState, fact_store: &FactStore) -> TaskPulse {
     let mut pulse = TaskPulse::default();
     let stuck = fact_store.recent(BuddyFactKind::TaskStuck, chrono::Duration::hours(1));
-    pulse.stuck = stuck.len() as u32;
+    pulse.recent_stuck_alerts_1h = stuck.len() as u32;
+    pulse.stuck = pulse.recent_stuck_alerts_1h;
     let abandoned = fact_store.recent(BuddyFactKind::TaskAbandoned, chrono::Duration::hours(24));
-    pulse.abandoned = abandoned.len() as u32;
+    pulse.recent_abandoned_alerts_24h = abandoned.len() as u32;
+    pulse.abandoned = pulse.recent_abandoned_alerts_24h;
     if let Ok(tasks) = crate::tasks::storage::list_tasks(gcx.gcx.clone()).await {
         pulse.total = tasks.len() as u32;
         for task in &tasks {

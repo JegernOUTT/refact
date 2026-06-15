@@ -331,8 +331,9 @@ pub async fn render_buddy_speech(
     fallback_text: String,
 ) -> BuddySpeechItem {
     let pulse_one_liner = format!(
-        "{} pending ops, {} stuck tasks",
-        pulse.memory.pending_ops, pulse.tasks.stuck
+        "{} pending ops, {} recent stuck task alerts",
+        pulse.memory.pending_ops,
+        pulse.tasks.recent_stuck_alert_count_1h()
     );
     let voice_ctx = VoiceCtx {
         persona: &persona,
@@ -366,8 +367,9 @@ pub async fn render_buddy_runtime_event(
     fallback_description: Option<String>,
 ) -> (String, Option<String>) {
     let pulse_one_liner = format!(
-        "{} pending ops, {} stuck tasks",
-        pulse.memory.pending_ops, pulse.tasks.stuck
+        "{} pending ops, {} recent stuck task alerts",
+        pulse.memory.pending_ops,
+        pulse.tasks.recent_stuck_alert_count_1h()
     );
     let voice_ctx = VoiceCtx {
         persona: &persona,
@@ -408,8 +410,9 @@ pub async fn render_buddy_activity_title(
     fallback_title: String,
 ) -> String {
     let pulse_one_liner = format!(
-        "{} pending ops, {} stuck tasks",
-        pulse.memory.pending_ops, pulse.tasks.stuck
+        "{} pending ops, {} recent stuck task alerts",
+        pulse.memory.pending_ops,
+        pulse.tasks.recent_stuck_alert_count_1h()
     );
     let voice_ctx = VoiceCtx {
         persona: &persona,

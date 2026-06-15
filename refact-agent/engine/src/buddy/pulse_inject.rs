@@ -186,7 +186,10 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
             ));
         }
         if payload.friction.stuck_tasks > 0 {
-            lines.push(format!("- stuck tasks: {}", payload.friction.stuck_tasks));
+            lines.push(format!(
+                "- recent stuck task alerts (1h): {}",
+                payload.friction.stuck_tasks
+            ));
         }
         sections.push(lines.join("\n"));
     }
@@ -419,7 +422,7 @@ async fn build_friction(gcx: AppState) -> PulseFriction {
         (
             service.recent_diagnostics.clone(),
             service.pulse.diagnostics.top_error_types.clone(),
-            service.pulse.tasks.stuck,
+            service.pulse.tasks.recent_stuck_alert_count_1h(),
         )
     };
     let cutoff = Utc::now() - Duration::hours(1);

@@ -139,9 +139,9 @@ fn safe_evidence_json(value: &serde_json::Value, max_chars: usize) -> String {
 fn phrase_bank_pulse_summary(ctx: &BuddyJobContext) -> String {
     let top_errors = safe_evidence_text(&ctx.pulse.diagnostics.top_error_types.join("|"), 160);
     format!(
-        "tasks={} stuck={} memory={} pending={} mcp={} failing={} diagnostics={} top_errors={} git_files={} diff_lines={} worktrees={}",
+        "tasks={} recent_stuck_alerts_1h={} memory={} pending={} mcp={} failing={} diagnostics={} top_errors={} git_files={} diff_lines={} worktrees={}",
         ctx.pulse.tasks.total,
-        ctx.pulse.tasks.stuck,
+        ctx.pulse.tasks.recent_stuck_alert_count_1h(),
         ctx.pulse.memory.total,
         ctx.pulse.memory.pending_ops,
         ctx.pulse.mcp.total,
@@ -349,7 +349,7 @@ mod tests {
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let mut ctx = test_context(dir.path());
         ctx.pulse.tasks.total = 7;
-        ctx.pulse.tasks.stuck = 2;
+        ctx.pulse.tasks.recent_stuck_alerts_1h = 2;
         ctx.pulse.mcp.failing = 1;
         ctx.recent_activities.push(BuddyActivity {
             icon: "•".to_string(),
@@ -372,7 +372,7 @@ mod tests {
         let (system, user) = prompts.first().expect("prompt captured");
         assert!(system.contains("reusable daily Buddy chat phrase bank"));
         assert!(system.contains("Do not use generic canned phrases"));
-        assert!(user.contains("tasks=7 stuck=2"));
+        assert!(user.contains("tasks=7 recent_stuck_alerts_1h=2"));
         assert!(user.contains("Reviewed chat bubble behavior"));
         assert!(user.contains("Build 12 reusable one-liners"));
     }

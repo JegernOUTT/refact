@@ -158,8 +158,9 @@ async fn voice_quest_speech(
         };
     };
     let pulse_one_liner = format!(
-        "{} pending ops, {} stuck tasks",
-        snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+        "{} pending ops, {} recent stuck task alerts",
+        snapshot.pulse.memory.pending_ops,
+        snapshot.pulse.tasks.recent_stuck_alert_count_1h()
     );
     let voice_ctx = VoiceCtx {
         persona: &snapshot.state.personality,

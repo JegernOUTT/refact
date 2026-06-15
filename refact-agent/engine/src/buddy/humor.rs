@@ -104,9 +104,9 @@ impl HumorService {
         }
 
         let pulse_summary = format!(
-            "tasks:{} stuck:{}, traj:{}, mem:{}, mcp:{} failing:{}, providers_ok:{}",
+            "tasks:{} recent_stuck_alerts_1h:{}, traj:{}, mem:{}, mcp:{} failing:{}, providers_ok:{}",
             pulse.tasks.total,
-            pulse.tasks.stuck,
+            pulse.tasks.recent_stuck_alert_count_1h(),
             pulse.trajectories.total,
             pulse.memory.total,
             pulse.mcp.total,
@@ -196,8 +196,9 @@ async fn generate_via_voice_service(
                 snapshot.state.personality,
                 snapshot.state.identity.name,
                 format!(
-                    "{} pending ops, {} stuck tasks",
-                    snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+                    "{} pending ops, {} recent stuck task alerts",
+                    snapshot.pulse.memory.pending_ops,
+                    snapshot.pulse.tasks.recent_stuck_alert_count_1h()
                 ),
             ),
             None => (

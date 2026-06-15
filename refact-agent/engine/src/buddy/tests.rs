@@ -7269,7 +7269,7 @@ async fn pulse_populates_all_subpulse_counts() {
     .await
     .unwrap();
 
-    // Inject stuck + abandoned facts into the FactStore.
+    // Inject recent stuck + abandoned alert facts into the FactStore.
     let mut store = FactStore::new();
     let now = chrono::Utc::now();
     store.ingest(make_fact("task:stuck:t1", BuddyFactKind::TaskStuck, now));
@@ -7294,12 +7294,20 @@ async fn pulse_populates_all_subpulse_counts() {
     assert!(pulse.customization.skills > 0, "skills must be populated");
     assert!(pulse.customization.hooks > 0, "hooks must be populated");
     assert_eq!(
+        pulse.tasks.recent_stuck_alerts_1h, 1,
+        "recent stuck alert count must reflect injected fact"
+    );
+    assert_eq!(
+        pulse.tasks.recent_abandoned_alerts_24h, 1,
+        "recent abandoned alert count must reflect injected fact"
+    );
+    assert_eq!(
         pulse.tasks.stuck, 1,
-        "stuck count must reflect injected fact"
+        "legacy stuck count must stay compatible"
     );
     assert_eq!(
         pulse.tasks.abandoned, 1,
-        "abandoned count must reflect injected fact"
+        "legacy abandoned count must stay compatible"
     );
 }
 
@@ -10320,6 +10328,61 @@ async fn pulse_task_total_and_by_status_populated() {
         1,
         "completed count must be 1"
     );
+}
+
+#[tokio::test]
+async fn pulse_task_current_state_and_recent_alerts_are_separate() {
+    use super::facts::FactStore;
+    use super::pulse::build_pulse;
+    use crate::tasks::storage::{create_task, load_task_meta, save_task_meta};
+    use crate::tasks::types::TaskStatus;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+    }
+
+    let _planning = create_task(gcx.clone(), "Task planning").await.unwrap();
+    let active = create_task(gcx.clone(), "Task active").await.unwrap();
+    let completed = create_task(gcx.clone(), "Task completed").await.unwrap();
+
+    let mut active_meta = load_task_meta(gcx.clone(), &active.id).await.unwrap();
+    active_meta.status = TaskStatus::Active;
+    save_task_meta(gcx.clone(), &active.id, &active_meta)
+        .await
+        .unwrap();
+
+    let mut completed_meta = load_task_meta(gcx.clone(), &completed.id).await.unwrap();
+    completed_meta.status = TaskStatus::Completed;
+    save_task_meta(gcx.clone(), &completed.id, &completed_meta)
+        .await
+        .unwrap();
+
+    let mut store = FactStore::new();
+    let now = chrono::Utc::now();
+    store.ingest(make_fact("task:stuck:t1", BuddyFactKind::TaskStuck, now));
+    store.ingest(make_fact(
+        "task:abandoned:t2",
+        BuddyFactKind::TaskAbandoned,
+        now,
+    ));
+
+    let pulse = build_pulse(app, dir.path(), &store).await;
+
+    assert_eq!(pulse.tasks.total, 3);
+    assert_eq!(pulse.tasks.by_status.get("planning"), Some(&1));
+    assert_eq!(pulse.tasks.by_status.get("active"), Some(&1));
+    assert_eq!(pulse.tasks.by_status.get("completed"), Some(&1));
+    assert_eq!(pulse.tasks.recent_stuck_alerts_1h, 1);
+    assert_eq!(pulse.tasks.recent_abandoned_alerts_24h, 1);
+    assert_eq!(pulse.tasks.stuck, 1);
+    assert_eq!(pulse.tasks.abandoned, 1);
 }
 
 #[test]
