@@ -84,6 +84,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/dist/chat/*path",
             get(crate::daemon::web::handle_daemon_gui_asset),
         )
+        .route("/cron/status", get(cron_status))
         .route("/daemon/v1/status", get(status))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
@@ -177,6 +178,12 @@ async fn workers(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
 ) -> Json<Vec<crate::daemon::state::WorkerRow>> {
     Json(state.worker_rows().await)
+}
+
+async fn cron_status(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+) -> Json<crate::daemon::cron_clock::CronClockStatus> {
+    Json(crate::daemon::cron_clock::status(&state).await)
 }
 
 async fn logs(
@@ -343,6 +350,32 @@ mod tests {
         assert_eq!(json["workers"], 0);
         assert_eq!(json["cron_pending"], serde_json::json!({}));
         assert_eq!(json["port"], 8488);
+    }
+
+    #[tokio::test]
+    async fn daemon_cron_status_reports_pending_clock_shape() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        state.set_cron_pending("project-a", Some(200_000)).await;
+        state.set_cron_pending("project-b", Some(150_000)).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/cron/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["jobs"], 2);
+        assert_eq!(json["next_wake_ms"], 60_000);
     }
 
     #[tokio::test]

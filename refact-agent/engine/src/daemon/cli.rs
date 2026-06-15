@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::StreamExt;
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr;
@@ -26,10 +27,22 @@ const EVENT_FOLLOW_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const EVENT_FOLLOW_HEADER_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const EVENT_FOLLOW_HEADER_TIMEOUT: Duration = Duration::from_millis(200);
+const API_PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b'/')
+    .add(b'?')
+    .add(b'#')
+    .add(b'[')
+    .add(b']')
+    .add(b'@')
+    .add(b':');
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     Ps {
+        json: bool,
+    },
+    Cron {
+        command: CronCommand,
         json: bool,
     },
     Projects {
@@ -78,6 +91,52 @@ pub enum ProjectsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CronCommand {
+    List { project: Option<String> },
+    Add(CronAddOptions),
+    Run { project: Option<String>, id: String },
+    Remove { project: Option<String>, id: String },
+    Pause { project: Option<String>, id: String },
+    Resume { project: Option<String>, id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronAddOptions {
+    pub project: Option<String>,
+    pub cron: Option<String>,
+    pub every: Option<String>,
+    pub at: Option<String>,
+    pub tz: Option<String>,
+    pub hook_id: Option<String>,
+    pub prompt: Option<String>,
+    pub command: Option<String>,
+    pub command_argv: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub delivery: CronDeliveryArg,
+    pub recurring: Option<bool>,
+    pub durable: bool,
+    pub isolated: bool,
+    pub description: String,
+    pub chat_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CronDeliveryArg {
+    Chat,
+    Webhook {
+        url: String,
+        token: Option<String>,
+    },
+    Notifier {
+        integration_id: String,
+        target: Option<String>,
+    },
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliOptions {
     pub command: CliCommand,
 }
@@ -86,6 +145,7 @@ impl CliOptions {
     fn json_output(&self) -> bool {
         match &self.command {
             CliCommand::Ps { json }
+            | CliCommand::Cron { json, .. }
             | CliCommand::Projects { json, .. }
             | CliCommand::Restart { json, .. }
             | CliCommand::Stop { json, .. }
@@ -179,6 +239,7 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
                 json: take_flag(&mut args, "--json")?,
             },
         },
+        "cron" => parse_cron(&mut args)?,
         "projects" => parse_projects(&mut args)?,
         "restart" => parse_restart_stop(&mut args, true)?,
         "stop" => parse_restart_stop(&mut args, false)?,
@@ -214,6 +275,155 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
         ));
     }
     Ok(options)
+}
+
+fn parse_cron(args: &mut Vec<String>) -> Result<CliOptions, String> {
+    let json = take_flag(args, "--json")?;
+    let command_name = take_one(args, "cron command")?;
+    let command = match command_name.as_str() {
+        "list" => CronCommand::List {
+            project: take_option(args, "--project")?,
+        },
+        "add" => CronCommand::Add(parse_cron_add(args)?),
+        "run" => CronCommand::Run {
+            project: take_option(args, "--project")?,
+            id: take_one(args, "id")?,
+        },
+        "rm" | "remove" => CronCommand::Remove {
+            project: take_option(args, "--project")?,
+            id: take_one(args, "id")?,
+        },
+        "pause" => CronCommand::Pause {
+            project: take_option(args, "--project")?,
+            id: take_one(args, "id")?,
+        },
+        "resume" => CronCommand::Resume {
+            project: take_option(args, "--project")?,
+            id: take_one(args, "id")?,
+        },
+        other => {
+            return Err(format!(
+                "unknown cron command `{other}`\n\n{}",
+                usage_text()
+            ))
+        }
+    };
+    Ok(CliOptions {
+        command: CliCommand::Cron { command, json },
+    })
+}
+
+fn parse_cron_add(args: &mut Vec<String>) -> Result<CronAddOptions, String> {
+    let project = take_option(args, "--project")?;
+    let cron = take_option(args, "--cron")?;
+    let every = take_option(args, "--every")?;
+    let at = take_option(args, "--at")?;
+    let tz = take_option(args, "--tz")?;
+    let hook_id = take_option(args, "--hook-id")?;
+    let prompt = take_option(args, "--prompt")?;
+    let command = take_option(args, "--command")?;
+    let command_argv = take_option(args, "--command-argv")?
+        .map(|value| {
+            serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|error| format!("--command-argv requires a JSON string array: {error}"))
+        })
+        .transpose()?;
+    let cwd = take_option(args, "--cwd")?;
+    let timeout_secs = take_option(args, "--timeout-secs")?
+        .map(|value| parse_positive_u64(&value, "--timeout-secs"))
+        .transpose()?;
+    let delivery = parse_cron_delivery(args)?;
+    let recurring = take_optional_bool(args, "--recurring")?;
+    let durable = take_flag(args, "--durable")?;
+    let isolated = take_flag(args, "--isolated")?;
+    let chat_id = take_option(args, "--chat-id")?;
+    let mode = take_option(args, "--mode")?;
+    let description = match take_option(args, "--description")? {
+        Some(description) => description,
+        None => take_one(args, "--description")?,
+    };
+    if description.trim().is_empty() {
+        return Err("--description must not be empty".to_string());
+    }
+    if description.chars().count() > 80 {
+        return Err("--description must be at most 80 characters".to_string());
+    }
+    if cron.is_none() && every.is_none() && at.is_none() && hook_id.is_none() {
+        return Err("one of --cron, --every, --at, or --hook-id is required".to_string());
+    }
+    let action_count = usize::from(prompt.is_some())
+        + usize::from(command.is_some())
+        + usize::from(command_argv.is_some());
+    if action_count != 1 {
+        return Err(
+            "exactly one of --prompt, --command, or --command-argv is required".to_string(),
+        );
+    }
+    Ok(CronAddOptions {
+        project,
+        cron,
+        every,
+        at,
+        tz,
+        hook_id,
+        prompt,
+        command,
+        command_argv,
+        cwd,
+        timeout_secs,
+        delivery,
+        recurring,
+        durable,
+        isolated,
+        description: description.trim().to_string(),
+        chat_id,
+        mode,
+    })
+}
+
+fn parse_cron_delivery(args: &mut Vec<String>) -> Result<CronDeliveryArg, String> {
+    let delivery = take_option(args, "--delivery")?.unwrap_or_else(|| "chat".to_string());
+    match delivery.as_str() {
+        "chat" => Ok(CronDeliveryArg::Chat),
+        "none" => Ok(CronDeliveryArg::None),
+        "webhook" => Ok(CronDeliveryArg::Webhook {
+            url: take_option(args, "--webhook-url")?
+                .ok_or_else(|| "--delivery webhook requires --webhook-url".to_string())?,
+            token: take_option(args, "--webhook-token")?,
+        }),
+        "notifier" => Ok(CronDeliveryArg::Notifier {
+            integration_id: take_option(args, "--notifier")?
+                .ok_or_else(|| "--delivery notifier requires --notifier".to_string())?,
+            target: take_option(args, "--notifier-target")?,
+        }),
+        other => Err(format!(
+            "--delivery must be chat, webhook, notifier, or none; got `{other}`"
+        )),
+    }
+}
+
+fn take_optional_bool(args: &mut Vec<String>, flag: &str) -> Result<Option<bool>, String> {
+    take_option(args, flag)?
+        .map(|value| parse_bool(&value, flag))
+        .transpose()
+}
+
+fn parse_bool(value: &str, flag: &str) -> Result<bool, String> {
+    match value {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(format!("{flag} requires true or false")),
+    }
+}
+
+fn parse_positive_u64(value: &str, flag: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} requires a positive integer"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} requires a positive integer"));
+    }
+    Ok(parsed)
 }
 
 fn parse_projects(args: &mut Vec<String>) -> Result<CliOptions, String> {
@@ -408,6 +618,7 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             Ok(0)
         }
         CliCommand::Projects { command, json } => run_projects(command, json, out).await,
+        CliCommand::Cron { command, json } => run_cron(command, json, out).await,
         CliCommand::Restart { target, json, .. } => {
             let daemon = existing_daemon().await?;
             let projects = list_projects(&daemon).await?;
@@ -476,6 +687,220 @@ async fn run_projects(
         }
     }
     Ok(0)
+}
+
+async fn run_cron(
+    command: CronCommand,
+    json_output: bool,
+    out: &mut dyn Write,
+) -> Result<i32, CliError> {
+    let daemon = ensure_daemon().await?;
+    match command {
+        CronCommand::List { project } => {
+            let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
+            let tasks: Value = client_get(
+                &daemon,
+                &cron_project_path(&project_id, "/v1/scheduler/cron"),
+            )
+            .await?;
+            if json_output {
+                print_json(out, &tasks)?;
+            } else {
+                write_cron_list(out, tasks.as_array().map(Vec::as_slice).unwrap_or(&[]))?;
+            }
+        }
+        CronCommand::Add(options) => {
+            let project_id = resolve_or_open_project(&daemon, options.project.as_deref()).await?;
+            let request = cron_add_request(options);
+            let value: Value = client::post_json(
+                &daemon,
+                &cron_project_path(&project_id, "/v1/scheduler/cron"),
+                &request,
+            )
+            .await
+            .map_err(client_error)?;
+            print_value(out, json_output, &value, "created")?;
+        }
+        CronCommand::Run { project, id } => {
+            let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
+            let value: Value = client_post_empty(
+                &daemon,
+                &cron_project_path(
+                    &project_id,
+                    &format!("/v1/scheduler/cron/{}/run", path_segment(&id)),
+                ),
+            )
+            .await?;
+            print_value(out, json_output, &value, "triggered")?;
+        }
+        CronCommand::Remove { project, id } => {
+            let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
+            let value: Value = client::delete_json(
+                &daemon,
+                &cron_project_path(
+                    &project_id,
+                    &format!("/v1/scheduler/cron/{}", path_segment(&id)),
+                ),
+            )
+            .await
+            .map_err(client_error)?;
+            print_value(out, json_output, &value, "removed")?;
+        }
+        CronCommand::Pause { project, id } => {
+            patch_cron_enabled(&daemon, project.as_deref(), &id, false, json_output, out).await?;
+        }
+        CronCommand::Resume { project, id } => {
+            patch_cron_enabled(&daemon, project.as_deref(), &id, true, json_output, out).await?;
+        }
+    }
+    Ok(0)
+}
+
+async fn patch_cron_enabled(
+    daemon: &DaemonInfo,
+    project: Option<&str>,
+    id: &str,
+    enabled: bool,
+    json_output: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let project_id = resolve_or_open_project(daemon, project).await?;
+    let value: Value = client::patch_json(
+        daemon,
+        &cron_project_path(
+            &project_id,
+            &format!("/v1/scheduler/cron/{}", path_segment(id)),
+        ),
+        &json!({"enabled": enabled}),
+    )
+    .await
+    .map_err(client_error)?;
+    print_value(
+        out,
+        json_output,
+        &value,
+        if enabled { "resumed" } else { "paused" },
+    )
+}
+
+async fn resolve_or_open_project(
+    daemon: &DaemonInfo,
+    project: Option<&str>,
+) -> Result<String, CliError> {
+    match project {
+        Some(target) => resolve_target(&list_projects(daemon).await?, target),
+        None => {
+            let root = canonicalize_existing_dir(Path::new("."))?;
+            let value: Value =
+                client::post_json(daemon, "/daemon/v1/projects/open", &json!({"root": root}))
+                    .await
+                    .map_err(client_error)?;
+            value
+                .get("project_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| CliError::runtime("daemon project open response missing project_id"))
+        }
+    }
+}
+
+fn cron_project_path(project_id: &str, suffix: &str) -> String {
+    format!("/p/{}{}", path_segment(project_id), suffix)
+}
+
+fn path_segment(value: &str) -> String {
+    utf8_percent_encode(value, API_PATH_SEGMENT).to_string()
+}
+
+fn cron_add_request(options: CronAddOptions) -> Value {
+    let mut request = serde_json::Map::new();
+    insert_string(&mut request, "cron", options.cron);
+    insert_string(&mut request, "every", options.every);
+    insert_string(&mut request, "at", options.at);
+    insert_string(&mut request, "tz", options.tz);
+    insert_string(&mut request, "hook_id", options.hook_id);
+    insert_string(&mut request, "prompt", options.prompt);
+    insert_string(&mut request, "command", options.command);
+    if let Some(argv) = options.command_argv {
+        request.insert("command_argv".to_string(), json!(argv));
+    }
+    insert_string(&mut request, "cwd", options.cwd);
+    if let Some(timeout_secs) = options.timeout_secs {
+        request.insert("timeout_secs".to_string(), json!(timeout_secs));
+    }
+    request.insert(
+        "delivery".to_string(),
+        cron_delivery_value(options.delivery),
+    );
+    if let Some(recurring) = options.recurring {
+        request.insert("recurring".to_string(), json!(recurring));
+    }
+    request.insert("durable".to_string(), json!(options.durable));
+    request.insert("isolated".to_string(), json!(options.isolated));
+    request.insert("description".to_string(), json!(options.description));
+    insert_string(&mut request, "chat_id", options.chat_id);
+    insert_string(&mut request, "mode", options.mode);
+    Value::Object(request)
+}
+
+fn insert_string(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        map.insert(key.to_string(), json!(value));
+    }
+}
+
+fn cron_delivery_value(delivery: CronDeliveryArg) -> Value {
+    match delivery {
+        CronDeliveryArg::Chat => json!("chat"),
+        CronDeliveryArg::None => json!("none"),
+        CronDeliveryArg::Webhook { url, token } => {
+            let mut value = json!({"kind": "webhook", "url": url});
+            if let Some(token) = token {
+                value["token"] = json!(token);
+            }
+            value
+        }
+        CronDeliveryArg::Notifier {
+            integration_id,
+            target,
+        } => {
+            let mut value = json!({"kind": "notifier", "integration_id": integration_id});
+            if let Some(target) = target {
+                value["target"] = json!(target);
+            }
+            value
+        }
+    }
+}
+
+fn write_cron_list(out: &mut dyn Write, tasks: &[Value]) -> Result<(), CliError> {
+    if tasks.is_empty() {
+        writeln!(out, "No scheduled jobs").map_err(write_error)?;
+        return Ok(());
+    }
+    writeln!(out, "ID\tENABLED\tSCHEDULE\tNEXT\tDESCRIPTION").map_err(write_error)?;
+    for task in tasks {
+        let id = task.get("id").and_then(Value::as_str).unwrap_or("");
+        let enabled = task
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let schedule = task
+            .get("human_schedule")
+            .or_else(|| task.get("cron"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let next = task
+            .get("next_fire_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let description = task
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        writeln!(out, "{id}\t{enabled}\t{schedule}\t{next}\t{description}").map_err(write_error)?;
+    }
+    Ok(())
 }
 
 async fn set_project_pin(
@@ -1423,13 +1848,14 @@ pub fn doctor_exit_code(checks: &[DoctorCheck]) -> i32 {
 }
 
 pub fn usage_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
+    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
 }
 
 pub fn subcommand_usage_text(subcommand: &str) -> Option<&'static str> {
     match subcommand {
         "ps" => Some("refact ps [--json]\n\nList daemon workers."),
         "projects" => Some("refact projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n\nManage daemon project registry."),
+        "cron" => Some("refact cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n\nManage worker scheduler jobs through the daemon proxy."),
         "restart" => Some("refact restart [--json] (--daemon|<id|path>)\n\nRestart a project worker or the daemon."),
         "stop" => Some("refact stop [--json] (--daemon|<id|path>)\n\nStop a project worker or the daemon."),
         "logs" => Some("refact logs [--json] [-f] [--daemon|<id|path>]\n\nPrint daemon or worker logs.\n\nOPTIONS:\n    --daemon                    Print daemon logs\n    -f, --follow                Follow log output\n    --json                      Emit the current log as JSON; incompatible with follow"),
@@ -1508,6 +1934,77 @@ mod tests {
 
         let error = parse_cli_args(&["events".into(), "--json".into(), "-f".into()]).unwrap_err();
         assert!(error.contains("incompatible"));
+    }
+
+    #[test]
+    fn parse_cron_subcommands_and_json_flag() {
+        let options = parse_cli_args(&["cron".into(), "--json".into(), "list".into()]).unwrap();
+        assert!(matches!(
+            options.command,
+            CliCommand::Cron {
+                command: CronCommand::List { project: None },
+                json: true
+            }
+        ));
+
+        let options = parse_cli_args(&[
+            "cron".into(),
+            "pause".into(),
+            "--project".into(),
+            "abc".into(),
+            "job-1".into(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            options.command,
+            CliCommand::Cron {
+                command: CronCommand::Pause {
+                    project: Some(_),
+                    id
+                },
+                json: false
+            } if id == "job-1"
+        ));
+    }
+
+    #[test]
+    fn parse_cron_add_mirrors_create_request_inputs() {
+        let options = parse_cli_args(&[
+            "cron".into(),
+            "add".into(),
+            "--project".into(),
+            "abc".into(),
+            "--every".into(),
+            "5m".into(),
+            "--command-argv".into(),
+            "[\"echo\",\"hi\"]".into(),
+            "--delivery".into(),
+            "webhook".into(),
+            "--webhook-url".into(),
+            "https://example.test/hook".into(),
+            "--recurring".into(),
+            "true".into(),
+            "--durable".into(),
+            "Say hi".into(),
+        ])
+        .unwrap();
+        let CliCommand::Cron {
+            command: CronCommand::Add(add),
+            json: false,
+        } = options.command
+        else {
+            panic!("expected cron add");
+        };
+        assert_eq!(add.project.as_deref(), Some("abc"));
+        assert_eq!(add.every.as_deref(), Some("5m"));
+        assert_eq!(
+            add.command_argv,
+            Some(vec!["echo".to_string(), "hi".to_string()])
+        );
+        assert!(matches!(add.delivery, CronDeliveryArg::Webhook { .. }));
+        assert_eq!(add.recurring, Some(true));
+        assert!(add.durable);
+        assert_eq!(add.description, "Say hi");
     }
 
     #[test]
@@ -2187,6 +2684,68 @@ mod tests {
             0
         );
         assert!(String::from_utf8(out).unwrap().contains("daemon healthy"));
+
+        shutdown_test_daemon(&info, task).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn cron_cli_dispatches_through_daemon_proxy() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
+            return;
+        };
+        let project_dir = tempfile::tempdir().unwrap();
+        let (info, task) = start_test_daemon(&cache_dir).await;
+        let opened: Value = client::post_json(
+            &info,
+            "/daemon/v1/projects/open",
+            &json!({"root": project_dir.path()}),
+        )
+        .await
+        .unwrap();
+        let project_id = opened["project_id"].as_str().unwrap().to_string();
+
+        let mut out = Vec::new();
+        run_inner(
+            CliOptions {
+                command: CliCommand::Cron {
+                    command: CronCommand::List {
+                        project: Some(project_id.clone()),
+                    },
+                    json: true,
+                },
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let listed = serde_json::from_slice::<Value>(&out).unwrap();
+        assert_eq!(listed[0]["id"], "job-1");
+
+        out.clear();
+        run_inner(
+            CliOptions {
+                command: CliCommand::Cron {
+                    command: CronCommand::Pause {
+                        project: Some(project_id.clone()),
+                        id: "job-1".to_string(),
+                    },
+                    json: true,
+                },
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let paused = serde_json::from_slice::<Value>(&out).unwrap();
+        assert_eq!(paused["method"], "PATCH");
+        assert_eq!(paused["path"], "/v1/scheduler/cron/job-1");
+        assert!(paused["body_text"]
+            .as_str()
+            .unwrap()
+            .contains("\"enabled\":false"));
 
         shutdown_test_daemon(&info, task).await;
     }

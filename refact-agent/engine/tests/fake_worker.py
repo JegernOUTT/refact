@@ -39,6 +39,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/build_info":
             self.send_json({"version": "fake-worker"})
             return
+        if self.path == "/v1/scheduler/cron":
+            self.send_json([{
+                "id": "job-1",
+                "enabled": True,
+                "human_schedule": "every minute",
+                "next_fire_at_ms": 0,
+                "description": "fake job",
+                "path": self.path,
+            }])
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -58,8 +68,28 @@ class WorkerHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("content-length", "0") or "0")
             self.send_echo(self.rfile.read(length))
             return
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
         if self.path.startswith("/v1/chats/") and self.path.endswith("/commands"):
             self.handle_chat_command()
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_PATCH(self):
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_DELETE(self):
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
             return
         self.send_response(404)
         self.end_headers()

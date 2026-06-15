@@ -224,6 +224,23 @@ pub async fn post_empty_json<T: DeserializeOwned>(
     post_json(info, path, &Value::Object(Default::default())).await
 }
 
+pub async fn patch_json<B: Serialize + ?Sized, T: DeserializeOwned>(
+    info: &DaemonInfo,
+    path: &str,
+    body: &B,
+) -> Result<T, DaemonClientError> {
+    let response = daemon_request(info, reqwest::Method::PATCH, path)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| {
+            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+                "failed to contact daemon: {error}"
+            )))
+        })?;
+    decode_json_response(response).await
+}
+
 pub async fn delete_json<T: DeserializeOwned>(
     info: &DaemonInfo,
     path: &str,

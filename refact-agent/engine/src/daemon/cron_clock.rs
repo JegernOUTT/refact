@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono_tz::Tz;
+use serde::Serialize;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
@@ -24,6 +25,13 @@ const REPARSE_SOON_MS: u64 = 120_000;
 pub(crate) struct PendingCron {
     pub task_id: String,
     pub next_fire_ms: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub(crate) struct CronClockStatus {
+    pub enabled: bool,
+    pub jobs: u32,
+    pub next_wake_ms: Option<u64>,
 }
 
 #[derive(Default)]
@@ -48,6 +56,16 @@ pub fn spawn(state: Arc<DaemonState>) -> JoinHandle<()> {
 
 pub fn cron_pending_blocks_idle_stop(next_fire_ms: u64, now: u64) -> bool {
     crate::daemon::idle::cron_pending_blocks_idle_stop(next_fire_ms, now)
+}
+
+pub(crate) async fn status(state: &DaemonState) -> CronClockStatus {
+    let pending = state.cron_pending_snapshot().await;
+    let next_fire_ms = pending.values().copied().min();
+    CronClockStatus {
+        enabled: crate::scheduler::runner::scheduler_enabled(),
+        jobs: pending.len().min(u32::MAX as usize) as u32,
+        next_wake_ms: next_fire_ms.map(|ms| ms.saturating_sub(WAKE_LEAD_MS)),
+    }
 }
 
 pub(crate) struct CronClock {
