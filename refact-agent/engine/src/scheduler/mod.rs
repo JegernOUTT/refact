@@ -2,6 +2,7 @@ pub mod cron_expr;
 pub mod delivery;
 pub mod exec_action;
 pub mod jitter;
+pub mod retry;
 pub mod runner;
 pub mod schedule;
 pub mod store;
@@ -9,6 +10,7 @@ pub mod types;
 
 pub use cron_expr::{CronSchedule, human_schedule, next_run_ms as cron_next_run_ms, parse_cron};
 pub use runner::{runner_change_notify, session_cron_store, CronRunner, spawn, spawn_if_enabled};
+pub use retry::{classify, RetryCategory, RetryConfig};
 pub use schedule::{ScheduleTarget, next_run_ms};
 pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCronStore};
 pub use types::{
@@ -80,7 +82,7 @@ mod tests {
         let config = SchedulerConfig::default().with_startup_overrides(false);
 
         assert!(!config.enabled);
-        assert!(spawn_if_enabled(memory_store(), config).is_none());
+        assert!(spawn_if_enabled(memory_store(), config.clone()).is_none());
         assert_eq!(
             cron_create_policy(&config, false),
             Err(SCHEDULER_DISABLED_ERROR.to_string())
@@ -94,7 +96,7 @@ mod tests {
             ..SchedulerConfig::default()
         };
 
-        assert!(spawn_if_enabled(memory_store(), config).is_none());
+        assert!(spawn_if_enabled(memory_store(), config.clone()).is_none());
         assert_eq!(
             cron_create_policy(&config, true),
             Err(SCHEDULER_DISABLED_ERROR.to_string())

@@ -4,13 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::retry::RetryConfig;
+
 pub const DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub const DEFAULT_SCHEDULER_MAX_JOBS: u32 = 50;
 pub const DURABLE_DISABLED_NOTE: &str = "durable schedules disabled by config";
 pub const SCHEDULER_DISABLED_ERROR: &str = "scheduler is disabled";
 pub const SCHEDULER_DISABLE_ENV: &str = "REFACT_DISABLE_SCHEDULER";
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SchedulerConfig {
     #[serde(default = "default_scheduler_enabled")]
     pub enabled: bool,
@@ -18,6 +20,8 @@ pub struct SchedulerConfig {
     pub disable_durable: bool,
     #[serde(default = "default_scheduler_max_jobs")]
     pub max_jobs: u32,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 impl Default for SchedulerConfig {
@@ -26,6 +30,7 @@ impl Default for SchedulerConfig {
             enabled: true,
             disable_durable: false,
             max_jobs: DEFAULT_SCHEDULER_MAX_JOBS,
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -104,6 +109,8 @@ pub struct Job {
     pub paused_at_ms: Option<u64>,
     pub trigger_at_ms: Option<u64>,
     pub auto_expire_after_ms: u64,
+    #[serde(default)]
+    pub retry_attempts: u32,
 }
 
 impl Job {
@@ -144,6 +151,7 @@ impl Job {
             paused_at_ms: None,
             trigger_at_ms: None,
             auto_expire_after_ms: default_auto_expire_after_ms(recurring),
+            retry_attempts: 0,
         }
     }
 
@@ -354,6 +362,7 @@ struct RawJob {
     paused_at_ms: Option<u64>,
     trigger_at_ms: Option<u64>,
     auto_expire_after_ms: Option<u64>,
+    retry_attempts: Option<u32>,
     cron: Option<String>,
     prompt: Option<String>,
     chat_id: Option<String>,
@@ -390,6 +399,7 @@ impl From<RawJob> for Job {
             paused_at_ms: raw.paused_at_ms,
             trigger_at_ms: raw.trigger_at_ms,
             auto_expire_after_ms,
+            retry_attempts: raw.retry_attempts.unwrap_or_default(),
         }
     }
 }
@@ -484,6 +494,7 @@ mod tests {
             paused_at_ms: None,
             trigger_at_ms: Some(3_000),
             auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+            retry_attempts: 0,
         }
     }
 

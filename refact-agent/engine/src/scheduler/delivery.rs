@@ -96,7 +96,7 @@ async fn deliver_webhook(
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("webhook delivery returned {}", response.status()))
+        Err(format!("webhook delivery returned status {}", response.status()))
     }
 }
 
@@ -231,6 +231,7 @@ mod tests {
             paused_at_ms: None,
             trigger_at_ms: None,
             auto_expire_after_ms: crate::scheduler::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+            retry_attempts: 0,
         }
     }
 

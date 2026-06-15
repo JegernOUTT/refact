@@ -25,6 +25,7 @@ use crate::scheduler::scheduler_timezone;
 use super::delivery::deliver;
 use super::exec_action::{command_error_summary, run_command, CommandRunResult};
 use super::jitter::{jittered_next_run_ms_for, one_shot_jittered_next_run_ms_for, JitterConfig};
+use super::retry::{classify, retry_delay_ms};
 use super::schedule::next_run_ms;
 use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
 use super::types::{
@@ -318,6 +319,12 @@ impl CronRunner {
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
+                if self
+                    .handle_classifiable_fire_error(&task, final_fire, now, &error)
+                    .await
+                {
+                    return;
+                }
                 self.handle_unfireable_task(&task, now, &error).await;
                 return;
             }
@@ -442,6 +449,12 @@ impl CronRunner {
             Ok(result) => result,
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
+                if self
+                    .handle_classifiable_fire_error(&task, final_fire, now, &error)
+                    .await
+                {
+                    return;
+                }
                 self.handle_unfireable_task(&task, now, &error).await;
                 return;
             }
@@ -457,6 +470,21 @@ impl CronRunner {
                 result.status,
                 store_error
             );
+        }
+        if result.status == "error" && command_failure_can_retry(&result) {
+            match self
+                .schedule_retry(&task, now, &command_retry_text(&result))
+                .await
+            {
+                Ok(true) => {
+                    self.deferred_until_ms.remove(&task.id);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!("failed to schedule retry for task {}: {}", task.id, error);
+                }
+            }
         }
         if final_fire {
             match self.store.remove(&task.id).await {
@@ -506,6 +534,12 @@ impl CronRunner {
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
+                if self
+                    .handle_classifiable_fire_error(&task, final_fire, now, &error)
+                    .await
+                {
+                    return;
+                }
                 self.handle_unfireable_task(&task, now, &error).await;
                 return;
             }
@@ -599,6 +633,97 @@ impl CronRunner {
         }
     }
 
+    async fn handle_classifiable_fire_error(
+        &mut self,
+        task: &Job,
+        final_fire: bool,
+        now: u64,
+        error: &str,
+    ) -> bool {
+        if classify(error).is_none() {
+            return false;
+        }
+        if let Err(store_error) =
+            record_run(&self.store, &task.id, "error", Some(error.to_string()), now).await
+        {
+            tracing::warn!(
+                "failed to record retryable scheduled task {} error: {}",
+                task.id,
+                store_error
+            );
+        }
+        match self.schedule_retry(task, now, error).await {
+            Ok(true) => {
+                self.deferred_until_ms.remove(&task.id);
+                return true;
+            }
+            Ok(false) => {}
+            Err(schedule_error) => {
+                tracing::warn!(
+                    "failed to schedule retry for task {}: {}",
+                    task.id,
+                    schedule_error
+                );
+            }
+        }
+        if final_fire {
+            match self.store.remove(&task.id).await {
+                Ok(true) => self.emit_auto_expired_notice(task).await,
+                Ok(false) => {
+                    tracing::warn!("expired scheduled task {} was already removed", task.id)
+                }
+                Err(remove_error) => tracing::warn!(
+                    "failed to remove expired scheduled task {}: {}",
+                    task.id,
+                    remove_error
+                ),
+            }
+        } else if !task.recurring {
+            if let Err(remove_error) = self.remove_task(task).await {
+                tracing::warn!(
+                    "failed to remove failed one-shot scheduled task {}: {}",
+                    task.id,
+                    remove_error
+                );
+            }
+        } else {
+            self.deferred_until_ms.remove(&task.id);
+        }
+        true
+    }
+
+    async fn schedule_retry(&self, task: &Job, now: u64, error: &str) -> Result<bool, String> {
+        let Some(category) = classify(error) else {
+            return Ok(false);
+        };
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let mut stored = match self.store.get(&task.id).await {
+            Some(stored) => stored,
+            None => return Ok(false),
+        };
+        let retry_cfg = self.gcx.scheduler_config.retry.clone();
+        let Some(delay_ms) = retry_delay_ms(&retry_cfg, stored.retry_attempts) else {
+            return Ok(false);
+        };
+        stored.retry_attempts = stored.retry_attempts.saturating_add(1);
+        stored.trigger_at_ms = Some(now.saturating_add(delay_ms));
+        let next_retry_at_ms = stored.trigger_at_ms;
+        let retry_attempts = stored.retry_attempts;
+        if !self.store.replace(stored).await? {
+            return Ok(false);
+        }
+        tracing::info!(
+            task_id = %task.id,
+            ?category,
+            retry_attempts,
+            ?next_retry_at_ms,
+            "scheduled retry for transient scheduler failure"
+        );
+        Ok(true)
+    }
+
     async fn remove_task(&mut self, task: &Job) -> Result<(), String> {
         let _ = self.store.remove(&task.id).await?;
         self.deferred_until_ms.remove(&task.id);
@@ -623,6 +748,9 @@ impl CronRunner {
             .trigger_at_ms
             .is_some_and(|trigger_at_ms| trigger_at_ms <= now)
         {
+            return task.trigger_at_ms;
+        }
+        if task.retry_attempts > 0 && task.trigger_at_ms.is_some() {
             return task.trigger_at_ms;
         }
         if let Some(deferred_at) = self.deferred_until_ms.get(&task.id).copied() {
@@ -1108,6 +1236,29 @@ fn command_record_error(result: &CommandRunResult) -> String {
     command_error_summary(result)
 }
 
+fn command_failure_can_retry(result: &CommandRunResult) -> bool {
+    classify(&command_retry_text(result)).is_some()
+}
+
+fn command_retry_text(result: &CommandRunResult) -> String {
+    let mut text = String::new();
+    if result.stderr.to_ascii_lowercase().contains("timed out") {
+        text.push_str("timeout\n");
+    }
+    text.push_str(&result.stderr);
+    if !result.stdout.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&result.stdout);
+    }
+    if text.trim().is_empty() {
+        command_error_summary(result)
+    } else {
+        text
+    }
+}
+
 fn catch_up_notice_message(missed_count: u64) -> ChatMessage {
     event(
         EventSubkind::SystemNotice,
@@ -1189,6 +1340,9 @@ async fn record_run(
     if status == "fired" || status == "error" {
         task.last_fired_at_ms = Some(now_ms);
         task.fire_count = task.fire_count.saturating_add(1);
+        if status == "fired" {
+            task.retry_attempts = 0;
+        }
         if task
             .trigger_at_ms
             .is_some_and(|trigger_at_ms| trigger_at_ms <= now_ms)
@@ -1358,6 +1512,47 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn failing_command() -> Vec<String> {
         vec!["cmd".to_string(), "/C".to_string(), "exit 7".to_string()]
+    }
+
+    fn one_shot_command_due_task(id: &str, now: u64, argv: Vec<String>) -> Job {
+        let mut task = command_due_task(id, now, argv);
+        task.trigger = Trigger::Once {
+            at_ms: now.saturating_sub(1_000),
+        };
+        task.recurring = false;
+        task.last_fired_at_ms = None;
+        task.auto_expire_after_ms = 0;
+        task
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn transient_failing_command() -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '429 Too Many Requests\\n' >&2; exit 7".to_string(),
+        ]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn transient_failing_command() -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "echo 429 Too Many Requests 1>&2 & exit 7".to_string(),
+        ]
+    }
+
+    #[test]
+    fn command_timeout_failure_is_retryable() {
+        let result = CommandRunResult {
+            status: "error".to_string(),
+            stdout: String::new(),
+            stderr: "command timed out after 1 seconds".to_string(),
+            exit_code: None,
+        };
+
+        assert!(command_failure_can_retry(&result));
     }
 
     fn timezone_cron_task(id: &str, created_at_ms: u64) -> Job {
@@ -1700,6 +1895,8 @@ mod tests {
         let stored = store.get("command_error").await.unwrap();
         assert_eq!(stored.last_status.as_deref(), Some("error"));
         assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.retry_attempts, 0);
+        assert_eq!(stored.trigger_at_ms, None);
         assert!(stored
             .last_error
             .as_deref()
@@ -1712,6 +1909,65 @@ mod tests {
             notice.extra["event"]["payload"]["action_kind"],
             json!("command")
         );
+    }
+
+    #[tokio::test]
+    async fn transient_command_failure_retries_until_max_then_gives_up() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(one_shot_command_due_task(
+                "command_transient_retry",
+                now,
+                transient_failing_command(),
+            ))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+        let stored = store.get("command_transient_retry").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("error"));
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.retry_attempts, 1);
+        assert_eq!(stored.trigger_at_ms, Some(now + 60_000));
+        assert!(!runner.task_is_due(&stored, now + 59_999));
+
+        runner.fire_due_tasks(now + 60_000).await;
+        let stored = store.get("command_transient_retry").await.unwrap();
+        assert_eq!(stored.fire_count, 2);
+        assert_eq!(stored.retry_attempts, 2);
+        assert_eq!(stored.trigger_at_ms, Some(now + 180_000));
+
+        runner.fire_due_tasks(now + 180_000).await;
+        let stored = store.get("command_transient_retry").await.unwrap();
+        assert_eq!(stored.fire_count, 3);
+        assert_eq!(stored.retry_attempts, 3);
+        assert_eq!(stored.trigger_at_ms, Some(now + 480_000));
+
+        runner.fire_due_tasks(now + 480_000).await;
+
+        assert!(store.get("command_transient_retry").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn command_success_resets_retry_backoff() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut task = command_due_task("command_retry_reset", now, stdout_command("ok"));
+        task.retry_attempts = 2;
+        task.trigger_at_ms = Some(now);
+        store.add(task).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_retry_reset").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.retry_attempts, 0);
+        assert_eq!(stored.trigger_at_ms, None);
     }
 
     #[tokio::test]

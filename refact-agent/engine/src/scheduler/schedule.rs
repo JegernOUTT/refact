@@ -213,6 +213,7 @@ mod tests {
             paused_at_ms: None,
             trigger_at_ms: None,
             auto_expire_after_ms: 0,
+            retry_attempts: 0,
         }
     }
 

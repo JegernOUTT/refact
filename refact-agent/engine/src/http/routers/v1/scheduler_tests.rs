@@ -95,6 +95,7 @@ fn interval_job(id: &str, every_ms: u64) -> Job {
         paused_at_ms: None,
         trigger_at_ms: None,
         auto_expire_after_ms: crate::scheduler::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+        retry_attempts: 0,
     }
 }
 
