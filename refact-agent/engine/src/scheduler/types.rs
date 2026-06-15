@@ -289,13 +289,20 @@ pub enum AgentTarget {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Delivery {
     Chat,
-    Webhook { url: String, token: Option<String> },
+    Webhook {
+        url: String,
+        token: Option<String>,
+    },
+    Notifier {
+        integration_id: String,
+        target: Option<String>,
+    },
     None,
 }
 
 pub fn delivery_from_value(value: &Value) -> Result<Delivery, String> {
     match value {
-        Value::String(kind) => delivery_from_kind(kind, None, None),
+        Value::String(kind) => delivery_from_parts(kind, None, None, None, None),
         Value::Object(map) => {
             let kind = map
                 .get("kind")
@@ -304,17 +311,24 @@ pub fn delivery_from_value(value: &Value) -> Result<Delivery, String> {
                 .unwrap_or("webhook");
             let url = map.get("url").and_then(Value::as_str);
             let token = map.get("token").and_then(Value::as_str);
-            delivery_from_kind(kind, url, token)
+            let integration_id = map
+                .get("integration_id")
+                .or_else(|| map.get("integration"))
+                .and_then(Value::as_str);
+            let target = map.get("target").and_then(Value::as_str);
+            delivery_from_parts(kind, url, token, integration_id, target)
         }
         Value::Null => Ok(Delivery::Chat),
         other => Err(format!("argument `delivery` is invalid: {other:?}")),
     }
 }
 
-fn delivery_from_kind(
+fn delivery_from_parts(
     kind: &str,
     url: Option<&str>,
     token: Option<&str>,
+    integration_id: Option<&str>,
+    target: Option<&str>,
 ) -> Result<Delivery, String> {
     match kind.trim().to_ascii_lowercase().as_str() {
         "chat" => Ok(Delivery::Chat),
@@ -329,6 +343,19 @@ fn delivery_from_kind(
                 token: token
                     .map(str::trim)
                     .filter(|token| !token.is_empty())
+                    .map(str::to_string),
+            })
+        }
+        "notifier" => {
+            let integration_id = integration_id
+                .map(str::trim)
+                .filter(|integration_id| !integration_id.is_empty())
+                .ok_or_else(|| "delivery notifier requires `integration_id`".to_string())?;
+            Ok(Delivery::Notifier {
+                integration_id: integration_id.to_string(),
+                target: target
+                    .map(str::trim)
+                    .filter(|target| !target.is_empty())
                     .map(str::to_string),
             })
         }
@@ -549,6 +576,31 @@ mod tests {
         let round_tripped: Job = serde_json::from_str(&json).unwrap();
 
         assert_eq!(round_tripped, job);
+    }
+
+    #[test]
+    fn notifier_delivery_from_value_accepts_target() {
+        let delivery = delivery_from_value(&json!({
+            "kind": "notifier",
+            "integration_id": "notifier_telegram",
+            "target": "chat-1",
+        }))
+        .unwrap();
+
+        assert_eq!(
+            delivery,
+            Delivery::Notifier {
+                integration_id: "notifier_telegram".to_string(),
+                target: Some("chat-1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn notifier_delivery_requires_integration_id() {
+        let err = delivery_from_value(&json!({"kind": "notifier"})).unwrap_err();
+
+        assert_eq!(err, "delivery notifier requires `integration_id`");
     }
 
     #[test]

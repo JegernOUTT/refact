@@ -17,6 +17,7 @@ pub mod integr_abstract;
 pub mod integr_cmdline;
 pub mod integr_cmdline_service;
 pub mod mcp;
+pub mod notifier;
 
 pub mod config_chat;
 pub mod process_io_utils;
@@ -62,12 +63,21 @@ pub fn integration_from_name(n: &str) -> Result<Box<dyn IntegrationTrait + Send 
                 ..Default::default()
             }) as Box<dyn IntegrationTrait + Send + Sync>)
         }
+        notifier::integr_notifier_telegram::INTEGRATION_ID => Ok(Box::new(
+            notifier::integr_notifier_telegram::IntegrationNotifierTelegram::default(),
+        )
+            as Box<dyn IntegrationTrait + Send + Sync>),
         _ => Err(format!("Unknown integration name: {}", n)),
     }
 }
 
 pub fn integrations_list(_allow_experimental: bool) -> Vec<&'static str> {
-    let integrations = vec!["cmdline_TEMPLATE", "service_TEMPLATE", "mcp_TEMPLATE"];
+    let integrations = vec![
+        "cmdline_TEMPLATE",
+        "service_TEMPLATE",
+        "mcp_TEMPLATE",
+        notifier::integr_notifier_telegram::INTEGRATION_ID,
+    ];
     integrations
 }
 

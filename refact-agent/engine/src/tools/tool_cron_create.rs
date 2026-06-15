@@ -106,9 +106,18 @@ impl Tool for ToolCronCreate {
                                     "token": { "type": "string" }
                                 },
                                 "required": ["url"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "type": "string", "enum": ["notifier"] },
+                                    "integration_id": { "type": "string" },
+                                    "target": { "type": "string" }
+                                },
+                                "required": ["integration_id"]
                             }
                         ],
-                        "description": "Delivery target: chat (default), none, or webhook {url, token?}."
+                        "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
                     },
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "default": false },
@@ -176,6 +185,14 @@ fn delivery_output(delivery: &Delivery) -> Value {
             "kind": "webhook",
             "url": url,
             "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        }),
+        Delivery::Notifier {
+            integration_id,
+            target,
+        } => json!({
+            "kind": "notifier",
+            "integration_id": integration_id,
+            "target": target,
         }),
         Delivery::None => json!({"kind": "none"}),
     }
@@ -956,6 +973,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notifier_delivery_creates_command_job() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("command", json!("printf hi")),
+                ("description", json!("Print frog")),
+                (
+                    "delivery",
+                    json!({"kind": "notifier", "integration_id": "notifier_telegram", "target": "chat-1"}),
+                ),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.task.action_kind(), "command");
+        assert_eq!(
+            outcome.task.delivery,
+            Delivery::Notifier {
+                integration_id: "notifier_telegram".to_string(),
+                target: Some("chat-1".to_string()),
+            }
+        );
+        let output = delivery_output(&outcome.task.delivery);
+        assert_eq!(output["kind"], json!("notifier"));
+        assert_eq!(output["integration_id"], json!("notifier_telegram"));
+        assert_eq!(output["target"], json!("chat-1"));
+    }
+
+    #[tokio::test]
     async fn webhook_delivery_rejects_prompt_job() {
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
         let err = create_cron_job(
@@ -966,6 +1015,27 @@ mod tests {
                 (
                     "delivery",
                     json!({"kind": "webhook", "url": "http://127.0.0.1/hook"}),
+                ),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "non-chat delivery is only supported for command jobs");
+    }
+
+    #[tokio::test]
+    async fn notifier_delivery_rejects_prompt_job() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let err = create_cron_job(
+            input(&[
+                ("cron", json!("*/5 * * * *")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+                (
+                    "delivery",
+                    json!({"kind": "notifier", "integration_id": "notifier_telegram"}),
                 ),
             ]),
             runtime(session_store, None, Arc::new(Notify::new())),

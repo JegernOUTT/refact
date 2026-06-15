@@ -27,6 +27,10 @@ pub async fn deliver(app: &AppState, job: &Job, output: &str) -> Result<(), Stri
         Delivery::Webhook { url, token } => {
             deliver_webhook(app, job, output, url, token.as_deref()).await
         }
+        Delivery::Notifier {
+            integration_id,
+            target,
+        } => deliver_notifier(app, output, integration_id, target.as_deref()).await,
         Delivery::None => Ok(()),
     }
 }
@@ -98,6 +102,18 @@ async fn deliver_webhook(
     } else {
         Err(format!("webhook delivery returned status {}", response.status()))
     }
+}
+
+async fn deliver_notifier(
+    app: &AppState,
+    output: &str,
+    integration_id: &str,
+    target: Option<&str>,
+) -> Result<(), String> {
+    let notifier =
+        crate::integrations::notifier::configured_notifier_backend(app.gcx.clone(), integration_id)
+            .await?;
+    notifier.send(target, output).await
 }
 
 fn job_target(job: &Job) -> Result<&AgentTarget, String> {
@@ -355,5 +371,65 @@ mod tests {
         assert_eq!(received[0].1["output"], json!("hello webhook"));
         assert!(received[0].1["ts"].as_u64().unwrap() > 0);
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn notifier_delivery_posts_to_configured_telegram() {
+        let temp = tempfile::tempdir().unwrap();
+        let received = Arc::new(AMutex::new(Vec::<Value>::new()));
+        let handler_received = received.clone();
+        let router = Router::new().route(
+            "/botsecret-token/sendMessage",
+            post(move |Json(body): Json<Value>| {
+                let handler_received = handler_received.clone();
+                async move {
+                    handler_received.lock().await.push(body);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(router.into_make_service());
+        let server_task = tokio::spawn(server);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let config_dir = temp.path().join(".refact").join("integrations.d");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("notifier_telegram.yaml"),
+            format!(
+                "bot_token: secret-token\ndefault_chat_id: default-chat\napi_base_for_test: http://127.0.0.1:{port}\n"
+            ),
+        )
+        .unwrap();
+        let app = AppState::from_gcx(gcx).await;
+        let job = command_job(Delivery::Notifier {
+            integration_id: "notifier_telegram".to_string(),
+            target: Some("target-chat".to_string()),
+        });
+
+        deliver(&app, &job, "hello notifier").await.unwrap();
+
+        let received = received.lock().await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0]["chat_id"], json!("target-chat"));
+        assert_eq!(received[0]["text"], json!("hello notifier"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn notifier_delivery_missing_integration_errors() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let job = command_job(Delivery::Notifier {
+            integration_id: "notifier_telegram".to_string(),
+            target: None,
+        });
+
+        let err = deliver(&app, &job, "hello notifier").await.unwrap_err();
+
+        assert!(err.contains("integration `notifier_telegram` not found"));
     }
 }

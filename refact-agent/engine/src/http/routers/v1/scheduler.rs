@@ -49,7 +49,14 @@ pub struct CronTaskResponse {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryResponse {
     Chat,
-    Webhook { url: String, has_token: bool },
+    Webhook {
+        url: String,
+        has_token: bool,
+    },
+    Notifier {
+        integration_id: String,
+        target: Option<String>,
+    },
     None,
 }
 
@@ -402,6 +409,13 @@ fn delivery_response(delivery: &Delivery) -> DeliveryResponse {
         Delivery::Webhook { url, token } => DeliveryResponse::Webhook {
             url: url.clone(),
             has_token: token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        },
+        Delivery::Notifier {
+            integration_id,
+            target,
+        } => DeliveryResponse::Notifier {
+            integration_id: integration_id.clone(),
+            target: target.clone(),
         },
         Delivery::None => DeliveryResponse::None,
     }

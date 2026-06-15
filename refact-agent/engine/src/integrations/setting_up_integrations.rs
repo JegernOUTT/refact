@@ -646,11 +646,7 @@ pub async fn integration_config_save(
         sanitized_json_m.extend(common_settings_m);
     }
 
-    tracing::info!(
-        "writing to {}:\n{}",
-        config_path.display(),
-        serde_json::to_string_pretty(&sanitized_json).unwrap()
-    );
+    tracing::info!("writing to {}", config_path.display());
     let sanitized_yaml = serde_yaml::to_value(sanitized_json).unwrap();
 
     let config_dir = config_path

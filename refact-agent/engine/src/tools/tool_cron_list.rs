@@ -209,6 +209,14 @@ fn delivery_value(delivery: &Delivery) -> Value {
             "url": url,
             "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
         }),
+        Delivery::Notifier {
+            integration_id,
+            target,
+        } => json!({
+            "kind": "notifier",
+            "integration_id": integration_id,
+            "target": target,
+        }),
         Delivery::None => json!({"kind": "none"}),
     }
 }
