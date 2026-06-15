@@ -228,6 +228,15 @@ jobs:
           CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
 
+      - name: Free test artifacts before linux-like build
+        if: matrix.cross
+        run: |
+          df -h . ./target || true
+          rm -rf ./target/${{ matrix.target }}/ci-release/deps
+          rm -rf ./target/${{ matrix.target }}/ci-release/incremental
+          docker system prune -af || true
+          df -h . ./target || true
+
       - name: Build linux-like artifact
         if: matrix.cross
         env:

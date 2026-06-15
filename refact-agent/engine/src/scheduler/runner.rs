@@ -2181,7 +2181,10 @@ mod tests {
             .iter()
             .find(|message| message.role == "plain_text")
             .expect("stdout message");
-        assert_eq!(output.content.content_text_only(), "hello command");
+        assert_eq!(
+            output.content.content_text_only().trim_end(),
+            "hello command"
+        );
     }
 
     #[tokio::test]

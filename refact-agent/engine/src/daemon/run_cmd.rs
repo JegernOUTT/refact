@@ -1027,7 +1027,7 @@ mod tests {
             ];
             std::env::set_var(
                 "REFACT_DAEMON_WORKER_CMD",
-                format!("{} {}", python, worker.display()),
+                shell_words::join([python.as_str(), worker.to_string_lossy().as_ref()]),
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::set_var("FAKE_WORKER_CHAT_SCRIPT", script);
