@@ -492,10 +492,11 @@ describe("DocumentsPanel", () => {
 
     const allDocNames = screen
       .getAllByRole("button", { name: /Unpin|Pin/ })
-      .map((btn) =>
-        btn
-          .closest("[data-testid^='document-row-']")
-          ?.getAttribute("data-testid"),
+      .map(
+        (btn) =>
+          btn
+            .closest("[data-testid^='document-row-']")
+            ?.getAttribute("data-testid"),
       );
 
     expect(allDocNames[0]).toBe("document-row-initial-plan");
