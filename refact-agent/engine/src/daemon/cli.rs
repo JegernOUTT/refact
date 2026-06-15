@@ -2758,18 +2758,25 @@ mod tests {
         let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
             return;
         };
-        let project_parent = tempfile::tempdir().unwrap();
-        let project_dir = project_parent.path().join("project");
-        std::fs::create_dir_all(&project_dir).unwrap();
+        let missing_project_dir = tempfile::tempdir().unwrap();
+        let missing_project_path = missing_project_dir.path().to_path_buf();
+        let project_dir = tempfile::tempdir().unwrap();
         let (info, task) = start_test_daemon(&cache_dir).await;
         let _: Value = client::post_json(
             &info,
             "/daemon/v1/projects/open",
-            &json!({"root": project_dir}),
+            &json!({"root": missing_project_path}),
         )
         .await
         .unwrap();
-        std::fs::rename(&project_dir, project_parent.path().join("project-moved")).unwrap();
+        drop(missing_project_dir);
+        let _: Value = client::post_json(
+            &info,
+            "/daemon/v1/projects/open",
+            &json!({"root": project_dir.path()}),
+        )
+        .await
+        .unwrap();
         let report = doctor_report().await;
         assert_eq!(report.exit_code(), 1);
         assert!(report
