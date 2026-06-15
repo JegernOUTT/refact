@@ -45,6 +45,13 @@ src/
   yaml_configs/        — defaults for modes, providers, toolbox commands, prompts
   postprocessing/      — token-aware truncation, AST prioritization
   agentic/             — commit messages, agentic edit flows
+  buddy/               — Buddy agent runtime (actor, jobs, observers, chat_reactions, diagnostics)
+  daemon/              — headless daemon (CLI, client, auth, config, chat client)
+  exec/                — unified exec runtime (PTY, spawn, registry, spill)
+  scheduler/           — cron expression, delivery, exec actions, jitter
+  ext/                 — extensions marketplace, hooks runner, competitor import
+  at_commands/         — `@`-prefixed IDE commands (file, search, ast_definition, knowledge)
+  bin/refact.rs        — alternate entry point
 ```
 
 ## Chat System
@@ -482,7 +489,7 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 
 ## Testing
 
-- **Python integration tests** (~38 files in `tests/`): live HTTP+SSE against running server. 7 `test_chat_session_*.py` files.
+- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus Rust e2e suites (`daemon_e2e.rs`, `daemon_proxy.rs`, `daemon_supervisor.rs`) that share the `tests/e2e_helpers/` module. Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
 - **Rust unit tests**: `src/chat/tests.rs`, AST parser tests, 50+ modules. `cargo test --lib`.
 - **Test data**: `tests/emergency_frog_situation/` — themed frog simulations for parsing edge cases.
 

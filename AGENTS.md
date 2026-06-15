@@ -10,14 +10,11 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | Agent GUI | `refact-agent/gui/` | TypeScript/React 18 | ✅ `refact-agent/gui/AGENTS.md` |
 | VSCode Extension | `plugins/vscode/` | TypeScript | — |
 | JetBrains Plugin | `plugins/intellij/` | Kotlin, Gradle | — |
-| Documentation | GitHub Wiki | https://github.com/JegernOUTT/refact/wiki | — |
-| Project pitch | `README.md` | Markdown | user-facing overview (local-first engine, Buddy, task planner, providers); defer to Wiki for setup, architecture, and per-mode details |
+| Documentation | `docs/` | Astro (static site) | — |
 | IDE metadata | `.idea/` | IntelliJ project config | keep local/editor files out of commits; `.idea/workspace.xml` is ignored by `.gitignore` |
 | Agent notes | `.agents/` | onboarding notes | checked for repo-specific guidance when present |
 | Codex workspace | `.codex/` | Codex config/data | checked for repo-specific guidance when present |
-| Claude Code workspace | `.claude/` | Claude Code config/agents | checked for repo-specific guidance when present |
-| Playwright MCP cache | `.playwright-mcp/` | Playwright MCP server runtime/browser cache | local-only cache for the Playwright MCP server; do not commit |
-| Local refact state | `.refact/` | per-project refact state | gitignored (`.refact/`, `.refact-*/`); holds `trajectories/`, `knowledge/`, `tasks/`, `integrations.d/`, and personal slash commands in `.refact/commands/` |
+| GitHub metadata | `.github/` | repo-level GitHub config | `PULL_REQUEST_TEMPLATE.md` mirrors the minimum pre-commit checks (engine/GUI/plugins); `FUNDING.yml` lists the maintainer |
 | Root `.gitignore` | `.gitignore` | repository ignore rules | includes local editor and build output exclusions; check before adding new generated files |
 | JetBrains local release helper | `build-jb-plugin-local.sh` | shell script | local JetBrains packaging helper; root `.gitignore` excludes copied `/refact-*.zip` archives |
 
@@ -77,6 +74,7 @@ If you changed **both**: run both sets.
 | `agent_engine_build` | `refact-agent/engine/**` | `cargo test --release` on 7 targets (Win/Linux/macOS × x86_64/aarch64) |
 | `agent_gui_build` | `refact-agent/gui/**` | `npm test` → `format:check` → `types` → `lint` → `build` (Node LTS + latest) |
 | `server_build` | `refact-server/**` | Docker multi-arch build |
+| `docs_build` | `docs/**` | Docker build + push |
 | `plugin_vscode_build` | `plugins/vscode/**`, engine, GUI | VS Code extension packaging against same-commit engine/GUI artifacts |
 | `plugin_intellij_build` | `plugins/intellij/**`, engine, GUI | JetBrains plugin build against same-commit engine/GUI artifacts |
 
@@ -91,7 +89,7 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 
 | Script | Purpose |
 |---|---|
-| `changed.sh [base]` | Print changed components (engine/gui/vscode/intellij/infra) vs base (default `origin/main`) |
+| `changed.sh [base]` | Print changed components (engine/gui/vscode/intellij/docs/infra) vs base (default `origin/main`) |
 | `check.sh [components...]` | Run pre-push checks only for changed components. Auto-detects; runs in the current worktree |
 | `ci-status.sh <run-url\|id>` | GitHub Actions run status: per-job pass/fail + pinpointed failed steps |
 | `ci-logs.sh <run-url\|id> [N]` | Tail (default 300) of each **failed** job's log. Use this, not `gh run view --log-failed` (unreliable for reusable-workflow jobs) |
@@ -213,7 +211,6 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 - **Linting**: ESLint strict-type-checked, 0 warnings. Prettier enforced in CI.
 - **State**: Redux Toolkit + RTK Query. Always use selectors from `features/Chat/Thread/selectors.ts`. Never access `state.chat.threads[id]` directly.
 - **Styling**: Radix UI primitives + CSS Modules + design tokens. No inline styles, no hardcoded colors, no magic numbers.
-- **Design system**: GUI design-system architecture, tokens, motion, responsiveness, overlays, and guardrails are defined in `refact-agent/gui/AGENTS.md` → `## Design System (Refact UI)`.
 - **File naming**: `PascalCase.tsx` (components), `useCamelCase.ts` (hooks), `camelCase.ts` (utils), `PascalCase.module.css`.
 - **No `any` types.**
 

@@ -10642,7 +10642,7 @@ fn buddy_modes_have_buddy_identity() {
             prompt_text.contains("You are Buddy"),
             "{filename} prompt does not contain 'You are Buddy'"
         );
-        let count = content.matches("%BUDDY_PERSONALITY%").count();
+        let count = prompt_text.matches("%BUDDY_PERSONALITY%").count();
         assert_eq!(
             count, 1,
             "{filename} should contain %BUDDY_PERSONALITY% exactly once, found {count}"

@@ -15,6 +15,7 @@ use crate::app_state::AppState;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 
 pub const BUDDY_PULSE_MARKER: &str = "buddy_project_memory_pulse";
+const MAX_PULSE_MARKDOWN_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuddyPulsePayload {
@@ -138,11 +139,11 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
 
     if !payload.preferences.is_empty() {
         let mut lines = vec!["## USER PREFERENCES".to_string()];
-        for pref in payload.preferences.iter().take(5) {
+        for pref in payload.preferences.iter().take(3) {
             lines.push(format!(
                 "- {:.2}: {} (updated {})",
                 pref.confidence,
-                redact(&pref.statement),
+                truncate_inline(&redact(&pref.statement), 72),
                 redact(&pref.last_updated)
             ));
         }
@@ -151,7 +152,7 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
 
     if !payload.lessons.is_empty() {
         let mut lines = vec!["## PROJECT LESSONS".to_string()];
-        for lesson in payload.lessons.iter().take(5) {
+        for lesson in payload.lessons.iter().take(3) {
             let tags = lesson
                 .tags
                 .iter()
@@ -161,8 +162,8 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
                 .join(", ");
             lines.push(format!(
                 "- {}: {} [{}]",
-                redact(&lesson.title),
-                redact(&lesson.preview),
+                truncate_inline(&redact(&lesson.title), 56),
+                truncate_inline(&redact(&lesson.preview), 88),
                 tags
             ));
         }
@@ -196,7 +197,7 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
             lines.push(format!(
                 "- {}: {} ({})",
                 redact(&report.title),
-                redact(&report.preview),
+                truncate_inline(&redact(&report.preview), 96),
                 redact(&report.chat_id)
             ));
         }
@@ -224,7 +225,7 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
                     "- {}: {} ({})",
                     redact(&group.action_type),
                     group.count,
-                    details
+                    truncate_inline(&details, 120)
                 ));
             }
         }
@@ -233,7 +234,29 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
     let footer = format!("_Generated {}_", redact(&payload.generated_at));
     let mut out = sections;
     out.push(footer);
-    out.join("\n\n")
+    cap_markdown_chars(out.join("\n\n"), MAX_PULSE_MARKDOWN_CHARS)
+}
+
+fn cap_markdown_chars(markdown: String, max_chars: usize) -> String {
+    if markdown.chars().count() <= max_chars {
+        return markdown;
+    }
+    let marker = "\n...[truncated]";
+    let keep_chars = max_chars.saturating_sub(marker.chars().count());
+    let mut truncated = markdown.chars().take(keep_chars).collect::<String>();
+    truncated.push_str(marker);
+    truncated
+}
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let marker = "...";
+    let keep_chars = max_chars.saturating_sub(marker.chars().count());
+    let mut truncated = text.chars().take(keep_chars).collect::<String>();
+    truncated.push_str(marker);
+    truncated
 }
 
 async fn read_preferences(project_root: &Path) -> Vec<PulsePreference> {

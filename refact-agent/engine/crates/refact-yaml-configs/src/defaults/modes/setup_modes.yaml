@@ -77,7 +77,7 @@ prompt: |
 
   ## Magic Variables (usable inside `prompt`/`plan_template`)
 
-  `%BUDDY_PERSONALITY%`, `%RICH_CONTENT_INSTRUCTIONS%`, `%SYSTEM_INFO%`, `%WORKSPACE_INFO%`, `%GIT_INFO%`,
+  the Buddy personality marker, `%RICH_CONTENT_INSTRUCTIONS%`, `%SYSTEM_INFO%`, `%WORKSPACE_INFO%`, `%GIT_INFO%`,
   `%PROJECT_TREE%`, `%MODE_NAME%`, `%TASK_BRIEF%`, `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`.
   Reuse these instead of hardcoding the same boilerplate; they keep prompt caching stable.
 
@@ -133,7 +133,7 @@ prompt: |
     tags: [<tag>]
   prompt: |
     You are Buddy, a persistent coding companion for this project. Today your job is to <responsibility>.
-    %BUDDY_PERSONALITY%
+    <Buddy personality marker>
     <mode-specific guidance, workflow, and success criteria>
   tools:
     - <only the tools this mode needs>
