@@ -14,6 +14,7 @@ import {
   isActionableWorktree,
   resolveCardWorktree,
 } from "./TaskWorkspaceWorktree";
+import type { CardWorktreeTarget } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { taskSseEventReceived } from "./tasksSlice";
 import { switchToThread } from "../Chat/Thread";
@@ -58,6 +59,12 @@ function readCssBlock(source: string, selector: string): string {
     throw new Error(`Malformed CSS block for ${selector}`);
   }
   return source.slice(start + 1, end);
+}
+
+function expectCardWorktreeTarget(
+  target: CardWorktreeTarget | null,
+): asserts target is CardWorktreeTarget {
+  expect(target).not.toBeNull();
 }
 
 type MockWorktreePanelProps = {
@@ -750,6 +757,7 @@ describe("TaskWorkspace worktree resolution", () => {
       record,
       legacy: false,
     });
+    expectCardWorktreeTarget(target);
     expect(isActionableWorktree(target)).toBe(true);
   });
 
@@ -769,6 +777,7 @@ describe("TaskWorkspace worktree resolution", () => {
     });
     expect(target?.record).toBeUndefined();
     expect(target?.label).toBe("missing-wt");
+    expectCardWorktreeTarget(target);
     expect(isActionableWorktree(target)).toBe(false);
   });
 
