@@ -338,7 +338,7 @@ mod tests {
             )];
             std::env::set_var(
                 "REFACT_DAEMON_WORKER_CMD",
-                format!("{} {}", python, script.display()),
+                shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
             );
             Some(Self { keys })
         }
