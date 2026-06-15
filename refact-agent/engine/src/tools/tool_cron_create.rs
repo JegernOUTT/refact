@@ -468,32 +468,34 @@ fn apply_cron_create_action(
     if let Some(prompt) = input.prompt.clone() {
         task.action = Action::AgentTurn {
             prompt,
-            target: if input.isolated {
-                AgentTarget::Isolated
-            } else {
-                AgentTarget::ExistingChat {
-                    chat_id: chat_id.unwrap_or_default(),
-                }
+            target: AgentTarget::ExistingChat {
+                chat_id: String::new(),
             },
             mode: None,
             model: input.isolated.then_some(model).flatten(),
             tools: None,
         };
+        if input.isolated {
+            task.set_isolated();
+        } else {
+            task.set_existing_chat(chat_id);
+        }
         return Ok(());
     }
     task.action = Action::Command {
         argv: command_argv_from_input(input)?,
-        target: if input.isolated {
-            AgentTarget::Isolated
-        } else {
-            AgentTarget::ExistingChat {
-                chat_id: chat_id.unwrap_or_default(),
-            }
+        target: AgentTarget::ExistingChat {
+            chat_id: String::new(),
         },
         cwd: input.cwd.clone(),
         env: None,
         timeout_secs: input.timeout_secs,
     };
+    if input.isolated {
+        task.set_isolated();
+    } else {
+        task.set_existing_chat(chat_id);
+    }
     Ok(())
 }
 

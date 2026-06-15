@@ -76,6 +76,8 @@ pub struct CronCreateRequest {
     pub recurring: Option<bool>,
     #[serde(default)]
     pub durable: bool,
+    #[serde(default)]
+    pub isolated: Option<bool>,
     pub description: String,
     #[serde(default)]
     pub chat_id: String,
@@ -443,12 +445,13 @@ fn apply_http_action(task: &mut Job, request: &CronCreateRequest) -> Result<(), 
         task.action = Action::AgentTurn {
             prompt: prompt.trim().to_string(),
             target: AgentTarget::ExistingChat {
-                chat_id: request.chat_id.clone(),
+                chat_id: String::new(),
             },
             mode: request.mode.clone(),
             model: None,
             tools: None,
         };
+        apply_http_agent_target(task, request);
         return Ok(());
     }
     task.action = Action::Command {
@@ -461,6 +464,14 @@ fn apply_http_action(task: &mut Job, request: &CronCreateRequest) -> Result<(), 
         timeout_secs: request.timeout_secs,
     };
     Ok(())
+}
+
+fn apply_http_agent_target(task: &mut Job, request: &CronCreateRequest) {
+    if request.isolated == Some(true) {
+        task.set_isolated();
+    } else {
+        task.set_existing_chat(Some(request.chat_id.clone()));
+    }
 }
 
 fn http_command_argv(request: &CronCreateRequest) -> Result<Vec<String>, String> {

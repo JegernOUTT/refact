@@ -296,6 +296,77 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
     let task = tasks.iter().find(|t| t.id == id).unwrap();
     assert_eq!(task.chat_id(), Some("active-chat"));
     assert_eq!(task.mode(), Some("agent"));
+    match &task.action {
+        Action::AgentTurn { target, .. } => {
+            assert_eq!(
+                target,
+                &AgentTarget::ExistingChat {
+                    chat_id: "active-chat".to_string()
+                }
+            );
+        }
+        _ => panic!("expected agent turn action"),
+    }
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_agent_isolated_creates_isolated_target() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "active-chat").await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/5 * * * *",
+                    "prompt": "Run isolated checks",
+                    "isolated": true,
+                    "description": "Isolated check",
+                    "chat_id": "active-chat",
+                    "mode": "agent"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["action_kind"], json!("agent_turn"));
+    let id = created["id"].as_str().unwrap();
+
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(task.chat_id(), None);
+    match &task.action {
+        Action::AgentTurn { target, mode, .. } => {
+            assert_eq!(target, &AgentTarget::Isolated);
+            assert_eq!(mode.as_deref(), Some("agent"));
+        }
+        _ => panic!("expected agent turn action"),
+    }
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["target"], json!("isolated"));
+    assert_eq!(listed_task["isolated"], json!(true));
 }
 
 #[tokio::test]
@@ -367,6 +438,49 @@ async fn scheduler_cron_http_post_command_creates_command_job() {
         .find(|task| task["id"] == json!(id))
         .unwrap();
     assert_eq!(listed_task["action_kind"], json!("command"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_command_ignores_isolated() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "command-chat").await;
+
+    let (status, created) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "*/5 * * * *",
+                    "command": "printf 'hi frog'",
+                    "isolated": true,
+                    "description": "Print frog",
+                    "chat_id": "command-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["action_kind"], json!("command"));
+    let id = created["id"].as_str().unwrap();
+
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    match &task.action {
+        Action::Command { target, .. } => {
+            assert_eq!(
+                target,
+                &AgentTarget::ExistingChat {
+                    chat_id: "command-chat".to_string()
+                }
+            );
+        }
+        _ => panic!("expected command action"),
+    }
 }
 
 #[tokio::test]

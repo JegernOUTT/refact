@@ -230,6 +230,14 @@ impl Job {
         }
     }
 
+    pub fn set_isolated(&mut self) {
+        match &mut self.action {
+            Action::AgentTurn { target, .. } | Action::Command { target, .. } => {
+                *target = AgentTarget::Isolated;
+            }
+        }
+    }
+
     pub fn set_mode(&mut self, mode: Option<String>) {
         if let Action::AgentTurn { mode: target, .. } = &mut self.action {
             *target = mode;
