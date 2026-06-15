@@ -88,9 +88,9 @@ impl WorktreeService {
         let _guard = registry_write_lock().lock().await;
         let mut registry = self.load_registry_unlocked().await?;
         let before = registry.records.len();
-        registry.records.retain(|record| {
-            !record.references.is_empty() || record.meta.root.try_exists().unwrap_or(true)
-        });
+        registry
+            .records
+            .retain(|record| record.meta.root.try_exists().unwrap_or(true));
         if registry.records.len() != before {
             let _ = self.save_registry_unlocked(&registry).await;
         }
@@ -2258,11 +2258,42 @@ mod worktree_registry_tests {
 
         let list = service.list_worktrees().await.unwrap();
 
-        assert_eq!(list.worktrees.len(), 1);
-        assert_eq!(list.worktrees[0].meta.id, "missing_referenced");
-        assert!(!list.worktrees[0].status.path_exists);
+        assert!(list.worktrees.is_empty());
         let registry = service.load_registry().await.unwrap();
-        assert_eq!(registry.records.len(), 1);
+        assert!(registry.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_worktrees_prunes_missing_record_even_with_stale_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                kind: Some("task_agent".to_string()),
+                chat_id: Some("chat-1".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                branch: Some("refact/task/task-1/card/T-1/agent-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = created.worktree.meta.id.clone();
+        let root = created.worktree.meta.root.clone();
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let list = service.list_worktrees().await.unwrap();
+        assert!(list.worktrees.is_empty());
+        assert!(service.get_worktree(&id).await.is_err());
+
+        let registry = service.load_registry().await.unwrap();
+        assert!(registry.records.is_empty());
     }
 
     #[tokio::test]
