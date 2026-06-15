@@ -100,7 +100,10 @@ async fn deliver_webhook(
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("webhook delivery returned status {}", response.status()))
+        Err(format!(
+            "webhook delivery returned status {}",
+            response.status()
+        ))
     }
 }
 

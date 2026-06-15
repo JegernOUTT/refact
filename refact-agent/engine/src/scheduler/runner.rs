@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
 use uuid::Uuid;
@@ -26,11 +26,9 @@ use super::delivery::deliver;
 use super::exec_action::{command_error_summary, run_command, CommandRunResult};
 use super::jitter::{jittered_next_run_ms_for, one_shot_jittered_next_run_ms_for, JitterConfig};
 use super::retry::{classify, retry_delay_ms};
-use super::schedule::next_run_ms;
+use super::schedule::{next_run_ms, recurring_missed_grace_state, MissedRunGraceConfig};
 use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
-use super::types::{
-    Action, AgentTarget, CommandSpec, CronRunRecord, Delivery, Job, Trigger, RECENT_RUNS_CAP,
-};
+use super::types::{Action, AgentTarget, CommandSpec, CronRunRecord, Delivery, Job, Trigger};
 
 const DEFAULT_SLEEP_MS: u64 = 60_000;
 const IDLE_DEFER_MS: u64 = 30_000;
@@ -43,6 +41,7 @@ pub struct CronRunner {
     pub shutdown_flag: Arc<AtomicBool>,
     pub change_notify: Arc<Notify>,
     pub jitter_cfg: JitterConfig,
+    run_semaphore: Arc<Semaphore>,
     deferred_until_ms: HashMap<String, u64>,
 }
 
@@ -50,12 +49,14 @@ impl CronRunner {
     pub fn new(store: Arc<dyn CronStore>, gcx: SharedGlobalContext) -> Self {
         let shutdown_flag = gcx.shutdown_flag.clone();
         let change_notify = store.change_notify();
+        let max_concurrent_runs = gcx.scheduler_config.max_concurrent_runs.max(1);
         Self {
             store,
             gcx,
             shutdown_flag,
             change_notify,
             jitter_cfg: JitterConfig::default(),
+            run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs)),
             deferred_until_ms: HashMap::new(),
         }
     }
@@ -154,7 +155,10 @@ impl CronRunner {
     }
 
     async fn resume_recurring_task(&self, task: &Job, now: u64) {
-        if !matches!(task.trigger, Trigger::Cron { .. }) {
+        if !matches!(
+            task.trigger,
+            Trigger::Cron { .. } | Trigger::Interval { .. }
+        ) {
             return;
         }
         if task
@@ -163,18 +167,36 @@ impl CronRunner {
         {
             return;
         }
-        if self
-            .scheduled_fire_at_ms(task, now)
-            .is_some_and(|fire_at| fire_at < now)
-        {
+        let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
+        let Some(state) = recurring_missed_grace_state(
+            task,
+            from_ms,
+            now,
+            scheduler_timezone(),
+            self.missed_grace_config(),
+        ) else {
+            return;
+        };
+        if state.due_ms.is_some() && !state.should_fire {
+            let Some(advance_to_ms) = state.advance_last_fired_at_ms else {
+                return;
+            };
             if let Err(error) = self
                 .store
-                .update_fired(&task.id, now, task.fire_count)
+                .update_fired(&task.id, advance_to_ms, task.fire_count)
                 .await
             {
                 tracing::warn!("failed to resume scheduled task {}: {}", task.id, error);
             }
         }
+    }
+
+    fn missed_grace_config(&self) -> MissedRunGraceConfig {
+        MissedRunGraceConfig::from(&self.gcx.scheduler_config)
+    }
+
+    fn recent_runs_cap(&self) -> usize {
+        self.gcx.scheduler_config.recent_runs_cap
     }
 
     async fn fire_due_tasks(&mut self, now: u64) {
@@ -183,14 +205,74 @@ impl CronRunner {
             .list()
             .await
             .into_iter()
-            .filter(|task| self.task_is_due(task, now))
+            .filter(|task| {
+                self.task_is_due(task, now) || self.task_needs_missed_fast_forward(task, now)
+            })
             .collect::<Vec<_>>();
 
+        let mut handles = Vec::new();
+        let max_concurrent_runs = self.gcx.scheduler_config.max_concurrent_runs.max(1);
         for task in due_tasks {
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
-            self.handle_due_task(task, now).await;
+            match self.fast_forward_recurring_if_missed(&task, now).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to fast-forward scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                    continue;
+                }
+            }
+            if task_can_use_cron_lane(&task) && handles.len() >= max_concurrent_runs {
+                self.defer_task(&task, now);
+                continue;
+            }
+            if task_can_use_cron_lane(&task) && self.run_semaphore.available_permits() == 0 {
+                self.defer_task(&task, now);
+                continue;
+            }
+            if !task_can_use_cron_lane(&task) {
+                self.handle_due_task(task, now).await;
+                continue;
+            }
+            let Ok(permit) = self.run_semaphore.clone().try_acquire_owned() else {
+                self.defer_task(&task, now);
+                continue;
+            };
+            let store = self.store.clone();
+            let gcx = self.gcx.clone();
+            let shutdown_flag = self.shutdown_flag.clone();
+            let change_notify = self.change_notify.clone();
+            let jitter_cfg = self.jitter_cfg.clone();
+            let task_id = task.id.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = permit;
+                let mut runner = CronRunner {
+                    store,
+                    gcx,
+                    shutdown_flag,
+                    change_notify,
+                    jitter_cfg,
+                    run_semaphore: Arc::new(Semaphore::new(1)),
+                    deferred_until_ms: HashMap::new(),
+                };
+                runner.handle_due_task(task, now).await;
+                (task_id, runner.deferred_until_ms)
+            }));
+        }
+        for handle in handles {
+            if let Ok((task_id, deferred)) = handle.await {
+                if deferred.contains_key(&task_id) {
+                    self.deferred_until_ms.extend(deferred);
+                } else {
+                    self.deferred_until_ms.remove(&task_id);
+                }
+            }
         }
     }
 
@@ -220,7 +302,7 @@ impl CronRunner {
         match chat_fire_status(&self.gcx, chat_id).await {
             ChatFireStatus::Fireable => {}
             ChatFireStatus::Busy => {
-                if let Err(error) = record_run(&self.store, &task.id, "deferred", None, now).await {
+                if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
                         task.id,
@@ -245,14 +327,14 @@ impl CronRunner {
                             task.id,
                             chat_id
                         );
-                        if let Err(error) = record_run(
-                            &self.store,
-                            &task.id,
-                            "deferred",
-                            Some("no trajectory found".to_string()),
-                            now,
-                        )
-                        .await
+                        if let Err(error) = self
+                            .record_run(
+                                &task.id,
+                                "deferred",
+                                Some("no trajectory found".to_string()),
+                                now,
+                            )
+                            .await
                         {
                             tracing::warn!(
                                 "failed to record deferred scheduled task {}: {}",
@@ -271,14 +353,14 @@ impl CronRunner {
                                 task.id,
                                 status
                             );
-                            if let Err(error) = record_run(
-                                &self.store,
-                                &task.id,
-                                "deferred",
-                                Some(format!("session restore status: {status:?}")),
-                                now,
-                            )
-                            .await
+                            if let Err(error) = self
+                                .record_run(
+                                    &task.id,
+                                    "deferred",
+                                    Some(format!("session restore status: {status:?}")),
+                                    now,
+                                )
+                                .await
                             {
                                 tracing::warn!(
                                     "failed to record deferred scheduled task {}: {}",
@@ -307,7 +389,7 @@ impl CronRunner {
         match self.fire(&task, final_fire, now).await {
             Ok(true) => {}
             Ok(false) => {
-                if let Err(error) = record_run(&self.store, &task.id, "deferred", None, now).await {
+                if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
                         task.id,
@@ -330,7 +412,7 @@ impl CronRunner {
             }
         }
 
-        if let Err(error) = record_run(&self.store, &task.id, "fired", None, now).await {
+        if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
             tracing::warn!(
                 "failed to record fired scheduled task {}: {}",
                 task.id,
@@ -386,9 +468,7 @@ impl CronRunner {
                 match chat_fire_status(&self.gcx, chat_id).await {
                     ChatFireStatus::Fireable => {}
                     ChatFireStatus::Busy => {
-                        if let Err(error) =
-                            record_run(&self.store, &task.id, "deferred", None, now).await
-                        {
+                        if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                             tracing::warn!(
                                 "failed to record deferred scheduled task {}: {}",
                                 task.id,
@@ -408,14 +488,14 @@ impl CronRunner {
                             )
                             .await;
                             if !restored {
-                                if let Err(error) = record_run(
-                                    &self.store,
-                                    &task.id,
-                                    "deferred",
-                                    Some("no trajectory found".to_string()),
-                                    now,
-                                )
-                                .await
+                                if let Err(error) = self
+                                    .record_run(
+                                        &task.id,
+                                        "deferred",
+                                        Some("no trajectory found".to_string()),
+                                        now,
+                                    )
+                                    .await
                                 {
                                     tracing::warn!(
                                         "failed to record deferred scheduled task {}: {}",
@@ -441,6 +521,15 @@ impl CronRunner {
             }
         }
 
+        let task = match self.advance_recurring_before_fire(&task, now).await {
+            Ok(Some(advanced)) => advanced,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!("failed to advance scheduled task {}: {}", task.id, error);
+                self.handle_unfireable_task(&task, now, &error).await;
+                return;
+            }
+        };
         let final_fire = task_final_after_fire(&task, now);
         let result = match self
             .fire_command_with_missed(&task, &cmd, final_fire, now, false)
@@ -461,9 +550,7 @@ impl CronRunner {
         };
 
         let error = (result.status == "error").then(|| command_record_error(&result));
-        if let Err(store_error) =
-            record_run(&self.store, &task.id, &result.status, error, now).await
-        {
+        if let Err(store_error) = self.record_run(&task.id, &result.status, error, now).await {
             tracing::warn!(
                 "failed to record scheduled task {} status {}: {}",
                 task.id,
@@ -518,11 +605,20 @@ impl CronRunner {
             return;
         }
 
+        let task = match self.advance_recurring_before_fire(&task, now).await {
+            Ok(Some(advanced)) => advanced,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!("failed to advance scheduled task {}: {}", task.id, error);
+                self.handle_unfireable_task(&task, now, &error).await;
+                return;
+            }
+        };
         let final_fire = task_final_after_fire(&task, now);
         match self.fire(&task, final_fire, now).await {
             Ok(true) => {}
             Ok(false) => {
-                if let Err(error) = record_run(&self.store, &task.id, "deferred", None, now).await {
+                if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
                         task.id,
@@ -545,7 +641,7 @@ impl CronRunner {
             }
         }
 
-        if let Err(error) = record_run(&self.store, &task.id, "fired", None, now).await {
+        if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
             tracing::warn!(
                 "failed to record fired scheduled task {}: {}",
                 task.id,
@@ -585,14 +681,9 @@ impl CronRunner {
                 task.id,
                 reason
             );
-            if let Err(error) = record_run(
-                &self.store,
-                &task.id,
-                "deferred",
-                Some(reason.to_string()),
-                now,
-            )
-            .await
+            if let Err(error) = self
+                .record_run(&task.id, "deferred", Some(reason.to_string()), now)
+                .await
             {
                 tracing::warn!(
                     "failed to record deferred scheduled task {}: {}",
@@ -609,14 +700,9 @@ impl CronRunner {
             task.id,
             reason
         );
-        if let Err(error) = record_run(
-            &self.store,
-            &task.id,
-            "skipped",
-            Some(reason.to_string()),
-            now,
-        )
-        .await
+        if let Err(error) = self
+            .record_run(&task.id, "skipped", Some(reason.to_string()), now)
+            .await
         {
             tracing::warn!(
                 "failed to record skipped scheduled task {}: {}",
@@ -643,8 +729,9 @@ impl CronRunner {
         if classify(error).is_none() {
             return false;
         }
-        if let Err(store_error) =
-            record_run(&self.store, &task.id, "error", Some(error.to_string()), now).await
+        if let Err(store_error) = self
+            .record_run(&task.id, "error", Some(error.to_string()), now)
+            .await
         {
             tracing::warn!(
                 "failed to record retryable scheduled task {} error: {}",
@@ -724,6 +811,98 @@ impl CronRunner {
         Ok(true)
     }
 
+    async fn advance_recurring_before_fire(
+        &self,
+        task: &Job,
+        now: u64,
+    ) -> Result<Option<Job>, String> {
+        if !task.recurring || task.trigger_at_ms.is_some() || task.retry_attempts > 0 {
+            return Ok(Some(task.clone()));
+        }
+        let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
+        let Some(state) = recurring_missed_grace_state(
+            task,
+            from_ms,
+            now,
+            scheduler_timezone(),
+            self.missed_grace_config(),
+        ) else {
+            return Ok(Some(task.clone()));
+        };
+        if state.due_ms.is_none() {
+            return Ok(None);
+        }
+        let mut advanced = self
+            .store
+            .get(&task.id)
+            .await
+            .unwrap_or_else(|| task.clone());
+        if advanced.trigger_at_ms.is_some() || advanced.retry_attempts > 0 {
+            return Ok(Some(advanced));
+        }
+        let Some(advance_to_ms) = state.advance_last_fired_at_ms else {
+            return Ok(None);
+        };
+        advanced.last_fired_at_ms = Some(advance_to_ms);
+        advanced.last_status = Some("advanced".to_string());
+        advanced.last_error = None;
+        if state.should_fire {
+            advanced.fire_count = advanced.fire_count.saturating_add(1);
+        }
+        if !self.store.replace(advanced.clone()).await? {
+            return Err(format!("Scheduled task {} not found", task.id));
+        }
+        if state.should_fire {
+            Ok(Some(advanced))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn fast_forward_recurring_if_missed(&self, task: &Job, now: u64) -> Result<bool, String> {
+        if !task.recurring || task.trigger_at_ms.is_some() || task.retry_attempts > 0 {
+            return Ok(false);
+        }
+        let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
+        let Some(state) = recurring_missed_grace_state(
+            task,
+            from_ms,
+            now,
+            scheduler_timezone(),
+            self.missed_grace_config(),
+        ) else {
+            return Ok(false);
+        };
+        if state.due_ms.is_some() && !state.should_fire {
+            let Some(advance_to_ms) = state.advance_last_fired_at_ms else {
+                return Ok(false);
+            };
+            self.store
+                .update_fired(&task.id, advance_to_ms, task.fire_count)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn record_run(
+        &self,
+        job_id: &str,
+        status: &str,
+        error: Option<String>,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        record_run(
+            &self.store,
+            job_id,
+            status,
+            error,
+            now_ms,
+            self.recent_runs_cap(),
+        )
+        .await
+    }
+
     async fn remove_task(&mut self, task: &Job) -> Result<(), String> {
         let _ = self.store.remove(&task.id).await?;
         self.deferred_until_ms.remove(&task.id);
@@ -756,12 +935,29 @@ impl CronRunner {
         if let Some(deferred_at) = self.deferred_until_ms.get(&task.id).copied() {
             return Some(deferred_at);
         }
-        scheduled_fire_at_ms(task, now, &self.jitter_cfg)
+        if self.task_needs_missed_fast_forward(task, now) {
+            return Some(now);
+        }
+        scheduled_fire_at_ms(task, now, &self.jitter_cfg, self.missed_grace_config())
     }
 
     fn task_is_due(&self, task: &Job, now: u64) -> bool {
         self.scheduled_fire_at_ms(task, now)
             .is_some_and(|fire_at| fire_at <= now)
+    }
+
+    fn task_needs_missed_fast_forward(&self, task: &Job, now: u64) -> bool {
+        if !task.recurring || task.trigger_at_ms.is_some() || task.retry_attempts > 0 {
+            return false;
+        }
+        recurring_missed_grace_state(
+            task,
+            task.last_fired_at_ms.unwrap_or(task.created_at_ms),
+            now,
+            scheduler_timezone(),
+            self.missed_grace_config(),
+        )
+        .is_some_and(|state| state.due_ms.is_some() && !state.should_fire)
     }
 
     async fn fire(&self, task: &Job, final_fire: bool, fired_at_ms: u64) -> Result<bool, String> {
@@ -899,7 +1095,11 @@ impl CronRunner {
         delivery_job.last_status = Some(result.status.clone());
         delivery_job.last_error = (result.status == "error").then(|| command_record_error(result));
         delivery_job.last_fired_at_ms = Some(fired_at_ms);
-        delivery_job.fire_count = task.fire_count;
+        delivery_job.fire_count = if job_was_advanced_before_fire(task, fired_at_ms) {
+            task.fire_count.saturating_sub(1)
+        } else {
+            task.fire_count
+        };
         let output = if result.status == "error" {
             command_error_summary(result)
         } else {
@@ -1187,6 +1387,10 @@ fn command_job_has_non_chat_delivery(task: &Job) -> bool {
     matches!(&task.action, Action::Command { .. }) && !matches!(task.delivery, Delivery::Chat)
 }
 
+fn task_can_use_cron_lane(task: &Job) -> bool {
+    matches!(task.action, Action::Command { .. }) || job_is_isolated(task)
+}
+
 fn job_model(task: &Job) -> Option<&str> {
     match &task.action {
         Action::AgentTurn { model, .. } => model.as_deref().filter(|model| !model.is_empty()),
@@ -1217,7 +1421,7 @@ fn cron_fire_message_with_missed(task: &Job, final_fire: bool, missed: bool) -> 
         "task_id": task.id,
         "cron": task.cron_expr().unwrap_or_default(),
         "recurring": task.recurring,
-        "fire_count": task.fire_count.saturating_add(1),
+        "fire_count": event_fire_count(task),
         "final": final_fire,
         "action_kind": task.action_kind(),
     });
@@ -1230,6 +1434,25 @@ fn cron_fire_message_with_missed(task: &Job, final_fire: bool, missed: bool) -> 
         payload,
         task.prompt().unwrap_or(&task.description).to_string(),
     )
+}
+
+fn event_fire_count(task: &Job) -> u32 {
+    if task
+        .last_fired_at_ms
+        .is_some_and(|fired_at_ms| job_was_advanced_before_fire(task, fired_at_ms))
+    {
+        task.fire_count
+    } else {
+        task.fire_count.saturating_add(1)
+    }
+}
+
+fn job_was_advanced_before_fire(task: &Job, fired_at_ms: u64) -> bool {
+    task.recurring
+        && task.last_status.as_deref() == Some("advanced")
+        && task
+            .last_fired_at_ms
+            .is_some_and(|last_fired_at_ms| last_fired_at_ms <= fired_at_ms)
 }
 
 fn command_record_error(result: &CommandRunResult) -> String {
@@ -1284,7 +1507,12 @@ fn auto_expired_notice_message(task: &Job) -> ChatMessage {
     )
 }
 
-fn scheduled_fire_at_ms(task: &Job, _now: u64, jitter_cfg: &JitterConfig) -> Option<u64> {
+pub(crate) fn scheduled_fire_at_ms(
+    task: &Job,
+    now: u64,
+    jitter_cfg: &JitterConfig,
+    grace_config: MissedRunGraceConfig,
+) -> Option<u64> {
     if let Some(trigger_at_ms) = task.trigger_at_ms {
         if task.is_paused() {
             return Some(trigger_at_ms);
@@ -1292,6 +1520,21 @@ fn scheduled_fire_at_ms(task: &Job, _now: u64, jitter_cfg: &JitterConfig) -> Opt
     }
     let tz = scheduler_timezone();
     let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
+    let recurring_state = if task.recurring
+        && matches!(
+            task.trigger,
+            Trigger::Cron { .. } | Trigger::Interval { .. }
+        ) {
+        recurring_missed_grace_state(task, from_ms, now, tz, grace_config)
+    } else {
+        None
+    };
+    if recurring_state
+        .as_ref()
+        .is_some_and(|state| state.due_ms.is_some() && !state.should_fire)
+    {
+        return recurring_state.map(|state| state.next_future_ms);
+    }
     let scheduled = match &task.trigger {
         Trigger::Cron { .. } if task.recurring => {
             jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz)
@@ -1321,25 +1564,44 @@ async fn record_run(
     status: &str,
     error: Option<String>,
     now_ms: u64,
+    recent_runs_cap: usize,
 ) -> Result<(), String> {
     let mut task = store
         .get(job_id)
         .await
         .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
-    task.recent_runs.push(CronRunRecord {
-        at_ms: now_ms,
-        status: status.to_string(),
-        error: error.clone(),
-    });
-    if task.recent_runs.len() > RECENT_RUNS_CAP {
-        task.recent_runs
-            .drain(0..task.recent_runs.len() - RECENT_RUNS_CAP);
+    let already_advanced = job_was_advanced_before_fire(&task, now_ms);
+    if already_advanced {
+        if let Some(run) = task
+            .recent_runs
+            .last_mut()
+            .filter(|run| run.at_ms == now_ms)
+        {
+            run.status = status.to_string();
+            run.error = error.clone();
+        } else {
+            task.recent_runs.push(CronRunRecord {
+                at_ms: now_ms,
+                status: status.to_string(),
+                error: error.clone(),
+            });
+            cap_recent_runs(&mut task, recent_runs_cap);
+        }
+    } else {
+        task.recent_runs.push(CronRunRecord {
+            at_ms: now_ms,
+            status: status.to_string(),
+            error: error.clone(),
+        });
+        cap_recent_runs(&mut task, recent_runs_cap);
     }
     task.last_status = Some(status.to_string());
     task.last_error = error;
     if status == "fired" || status == "error" {
-        task.last_fired_at_ms = Some(now_ms);
-        task.fire_count = task.fire_count.saturating_add(1);
+        if !already_advanced {
+            task.last_fired_at_ms = Some(now_ms);
+            task.fire_count = task.fire_count.saturating_add(1);
+        }
         if status == "fired" {
             task.retry_attempts = 0;
         }
@@ -1354,6 +1616,16 @@ async fn record_run(
         Ok(())
     } else {
         Err(format!("Scheduled task {job_id} not found"))
+    }
+}
+
+fn cap_recent_runs(task: &mut Job, cap: usize) {
+    if cap == 0 {
+        task.recent_runs.clear();
+        return;
+    }
+    if task.recent_runs.len() > cap {
+        task.recent_runs.drain(0..task.recent_runs.len() - cap);
     }
 }
 
@@ -1393,7 +1665,7 @@ mod tests {
     use crate::chat::internal_roles::EVENT_ROLE;
     use crate::chat::types::{ChatSession, SessionState};
     use crate::scheduler::store::InMemoryCronStore;
-    use crate::scheduler::types::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+    use crate::scheduler::types::{DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP};
 
     fn task(id: &str, now: u64) -> Job {
         let mut task = Job::new_cron_agent_chat(
@@ -1505,6 +1777,20 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
+    fn slow_empty_command() -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), "sleep 0.2".to_string()]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn slow_empty_command() -> Vec<String> {
+        vec![
+            "Start-Sleep".to_string(),
+            "-Milliseconds".to_string(),
+            "200".to_string(),
+        ]
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn failing_command() -> Vec<String> {
         vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()]
     }
@@ -1584,6 +1870,25 @@ mod tests {
 
     async fn gcx_with_session(state: SessionState) -> SharedGlobalContext {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = ChatSession::new("chat-1".to_string());
+        session.set_runtime_state(state, None);
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("chat-1".to_string(), Arc::new(AMutex::new(session)));
+        gcx
+    }
+
+    async fn gcx_with_session_and_config<F>(
+        state: SessionState,
+        configure: F,
+    ) -> SharedGlobalContext
+    where
+        F: FnOnce(&mut crate::scheduler::types::SchedulerConfig),
+    {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().scheduler_config =
+            crate::scheduler::types::test_scheduler_config_with(configure);
         let mut session = ChatSession::new("chat-1".to_string());
         session.set_runtime_state(state, None);
         gcx.chat_sessions
@@ -1823,6 +2128,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overdue_recurring_job_fast_forwards_without_burst() {
+        let now = now_ms();
+        let every_ms = 60_000;
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut task = interval_task("interval_overdue_fast_forward", now, every_ms);
+        task.last_fired_at_ms = Some(now - 10 * every_ms);
+        store.add(task).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("interval_overdue_fast_forward").await.unwrap();
+        assert_eq!(stored.last_fired_at_ms, Some(now));
+        assert_eq!(stored.fire_count, 0);
+        assert!(stored.recent_runs.is_empty());
+        assert_no_fire(&gcx).await;
+        assert!(!runner.task_is_due(&stored, now + every_ms - 1));
+        assert!(runner.task_is_due(&stored, now + every_ms));
+    }
+
+    #[tokio::test]
     async fn command_job_runs_and_delivers_stdout() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
@@ -1877,6 +2204,132 @@ mod tests {
         let session = session.lock().await;
         assert!(session.messages.is_empty());
         assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recurring_command_advances_before_fire_without_double_counting() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(command_due_task(
+                "command_advance_before_fire",
+                now,
+                stdout_command("advanced"),
+            ))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_advance_before_fire").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert!(stored
+            .last_fired_at_ms
+            .is_some_and(|last_fired_at_ms| last_fired_at_ms <= now));
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.recent_runs.len(), 1);
+        assert_eq!(stored.recent_runs[0].status, "fired");
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        let fire_event = event_message(&session, "cron_fire", "command_advance_before_fire");
+        assert_eq!(fire_event.extra["event"]["payload"]["fire_count"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn recurring_command_advanced_crash_does_not_refire_same_slot() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let task = command_due_task("command_crash_advanced", now, stdout_command("nope"));
+        store.add(task.clone()).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let runner = CronRunner::new(store.clone(), gcx.clone());
+
+        let advanced = runner
+            .advance_recurring_before_fire(&task, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let advanced_at_ms = advanced.last_fired_at_ms.unwrap();
+        assert!(advanced_at_ms <= now);
+        assert_eq!(advanced.fire_count, 1);
+
+        let mut restarted = CronRunner::new(store.clone(), gcx.clone());
+        restarted.fire_due_tasks(now).await;
+
+        let stored = store.get("command_crash_advanced").await.unwrap();
+        assert_eq!(stored.last_fired_at_ms, Some(advanced_at_ms));
+        assert_eq!(stored.fire_count, 1);
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        assert!(session.messages.is_empty());
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recurring_isolated_advanced_crash_does_not_refire_same_slot() {
+        let now = now_ms();
+        let every_ms = 60_000;
+        let store = Arc::new(InMemoryCronStore::new());
+        let task = isolated_interval_task("isolated_crash_advanced", now, every_ms);
+        store.add(task.clone()).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let runner = CronRunner::new(store.clone(), gcx.clone());
+
+        let advanced = runner
+            .advance_recurring_before_fire(&task, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let advanced_at_ms = advanced.last_fired_at_ms.unwrap();
+        assert!(advanced_at_ms <= now);
+        assert_eq!(advanced.fire_count, 1);
+
+        let mut restarted = CronRunner::new(store.clone(), gcx.clone());
+        restarted.fire_due_tasks(now).await;
+
+        let stored = store.get("isolated_crash_advanced").await.unwrap();
+        assert_eq!(stored.last_fired_at_ms, Some(advanced_at_ms));
+        assert_eq!(stored.fire_count, 1);
+        assert!(isolated_session_ids(&gcx, "isolated_crash_advanced")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrency_cap_defers_over_limit_command_runs() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        for id in ["command_cap_a", "command_cap_b", "command_cap_c"] {
+            store
+                .add(command_due_task(id, now, slow_empty_command()))
+                .await
+                .unwrap();
+        }
+        let gcx = gcx_with_session_and_config(SessionState::Idle, |config| {
+            config.max_concurrent_runs = 2;
+        })
+        .await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+
+        let jobs = store.list().await;
+        let fired = jobs
+            .iter()
+            .filter(|job| job.last_status.as_deref() == Some("fired"))
+            .count();
+        let pending = jobs
+            .iter()
+            .filter(|job| job.last_status.as_deref() != Some("fired"))
+            .collect::<Vec<_>>();
+        assert_eq!(fired, 2);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            runner.deferred_until_ms.get(&pending[0].id),
+            Some(&(now + IDLE_DEFER_MS))
+        );
     }
 
     #[tokio::test]
@@ -2072,7 +2525,7 @@ mod tests {
             .collect();
         store.add(task).await.unwrap();
 
-        record_run(&store, "history_cap", "fired", None, now)
+        record_run(&store, "history_cap", "fired", None, now, RECENT_RUNS_CAP)
             .await
             .unwrap();
         record_run(
@@ -2081,6 +2534,7 @@ mod tests {
             "deferred",
             Some("busy".to_string()),
             now + 1,
+            RECENT_RUNS_CAP,
         )
         .await
         .unwrap();
@@ -2093,6 +2547,35 @@ mod tests {
         assert_eq!(stored.last_error.as_deref(), Some("busy"));
         assert_eq!(stored.last_fired_at_ms, Some(now));
         assert_eq!(stored.fire_count, 8);
+    }
+
+    #[tokio::test]
+    async fn runner_uses_configurable_recent_run_cap() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(due_task("history_config_cap", now))
+            .await
+            .unwrap();
+        let gcx = gcx_with_session_and_config(SessionState::Idle, |config| {
+            config.recent_runs_cap = 1;
+        })
+        .await;
+        let runner = CronRunner::new(store.clone(), gcx);
+
+        runner
+            .record_run("history_config_cap", "fired", None, now)
+            .await
+            .unwrap();
+        runner
+            .record_run("history_config_cap", "deferred", None, now + 1)
+            .await
+            .unwrap();
+
+        let stored = store.get("history_config_cap").await.unwrap();
+        assert_eq!(stored.recent_runs.len(), 1);
+        assert_eq!(stored.recent_runs[0].at_ms, now + 1);
+        assert_eq!(stored.recent_runs[0].status, "deferred");
     }
 
     #[tokio::test]
@@ -2210,7 +2693,9 @@ mod tests {
 
         let stored = store.get("cron_isolated_due").await.unwrap();
         assert_eq!(stored.last_status.as_deref(), Some("fired"));
-        assert_eq!(stored.last_fired_at_ms, Some(now));
+        assert!(stored
+            .last_fired_at_ms
+            .is_some_and(|last_fired_at_ms| last_fired_at_ms <= now));
         assert_eq!(stored.fire_count, 1);
         let ids = isolated_session_ids(&gcx, "cron_isolated_due").await;
         assert_eq!(ids, vec![format!("cron_cron_isolated_due_{now}")]);

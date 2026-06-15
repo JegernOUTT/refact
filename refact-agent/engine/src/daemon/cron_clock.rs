@@ -11,8 +11,8 @@ use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{now_ms, DaemonState};
 use crate::daemon::supervisor::WorkerState;
 use crate::scheduler::{
-    next_run_ms, scheduled_tasks_path, scheduler_timezone, Action, AgentTarget, Delivery, Job,
-    Trigger,
+    next_run_ms, recurring_missed_grace_state, scheduled_tasks_path, scheduler_timezone, Action,
+    AgentTarget, Delivery, Job, MissedRunGraceConfig, Trigger,
 };
 
 pub(crate) const WAKE_LEAD_MS: u64 = 90_000;
@@ -295,7 +295,12 @@ fn next_fire_for_task(task: &Job, now: u64, tz: Tz) -> Option<u64> {
             return None;
         }
         let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
-        return next_run_ms(task, from_ms, tz);
+        let state =
+            recurring_missed_grace_state(task, from_ms, now, tz, MissedRunGraceConfig::default())?;
+        if state.due_ms.is_some() && state.should_fire {
+            return Some(now);
+        }
+        return Some(state.next_future_ms);
     }
     if task.fire_count != 0 {
         return None;
@@ -461,6 +466,27 @@ mod tests {
                 next_run_ms(expr, now, chrono_tz::UTC)
             );
         }
+    }
+
+    #[test]
+    fn overdue_recurring_fast_forward_matches_runner_fixture() {
+        let now = utc_ms(2026, 1, 1, 0, 10);
+        let mut task = task("overdue", "*/1 * * * *", utc_ms(2026, 1, 1, 0, 0));
+        task.last_fired_at_ms = Some(utc_ms(2026, 1, 1, 0, 0));
+        let mut jitter_cfg = crate::scheduler::jitter::JitterConfig::default();
+        jitter_cfg.recurring_frac = 0.0;
+
+        let clock_next = next_fire_for_task(&task, now, chrono_tz::UTC).unwrap();
+        let runner_next = crate::scheduler::runner::scheduled_fire_at_ms(
+            &task,
+            now,
+            &jitter_cfg,
+            MissedRunGraceConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(clock_next, utc_ms(2026, 1, 1, 0, 11));
+        assert_eq!(runner_next, clock_next);
     }
 
     #[test]

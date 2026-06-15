@@ -11,13 +11,17 @@ pub mod types;
 pub use cron_expr::{CronSchedule, human_schedule, next_run_ms as cron_next_run_ms, parse_cron};
 pub use runner::{runner_change_notify, session_cron_store, CronRunner, spawn, spawn_if_enabled};
 pub use retry::{classify, RetryCategory, RetryConfig};
-pub use schedule::{ScheduleTarget, next_run_ms};
+pub use schedule::{
+    missed_run_grace_ms, next_run_ms, recurring_missed_grace_state, MissedRunGraceConfig,
+    RecurringMissedGraceState, ScheduleTarget,
+};
 pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCronStore};
 pub use types::{
     Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, Delivery,
-    DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job,
-    RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger,
-    cron_create_policy, delivery_from_value,
+    DEFAULT_MISSED_GRACE_MAX_MS, DEFAULT_MISSED_GRACE_MIN_MS,
+    DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS,
+    DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job, RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV,
+    SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger, cron_create_policy, delivery_from_value,
 };
 
 pub fn scheduler_timezone() -> chrono_tz::Tz {

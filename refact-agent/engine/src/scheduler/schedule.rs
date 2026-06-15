@@ -2,7 +2,43 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
 use super::cron_expr;
-use super::types::{Job, Trigger};
+use super::types::{
+    DEFAULT_MISSED_GRACE_MAX_MS, DEFAULT_MISSED_GRACE_MIN_MS, Job, SchedulerConfig, Trigger,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MissedRunGraceConfig {
+    pub min_ms: u64,
+    pub max_ms: u64,
+}
+
+impl Default for MissedRunGraceConfig {
+    fn default() -> Self {
+        Self {
+            min_ms: DEFAULT_MISSED_GRACE_MIN_MS,
+            max_ms: DEFAULT_MISSED_GRACE_MAX_MS,
+        }
+    }
+}
+
+impl From<&SchedulerConfig> for MissedRunGraceConfig {
+    fn from(config: &SchedulerConfig) -> Self {
+        Self {
+            min_ms: config.missed_grace_min_ms,
+            max_ms: config.missed_grace_max_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecurringMissedGraceState {
+    pub due_ms: Option<u64>,
+    pub next_future_ms: u64,
+    pub advance_last_fired_at_ms: Option<u64>,
+    pub period_ms: u64,
+    pub grace_ms: u64,
+    pub should_fire: bool,
+}
 
 pub trait ScheduleTarget {
     fn schedule_next_run_ms(&self, from_ms: u64, default_tz: Tz) -> Option<u64>;
@@ -39,6 +75,91 @@ pub fn next_run_ms<T: ScheduleTarget + ?Sized>(
     default_tz: Tz,
 ) -> Option<u64> {
     target.schedule_next_run_ms(from_ms, default_tz)
+}
+
+pub fn missed_run_grace_ms(period_ms: u64, config: MissedRunGraceConfig) -> u64 {
+    let max_ms = config.max_ms.max(config.min_ms);
+    period_ms.saturating_div(2).clamp(config.min_ms, max_ms)
+}
+
+pub fn recurring_missed_grace_state(
+    job: &Job,
+    from_ms: u64,
+    now_ms: u64,
+    default_tz: Tz,
+    grace_config: MissedRunGraceConfig,
+) -> Option<RecurringMissedGraceState> {
+    if !job.recurring {
+        return None;
+    }
+    let due_ms = next_run_ms(job, from_ms, default_tz)?;
+    let after_due_ms = next_run_ms(job, due_ms, default_tz)?;
+    let period_ms = after_due_ms.saturating_sub(due_ms);
+    let grace_ms = missed_run_grace_ms(period_ms, grace_config);
+    if due_ms > now_ms {
+        return Some(RecurringMissedGraceState {
+            due_ms: None,
+            next_future_ms: due_ms,
+            advance_last_fired_at_ms: None,
+            period_ms,
+            grace_ms,
+            should_fire: false,
+        });
+    }
+    let next_future_ms = if after_due_ms > now_ms {
+        after_due_ms
+    } else {
+        next_run_ms(job, now_ms, default_tz)?
+    };
+    let should_fire = now_ms.saturating_sub(due_ms) <= grace_ms;
+    let advance_last_fired_at_ms =
+        missed_fast_forward_anchor_ms(job, due_ms, after_due_ms, now_ms, default_tz, should_fire)
+            .unwrap_or(now_ms);
+    Some(RecurringMissedGraceState {
+        due_ms: Some(due_ms),
+        next_future_ms,
+        advance_last_fired_at_ms: Some(advance_last_fired_at_ms),
+        period_ms,
+        grace_ms,
+        should_fire,
+    })
+}
+
+fn missed_fast_forward_anchor_ms(
+    job: &Job,
+    due_ms: u64,
+    after_due_ms: u64,
+    now_ms: u64,
+    default_tz: Tz,
+    should_fire: bool,
+) -> Option<u64> {
+    if after_due_ms > now_ms {
+        return Some(due_ms);
+    }
+    match job.trigger {
+        Trigger::Interval { every_ms } if every_ms > 0 => {
+            let base_ms = job.last_fired_at_ms.unwrap_or(job.created_at_ms);
+            if now_ms <= base_ms {
+                return Some(base_ms);
+            }
+            let ticks = now_ms.saturating_sub(base_ms) / every_ms;
+            base_ms.checked_add(ticks.checked_mul(every_ms)?)
+        }
+        Trigger::Cron { .. } if should_fire => {
+            let mut anchor_ms = due_ms;
+            let mut next_ms = after_due_ms;
+            while next_ms <= now_ms {
+                anchor_ms = next_ms;
+                next_ms = next_run_ms(job, anchor_ms, default_tz)?;
+                if next_ms <= anchor_ms {
+                    return None;
+                }
+            }
+            Some(anchor_ms)
+        }
+        Trigger::Cron { .. } => Some(now_ms),
+        _ => None,
+    }
 }
 
 pub fn parse_schedule(
@@ -368,6 +489,59 @@ mod tests {
 
         job.last_fired_at_ms = Some(1_050);
         assert_eq!(next_run_ms(&job, 1_051, chrono_tz::UTC), Some(1_060));
+    }
+
+    #[test]
+    fn missed_grace_is_half_period_with_bounds() {
+        let cfg = MissedRunGraceConfig::default();
+
+        assert_eq!(missed_run_grace_ms(60_000, cfg), 120_000);
+        assert_eq!(missed_run_grace_ms(10 * 60_000, cfg), 5 * 60_000);
+        assert_eq!(missed_run_grace_ms(6 * 60 * 60_000, cfg), 2 * 60 * 60_000);
+    }
+
+    #[test]
+    fn recurring_missed_state_fast_forwards_beyond_grace() {
+        let mut job = job(Trigger::Interval { every_ms: 60_000 });
+        job.created_at_ms = 0;
+        job.last_fired_at_ms = Some(0);
+
+        let state = recurring_missed_grace_state(
+            &job,
+            0,
+            10 * 60_000,
+            chrono_tz::UTC,
+            MissedRunGraceConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(state.due_ms, Some(60_000));
+        assert_eq!(state.period_ms, 60_000);
+        assert_eq!(state.grace_ms, 120_000);
+        assert!(!state.should_fire);
+        assert_eq!(state.next_future_ms, 11 * 60_000);
+        assert_eq!(state.advance_last_fired_at_ms, Some(10 * 60_000));
+    }
+
+    #[test]
+    fn recurring_missed_state_fires_once_inside_grace() {
+        let mut job = job(Trigger::Interval { every_ms: 60_000 });
+        job.created_at_ms = 0;
+        job.last_fired_at_ms = Some(0);
+
+        let state = recurring_missed_grace_state(
+            &job,
+            0,
+            90_000,
+            chrono_tz::UTC,
+            MissedRunGraceConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(state.due_ms, Some(60_000));
+        assert!(state.should_fire);
+        assert_eq!(state.next_future_ms, 120_000);
+        assert_eq!(state.advance_last_fired_at_ms, Some(60_000));
     }
 
     #[test]

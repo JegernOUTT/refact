@@ -6,6 +6,7 @@ use chrono_tz::Tz;
 
 use super::schedule::{next_run_ms, ScheduleTarget};
 
+#[derive(Clone)]
 pub struct JitterConfig {
     pub recurring_frac: f64,
     pub recurring_cap_ms: u64,

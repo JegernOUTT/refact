@@ -8,9 +8,13 @@ use super::retry::RetryConfig;
 
 pub const DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub const DEFAULT_SCHEDULER_MAX_JOBS: u32 = 50;
+pub const DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS: usize = 8;
+pub const DEFAULT_MISSED_GRACE_MIN_MS: u64 = 120 * 1000;
+pub const DEFAULT_MISSED_GRACE_MAX_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DURABLE_DISABLED_NOTE: &str = "durable schedules disabled by config";
 pub const SCHEDULER_DISABLED_ERROR: &str = "scheduler is disabled";
 pub const SCHEDULER_DISABLE_ENV: &str = "REFACT_DISABLE_SCHEDULER";
+pub const RECENT_RUNS_CAP: usize = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SchedulerConfig {
@@ -20,6 +24,14 @@ pub struct SchedulerConfig {
     pub disable_durable: bool,
     #[serde(default = "default_scheduler_max_jobs")]
     pub max_jobs: u32,
+    #[serde(default = "default_scheduler_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+    #[serde(default = "default_scheduler_recent_runs_cap")]
+    pub recent_runs_cap: usize,
+    #[serde(default = "default_missed_grace_min_ms")]
+    pub missed_grace_min_ms: u64,
+    #[serde(default = "default_missed_grace_max_ms")]
+    pub missed_grace_max_ms: u64,
     #[serde(default)]
     pub retry: RetryConfig,
 }
@@ -30,6 +42,10 @@ impl Default for SchedulerConfig {
             enabled: true,
             disable_durable: false,
             max_jobs: DEFAULT_SCHEDULER_MAX_JOBS,
+            max_concurrent_runs: DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS,
+            recent_runs_cap: RECENT_RUNS_CAP,
+            missed_grace_min_ms: DEFAULT_MISSED_GRACE_MIN_MS,
+            missed_grace_max_ms: DEFAULT_MISSED_GRACE_MAX_MS,
             retry: RetryConfig::default(),
         }
     }
@@ -46,6 +62,16 @@ impl SchedulerConfig {
     pub fn runner_enabled(&self) -> bool {
         self.enabled
     }
+}
+
+#[cfg(test)]
+pub fn test_scheduler_config_with<F>(configure: F) -> SchedulerConfig
+where
+    F: FnOnce(&mut SchedulerConfig),
+{
+    let mut config = SchedulerConfig::default();
+    configure(&mut config);
+    config
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,7 +111,21 @@ fn default_scheduler_max_jobs() -> u32 {
     DEFAULT_SCHEDULER_MAX_JOBS
 }
 
-pub const RECENT_RUNS_CAP: usize = 20;
+fn default_scheduler_max_concurrent_runs() -> usize {
+    DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS
+}
+
+fn default_scheduler_recent_runs_cap() -> usize {
+    RECENT_RUNS_CAP
+}
+
+fn default_missed_grace_min_ms() -> u64 {
+    DEFAULT_MISSED_GRACE_MIN_MS
+}
+
+fn default_missed_grace_max_ms() -> u64 {
+    DEFAULT_MISSED_GRACE_MAX_MS
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(from = "RawJob")]
@@ -430,7 +470,7 @@ impl From<RawJob> for Job {
             fire_count: raw.fire_count.unwrap_or_default(),
             last_status: raw.last_status,
             last_error: raw.last_error,
-            recent_runs: capped_recent_runs(raw.recent_runs.unwrap_or_default()),
+            recent_runs: raw.recent_runs.unwrap_or_default(),
             paused_at_ms: raw.paused_at_ms,
             trigger_at_ms: raw.trigger_at_ms,
             auto_expire_after_ms,
@@ -454,13 +494,6 @@ fn legacy_action(prompt: Option<String>, chat_id: Option<String>, mode: Option<S
         model: None,
         tools: None,
     }
-}
-
-fn capped_recent_runs(mut recent_runs: Vec<CronRunRecord>) -> Vec<CronRunRecord> {
-    if recent_runs.len() > RECENT_RUNS_CAP {
-        recent_runs.drain(0..recent_runs.len() - RECENT_RUNS_CAP);
-    }
-    recent_runs
 }
 
 fn new_job_id() -> String {
@@ -628,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_runs_are_capped_on_deserialize() {
+    fn recent_runs_are_preserved_on_deserialize() {
         let runs = (0..25)
             .map(|idx| json!({"at_ms": idx, "status": "ok", "error": null}))
             .collect::<Vec<_>>();
@@ -637,8 +670,8 @@ mod tests {
 
         let job: Job = serde_json::from_value(value).unwrap();
 
-        assert_eq!(job.recent_runs.len(), RECENT_RUNS_CAP);
-        assert_eq!(job.recent_runs[0].at_ms, 5);
-        assert_eq!(job.recent_runs[19].at_ms, 24);
+        assert_eq!(job.recent_runs.len(), 25);
+        assert_eq!(job.recent_runs[0].at_ms, 0);
+        assert_eq!(job.recent_runs[24].at_ms, 24);
     }
 }
