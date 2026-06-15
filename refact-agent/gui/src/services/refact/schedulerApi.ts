@@ -19,6 +19,18 @@ export type CronRunRecord = {
 
 export type CronActionKind = "agent_turn" | "command";
 export type CronActionTarget = "existing_chat" | "isolated";
+export type CronDeliveryKind = "chat" | "webhook" | "notifier" | "none";
+
+export type CreateCronDelivery =
+  | { kind: "chat" }
+  | { kind: "webhook"; url: string; token?: string }
+  | { kind: "notifier"; integration_id: string; target?: string };
+
+export type CronTaskDelivery =
+  | { kind: "chat" }
+  | { kind: "webhook"; url?: string; has_token?: boolean }
+  | { kind: "notifier"; integration_id?: string; target?: string | null }
+  | { kind: "none" };
 
 export type CronTask = {
   id: string;
@@ -41,10 +53,23 @@ export type CronTask = {
   last_error: string | null;
   recent_runs: CronRunRecord[];
   action_kind: CronActionKind;
+  delivery_kind: CronDeliveryKind;
+  delivery?: CronTaskDelivery;
   chat_id: string | null;
   target: CronActionTarget;
   isolated: boolean;
 };
+
+type CronTaskWire = Omit<CronTask, "delivery_kind"> & {
+  delivery_kind?: CronDeliveryKind;
+};
+
+function normalizeCronTask(task: CronTaskWire): CronTask {
+  return {
+    ...task,
+    delivery_kind: task.delivery?.kind ?? task.delivery_kind ?? "chat",
+  };
+}
 
 export type CreateCronRequest = {
   cron?: string;
@@ -57,6 +82,7 @@ export type CreateCronRequest = {
   command_argv?: string[];
   cwd?: string;
   timeout_secs?: number;
+  delivery?: CreateCronDelivery;
   recurring?: boolean;
   durable: boolean;
   description: string;
@@ -70,6 +96,8 @@ export type CreateCronResponse = {
   recurring: boolean;
   durable: boolean;
   action_kind: CronActionKind;
+  delivery?: CronTaskDelivery;
+  delivery_kind?: CronDeliveryKind;
 };
 
 export type UpdateCronRequest = {
@@ -137,7 +165,9 @@ export const schedulerApi = createApi({
           url: buildApiUrlFromState(state, "/v1/scheduler/cron"),
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as CronTask[] };
+        return {
+          data: (result.data as CronTaskWire[]).map(normalizeCronTask),
+        };
       },
       providesTags: ["CronTasks"],
     }),

@@ -136,6 +136,34 @@ describe("CronCreateForm", () => {
     expect(screen.getByLabelText("Timeout")).toBeInTheDocument();
   });
 
+  it("toggles delivery fields when switching delivery kind", async () => {
+    const { user } = render(
+      <CronCreateForm onSubmit={vi.fn()} taskCount={0} />,
+    );
+
+    expect(screen.getByRole("radio", { name: "Chat delivery" })).toBeChecked();
+    expect(screen.queryByLabelText("Webhook URL")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Notifier integration ID"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Webhook delivery" }));
+
+    expect(screen.getByLabelText("Webhook URL")).toBeInTheDocument();
+    expect(screen.getByLabelText("Webhook token")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Notifier integration ID"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Notifier delivery" }));
+
+    expect(screen.queryByLabelText("Webhook URL")).not.toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Notifier integration ID"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Notifier target")).toBeInTheDocument();
+  });
+
   it("blocks command actions without command text", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const { user } = render(
@@ -178,6 +206,64 @@ describe("CronCreateForm", () => {
         recurring: true,
         durable: false,
         description: "Command frog check",
+      });
+    });
+  });
+
+  it("blocks webhook delivery without a URL", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.type(screen.getByLabelText("Description"), "Webhook frog check");
+    await user.click(screen.getByRole("radio", { name: "Command action" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Command" }),
+      "echo hi",
+    );
+    await user.click(screen.getByRole("radio", { name: "Webhook delivery" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Webhook URL is required.",
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("submits notifier delivery with integration id", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.type(
+      screen.getByLabelText("Description"),
+      "Notifier frog check",
+    );
+    await user.click(screen.getByRole("radio", { name: "Command action" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Command" }),
+      "echo hi",
+    );
+    await user.click(screen.getByRole("radio", { name: "Notifier delivery" }));
+    await user.type(
+      screen.getByLabelText("Notifier integration ID"),
+      "notifier_telegram",
+    );
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        cron: "7 * * * *",
+        command: "echo hi",
+        delivery: {
+          kind: "notifier",
+          integration_id: "notifier_telegram",
+        },
+        recurring: true,
+        durable: false,
+        description: "Notifier frog check",
       });
     });
   });

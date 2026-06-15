@@ -32,6 +32,8 @@ const task: CronTask = {
     },
   ],
   action_kind: "agent_turn",
+  delivery_kind: "chat",
+  delivery: { kind: "chat" },
   chat_id: "chat-1",
   target: "existing_chat",
   isolated: false,

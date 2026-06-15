@@ -17,6 +17,7 @@ import styles from "./Scheduler.module.css";
 type CronPreset = "hourly" | "daily" | "weekdays" | "five-min" | "custom";
 type ScheduleKind = "cron" | "interval" | "once";
 type ActionKind = "agent" | "command";
+type DeliveryKind = "chat" | "webhook" | "notifier";
 
 type CronCreateFormData = Omit<CreateCronRequest, "chat_id" | "mode">;
 
@@ -52,6 +53,12 @@ const SCHEDULE_OPTIONS = [
 const ACTION_OPTIONS = [
   { value: "agent", label: "Agent turn", ariaLabel: "Agent turn action" },
   { value: "command", label: "Command", ariaLabel: "Command action" },
+];
+
+const DELIVERY_OPTIONS = [
+  { value: "chat", label: "Chat", ariaLabel: "Chat delivery" },
+  { value: "webhook", label: "Webhook", ariaLabel: "Webhook delivery" },
+  { value: "notifier", label: "Notifier", ariaLabel: "Notifier delivery" },
 ];
 
 const CRON_PATTERN = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
@@ -104,6 +111,11 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
   const [command, setCommand] = useState("");
   const [cwd, setCwd] = useState("");
   const [timeoutSecs, setTimeoutSecs] = useState("");
+  const [deliveryKind, setDeliveryKind] = useState<DeliveryKind>("chat");
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [webhookToken, setWebhookToken] = useState("");
+  const [notifierIntegrationId, setNotifierIntegrationId] = useState("");
+  const [notifierTarget, setNotifierTarget] = useState("");
   const [description, setDescription] = useState("");
   const [recurring, setRecurring] = useState(true);
   const [durable, setDurable] = useState(false);
@@ -137,6 +149,11 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     setLocalError(null);
   };
 
+  const handleDeliveryKindChange = (value: string) => {
+    setDeliveryKind(value as DeliveryKind);
+    setLocalError(null);
+  };
+
   const validateSchedule = (): string | null => {
     if (scheduleKind === "interval") return validateInterval(every);
     if (scheduleKind === "once") return validateOneShot(at);
@@ -158,6 +175,21 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
       ) {
         return "Timeout must be a positive number of seconds.";
       }
+    }
+    return null;
+  };
+
+  const validateDelivery = (): string | null => {
+    if (deliveryKind === "chat") return null;
+    if (actionKind !== "command") {
+      return "Webhook and notifier delivery require a command action.";
+    }
+    if (deliveryKind === "webhook") {
+      if (!webhookUrl.trim()) return "Webhook URL is required.";
+      return null;
+    }
+    if (!notifierIntegrationId.trim()) {
+      return "Notifier integration ID is required.";
     }
     return null;
   };
@@ -198,6 +230,26 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     };
   };
 
+  const buildDeliveryRequest = (): Pick<CreateCronRequest, "delivery"> => {
+    if (deliveryKind === "chat") return {};
+    if (deliveryKind === "webhook") {
+      return {
+        delivery: {
+          kind: "webhook",
+          url: webhookUrl.trim(),
+          ...(webhookToken.trim() ? { token: webhookToken.trim() } : {}),
+        },
+      };
+    }
+    return {
+      delivery: {
+        kind: "notifier",
+        integration_id: notifierIntegrationId.trim(),
+        ...(notifierTarget.trim() ? { target: notifierTarget.trim() } : {}),
+      },
+    };
+  };
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (capExceeded) {
@@ -224,11 +276,17 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
       setLocalError(actionError);
       return;
     }
+    const deliveryError = validateDelivery();
+    if (deliveryError) {
+      setLocalError(deliveryError);
+      return;
+    }
 
     setLocalError(null);
     await onSubmit({
       ...buildScheduleRequest(),
       ...buildActionRequest(),
+      ...buildDeliveryRequest(),
       durable,
       description: description.trim(),
     });
@@ -412,6 +470,62 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
             </Field>
           </div>
         </>
+      ) : null}
+
+      <Field label="Delivery">
+        <SegmentedControl
+          aria-label="Delivery"
+          name="scheduler-delivery-kind"
+          options={DELIVERY_OPTIONS}
+          value={deliveryKind}
+          onValueChange={handleDeliveryKindChange}
+        />
+      </Field>
+
+      {deliveryKind === "webhook" ? (
+        <div className={styles.commandGrid}>
+          <Field label="Webhook URL" required>
+            <FieldText
+              className={styles.fieldControl}
+              value={webhookUrl}
+              onChange={setWebhookUrl}
+              aria-label="Webhook URL"
+              placeholder="https://example.com/scheduler"
+            />
+          </Field>
+          <Field label="Webhook token" helper="Optional bearer token.">
+            <FieldText
+              className={styles.fieldControl}
+              value={webhookToken}
+              onChange={setWebhookToken}
+              aria-label="Webhook token"
+              placeholder="Optional secret"
+            />
+          </Field>
+        </div>
+      ) : null}
+
+      {deliveryKind === "notifier" ? (
+        <div className={styles.commandGrid}>
+          <Field label="Notifier integration ID" required>
+            <FieldText
+              className={styles.fieldControl}
+              value={notifierIntegrationId}
+              onChange={setNotifierIntegrationId}
+              aria-label="Notifier integration ID"
+              placeholder="notifier_telegram"
+            />
+          </Field>
+          <Field label="Notifier target" helper="Optional channel or chat id.">
+            <FieldText
+              className={styles.fieldControl}
+              value={notifierTarget}
+              onChange={setNotifierTarget}
+              aria-label="Notifier target"
+              placeholder="chat-1"
+            />
+          </Field>
+        </div>
       ) : null}
 
       <div className={styles.toggles}>

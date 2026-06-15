@@ -30,6 +30,8 @@ const task: CronTask = {
     },
   ],
   action_kind: "agent_turn",
+  delivery_kind: "chat",
+  delivery: { kind: "chat" },
   chat_id: "chat-1",
   target: "existing_chat",
   isolated: false,
@@ -53,6 +55,7 @@ describe("CronList", () => {
     expect(screen.getByText("fired")).toBeInTheDocument();
     expect(screen.getByText("Cron")).toBeInTheDocument();
     expect(screen.getByText("Agent")).toBeInTheDocument();
+    expect(screen.getByText("Chat")).toBeInTheDocument();
     expect(screen.getByText("Durable")).toBeInTheDocument();
     expect(screen.getByText("Recurring")).toBeInTheDocument();
     expect(screen.getByText("Last fired")).toBeInTheDocument();
@@ -78,6 +81,31 @@ describe("CronList", () => {
 
     expect(screen.getByText("Command")).toBeInTheDocument();
     expect(screen.getByText("Isolated")).toBeInTheDocument();
+  });
+
+  it("renders delivery badges", () => {
+    render(
+      <CronList
+        tasks={[
+          {
+            ...task,
+            id: "cron_webhook",
+            delivery_kind: "webhook",
+            delivery: { kind: "webhook", url: "https://example.com/hook" },
+          },
+          {
+            ...task,
+            id: "cron_notifier",
+            delivery_kind: "notifier",
+            delivery: { kind: "notifier", integration_id: "notifier_telegram" },
+          },
+        ]}
+        {...defaultProps}
+      />,
+    );
+
+    expect(screen.getByText("Webhook")).toBeInTheDocument();
+    expect(screen.getByText("Notifier")).toBeInTheDocument();
   });
 
   it("calls delete with the task id", async () => {

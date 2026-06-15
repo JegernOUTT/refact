@@ -2,6 +2,7 @@ import React, { FormEvent, useState } from "react";
 import { CalendarClock, Timer } from "lucide-react";
 import {
   Badge,
+  type BadgeTone,
   Button,
   EmptyState,
   Field,
@@ -132,6 +133,26 @@ function actionLabel(task: CronTask): string {
 function actionTone(task: CronTask) {
   if (task.action_kind === "command") return "accent";
   if (task.isolated || task.target === "isolated") return "warning";
+  return "default";
+}
+
+function deliveryKind(task: CronTask): CronTask["delivery_kind"] {
+  return task.delivery?.kind ?? task.delivery_kind;
+}
+
+function deliveryLabel(task: CronTask): string {
+  const kind = deliveryKind(task);
+  if (kind === "webhook") return "Webhook";
+  if (kind === "notifier") return "Notifier";
+  if (kind === "none") return "No delivery";
+  return "Chat";
+}
+
+function deliveryTone(task: CronTask): BadgeTone {
+  const kind = deliveryKind(task);
+  if (kind === "webhook") return "accent";
+  if (kind === "notifier") return "success";
+  if (kind === "none") return "muted";
   return "default";
 }
 
@@ -280,6 +301,7 @@ export const CronList: React.FC<CronListProps> = ({
                 </Badge>
                 <Badge tone="default">{triggerLabel(task)}</Badge>
                 <Badge tone={actionTone(task)}>{actionLabel(task)}</Badge>
+                <Badge tone={deliveryTone(task)}>{deliveryLabel(task)}</Badge>
                 <Badge tone={task.durable ? "accent" : "muted"}>
                   {task.durable ? "Durable" : "Session"}
                 </Badge>
