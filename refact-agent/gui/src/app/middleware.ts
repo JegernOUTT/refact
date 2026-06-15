@@ -85,7 +85,11 @@ import {
 } from "../features/Tasks/tasksSlice";
 import { closeThread } from "../features/Chat/Thread";
 import { createChatWithId } from "../features/Chat/Thread/actions";
-import { push, selectCurrentPage } from "../features/Pages/pagesSlice";
+import {
+  popBackTo,
+  push,
+  selectCurrentPage,
+} from "../features/Pages/pagesSlice";
 import { cronFireReceived } from "../features/Scheduler";
 import {
   ideToolCallResponse,
@@ -1382,30 +1386,73 @@ startListening({
 // eliminating the race condition where this async listener could fire
 // after the user_message had already triggered generation.
 
+function clearDeletedTaskState(
+  taskId: string,
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+): void {
+  const state = listenerApi.getState();
+  const threads = state.chat.threads as Record<
+    string,
+    | {
+        thread: {
+          task_meta?: { task_id: string };
+        };
+      }
+    | undefined
+  >;
+
+  for (const [threadId, runtime] of Object.entries(threads)) {
+    if (!runtime) continue;
+    if (runtime.thread.task_meta?.task_id === taskId) {
+      listenerApi.dispatch(closeThread({ id: threadId, force: true }));
+    }
+  }
+
+  listenerApi.dispatch(closeTask(taskId));
+
+  const currentPage = selectCurrentPage(listenerApi.getState());
+  if (currentPage?.name === "task workspace" && currentPage.taskId === taskId) {
+    listenerApi.dispatch(popBackTo({ name: "history" }));
+  }
+}
+
+function invalidateDeletedTaskCaches(
+  taskId: string,
+  listenerApi: {
+    dispatch: AppDispatch;
+  },
+): void {
+  listenerApi.dispatch(
+    tasksApi.util.invalidateTags([
+      "Tasks",
+      { type: "Tasks", id: taskId },
+      { type: "Board", id: taskId },
+      { type: "TaskTrajectories", id: `${taskId}/planner` },
+      { type: "TaskTrajectories", id: `${taskId}/agents` },
+    ]),
+  );
+  listenerApi.dispatch(
+    taskDocumentsApi.util.invalidateTags([
+      { type: "TaskDocuments", id: taskId },
+    ]),
+  );
+  listenerApi.dispatch(
+    taskMemoriesApi.util.invalidateTags([
+      { type: "TaskMemories", id: taskId },
+      { type: "TaskMemories", id: `${taskId}:facets` },
+    ]),
+  );
+}
+
 startListening({
   matcher: tasksApi.endpoints.deleteTask.matchFulfilled,
   effect: (action, listenerApi) => {
     const taskId = action.meta.arg.originalArgs;
-    const state = listenerApi.getState();
-    const threads = state.chat.threads as Record<
-      string,
-      | {
-          thread: {
-            task_meta?: { task_id: string };
-          };
-        }
-      | undefined
-    >;
-
-    for (const [threadId, runtime] of Object.entries(threads)) {
-      if (!runtime) continue;
-      const thread = runtime.thread;
-      if (thread.task_meta?.task_id === taskId) {
-        listenerApi.dispatch(closeThread({ id: threadId, force: true }));
-      }
-    }
-
-    listenerApi.dispatch(closeTask(taskId));
+    invalidateDeletedTaskCaches(taskId, listenerApi);
+    clearDeletedTaskState(taskId, listenerApi);
   },
 });
 
@@ -1439,13 +1486,7 @@ startListening({
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
             const index = draft.findIndex((t) => t.id === event.task_id);
             if (index >= 0) {
-              const existing = draft[index];
-              draft[index] = {
-                ...event.meta,
-                planner_session_state:
-                  event.meta.planner_session_state ??
-                  existing.planner_session_state,
-              };
+              draft[index] = event.meta;
             } else {
               draft.unshift(event.meta);
             }
@@ -1461,12 +1502,7 @@ startListening({
           tasksApi.util.updateQueryData(
             "getTask",
             event.task_id,
-            (existing) => ({
-              ...event.meta,
-              planner_session_state:
-                event.meta.planner_session_state ??
-                existing.planner_session_state,
-            }),
+            () => event.meta,
           ),
         );
         break;
@@ -1480,6 +1516,8 @@ startListening({
             }
           }),
         );
+        invalidateDeletedTaskCaches(event.task_id, listenerApi);
+        clearDeletedTaskState(event.task_id, listenerApi);
         break;
       case "board_changed":
         void listenerApi.dispatch(

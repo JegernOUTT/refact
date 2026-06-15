@@ -175,7 +175,13 @@ export const tasksApi = createApi({
         if (result.error) return { error: result.error };
         return { data: { deleted: true } };
       },
-      invalidatesTags: ["Tasks"],
+      invalidatesTags: (_result, _error, taskId) => [
+        "Tasks",
+        { type: "Tasks", id: taskId },
+        { type: "Board", id: taskId },
+        { type: "TaskTrajectories", id: `${taskId}/planner` },
+        { type: "TaskTrajectories", id: `${taskId}/agents` },
+      ],
     }),
 
     updateTaskStatus: builder.mutation<
@@ -470,6 +476,7 @@ export const tasksApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "Tasks", id: taskId },
+        "Tasks",
       ],
     }),
   }),

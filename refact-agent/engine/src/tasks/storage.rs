@@ -12,7 +12,7 @@ use refact_buddy_core::user_action::UserAction;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
-use super::events::{TaskEvent, emit_task_event};
+use super::events::{emit_task_event, emit_task_updated, TaskEvent};
 
 const TASKS_DIR: &str = "tasks";
 
@@ -429,14 +429,7 @@ pub async fn update_task_name(
     meta.is_name_generated = true;
     meta.updated_at = Utc::now().to_rfc3339();
     save_task_meta(gcx.clone(), task_id, &meta).await?;
-    emit_task_event(
-        gcx,
-        TaskEvent::TaskUpdated {
-            task_id: task_id.to_string(),
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    emit_task_updated(gcx, task_id.to_string(), meta.clone()).await;
     Ok(meta)
 }
 
@@ -455,14 +448,7 @@ pub async fn update_task_stats(gcx: Arc<GlobalContext>, task_id: &str) -> Result
     meta.updated_at = Utc::now().to_rfc3339();
 
     save_task_meta(gcx.clone(), task_id, &meta).await?;
-    emit_task_event(
-        gcx,
-        TaskEvent::TaskUpdated {
-            task_id: task_id.to_string(),
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    emit_task_updated(gcx, task_id.to_string(), meta.clone()).await;
     Ok(meta)
 }
 

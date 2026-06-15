@@ -864,7 +864,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 <Badge tone="success" title={`Worktree: ${worktreeLabel}`}>
                   <BranchIcon /> {worktreeLabel}
                 </Badge>
-                {worktree?.record ?? worktree?.meta ? (
+                {(worktree?.record ?? worktree?.meta) ? (
                   <WorktreeStatusBadge
                     worktree={worktree.meta ?? worktree.record?.meta}
                     record={worktree.record}
@@ -1087,10 +1087,18 @@ interface TaskWorkspaceProps {
 export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
-  const { data: task, isLoading: taskLoading } = useGetTaskQuery(taskId, {
+  const {
+    data: task,
+    isLoading: taskLoading,
+    isError: taskError,
+  } = useGetTaskQuery(taskId, {
     pollingInterval: 0,
   });
-  const { data: board, isLoading: boardLoading } = useGetBoardQuery(taskId, {
+  const {
+    data: board,
+    isLoading: boardLoading,
+    isError: boardError,
+  } = useGetBoardQuery(taskId, {
     pollingInterval: 0,
   });
   const { data: worktreesData, isLoading: worktreesLoading } =
@@ -1155,7 +1163,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const selectedCard = useMemo(
     () =>
       selectedCardId
-        ? board?.cards.find((c) => c.id === selectedCardId) ?? null
+        ? (board?.cards.find((c) => c.id === selectedCardId) ?? null)
         : null,
     [board, selectedCardId],
   );
@@ -1221,8 +1229,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     [selectedCard, selectedCardThread?.worktree, taskId, worktreeRecords],
   );
   const selectedCardWorktreeLabel = selectedCard
-    ? selectedCardWorktree?.label ??
-      worktreeLabel(selectedCard, undefined, selectedCardThread?.worktree)
+    ? (selectedCardWorktree?.label ??
+      worktreeLabel(selectedCard, undefined, selectedCardThread?.worktree))
     : null;
 
   useEffect(() => {
@@ -1889,6 +1897,18 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       taskId,
     ],
   );
+
+  if (taskError || boardError) {
+    return (
+      <Flex
+        align="center"
+        justify="center"
+        className={styles.fullHeightEmptyState}
+      >
+        <Text color="gray">Task is no longer available.</Text>
+      </Flex>
+    );
+  }
 
   if (taskLoading || boardLoading || savedPlannersLoading || !task || !board) {
     return <ChatLoading />;
