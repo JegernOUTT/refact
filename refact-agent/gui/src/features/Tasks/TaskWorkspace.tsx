@@ -864,7 +864,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 <Badge tone="success" title={`Worktree: ${worktreeLabel}`}>
                   <BranchIcon /> {worktreeLabel}
                 </Badge>
-                {(worktree?.record ?? worktree?.meta) ? (
+                {worktree?.record ?? worktree?.meta ? (
                   <WorktreeStatusBadge
                     worktree={worktree.meta ?? worktree.record?.meta}
                     record={worktree.record}
@@ -1163,7 +1163,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const selectedCard = useMemo(
     () =>
       selectedCardId
-        ? (board?.cards.find((c) => c.id === selectedCardId) ?? null)
+        ? board?.cards.find((c) => c.id === selectedCardId) ?? null
         : null,
     [board, selectedCardId],
   );
@@ -1229,8 +1229,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     [selectedCard, selectedCardThread?.worktree, taskId, worktreeRecords],
   );
   const selectedCardWorktreeLabel = selectedCard
-    ? (selectedCardWorktree?.label ??
-      worktreeLabel(selectedCard, undefined, selectedCardThread?.worktree))
+    ? selectedCardWorktree?.label ??
+      worktreeLabel(selectedCard, undefined, selectedCardThread?.worktree)
     : null;
 
   useEffect(() => {
