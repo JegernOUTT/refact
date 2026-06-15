@@ -615,6 +615,65 @@ async fn scheduler_cron_http_post_notifier_delivery_round_trips() {
 }
 
 #[tokio::test]
+async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
+    let (_temp, _app_state, app) = test_app().await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "trigger": {"kind": "webhook", "hook_id": "deploy"},
+                    "command": "printf 'hi frog'",
+                    "delivery": "none",
+                    "description": "Deploy hook"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["human_schedule"], json!("webhook"));
+    let id = created["id"].as_str().unwrap();
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(
+        task.trigger,
+        Trigger::Webhook {
+            hook_id: "deploy".to_string()
+        }
+    );
+    assert_eq!(
+        crate::scheduler::next_run_ms(task, 1_000, chrono_tz::UTC),
+        None
+    );
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["trigger_kind"], json!("webhook"));
+    assert_eq!(listed_task["next_fire_at_ms"], json!(0));
+}
+
+#[tokio::test]
 async fn scheduler_cron_http_post_rejects_prompt_plus_command() {
     let (_temp, app_state, app) = test_app().await;
     add_open_session(&app_state, "command-chat").await;

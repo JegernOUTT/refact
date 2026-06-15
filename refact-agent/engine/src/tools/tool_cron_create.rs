@@ -39,6 +39,7 @@ pub(crate) struct CronCreateInput {
     pub(crate) every: Option<String>,
     pub(crate) at: Option<String>,
     pub(crate) tz: Option<String>,
+    pub(crate) trigger: Option<Trigger>,
     pub(crate) prompt: Option<String>,
     pub(crate) command: Option<String>,
     pub(crate) command_argv: Option<Vec<String>>,
@@ -89,6 +90,16 @@ impl Tool for ToolCronCreate {
                     "cron": { "type": "string", "description": "Standard 5-field cron expression in local time. Required unless every or at is set." },
                     "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
                     "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
+                    "trigger": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["webhook"] },
+                            "hook_id": { "type": "string", "description": "Inbound daemon hook id that fires this job." }
+                        },
+                        "required": ["kind", "hook_id"],
+                        "description": "Webhook trigger. Mutually exclusive with cron, every, and at. Webhook jobs never time-fire."
+                    },
+                    "hook_id": { "type": "string", "description": "Shortcut for trigger {kind:'webhook', hook_id}." },
                     "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
                     "prompt": { "type": "string", "description": "Prompt enqueued at each fire time. Mutually exclusive with command and command_argv." },
                     "command": { "type": "string", "description": "Command line to shell-split and run without an agent turn. Mutually exclusive with prompt and command_argv." },
@@ -203,7 +214,8 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
     let every = optional_string_arg(args, "every")?;
     let at = optional_string_arg(args, "at")?;
     let tz = optional_string_arg(args, "tz")?;
-    if cron.is_none() && every.is_none() && at.is_none() {
+    let trigger = trigger_arg(args)?;
+    if cron.is_none() && every.is_none() && at.is_none() && trigger.is_none() {
         return Err("argument `cron` is required".to_string());
     }
     let prompt = optional_string_arg(args, "prompt")?;
@@ -219,6 +231,7 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         every,
         at,
         tz,
+        trigger,
         prompt,
         command,
         command_argv,
@@ -237,6 +250,36 @@ fn delivery_arg(args: &HashMap<String, Value>) -> Result<Delivery, String> {
         .map(delivery_from_value)
         .transpose()
         .map(|delivery| delivery.unwrap_or(Delivery::Chat))
+}
+
+fn trigger_arg(args: &HashMap<String, Value>) -> Result<Option<Trigger>, String> {
+    let shortcut = optional_string_arg(args, "hook_id")?;
+    let trigger = match args.get("trigger") {
+        Some(Value::Object(map)) => {
+            let kind = map.get("kind").and_then(Value::as_str).unwrap_or("webhook");
+            if kind != "webhook" {
+                return Err(format!("unsupported trigger `{kind}`"));
+            }
+            let hook_id = map
+                .get("hook_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|hook_id| !hook_id.is_empty())
+                .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Some(Trigger::Webhook {
+                hook_id: hook_id.to_string(),
+            })
+        }
+        Some(Value::String(kind)) if kind == "webhook" => {
+            let hook_id = shortcut
+                .clone()
+                .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Some(Trigger::Webhook { hook_id })
+        }
+        Some(Value::Null) | None => shortcut.map(|hook_id| Trigger::Webhook { hook_id }),
+        Some(other) => return Err(format!("argument `trigger` is invalid: {other:?}")),
+    };
+    Ok(trigger)
 }
 
 fn required_string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -532,6 +575,15 @@ fn job_model(task: &Job) -> Option<&str> {
 }
 
 fn parse_create_schedule(input: &CronCreateInput, now_ms: u64) -> Result<Trigger, String> {
+    if let Some(trigger) = input.trigger.clone() {
+        if input.cron.is_some() || input.every.is_some() || input.at.is_some() || input.tz.is_some()
+        {
+            return Err(
+                "webhook trigger is mutually exclusive with cron, every, at, and tz".to_string(),
+            );
+        }
+        return Ok(trigger);
+    }
     parse_schedule(
         input.cron.as_deref(),
         input.every.as_deref(),
@@ -552,6 +604,12 @@ fn parse_create_schedule(input: &CronCreateInput, now_ms: u64) -> Result<Trigger
 }
 
 fn validate_next_run(task: &Job, now_ms: u64, timezone: Tz) -> Result<(), String> {
+    if matches!(
+        task.trigger,
+        Trigger::Webhook { .. } | Trigger::Manual | Trigger::OnProcessExit { .. }
+    ) {
+        return Ok(());
+    }
     let next = next_run_ms(task, now_ms, timezone).ok_or_else(no_match_in_year_error)?;
     if matches!(task.trigger, Trigger::Cron { .. }) && next.saturating_sub(now_ms) > ONE_YEAR_MS {
         return Err(no_match_in_year_error());
@@ -825,6 +883,37 @@ mod tests {
         );
         assert!(!outcome.task.recurring);
         assert!(outcome.human_schedule.starts_with("once at "));
+    }
+
+    #[tokio::test]
+    async fn webhook_trigger_creates_dormant_job() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let outcome = create_cron_job(
+            input(&[
+                ("trigger", json!({"kind":"webhook", "hook_id":"deploy"})),
+                ("command", json!("printf hi")),
+                ("delivery", json!("none")),
+                ("description", json!("Deploy hook")),
+            ]),
+            runtime(session_store.clone(), None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.task.trigger,
+            Trigger::Webhook {
+                hook_id: "deploy".to_string()
+            }
+        );
+        assert_eq!(outcome.human_schedule, "webhook deploy");
+        assert_eq!(
+            next_run_ms(&outcome.task, fixed_now_ms(), chrono_tz::UTC),
+            None
+        );
+        let jobs = session_store.jobs_by_hook_id("deploy").await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, outcome.task.id);
     }
 
     #[tokio::test]

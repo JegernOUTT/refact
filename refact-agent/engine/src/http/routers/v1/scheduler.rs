@@ -66,6 +66,8 @@ pub struct CronCreateRequest {
     pub every: Option<String>,
     pub at: Option<String>,
     pub tz: Option<String>,
+    pub trigger: Option<serde_json::Value>,
+    pub hook_id: Option<String>,
     pub prompt: Option<String>,
     pub command: Option<String>,
     pub command_argv: Option<Vec<String>>,
@@ -313,13 +315,7 @@ async fn create_http_cron_job(
 ) -> Result<Job, String> {
     validate_http_action_args(&request)?;
     let now_ms = unix_now_ms();
-    let trigger = parse_schedule(
-        request.cron.as_deref(),
-        request.every.as_deref(),
-        request.at.as_deref(),
-        request.tz.as_deref(),
-        now_ms,
-    )?;
+    let trigger = request_trigger(&request, now_ms)?;
     let recurring = if matches!(trigger, Trigger::Once { .. }) {
         false
     } else {
@@ -564,6 +560,12 @@ fn set_job_prompt(task: &mut Job, value: String) -> Result<(), String> {
 }
 
 fn validate_next_fire(task: &Job, now_ms: u64) -> Result<(), String> {
+    if matches!(
+        task.trigger,
+        Trigger::Webhook { .. } | Trigger::Manual | Trigger::OnProcessExit { .. }
+    ) {
+        return Ok(());
+    }
     let next =
         next_run_ms(task, now_ms, scheduler_timezone()).ok_or_else(no_match_in_year_error)?;
     if matches!(task.trigger, Trigger::Cron { .. }) && next.saturating_sub(now_ms) > ONE_YEAR_MS {
@@ -617,6 +619,67 @@ fn trigger_cron_expr(trigger: &Trigger) -> Option<&str> {
     match trigger {
         Trigger::Cron { expr, .. } => Some(expr.as_str()),
         _ => None,
+    }
+}
+
+fn request_trigger(request: &CronCreateRequest, now_ms: u64) -> Result<Trigger, String> {
+    if let Some(trigger) = request_webhook_trigger(request)? {
+        if request.cron.is_some()
+            || request.every.is_some()
+            || request.at.is_some()
+            || request.tz.is_some()
+        {
+            return Err(
+                "webhook trigger is mutually exclusive with cron, every, at, and tz".to_string(),
+            );
+        }
+        return Ok(trigger);
+    }
+    parse_schedule(
+        request.cron.as_deref(),
+        request.every.as_deref(),
+        request.at.as_deref(),
+        request.tz.as_deref(),
+        now_ms,
+    )
+}
+
+fn request_webhook_trigger(request: &CronCreateRequest) -> Result<Option<Trigger>, String> {
+    let hook_id = request
+        .hook_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|hook_id| !hook_id.is_empty())
+        .map(str::to_string);
+    let Some(trigger) = request.trigger.as_ref() else {
+        return Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id }));
+    };
+    match trigger {
+        serde_json::Value::Object(map) => {
+            let kind = map
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("webhook");
+            if kind != "webhook" {
+                return Err(format!("unsupported trigger `{kind}`"));
+            }
+            let hook_id = map
+                .get("hook_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|hook_id| !hook_id.is_empty())
+                .map(str::to_string)
+                .or(hook_id)
+                .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Ok(Some(Trigger::Webhook { hook_id }))
+        }
+        serde_json::Value::String(kind) if kind == "webhook" => {
+            let hook_id =
+                hook_id.ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Ok(Some(Trigger::Webhook { hook_id }))
+        }
+        serde_json::Value::Null => Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id })),
+        other => Err(format!("argument `trigger` is invalid: {other:?}")),
     }
 }
 

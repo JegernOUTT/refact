@@ -67,6 +67,48 @@ impl CronRunner {
         })
     }
 
+    pub async fn fire_manual_job(
+        gcx: SharedGlobalContext,
+        mut task: Job,
+        now: u64,
+    ) -> Result<bool, String> {
+        task.trigger_at_ms = Some(now);
+        let store = Arc::new(InMemoryCronStore::new());
+        let runner = Self::new(store, gcx);
+        runner.fire_with_missed(&task, false, now, false).await
+    }
+
+    pub async fn fire_store_job_now(
+        store: Arc<dyn CronStore>,
+        gcx: SharedGlobalContext,
+        job_id: &str,
+        now: u64,
+    ) -> Result<bool, String> {
+        let mut task = store
+            .get(job_id)
+            .await
+            .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
+        task.trigger_at_ms = Some(now);
+        let mut runner = Self::new(store.clone(), gcx);
+        runner.handle_due_task(task, now).await;
+        let fired = store
+            .get(job_id)
+            .await
+            .map(|task| task.last_status.as_deref() == Some("fired"))
+            .unwrap_or(true);
+        if !fired {
+            if let Some(mut stored) = store
+                .get(job_id)
+                .await
+                .filter(|task| task.last_status.as_deref() == Some("deferred"))
+            {
+                stored.trigger_at_ms = Some(now);
+                let _ = store.replace(stored).await?;
+            }
+        }
+        Ok(fired)
+    }
+
     async fn run(mut self) {
         self.catch_up().await;
 
@@ -965,7 +1007,7 @@ impl CronRunner {
             .await
     }
 
-    async fn fire_with_missed(
+    pub async fn fire_with_missed(
         &self,
         task: &Job,
         final_fire: bool,
@@ -1292,10 +1334,7 @@ async fn chat_fire_status(gcx: &SharedGlobalContext, chat_id: &str) -> ChatFireS
 }
 
 fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
-    if !matches!(
-        job.trigger,
-        Trigger::Cron { .. } | Trigger::Interval { .. } | Trigger::Once { .. }
-    ) {
+    if !runner_supported_trigger(&job.trigger) {
         return Err("trigger is not supported by the chat runner yet");
     }
     match (&job.action, &job.delivery) {
@@ -1313,10 +1352,7 @@ fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
 }
 
 fn runnable_isolated_job(job: &Job) -> Result<(), &'static str> {
-    if !matches!(
-        job.trigger,
-        Trigger::Cron { .. } | Trigger::Interval { .. } | Trigger::Once { .. }
-    ) {
+    if !runner_supported_trigger(&job.trigger) {
         return Err("trigger is not supported by the chat runner yet");
     }
     match (&job.action, &job.delivery) {
@@ -1334,10 +1370,7 @@ fn runnable_isolated_job(job: &Job) -> Result<(), &'static str> {
 }
 
 fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
-    if !matches!(
-        job.trigger,
-        Trigger::Cron { .. } | Trigger::Interval { .. } | Trigger::Once { .. }
-    ) {
+    if !runner_supported_trigger(&job.trigger) {
         return Err("trigger is not supported by the command runner yet");
     }
     match (&job.action, &job.delivery) {
@@ -1353,6 +1386,17 @@ fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
         (Action::Command { .. }, _) => Ok(()),
         (Action::AgentTurn { .. }, _) => Err("action is not command"),
     }
+}
+
+fn runner_supported_trigger(trigger: &Trigger) -> bool {
+    matches!(
+        trigger,
+        Trigger::Cron { .. }
+            | Trigger::Interval { .. }
+            | Trigger::Once { .. }
+            | Trigger::Manual
+            | Trigger::Webhook { .. }
+    )
 }
 
 fn isolated_set_params_patch(task: &Job) -> Option<Value> {
