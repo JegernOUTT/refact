@@ -485,6 +485,11 @@ export const toolMessagesSelector = createSelector(selectMessages, (messages) =>
   messages.filter(isToolMessage),
 );
 
+export const selectToolMessagesByThreadId = createSelector(
+  [selectMessagesById],
+  (messages) => messages.filter(isToolMessage),
+);
+
 export const toolResultsByIdSelector = (() => {
   let prevMessages: ToolMessage[] = [];
   let prevMap: ReadonlyMap<string, ToolResult> = EMPTY_TOOL_RESULTS_BY_ID;
@@ -511,8 +516,39 @@ export const toolResultsByIdSelector = (() => {
   });
 })();
 
+export const toolResultsByIdByThreadSelector = (() => {
+  let prevMessages: ToolMessage[] = [];
+  let prevMap: ReadonlyMap<string, ToolResult> = EMPTY_TOOL_RESULTS_BY_ID;
+
+  return createSelector(selectToolMessagesByThreadId, (messages) => {
+    if (messages.length === 0) {
+      prevMessages = [];
+      prevMap = EMPTY_TOOL_RESULTS_BY_ID;
+      return prevMap;
+    }
+
+    if (sameRefArray(prevMessages, messages)) {
+      return prevMap;
+    }
+
+    const nextMap = new Map<string, ToolResult>();
+    for (const msg of messages) {
+      nextMap.set(msg.tool_call_id, msg as unknown as ToolResult);
+    }
+
+    prevMessages = messages;
+    prevMap = nextMap;
+    return nextMap;
+  });
+})();
+
 export const selectToolResultById = createSelector(
   [toolResultsByIdSelector, (_, id?: string) => id],
+  (messagesById, id) => (id ? messagesById.get(id) : undefined),
+);
+
+export const selectToolResultByThreadAndId = createSelector(
+  [toolResultsByIdByThreadSelector, (_, _threadId: string, id?: string) => id],
   (messagesById, id) => (id ? messagesById.get(id) : undefined),
 );
 export const selectManyToolResultsByIds = (ids: string[]) => {

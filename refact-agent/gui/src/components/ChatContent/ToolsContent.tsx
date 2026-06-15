@@ -556,6 +556,7 @@ export type ToolContentProps = {
   contextFilesByToolId?: Record<string, ChatContextFile[]>;
   diffsByToolId?: Record<string, DiffChunk[]>;
   isActiveAssistant?: boolean;
+  threadId?: string;
 };
 
 export const ToolContent: React.FC<ToolContentProps> = ({
@@ -563,9 +564,11 @@ export const ToolContent: React.FC<ToolContentProps> = ({
   contextFilesByToolId,
   diffsByToolId,
   isActiveAssistant = false,
+  threadId,
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
+  const toolThreadId = threadId ?? chatId;
   const features = useAppSelector(selectFeatures);
   const backgroundAgents = useAppSelector((state) =>
     selectBackgroundAgentsByThread(state, chatId),
@@ -613,6 +616,7 @@ export const ToolContent: React.FC<ToolContentProps> = ({
     activeToolCallId,
     backgroundAgents,
     handleOpenTrajectory,
+    toolThreadId,
   );
 };
 
@@ -629,6 +633,7 @@ function processToolCalls(
     agent: BackgroundAgentSummary,
     childChatId: string,
   ) => void = () => undefined,
+  threadId?: string,
 ) {
   if (toolCalls.length === 0) return processed;
   const [head, ...tail] = toolCalls;
@@ -657,6 +662,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -678,6 +684,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -700,6 +707,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -722,6 +730,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -744,6 +753,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -765,6 +775,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -785,6 +796,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -805,6 +817,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -832,6 +845,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -859,6 +873,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -879,6 +894,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -899,6 +915,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -919,6 +936,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -941,6 +959,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -963,6 +982,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -985,6 +1005,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1007,6 +1028,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1021,6 +1043,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1043,6 +1066,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1065,6 +1089,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1087,6 +1112,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1109,6 +1135,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1132,6 +1159,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1154,6 +1182,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1174,6 +1203,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1194,6 +1224,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1214,6 +1245,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1234,6 +1266,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1255,6 +1288,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1283,6 +1317,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1303,6 +1338,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1323,6 +1359,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1429,6 +1466,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1455,6 +1493,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1463,6 +1502,7 @@ function processToolCalls(
       <SleepToolCard
         key={`sleep-tool-${processed.length}`}
         toolCall={normalizedHead}
+        threadId={threadId}
       />
     );
     return processToolCalls(
@@ -1475,6 +1515,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1495,6 +1536,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1516,6 +1558,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1554,6 +1597,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1574,6 +1618,7 @@ function processToolCalls(
     activeToolCallId,
     backgroundAgents,
     onOpenTrajectory,
+    threadId,
   );
 }
 

@@ -406,6 +406,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               diffsByToolId={item.diffsByToolId}
               usage={item.message.usage}
               isStreaming={item.isStreaming}
+              threadId={renderChatId}
             />
           );
 
@@ -485,7 +486,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return null;
       }
     },
-    [handleBranch, handleDelete, onRetryWrapper, collapsibleState],
+    [
+      handleBranch,
+      handleDelete,
+      onRetryWrapper,
+      collapsibleState,
+      renderChatId,
+    ],
   );
 
   if (showLoading) {

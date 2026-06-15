@@ -173,10 +173,14 @@ export function useChatActions() {
   /**
    * Abort the current generation.
    */
-  const abort = useCallback(async () => {
-    if (!chatId) return;
-    await abortGeneration(chatId, config, apiKey ?? undefined);
-  }, [chatId, config, apiKey]);
+  const abort = useCallback(
+    async (targetChatId?: string) => {
+      const id = targetChatId ?? chatId;
+      if (!id) return;
+      await abortGeneration(id, config, apiKey ?? undefined);
+    },
+    [chatId, config, apiKey],
+  );
 
   /**
    * Update chat parameters (model, mode, etc.).

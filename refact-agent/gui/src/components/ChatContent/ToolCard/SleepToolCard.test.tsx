@@ -99,15 +99,63 @@ function renderSleepCard(messages: ChatMessage[] = [], args = {}) {
   );
 }
 
+function renderSleepCardForThread(
+  messages: ChatMessage[] = [],
+  args = {},
+  activeChatId = "active-chat",
+  activeMessages: ChatMessage[] = [],
+) {
+  const chat = createDefaultChatState();
+  const activeRuntime = chat.threads[chat.current_thread_id];
+  activeRuntime.thread.id = activeChatId;
+  activeRuntime.thread.messages = activeMessages;
+  const sleepRuntime = {
+    ...activeRuntime,
+    thread: {
+      ...activeRuntime.thread,
+      id: chatId,
+      messages,
+    },
+  };
+  chat.current_thread_id = activeChatId;
+  chat.open_thread_ids = [activeChatId, chatId];
+  chat.threads = {
+    [activeChatId]: activeRuntime,
+    [chatId]: sleepRuntime,
+  };
+
+  const store = setUpStore({
+    chat,
+    config: {
+      host: "web",
+      lspPort: 4321,
+      apiKey: null,
+      features: { statistics: true, vecdb: true, ast: true, images: true },
+      themeProps: { appearance: "dark" },
+      shiftEnterToSubmit: false,
+    },
+  });
+
+  return render(
+    <Provider store={store}>
+      <Theme>
+        <SleepToolCard toolCall={toolCall(args)} threadId={chatId} />
+      </Theme>
+    </Provider>,
+  );
+}
+
 describe("SleepToolCard", () => {
   beforeEach(() => {
     (globalThis as ActGlobal).IS_REACT_ACT_ENVIRONMENT = true;
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2026-05-28T00:00:00.000Z"));
+    window.localStorage.clear();
   });
 
   afterEach(() => {
     (globalThis as ActGlobal).IS_REACT_ACT_ENVIRONMENT = undefined;
+    window.localStorage.clear();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -147,6 +195,53 @@ describe("SleepToolCard", () => {
       type?: string;
     };
     expect(body.type).toBe("abort");
+  });
+
+  test("Wake-up button dispatches abort to rendered thread", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response());
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSleepCardForThread();
+
+    await user.click(screen.getByRole("button", { name: /wake up/i }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/chats/sleep-chat/commands",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  test("keeps fallback countdown after remount", () => {
+    const { unmount } = renderSleepCard();
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(
+      screen.getAllByText(/Sleeping… 25s remaining/u).length,
+    ).toBeGreaterThan(0);
+
+    unmount();
+    renderSleepCard();
+
+    expect(
+      screen.getAllByText(/Sleeping… 25s remaining/u).length,
+    ).toBeGreaterThan(0);
+  });
+
+  test("uses ticks from rendered thread", () => {
+    renderSleepCardForThread(
+      [eventTick("rendered-tick", 10_000, 20_000)],
+      {},
+      "active-chat",
+      [eventTick("active-tick", 25_000, 5_000)],
+    );
+
+    expect(
+      screen.getAllByText(/Sleeping… 20s remaining/u).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/Sleeping… 5s remaining/u)).toBeNull();
   });
 
   test("tick events animate", () => {

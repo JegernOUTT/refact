@@ -10,7 +10,9 @@ import { useAppSelector } from "../../../hooks";
 import { useChatActions } from "../../../hooks/useChatActions";
 import {
   selectMessages,
+  selectMessagesById,
   selectToolResultById,
+  selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
 import type {
   EventMessage,
@@ -38,7 +40,10 @@ type SleepTick = {
 
 type SleepToolCardProps = {
   toolCall: ToolCall;
+  threadId?: string;
 };
+
+const SLEEP_STARTED_AT_STORAGE_PREFIX = "refact.sleep.startedAt";
 
 function parseSleepArgs(toolCall: ToolCall): SleepArgs {
   try {
@@ -120,6 +125,60 @@ function statusFromResult(result: SleepResult | null): ToolStatus {
   return result.interrupted ? "error" : "success";
 }
 
+function sleepStorageKey(
+  threadId: string | undefined,
+  toolCallId?: string,
+): string | null {
+  if (!toolCallId) return null;
+  const threadPart = threadId ?? "current";
+  return `${SLEEP_STARTED_AT_STORAGE_PREFIX}:${threadPart}:${toolCallId}`;
+}
+
+function readStoredSleepStartedAt(key: string): number | null {
+  try {
+    const value = window.localStorage.getItem(key);
+    if (!value) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSleepStartedAt(key: string, startedAtMs: number): void {
+  try {
+    window.localStorage.setItem(key, String(startedAtMs));
+  } catch {
+    return;
+  }
+}
+
+function removeStoredSleepStartedAt(
+  threadId: string | undefined,
+  toolCallId?: string,
+): void {
+  const key = sleepStorageKey(threadId, toolCallId);
+  if (!key) return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    return;
+  }
+}
+
+function resolveSleepStartedAtMs(
+  threadId: string | undefined,
+  toolCallId?: string,
+): number {
+  const key = sleepStorageKey(threadId, toolCallId);
+  if (!key) return Date.now();
+  const stored = readStoredSleepStartedAt(key);
+  if (stored !== null) return stored;
+  const startedAtMs = Date.now();
+  writeStoredSleepStartedAt(key, startedAtMs);
+  return startedAtMs;
+}
+
 const TickDots = React.memo(function TickDots({
   ticks,
 }: {
@@ -146,15 +205,25 @@ const TickDots = React.memo(function TickDots({
   );
 });
 
-export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
+export const SleepToolCard: React.FC<SleepToolCardProps> = ({
+  toolCall,
+  threadId,
+}) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const { abort } = useChatActions();
 
   const sleepArgs = useMemo(() => parseSleepArgs(toolCall), [toolCall]);
+  const messages = useAppSelector((state) =>
+    threadId === undefined
+      ? selectMessages(state)
+      : selectMessagesById(state, threadId),
+  );
   const resultMessage = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    threadId === undefined
+      ? selectToolResultById(state, toolCall.id)
+      : selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
   const sleepResult = useMemo(
     () => parseSleepResult(resultMessage),
@@ -162,7 +231,6 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
   );
   const status = statusFromResult(sleepResult);
   const isRunning = status === "running";
-  const messages = useAppSelector(selectMessages);
   const ticks = useMemo(
     () =>
       messages.flatMap((message, index) => {
@@ -175,13 +243,21 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
       }),
     [messages],
   );
-  const startedAtMs = useMemo(() => Date.now(), []);
+  const startedAtMs = useMemo(
+    () => resolveSleepStartedAtMs(threadId, toolCall.id),
+    [threadId, toolCall.id],
+  );
 
   useEffect(() => {
     if (!isRunning) return;
     const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, [isRunning]);
+
+  useEffect(() => {
+    if (isRunning) return;
+    removeStoredSleepStartedAt(threadId, toolCall.id);
+  }, [isRunning, threadId, toolCall.id]);
 
   const fallbackRemainingMs = Math.max(
     0,
@@ -212,9 +288,9 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
   const handleWakeUp = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
-      void abort();
+      void abort(threadId);
     },
-    [abort],
+    [abort, threadId],
   );
 
   const icon = sleepResult?.interrupted ? (
