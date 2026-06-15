@@ -414,9 +414,14 @@ impl Supervisor {
                 record.info.pid = None;
                 None
             }
-            WorkerState::Starting | WorkerState::Stopping | WorkerState::Crashed => {
-                Some(record.info.clone())
+            WorkerState::Starting => {
+                if child_is_alive(&mut record.child) {
+                    return Some(record.info.clone());
+                }
+                record.info.pid = None;
+                None
             }
+            WorkerState::Stopping | WorkerState::Crashed => Some(record.info.clone()),
             WorkerState::Stopped | WorkerState::Failed { .. } => None,
         }
     }

@@ -51,7 +51,7 @@ impl EnvGuard {
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
-            format!("{} {}", python, script.display()),
+            shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
         );
         std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
         if fake_crash {
@@ -331,7 +331,10 @@ async fn auth_enabled_daemon_accepts_fake_worker_status() {
     let server_task = tokio::spawn(server);
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
-    let entry = project_entry(root, "auth-status-project");
+    let entry = {
+        let mut registry = state.projects.write().await;
+        registry.open(root).await.unwrap()
+    };
 
     let info = state.supervisor.ensure_worker(&entry).await.unwrap();
     assert_eq!(info.state, WorkerState::Ready);
