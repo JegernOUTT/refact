@@ -365,25 +365,135 @@ Schema:
 
 Returns `{ "slept_ms": number, "interrupted": boolean }`. If `tick_interval_ms` is set, it injects `event(tick, "tool.sleep", {elapsed_ms, remaining_ms}, "tick")` at each interval. Edge cases: duration max is 1 hour; abort returns early; description must be ≤80 chars.
 
-## Scheduler
+## Scheduler / Automation Platform
 
-The scheduler owns cron-style scheduled tasks and is spawned from background tasks only when enabled. Durable jobs are stored per project at `<project>/.refact/scheduled_tasks.json`; session jobs live in the in-memory scheduler store and disappear on engine restart.
+The scheduler is now a small automation platform built around `Job { trigger, action, delivery }`.
+Session jobs live in the in-memory `session_cron_store()` and disappear on engine restart. Durable
+jobs are project-scoped and stored at `<project>/.refact/scheduled_tasks.json`.
+
+### Job model
+
+| Field | Purpose |
+|---|---|
+| `trigger` | When work becomes due: `cron`, `interval`, `once`, `manual`, `webhook`, or reserved `on_process_exit`. |
+| `action` | What runs: an agent turn or a foreground command. |
+| `delivery` | Where command output goes: chat, outgoing webhook, notifier integration, or nowhere. |
+| `recurring` | Explicit compatibility flag. `once` forces `false`; legacy one-shot cron jobs stay one-shot. |
+| `durable` | `true` stores the job in `.refact/scheduled_tasks.json`; `false` stores it in memory. |
+| `enabled` / `paused_at_ms` | Pause/resume state. Paused jobs skip ordinary schedule fires; a queued `trigger_at_ms` still makes the job due. |
+| `trigger_at_ms` | Manual run marker set by `cron_update(run_now=true)`, HTTP run, or webhook dispatch. |
+| `last_fired_at_ms`, `fire_count` | Last successful/error firing timestamp and counter. |
+| `last_status`, `last_error`, `recent_runs` | Run history. `recent_runs` is capped by `scheduler.recent_runs_cap` (default 20). |
+| `auto_expire_after_ms` | Recurring jobs default to 30 days and emit an auto-expire notice after the final fire. |
+| `retry_attempts` | Transient retry counter for classifiable rate-limit/overload/network/timeout/5xx failures. |
+
+Serialized shapes:
+
+```json
+{
+  "id": "cron_...",
+  "description": "Nightly build",
+  "enabled": true,
+  "durable": true,
+  "created_at_ms": 1770000000000,
+  "recurring": true,
+  "trigger": { "kind": "cron", "expr": "0 2 * * *", "tz": "UTC" },
+  "action": {
+    "kind": "command",
+    "argv": ["cargo", "check"],
+    "target": { "kind": "isolated" },
+    "cwd": ".",
+    "env": null,
+    "timeout_secs": 600
+  },
+  "delivery": { "kind": "webhook", "url": "https://example.test/hook", "token": "secret" },
+  "last_fired_at_ms": null,
+  "fire_count": 0,
+  "last_status": null,
+  "last_error": null,
+  "recent_runs": [],
+  "paused_at_ms": null,
+  "trigger_at_ms": null,
+  "auto_expire_after_ms": 2592000000,
+  "retry_attempts": 0
+}
+```
+
+Back-compat: `JsonFileCronStore` deserializes the old flat
+`{ cron, prompt, chat_id, mode, ... }` shape into a nested `cron` trigger,
+`agent_turn` action, and `chat` delivery. The next write persists only the nested
+shape and drops the legacy `cron` / `prompt` top-level fields.
+
+### Triggers
+
+| Trigger | Public creation path | Runtime behavior |
+|---|---|---|
+| `Cron { expr, tz }` | `cron` plus optional `tz` | 5-field cron, evaluated in `tz` or `scheduler_timezone()`; cron fires receive deterministic jitter. |
+| `Interval { every_ms }` | `every: "30m"`, `"2h"`, `"1d"`, etc. | Repeats from `created_at_ms` / `last_fired_at_ms`; no cron jitter. |
+| `Once { at_ms }` | `at` as RFC3339 or `in 30m` | One-shot; `recurring` is forced to `false` and the job is removed after fire/error/skip unless retry is scheduled. |
+| `Manual` | Inline daemon hook agent jobs | No time-based next run; fired immediately through the manual runner. |
+| `Webhook { hook_id }` | `trigger: {kind:"webhook", hook_id}` or top-level `hook_id` | No time-based next run; fired by daemon/worker hook dispatch. |
+| `OnProcessExit { match_kind }` | Storage enum only | Reserved optional trigger; not created by public cron tools and has no time-based next run. |
+
+`parse_schedule()` requires exactly one of `cron`, `every`, or `at`. A webhook trigger is
+mutually exclusive with `cron`, `every`, `at`, and `tz`.
+
+### Actions and targets
+
+| Action | Shape | Notes |
+|---|---|---|
+| `agent_turn` | `{ kind, prompt, target, mode?, model?, tools? }` | Enqueues a `ChatCommand::UserMessage`. Existing-chat targets require an open/restorable chat id. Isolated targets create a fresh `cron_<job_id>_<fire_ms>` chat per fire. |
+| `command` | `{ kind, argv, target, cwd?, env?, timeout_secs? }` | No-agent path. Runs via the exec registry as a foreground non-PTY command. `command` input is shell-split into `argv`; `command_argv` is used verbatim. `cwd` must stay inside the active project. Default timeout is 300s, capped at 3600s. |
+
+Public `cron_create` does not expose `env`; it stores `env: null`. Command output is captured
+from stdout/stderr with exec transcript limits. Command jobs can target chat for output delivery,
+but `webhook`, `notifier`, and `none` deliveries do not require a chat target.
+
+### Delivery
+
+| Delivery | Behavior |
+|---|---|
+| `chat` | Agent turns enqueue into chat. Command jobs append `event(cron_fire)` and a `plain_text` output message; error output becomes a `system_notice`. Empty output is silent. |
+| `webhook` | Command jobs POST `{job_id, description, status, output, ts}` to `url` with optional `Authorization: Bearer <token>`. Tool/HTTP responses expose `has_token`, never the token. Timeout is 10s. |
+| `notifier` | Command jobs resolve `integration_id` through the notifier framework and call `NotifierBackend::send(target, output)`. Current built-in backend: `notifier_telegram`. |
+| `none` | Command output is discarded after run history is recorded. |
+
+Non-chat delivery is supported for command jobs only. Agent-turn jobs and inline daemon agent hooks
+must use `chat` delivery.
 
 ### Runtime behavior
 
-- Kill switches: `REFACT_DISABLE_SCHEDULER=1`, the `--no-scheduler` CLI flag, or `scheduler.enabled: false` in global config skip runner startup and cron tool effects.
-- Durable restriction: `scheduler.disable_durable: true` makes `cron_create` fall back to session-only and return the note `durable schedules disabled by config`.
-- Job cap: `scheduler.max_jobs` defaults to 50.
-- Jitter: recurring jobs use deterministic per-task jitter capped by scheduler defaults so many jobs do not fire at the same instant. One-shot jobs use the one-shot jitter path near matching minutes. Jitter only shifts fire checks; it does not change the stored cron expression.
-- REPL-idle gate: due jobs do not inject while the owning chat is `Generating`, `ExecutingTools`, or `Paused`. They defer and re-check after the runner delay.
-- Missed-task catch-up: recurring durable jobs compute their next future fire from now and do not replay a burst. Past one-shot durable jobs fire ASAP and mark the `cron_fire` payload as missed when that path is available.
-- Auto-expire: recurring jobs default to a 30-day auto-expiration window and final fires carry `final=true` before deletion.
+- Background startup spawns the session runner and, when an active project exists, a durable runner
+  over `<project>/.refact/scheduled_tasks.json`. `REFACT_DISABLE_SCHEDULER=1` suppresses runner spawn.
+  `--no-scheduler` and `scheduler.enabled: false` are loaded into `SchedulerConfig.enabled` for call
+  paths that explicitly consult scheduler config.
+- `schedule::next_run_ms` is the shared dispatcher used by the runner, cron-clock wakeups, list output,
+  and create/update validation.
+- Existing-chat agent turns and chat-delivered command jobs defer while the chat is busy, paused, missing,
+  or closed. Busy defers retry after 30s; invalid targets defer after 60s for durable/recurring jobs.
+- Command jobs and isolated agent-turn jobs use the cron lane and are bounded by
+  `scheduler.max_concurrent_runs` (default 8).
+- Durable catch-up runs on runner start. Legacy one-shot cron jobs whose first scheduled time passed
+  fire ASAP when their target can be restored; recurring jobs use `recurring_missed_grace_state()`.
+- Missed recurring grace is half the schedule period clamped by `scheduler.missed_grace_min_ms` (default
+  120s) and `scheduler.missed_grace_max_ms` (default 2h). Runs outside the grace window are advanced
+  without replaying a burst.
+- Classifiable transient failures (`429`/rate-limit, overload/529, network, timeout, HTTP 5xx) schedule
+  retries using `scheduler.retry` (default delays: 60s, 120s, 300s; default max attempts: 3).
+- The runner is best-effort at-most-once per due marker: successful/error fires update
+  `last_fired_at_ms` / `fire_count`, clear due `trigger_at_ms`, and one-shot jobs are removed unless a
+  retry was scheduled.
+- Run history status values include `fired`, `error`, `deferred`, `skipped`, and `advanced`.
+- Recurring jobs auto-expire after `auto_expire_after_ms` when set. The default for recurring jobs is
+  30 days; one-shot jobs use `0`.
 
 ### Cron tools
 
 #### `cron_create`
 
-Model-facing prompt: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Set `durable` to true when the job should survive engine restarts in the current project; leave it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier."
+Model-facing prompt: schedule an agent prompt or command for cron, interval, one-shot, or webhook
+triggering. Cron expressions are standard 5-field expressions evaluated in the local timezone unless
+`tz` is supplied. Webhook jobs never time-fire.
 
 Schema:
 
@@ -391,28 +501,80 @@ Schema:
 {
   "type": "object",
   "properties": {
-    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time." },
-    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
+    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time. Required unless every or at is set." },
+    "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
+    "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
+    "trigger": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["webhook"] },
+        "hook_id": { "type": "string", "description": "Inbound daemon hook id that fires this job." }
+      },
+      "required": ["kind", "hook_id"],
+      "description": "Webhook trigger. Mutually exclusive with cron, every, and at. Webhook jobs never time-fire."
+    },
+    "hook_id": { "type": "string", "description": "Shortcut for trigger {kind:'webhook', hook_id}." },
+    "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
+    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time. Mutually exclusive with command and command_argv." },
+    "command": { "type": "string", "description": "Command line to shell-split and run without an agent turn. Mutually exclusive with prompt and command_argv." },
+    "command_argv": { "type": "array", "items": { "type": "string" }, "description": "Command argv to run without an agent turn. Mutually exclusive with prompt and command." },
+    "cwd": { "type": "string", "description": "Optional command working directory, resolved under the active project." },
+    "timeout_secs": { "type": "integer", "description": "Optional command timeout in seconds." },
+    "delivery": {
+      "oneOf": [
+        { "type": "string", "enum": ["chat", "none"] },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["webhook"] },
+            "url": { "type": "string" },
+            "token": { "type": "string" }
+          },
+          "required": ["url"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["notifier"] },
+            "integration_id": { "type": "string" },
+            "target": { "type": "string" }
+          },
+          "required": ["integration_id"]
+        }
+      ],
+      "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
+    },
     "recurring": { "type": "boolean", "default": true },
     "durable": { "type": "boolean", "default": false },
+    "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
   },
-  "required": ["cron", "prompt", "description"]
+  "required": ["description"]
 }
 ```
 
-Returns `{ id, human_schedule, recurring, durable }`. Emits `event(system_notice, "scheduler.cron", {id, cron, recurring, durable}, summary)`. Edge cases: rejects invalid cron expressions, expressions with no match within a year, descriptions over 80 chars, no project root for durable jobs, and jobs beyond the configured cap.
+Validation: one schedule source (`cron` / `every` / `at` / webhook) and one action
+(`prompt` / `command` / `command_argv`) are required. Descriptions over 80 chars,
+invalid timezones, schedules with no match in the next year, and more than 50 jobs are rejected.
+`prompt` with non-chat delivery is rejected.
+
+Returns `{ id, human_schedule, recurring, durable, action_kind, delivery, isolated }` and appends a
+`system_notice` event summarizing the created job. Webhook tokens are stored for delivery but returned
+only as `has_token`.
 
 Examples:
 
 ```json
 {"cron":"0 9 * * 1-5","prompt":"Prepare the daily standup summary","recurring":true,"durable":true,"description":"Daily standup prep"}
-{"cron":"30 14 28 2 *","prompt":"Check leap-day task state","recurring":false,"description":"Leap check"}
+{"every":"30m","command":"cargo check","delivery":"none","description":"Build check"}
+{"at":"in 30m","command_argv":["python3","scripts/check.py"],"delivery":{"kind":"webhook","url":"https://example.test/hook","token":"secret"},"description":"One-shot check"}
+{"hook_id":"deploy","command":"./deploy.sh","delivery":{"kind":"notifier","integration_id":"notifier_telegram","target":"12345"},"description":"Deploy hook"}
 ```
 
 #### `cron_list`
 
-Model-facing prompt: list scheduled tasks, optionally filtering by session-only or durable scope.
+Model-facing prompt: list scheduled tasks with target chat and mode, optionally filtering by
+session-only or durable scope.
 
 Schema:
 
@@ -426,7 +588,40 @@ Schema:
 }
 ```
 
-Returns an array of `{ id, cron, human_schedule, description, prompt, recurring, durable, next_fire_at_ms, fire_count, created_at_ms }`. The prompt is truncated to the first 200 characters. Edge cases: invalid scopes are rejected; `next_fire_at_ms` can be 0 if no next run can be calculated.
+Returns an array sorted by `next_fire_at_ms` then `id`. Tool rows contain
+`{ id, cron, human_schedule, description, prompt, action_kind, delivery, chat_id, target,
+isolated, mode, recurring, durable, next_fire_at_ms, fire_count, created_at_ms }`. `prompt` is
+truncated to 200 chars; non-time triggers have `next_fire_at_ms: 0`.
+
+#### `cron_update`
+
+Model-facing prompt: update, pause, resume, or run a scheduled task by ID.
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "cron": { "type": "string" },
+    "every": { "type": "string" },
+    "at": { "type": "string" },
+    "tz": { "type": "string" },
+    "prompt": { "type": "string" },
+    "description": { "type": "string" },
+    "enabled": { "type": "boolean" },
+    "run_now": { "type": "boolean" }
+  },
+  "required": ["id"]
+}
+```
+
+Schedule updates use the same `parse_schedule()` rules as create; `tz` must accompany a cron
+schedule. Updating to `at` forces `recurring=false`. `prompt` can only change `agent_turn` jobs;
+command jobs reject prompt updates. `enabled=false` pauses and records `paused_at_ms`; `enabled=true`
+resumes. `run_now=true` sets `trigger_at_ms` and wakes the runner. Returns
+`{ id, updated: true, human_schedule }`.
 
 #### `cron_delete`
 
@@ -442,11 +637,101 @@ Schema:
 }
 ```
 
-Returns `{ "removed": boolean }` and notifies the runner to recompute wakeups. Missing IDs return `removed: false`; non-string or missing `id` is rejected.
+Removes from the session store first, then the active durable store. Returns `{ "removed": boolean }`
+and notifies the runner only when a job was removed.
 
-### Cron fire injection
+### HTTP scheduler surface
 
-On fire, the runner appends `event(cron_fire, "scheduler.cron", {task_id, cron, recurring, fire_count, final?, missed?}, prompt)` and enqueues a `ChatCommand::UserMessage` with the configured prompt so the agent actually wakes up. Keep both pieces unless the product intentionally changes autonomous scheduling semantics.
+Routes live under `/v1/scheduler/cron`:
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /v1/scheduler/cron` | none | `CronTaskResponse[]` with `enabled`, `paused`, trigger fields (`trigger_kind`, `hook_id`, `tz`, `every_ms`, `at_ms`), `last_status`, `last_error`, and `recent_runs`. |
+| `POST /v1/scheduler/cron` | `CronCreateRequest` | `{ id, human_schedule, recurring, durable, action_kind, delivery }` |
+| `PATCH /v1/scheduler/cron/:id` | `CronUpdateRequest` | `{ id, updated, human_schedule }` |
+| `POST /v1/scheduler/cron/:id/run` | none | Sets `trigger_at_ms`; returns `{ id, triggered: true }`. |
+| `DELETE /v1/scheduler/cron/:id` | none | `{ removed }` |
+
+HTTP creation mirrors `cron_create` plus `chat_id` and `mode`. If the request creates an agent turn
+or uses `chat` delivery, `chat_id` must name an existing open chat. HTTP list responses flatten
+trigger details for the GUI and still redact webhook tokens as `has_token`.
+
+### Daemon cron clock
+
+The headless daemon does not run jobs itself. Its `cron_clock` scans each open project's
+`.refact/scheduled_tasks.json`, records the nearest pending durable job, and wakes the project worker
+about 90s before fire time. The scan intentionally supports only durable cron-triggered
+`agent_turn` jobs targeting an existing chat with `chat` delivery; unsupported jobs are skipped by the
+clock, but can still run once a worker is already alive.
+
+`GET /cron/status` returns:
+
+```json
+{ "enabled": true, "jobs": 1, "next_wake_ms": 1770000000000 }
+```
+
+`jobs` is the count of projects with pending cron-clock entries, not a full job count.
+
+### Daemon inbound webhooks
+
+Daemon HTTP routes:
+
+| Route | Body | Behavior |
+|---|---|---|
+| `POST /hooks/wake` | `{project, text}` | Wakes the project worker and injects `text` as a `system_notice`. |
+| `POST /hooks/agent` | `{project, message, mode?, model?, deliver?}` | Wakes the worker and fires an isolated inline agent job. Delivery must resolve to `chat`. |
+| `POST /hooks/:name` | Mapping-specific body | Resolves `hooks.mappings[name]`, applies mapping defaults, wakes the worker, then forwards to `/v1/hooks/fire`. |
+| `POST /hooks` | none | Authenticates, then returns `400 missing hook name` when hooks are enabled. |
+
+Daemon config (`daemon.yaml`):
+
+```yaml
+hooks:
+  enabled: true
+  token: hook-secret
+  default_project: demo
+  allowed_projects: [demo, /abs/path/to/project]
+  mappings:
+    deploy:
+      project: demo
+      kind: agent        # wake | agent
+      mode: agent
+      model: test-model
+      deliver:
+        type: chat
+```
+
+Project resolution order is request body `project` → mapping `project` → `default_project`.
+Allowed projects can match project id, slug, or root path. Hook auth accepts `Authorization: Bearer`
+or `x-refact-token`; query-string daemon tokens are rejected for hook routes. The worker forward token
+is the daemon auth token when present, otherwise the hook token.
+
+Worker endpoint `POST /v1/hooks/fire` accepts:
+
+```json
+{
+  "kind": "wake",
+  "text": "optional wake text",
+  "message": "optional agent message",
+  "mode": "agent",
+  "model": "model-id",
+  "hook_id": "deploy",
+  "deliver": { "kind": "chat" }
+}
+```
+
+`kind="wake"` with text injects a notice. `kind="agent"` with message creates and fires an isolated
+manual `agent_turn` job. Any `hook_id` also fires matching stored `Trigger::Webhook` jobs from both
+session and durable stores, so a single hook call may perform the inline action and stored webhook jobs.
+
+### Non-goals / boundaries
+
+- No chat-platform messaging gateway is implemented here. Deliveries are Refact chat session,
+  outgoing HTTP webhook, configured notifier backend, or no-op.
+- Slack/email notifiers are framework-ready future plugins, not shipped backends. The in-tree notifier
+  backend is Telegram (`notifier_telegram`).
+- `OnProcessExit` is an optional/reserved trigger shape and is not wired through public cron creation or
+  process-exit event handling.
 
 ## HTTP API
 
