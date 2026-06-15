@@ -225,6 +225,21 @@ describe("DefaultModels — embedded", () => {
     }
   });
 
+  it("does not render sampling controls for the completion slot", () => {
+    setupMocks();
+    (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: { ...baseCaps, completion_default_model: "custom/coder" },
+      refetch: vi.fn(),
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    // Chat tab is active by default and resolves a model → sampling shown.
+    expect(screen.getByTestId("sampling-params")).toBeInTheDocument();
+    // Completion slot resolves a model but must NOT expose sampling controls
+    // (the defaults contract cannot persist completion sampling).
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Completion" }));
+    expect(screen.queryByTestId("sampling-params")).not.toBeInTheDocument();
+  });
+
   it("applies draft overrides and enables Save when draft is present", () => {
     setupMocks({
       draftData: {

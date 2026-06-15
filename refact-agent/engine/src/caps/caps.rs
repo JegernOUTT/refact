@@ -666,6 +666,7 @@ fn resolve_unqualified_embedding_model_default(
 
 fn apply_user_default_embedding_model(
     target: &mut EmbeddingModelRecord,
+    default_id: &mut String,
     model: Option<&str>,
     embedding_models: &[EmbeddingModelRecord],
 ) {
@@ -676,6 +677,7 @@ fn apply_user_default_embedding_model(
     let model = model.trim();
     if model.is_empty() {
         *target = EmbeddingModelRecord::default();
+        default_id.clear();
         return;
     }
 
@@ -685,11 +687,17 @@ fn apply_user_default_embedding_model(
             model
         );
         *target = EmbeddingModelRecord::default();
+        default_id.clear();
         return;
     }
 
     match resolve_user_default_embedding_model(model, embedding_models) {
-        Some(resolved) => *target = resolved,
+        Some(resolved) => {
+            *target = resolved;
+            // Keep the exported defaults string in sync with the authoritative
+            // runtime embedding record so consumers never see a stale default.
+            *default_id = target.base.id.clone();
+        }
         None => warn!(
             "User default embedding model '{}' not found in available models; keeping configured embedding model for setup diagnostics",
             model
@@ -911,6 +919,7 @@ pub async fn load_caps(
             );
             apply_user_default_embedding_model(
                 &mut caps.embedding_model,
+                &mut caps.defaults.embedding_default_model,
                 user_defaults.embedding_model.as_deref(),
                 &embedding_models,
             );
@@ -1331,14 +1340,29 @@ mod tests {
             },
         ];
         let mut target = EmbeddingModelRecord::default();
+        let mut default_id = String::new();
 
         apply_user_default_embedding_model(
             &mut target,
+            &mut default_id,
             Some("openai_2/text-embedding-3-small"),
             &embedding_models,
         );
         assert_eq!(target.base.id, "openai_2/text-embedding-3-small");
         assert_eq!(target.embedding_size, 3072);
+        // The exported defaults string mirrors the resolved record id.
+        assert_eq!(default_id, "openai_2/text-embedding-3-small");
+
+        // An empty user default clears both the record and the defaults string.
+        let mut prefilled = String::from("openai_2/text-embedding-3-small");
+        apply_user_default_embedding_model(
+            &mut target,
+            &mut prefilled,
+            Some(""),
+            &embedding_models,
+        );
+        assert!(target.base.id.is_empty());
+        assert!(prefilled.is_empty());
     }
 
     #[test]

@@ -149,6 +149,64 @@ describe("role-separated model service contracts", () => {
     ).toBe(false);
   });
 
+  test("providers parser validates role-separated settings shape", () => {
+    const base = {
+      name: "custom",
+      base_provider: "custom",
+      display_name: "Custom Provider",
+      enabled: true,
+      readonly: false,
+      has_credentials: true,
+      selected_models_count: 1,
+      status: "active",
+    };
+
+    // completion_models must be an object map, not a bare string
+    expect(
+      isProviderDetailResponse({
+        ...base,
+        settings: { completion_models: "qwen2.5-coder" },
+      }),
+    ).toBe(false);
+
+    // embedding_model must be a string or object, not a number
+    expect(
+      isProviderDetailResponse({
+        ...base,
+        settings: { embedding_model: 7 },
+      }),
+    ).toBe(false);
+
+    // invalid completion_endpoint_style in settings is rejected
+    expect(
+      isProviderDetailResponse({
+        ...base,
+        settings: { completion_endpoint_style: "anthropic_messages" },
+      }),
+    ).toBe(false);
+
+    // legacy bare-string embedding_model shape is accepted for back-compat
+    expect(
+      isProviderDetailResponse({
+        ...base,
+        settings: { embedding_model: "custom/nomic-embed-text" },
+      }),
+    ).toBe(true);
+
+    // a well-formed role-separated settings object passes
+    expect(
+      isProviderDetailResponse({
+        ...base,
+        settings: {
+          completion_endpoint_style: "openai_completions",
+          completion_models: { "qwen2.5-coder": { n_ctx: 8192 } },
+          embedding_endpoint_style: "openai",
+          embedding_model: { name: "nomic-embed-text", embedding_size: 768 },
+        },
+      }),
+    ).toBe(true);
+  });
+
   test("defaults parser validates completion_model and embedding_model", () => {
     expect(
       isProviderDefaults({

@@ -227,6 +227,47 @@ describe("RoleSeparatedModelConfig", () => {
     store.dispatch(providersApi.util.resetApiState());
   });
 
+  it("populates the embedding model name from a legacy string-shaped config", async () => {
+    const detail = {
+      ...baseDetail,
+      settings: {
+        ...baseDetail.settings,
+        embedding_endpoint: "https://embedding.example/v1/embeddings",
+        embedding_model: "legacy-embed-name",
+      },
+    };
+
+    const { store } = render(<RoleSeparatedModelConfig provider={detail} />, {
+      preloadedState,
+    });
+
+    await screen.findByText("Role-separated model configuration");
+    expect(
+      await screen.findByDisplayValue("legacy-embed-name"),
+    ).toBeInTheDocument();
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
+  it("populates the embedding model name from an object-shaped config", async () => {
+    const detail = {
+      ...baseDetail,
+      settings: {
+        ...baseDetail.settings,
+        embedding_model: { name: "object-embed-name", embedding_size: 768 },
+      },
+    };
+
+    const { store } = render(<RoleSeparatedModelConfig provider={detail} />, {
+      preloadedState,
+    });
+
+    await screen.findByText("Role-separated model configuration");
+    expect(
+      await screen.findByDisplayValue("object-embed-name"),
+    ).toBeInTheDocument();
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
   it("editing completion and embedding records does not post chat custom models", async () => {
     const requests: unknown[] = [];
     mockUpdateProvider((body) => requests.push(body));

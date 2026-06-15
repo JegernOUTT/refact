@@ -97,6 +97,11 @@ export type CapsResponse = {
   completion_models: Record<string, CodeCompletionModel>;
   completion_default_model: string;
   code_completion_n_ctx: number;
+  // The engine wire caps expose a single authoritative embedding model
+  // (VecDB indexes one embedding dimension at a time). `embedding_models`
+  // (plural) is accepted for forward/back-compat but is NOT populated by the
+  // current backend; consumers should treat `embedding_model` as the source of
+  // truth and only fall back to the plural map when present.
   embedding_model?: EmbeddingModel;
   embedding_models?: Record<string, EmbeddingModel>;
   chat_model_2: string;

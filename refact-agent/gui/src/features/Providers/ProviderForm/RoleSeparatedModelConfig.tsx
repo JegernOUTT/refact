@@ -149,13 +149,13 @@ function completionInitialState(
 function embeddingInitialState(
   settings: ProviderFormRoleSettings,
 ): EmbeddingFormState {
-  const config = isRecord(settings.embedding_model)
-    ? settings.embedding_model
-    : {};
+  const rawEmbedding: unknown = settings.embedding_model;
+  const config = isRecord(rawEmbedding) ? rawEmbedding : {};
+  const legacyName = typeof rawEmbedding === "string" ? rawEmbedding : "";
   return {
     endpoint: stringValue(settings.embedding_endpoint),
     endpointStyle: stringValue(settings.embedding_endpoint_style) || "openai",
-    modelName: stringValue(config.name),
+    modelName: stringValue(config.name) || legacyName,
     nCtx: numberValue(config.n_ctx, DEFAULT_EMBEDDING_CONTEXT),
     tokenizer: stringValue(config.tokenizer),
     embeddingSize: numberValue(config.embedding_size, DEFAULT_EMBEDDING_SIZE),

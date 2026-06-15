@@ -205,7 +205,7 @@ const ModelTypeSection: React.FC<{
         />
       </SettingsGroup>
 
-      {effectiveModel && capability !== "embedding" ? (
+      {effectiveModel && capability === "chat" ? (
         <SettingsGroup title="Sampling">
           <SettingItem
             className="rf-enter"

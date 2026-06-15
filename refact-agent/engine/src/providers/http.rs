@@ -2079,6 +2079,25 @@ impl ProviderModelConfigSnapshot {
         let Some(map) = settings.as_mapping() else {
             return snapshot;
         };
+        // Preserve model-management fields from the on-disk YAML so a partial
+        // update to a provider that is configured on disk but not loaded in the
+        // registry does not wipe enabled/disabled/custom/selected model config.
+        snapshot.enabled_models = map
+            .get(&yaml_key("enabled_models"))
+            .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        snapshot.disabled_models = map
+            .get(&yaml_key("disabled_models"))
+            .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        snapshot.custom_models = map
+            .get(&yaml_key("custom_models"))
+            .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        snapshot.selected_providers = map
+            .get(&yaml_key("selected_providers"))
+            .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+            .unwrap_or_default();
         snapshot.completion_endpoint = map
             .get(&yaml_key("completion_endpoint"))
             .and_then(|value| value.as_str())
@@ -3561,6 +3580,71 @@ extra_headers:
         assert!(merged["extra_headers"].get("X-Remove-Null").is_none());
         assert!(merged["extra_headers"].get("X-Remove-Number").is_none());
         assert!(merged["extra_headers"].get("X-Absent").is_none());
+    }
+
+    #[test]
+    fn disk_fallback_snapshot_preserves_model_management_fields() {
+        // Simulates a provider configured on disk but not loaded in the registry:
+        // the snapshot is built from the on-disk settings YAML.
+        let existing: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+enabled_models:
+  - chat-a
+  - chat-b
+disabled_models:
+  - chat-c
+custom_models:
+  chatty:
+    n_ctx: 4096
+selected_providers:
+  chat-a: custom
+completion_models:
+  coder:
+    n_ctx: 8192
+"#,
+        )
+        .unwrap();
+
+        let snapshot = ProviderModelConfigSnapshot::from_settings(&existing);
+        assert_eq!(snapshot.enabled_models, vec!["chat-a", "chat-b"]);
+        assert_eq!(snapshot.disabled_models, vec!["chat-c"]);
+        assert!(snapshot.custom_models.contains_key("chatty"));
+        assert_eq!(
+            snapshot
+                .selected_providers
+                .get("chat-a")
+                .map(String::as_str),
+            Some("custom")
+        );
+
+        // Partial update that only changes completion_models.
+        let incoming: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+completion_models:
+  coder:
+    n_ctx: 16384
+"#,
+        )
+        .unwrap();
+        let present_fields = ProviderModelConfigFields::from_settings(&incoming);
+
+        let merged =
+            merge_yaml_preserving_secrets_for_provider("custom", existing, incoming).unwrap();
+        let result =
+            apply_model_config_snapshot_for_omitted_fields(merged, &snapshot, present_fields)
+                .unwrap();
+        let result = serde_json::to_value(&result).unwrap();
+
+        // Omitted model-management fields must survive the partial update.
+        assert_eq!(
+            result["enabled_models"],
+            serde_json::json!(["chat-a", "chat-b"])
+        );
+        assert_eq!(result["disabled_models"], serde_json::json!(["chat-c"]));
+        assert!(result["custom_models"]["chatty"].is_object());
+        assert_eq!(result["selected_providers"]["chat-a"], "custom");
+        // The explicitly-updated field is applied.
+        assert_eq!(result["completion_models"]["coder"]["n_ctx"], 16384);
     }
 
     #[test]

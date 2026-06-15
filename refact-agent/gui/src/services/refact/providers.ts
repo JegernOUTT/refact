@@ -1483,6 +1483,7 @@ function isProviderDetailResponseWire(
   if (!hasProperty(data, "readonly") || typeof data.readonly !== "boolean")
     return false;
   if (!hasProperty(data, "settings")) return false;
+  if (!isProviderFormRoleSettings(data.settings)) return false;
   if (hasProperty(data, "runtime") && !isProviderRuntime(data.runtime)) {
     return false;
   }
@@ -1696,6 +1697,46 @@ function isOptionalNumberField(data: object, key: string): boolean {
     !hasProperty(data, key) ||
     (typeof data[key] === "number" && Number.isFinite(data[key]))
   );
+}
+
+function isRoleSettingsObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCompletionModelsSettingsField(data: object, key: string): boolean {
+  return !hasProperty(data, key) || isRoleSettingsObject(data[key]);
+}
+
+function isEmbeddingModelSettingsField(data: object, key: string): boolean {
+  // Accept the legacy bare-string shape and the object shape.
+  return (
+    !hasProperty(data, key) ||
+    typeof data[key] === "string" ||
+    isRoleSettingsObject(data[key])
+  );
+}
+
+// Validates the role-separated provider settings the GUI actually edits.
+// Only present fields are checked; unrelated provider settings keys are tolerated.
+function isProviderFormRoleSettings(data: unknown): boolean {
+  if (!isRoleSettingsObject(data)) return false;
+  const settings = data as object;
+  if (!isOptionalStringField(settings, "completion_endpoint")) return false;
+  if (
+    hasProperty(settings, "completion_endpoint_style") &&
+    !isCompletionEndpointStyleOrEmpty(settings.completion_endpoint_style)
+  )
+    return false;
+  if (!isCompletionModelsSettingsField(settings, "completion_models"))
+    return false;
+  if (!isOptionalStringField(settings, "embedding_endpoint")) return false;
+  if (
+    hasProperty(settings, "embedding_endpoint_style") &&
+    !isEmbeddingEndpointStyleOrEmpty(settings.embedding_endpoint_style)
+  )
+    return false;
+  if (!isEmbeddingModelSettingsField(settings, "embedding_model")) return false;
+  return true;
 }
 
 function isOAuthStartResponse(data: unknown): data is OAuthStartResponse {

@@ -37,8 +37,11 @@ pub struct CustomProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
     pub completion_models: HashMap<String, CustomModelConfig>,
+    // Full embedding model config (name + operational fields) preserved verbatim
+    // so the GUI round-trips size/batch/threshold/prefixes. A legacy bare-string
+    // value is preserved as-is for back-compat.
     #[serde(default)]
-    pub embedding_model: Option<String>,
+    pub embedding_model: Option<serde_json::Value>,
 }
 
 impl CustomProvider {
@@ -51,7 +54,22 @@ impl CustomProvider {
     }
 
     fn has_embedding_role(&self) -> bool {
-        !self.embedding_endpoint.is_empty() && self.embedding_model.is_some()
+        !self.embedding_endpoint.is_empty() && self.embedding_model_name().is_some()
+    }
+
+    fn embedding_model_name(&self) -> Option<String> {
+        let value = self.embedding_model.as_ref()?;
+        let name = match value {
+            serde_json::Value::String(name) => name.trim().to_string(),
+            serde_json::Value::Object(map) => map
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            _ => String::new(),
+        };
+        (!name.is_empty()).then_some(name)
     }
 
     fn role_count(&self) -> usize {
@@ -68,9 +86,8 @@ impl CustomProvider {
     }
 
     fn runtime_embedding_model(&self) -> Option<ProviderModel> {
-        self.embedding_model
-            .as_deref()
-            .map(embedding_model_to_provider_model)
+        self.embedding_model_name()
+            .map(|name| embedding_model_to_provider_model(&name))
     }
 }
 
@@ -112,18 +129,26 @@ fn parse_custom_models_from_key(
     ))
 }
 
-fn parse_embedding_model_name(value: &serde_yaml::Value) -> Result<Option<String>, String> {
+fn parse_embedding_model_value(
+    value: &serde_yaml::Value,
+) -> Result<Option<serde_json::Value>, String> {
     if value.is_null() {
         return Ok(None);
     }
     if let Some(name) = value.as_str() {
         let name = name.trim();
-        return Ok((!name.is_empty()).then(|| name.to_string()));
+        // Preserve the legacy bare-string shape as-is for back-compat.
+        return Ok((!name.is_empty()).then(|| serde_json::Value::String(name.to_string())));
     }
+    // Validate the object as an embedding record (catches malformed configs) but
+    // preserve every field the GUI sent so the round-trip is lossless.
     let record: EmbeddingModelRecord = serde_yaml::from_value(value.clone())
         .map_err(|e| format!("invalid embedding_model: {e}"))?;
-    let name = record.base.name.trim();
-    Ok((!name.is_empty()).then(|| name.to_string()))
+    if record.base.name.trim().is_empty() {
+        return Ok(None);
+    }
+    let json = serde_json::to_value(value).map_err(|e| format!("invalid embedding_model: {e}"))?;
+    Ok(Some(json))
 }
 
 fn custom_model_to_provider_model(
@@ -319,7 +344,7 @@ available:
             parse_custom_models_from_key(&yaml, "completion_models", &mut self.completion_models)?;
         }
         if let Some(model) = yaml.get("embedding_model") {
-            self.embedding_model = parse_embedding_model_name(model)?;
+            self.embedding_model = parse_embedding_model_value(model)?;
         }
         if let Some(wire_format) = yaml.get("wire_format") {
             match serde_yaml::from_value(wire_format.clone()) {
@@ -696,7 +721,7 @@ extra_headers: |
             enabled: true,
             embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
             embedding_endpoint_style: "openai".to_string(),
-            embedding_model: Some("text-embedding-3-small".to_string()),
+            embedding_model: Some(serde_json::json!({ "name": "text-embedding-3-small" })),
             ..Default::default()
         };
 
@@ -730,7 +755,7 @@ extra_headers: |
             )]),
             embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
             embedding_endpoint_style: "ollama_native".to_string(),
-            embedding_model: Some("embedding-model".to_string()),
+            embedding_model: Some(serde_json::json!({ "name": "embedding-model" })),
             ..Default::default()
         };
 
@@ -789,6 +814,75 @@ extra_headers:
         assert_eq!(settings["embedding_endpoint_style"], "openai");
         assert_eq!(settings["embedding_model"], "text-embedding-3-small");
         assert_eq!(settings["extra_headers"]["Authorization"], "***");
+    }
+
+    #[test]
+    fn custom_provider_embedding_object_roundtrips_all_fields() {
+        let mut provider = CustomProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    r#"
+embedding_endpoint: https://example.com/v1/embeddings
+embedding_endpoint_style: openai
+embedding_model:
+  name: nomic-embed-text
+  n_ctx: 2048
+  tokenizer: hf://Nomic/tokenizer
+  embedding_size: 768
+  embedding_batch: 16
+  rejection_threshold: 0.42
+  dimensions: 512
+  query_prefix: "query: "
+  document_prefix: "passage: "
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let settings = provider.provider_settings_as_json();
+        let embedding = &settings["embedding_model"];
+        assert_eq!(embedding["name"], "nomic-embed-text");
+        assert_eq!(embedding["embedding_size"], 768);
+        assert_eq!(embedding["embedding_batch"], 16);
+        assert_eq!(embedding["rejection_threshold"].as_f64(), Some(0.42));
+        assert_eq!(embedding["dimensions"], 512);
+        assert_eq!(embedding["query_prefix"], "query: ");
+        assert_eq!(embedding["document_prefix"], "passage: ");
+
+        // Runtime still derives the model id from the embedded name.
+        let runtime = provider.build_runtime().unwrap();
+        assert_eq!(runtime.embedding_model.unwrap().id, "nomic-embed-text");
+    }
+
+    #[test]
+    fn custom_provider_embedding_legacy_string_is_accepted() {
+        let mut provider = CustomProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    r#"
+embedding_endpoint: https://example.com/v1/embeddings
+embedding_model: legacy-embed
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Legacy bare-string is preserved as-is for back-compat.
+        let settings = provider.provider_settings_as_json();
+        assert_eq!(settings["embedding_model"], "legacy-embed");
+        assert_eq!(
+            provider
+                .build_runtime()
+                .unwrap()
+                .embedding_model
+                .unwrap()
+                .id,
+            "legacy-embed"
+        );
     }
 
     #[test]
