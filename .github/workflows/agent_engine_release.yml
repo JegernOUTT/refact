@@ -2,13 +2,27 @@ name: Refact Agent Engine CI Release (Rust)
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version without a leading v; tag pushes derive it from engine/v<ver>.
+        required: false
+        type: string
   push:
     tags:
       - engine/*
 
+# Release URL contract for installers, self-update, and IDE plugin downloaders:
+# https://github.com/JegernOUTT/refact/releases/download/engine/v<ver>/refact-<ver>-<target>.<ext>
+# Windows uses .zip, Unix uses .tar.gz, each archive contains only refact at its root,
+# and every archive is uploaded with a matching .sha256 sidecar. Latest uses GitHub
+# /releases/latest; this workflow marks engine/v<ver> releases as latest.
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 defaults:
   run:
@@ -25,6 +39,7 @@ env:
 jobs:
   dist:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -47,15 +62,9 @@ jobs:
             target: aarch64-unknown-linux-gnu
             code-target: linux-arm64
             cross: true
-          #          - os: ubuntu-22.04
-          #            target: arm-unknown-linux-gnueabihf
-          #            code-target: linux-armhf
-          # x86_64-apple-darwin (macOS Intel) is disabled — GitHub-hosted macos-15-large runners
-          # incur significant costs and Intel Mac support is being phased out. Re-enable only if
-          # explicitly needed and billing is confirmed.
-          #- os: macos-15-large
-          #  target: x86_64-apple-darwin
-          #  code-target: darwin-x64
+          - os: macos-15-large
+            target: x86_64-apple-darwin
+            code-target: darwin-x64
           - os: macos-14
             target: aarch64-apple-darwin
             code-target: darwin-arm64
@@ -71,6 +80,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: ${{ env.FETCH_DEPTH }}
+
+      - name: Derive release metadata
+        id: release
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ inputs.version || '' }}
+        run: |
+          if [[ -n "$MANUAL_VERSION" ]]; then
+            version="$MANUAL_VERSION"
+            tag="engine/v${version}"
+          elif [[ "$GITHUB_REF_NAME" == engine/v* ]]; then
+            version="${GITHUB_REF_NAME#engine/v}"
+            tag="$GITHUB_REF_NAME"
+          else
+            echo "Engine releases must run from an engine/v<ver> tag or provide workflow_dispatch input version." >&2
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         run: |
@@ -104,10 +136,6 @@ jobs:
           sudo swapon /swapfile
           free -h
 
-      - name: Install ARM target toolchain
-        if: matrix.target == 'arm-unknown-linux-gnueabihf'
-        run: sudo apt-get install gcc-arm-linux-gnueabihf
-
       - name: Restore cached cargo
         uses: swatinem/rust-cache@v2
         with:
@@ -124,6 +152,13 @@ jobs:
           tool: cross
           fallback: none
 
+      - name: Build GUI for linux-like artifact
+        if: matrix.cross
+        working-directory: refact-agent/gui
+        run: |
+          npm ci
+          npm run build
+
       - name: Test artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
         run: cargo test --release --lib --tests || exit 1
@@ -131,8 +166,8 @@ jobs:
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
         run: |
-          cargo build --release || exit 1
-          cp ./target/release/refact-lsp${{ matrix.ext }} ../..
+          cargo build --release --target ${{ matrix.target }} || exit 1
+          cp './target/${{ matrix.target }}/release/refact${{ matrix.ext }}' .
 
       - name: Test artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
@@ -142,13 +177,14 @@ jobs:
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         run: |
           OPENSSL_STATIC=1 cargo build --release --target ${{ matrix.target }} || exit 1
-          cp ./target/${{ matrix.target }}/release/refact-lsp${{ matrix.ext }} ../..
+          cp './target/${{ matrix.target }}/release/refact${{ matrix.ext }}' .
 
       - name: Test linux-like artifact
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
           CARGO_PROFILE_RELEASE_LTO: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'thin' || 'true' }}
+          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: CROSS_NO_WARNINGS=0 cross test --release --lib --tests --target ${{ matrix.target }} || exit 1
 
       - name: Build linux-like artifact
@@ -156,32 +192,51 @@ jobs:
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
           CARGO_PROFILE_RELEASE_LTO: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'thin' || 'true' }}
+          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: |
           CROSS_NO_WARNINGS=0 cross build --release --target ${{ matrix.target }} || exit 1
-          cp ./target/${{ matrix.target }}/release/refact-lsp${{ matrix.ext }} ../..
+          cp './target/${{ matrix.target }}/release/refact${{ matrix.ext }}' .
 
-      - name: Package artifact in ZIP (WIN)
-        uses: vimtor/action-zip@v1.2
-        if: endsWith(matrix.target, 'msvc')
-        with:
-          files: refact-lsp.exe
-          recursive: false
-          dest: dist-${{ matrix.target }}.zip
-
-      - name: Package artifact in ZIP (UNIX)
-        uses: vimtor/action-zip@v1.2
-        if: ${{ !endsWith(matrix.target, 'msvc') }}
-        with:
-          files: refact-lsp
-          recursive: false
-          dest: dist-${{ matrix.target }}.zip
+      - name: Package release archive
+        id: package
+        shell: bash
+        run: |
+          version="${{ steps.release.outputs.version }}"
+          target="${{ matrix.target }}"
+          if [[ "$target" == *msvc ]]; then
+            binary="refact.exe"
+            archive="refact-${version}-${target}.zip"
+            pwsh -NoLogo -NoProfile -Command "Compress-Archive -Path '$binary' -DestinationPath '$archive' -CompressionLevel Optimal -Force"
+          else
+            binary="refact"
+            archive="refact-${version}-${target}.tar.gz"
+            tar -czf "$archive" "$binary"
+          fi
+          test -f "$binary"
+          test -f "$archive"
+          checksum="${archive}.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "$checksum"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$archive" > "$checksum"
+          else
+            hash="$(pwsh -NoLogo -NoProfile -Command "(Get-FileHash -Algorithm SHA256 '$archive').Hash.ToLowerInvariant()")"
+            printf '%s  %s\n' "$hash" "$archive" > "$checksum"
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
       - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ github.token }}
-          asset_name: dist-${{ matrix.target }}
-          file: dist-${{ matrix.target }}.zip
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: Refact Engine v${{ steps.release.outputs.version }}
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          working_directory: refact-agent/engine
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

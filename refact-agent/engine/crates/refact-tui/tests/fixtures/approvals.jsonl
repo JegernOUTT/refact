@@ -1,0 +1,2 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"pause_required","pause_id":"p1","reasons":[{"type":"confirmation","tool_name":"shell","command":"rm -rf /tmp/demo","rule":"danger","tool_call_id":"call-approve"}]}

@@ -2,65 +2,23 @@
   overflow: hidden;
 }
 
-.header {
-  padding: var(--space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  min-height: 24px;
-  transition: filter 0.15s ease;
-}
-
-.header:hover {
-  filter: brightness(1.3);
-}
-
 .icon {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.icon svg {
-  width: 14px;
-  height: 14px;
 }
 
 .summary {
-  color: inherit;
   overflow: hidden;
+  color: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.contentWrapper {
-  overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
-  transform: translateZ(0);
-  /* CSS-based collapse animation using grid */
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
-}
-
-.contentWrapperOpen {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-
-.contentInner {
-  overflow: hidden;
-}
-
 .content {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
   max-height: 400px;
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   overflow-y: auto;
 }

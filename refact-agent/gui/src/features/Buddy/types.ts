@@ -54,7 +54,10 @@ export type EyeStyle =
   | "angry"
   | "X"
   | "squint"
-  | "uwu";
+  | "uwu"
+  | "wide"
+  | "wink"
+  | "shifty";
 
 export type AnimType =
   | "idle"
@@ -105,9 +108,32 @@ export type IdleActionType =
   | "type_code"
   | "scratch"
   | "peekAround"
-  | "sniff";
+  | "sniff"
+  | "sigh"
+  | "earTwitch"
+  | "headTiltHold"
+  | "groom"
+  | "wiggle"
+  | "zoomies"
+  | "nodOff"
+  | "shiver"
+  | "daydream"
+  | "shakeOff"
+  | "peekCamera"
+  | "stumble"
+  | "dance";
 
 export type ToyType = "duck" | "dice" | "coffee" | "bug" | "scroll";
+
+export type BuddyArmPose =
+  | "rest"
+  | "swing"
+  | "wave"
+  | "raise"
+  | "face"
+  | "drum"
+  | "hold"
+  | "hug";
 
 export type GroundFXType = "impact" | "crack" | "dust";
 
@@ -301,6 +327,32 @@ export interface BuddySpeechItem {
   speech_intent?: string;
 }
 
+export type AnimBeatKind =
+  | "squash"
+  | "sparks"
+  | "rainbow"
+  | "emoji"
+  | "impact"
+  | "dust"
+  | "speedlines"
+  | "flash"
+  | "afterimage"
+  | "status"
+  | "eyes";
+
+export interface AnimBeat {
+  at: number;
+  kind: AnimBeatKind;
+  x?: number;
+  y?: number;
+  count?: number;
+  emoji?: string;
+  text?: string;
+  color?: string;
+  eyeStyle?: EyeStyle;
+  frames?: number;
+}
+
 export interface BuddyAnimState {
   frame: number;
   blinkTick: number;
@@ -376,6 +428,46 @@ export interface BuddyAnimState {
   activeScene: string;
   activeSceneVariant: string;
   activeSceneTimer: number;
+  lidClose: number;
+  lidBase: number;
+  blinkQueue: number;
+  slowBlinkTimer: number;
+  pupilDilation: number;
+  saccadeFrames: number;
+  gazeSettleFrames: number;
+  breathPhase: number;
+  pantTimer: number;
+  recentIdleActions: IdleActionType[];
+  nextIdleBias: Partial<Record<IdleActionType, number>>;
+  idleActionTotal: number;
+  sighCooldown: number;
+  rareActionCooldown: number;
+  walkVel: number;
+  walkLeanFrames: number;
+  stumbleCooldown: number;
+  zoomiesDashesLeft: number;
+  earTwitchTimer: number;
+  earTwitchSide: number;
+  shiverTimer: number;
+  blushTimer: number;
+  beats: AnimBeat[];
+  petSessionCount: number;
+  lastPetFrame: number;
+  temperamentSeed: number;
+  facing: number;
+  facingLerp: number;
+  tailPhase: number;
+  tailEnergy: number;
+  tailDroop: number;
+  armPose: BuddyArmPose;
+  armAnimPhase: number;
+  wingFlap: number;
+  dancePhase: number;
+  sweatTimer: number;
+  veinTimer: number;
+  cheekPuffTimer: number;
+  auraTimer: number;
+  envTickCooldown: number;
 }
 
 export interface ColorMap {
@@ -402,6 +494,14 @@ export type BuddyEvent =
 
 export type BubblePosition = "top" | "left" | "right";
 
+export type BuddySpeechStyle =
+  | "say"
+  | "think"
+  | "sing"
+  | "whisper"
+  | "excite"
+  | "alert";
+
 export type BuddyScenePose =
   | "idle"
   | "spin"
@@ -419,7 +519,15 @@ export type BuddyScenePose =
 
 export type BuddyShowcaseKind =
   | "memory_firefly_night"
-  | "stargazing_constellation";
+  | "stargazing_constellation"
+  | "rain_shelter_dash"
+  | "koi_pond_watch"
+  | "campfire_story"
+  | "firefly_meadow_chase"
+  | "snow_sculpting"
+  | "leaf_storm_play"
+  | "aurora_dance"
+  | "komorebi_nap";
 
 export type BuddyShowcasePhase =
   | "travel"
@@ -447,14 +555,34 @@ export interface BuddyShowcaseRun {
   phaseStartedAtMs: number;
 }
 
+export interface BuddyEnvContext {
+  phase: "morning" | "day" | "evening" | "night";
+  weather: "clear" | "aurora" | "busy" | "wind" | "rain" | "storm" | "dream";
+  season: "spring" | "summer" | "autumn" | "winter";
+}
+
+export interface BuddyCursorBridge {
+  move: (clientX: number, clientY: number) => void;
+  leave: () => void;
+}
+
 export interface BuddyCanvasProps {
   state: BuddySemanticState;
   onEvent?: (event: BuddyEvent) => void;
   displaySize?: number;
   className?: string;
   style?: React.CSSProperties;
+  envContext?: BuddyEnvContext | null;
+  /** Restrict pointer interactions to a circular hit area over the sprite */
+  spritePointer?: boolean;
+  /** Receives a cursor bridge so a parent surface can forward pointer moves */
+  cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   /** Override speech bubble text (from runtime/backend), takes priority over canvas statusText */
   speechOverride?: string | null;
+  /** Visual style for the override speech bubble */
+  speechStyle?: BuddySpeechStyle;
+  /** Optional media node rendered inside the bubble below the text */
+  speechMedia?: React.ReactNode;
   /** Buttons rendered inside the speech bubble */
   speechControls?: BuddyControl[];
   speechIntent?: string;
@@ -705,6 +833,7 @@ export type PulseScope =
 export type BuddyPage =
   | { type: "buddy" }
   | { type: "stats" }
+  | { type: "settings" }
   | { type: "customization" }
   | { type: "providers" }
   | { type: "default_models" }

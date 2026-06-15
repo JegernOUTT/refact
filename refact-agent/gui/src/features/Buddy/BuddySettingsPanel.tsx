@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Switch, Text, TextArea } from "@radix-ui/themes";
-import classNames from "classnames";
+import {
+  Button,
+  Field,
+  FieldTextarea,
+  SegmentedControl,
+  Surface,
+  Switch,
+  Text,
+} from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   selectBuddySettings,
@@ -18,6 +25,18 @@ type SaveStatus = "idle" | "saving" | "saved" | "failed";
 type BuddySettingsPatch = Partial<BuddySettings> & {
   clear_personality_prompt?: boolean;
 };
+
+const HUMOR_OPTIONS: Array<{ value: HumorLevel; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "light", label: "Light" },
+  { value: "normal", label: "Normal" },
+];
+
+const AUTONOMY_OPTIONS: Array<{ value: AutonomyLevel; label: string }> = [
+  { value: "read_only", label: "Read only" },
+  { value: "suggest", label: "Suggest" },
+  { value: "safe_auto", label: "Safe auto" },
+];
 
 const buildPromptPatch = (value: string): BuddySettingsPatch => {
   if (value.trim() === "") return { clear_personality_prompt: true };
@@ -201,11 +220,21 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           : null;
 
   return (
-    <div className={styles.panel} data-testid="buddy-settings-panel">
+    <Surface
+      className={styles.panel}
+      data-testid="buddy-settings-panel"
+      radius="card"
+      variant="glass"
+    >
       <div className={styles.panelHeader}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          SETTINGS
-        </Text>
+        <div className={styles.headerCopy}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            SETTINGS
+          </Text>
+          <Text size="1" className={styles.headerDescription}>
+            Tune Pixel's autonomy, observations, and tiny-chaos operating hours.
+          </Text>
+        </div>
         {saveLabel ? (
           <Text
             size="1"
@@ -218,301 +247,338 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         ) : null}
       </div>
 
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          CORE
-        </Text>
-        <div className={styles.row}>
-          <Text size="2">Buddy enabled</Text>
-          <Switch
-            checked={liveSettings.enabled}
-            onCheckedChange={(v) => handleSwitch("enabled", v)}
-            aria-label="buddy enabled"
-            data-testid="buddy-toggle-enabled"
-          />
+      <div className={`${styles.sectionGrid} rf-stagger`}>
+        <div className={`${styles.section} rf-enter-rise`}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            CORE
+          </Text>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Buddy enabled</Text>
+            </span>
+            <Switch
+              checked={liveSettings.enabled}
+              onCheckedChange={(v) => handleSwitch("enabled", v)}
+              aria-label="buddy enabled"
+              data-testid="buddy-toggle-enabled"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Quiet mode</Text>
+            </span>
+            <Switch
+              checked={liveSettings.quiet_mode}
+              onCheckedChange={(v) => handleSwitch("quiet_mode", v)}
+              aria-label="quiet mode"
+            />
+          </div>
         </div>
-        <div className={styles.row}>
-          <Text size="2">Quiet mode</Text>
-          <Switch
-            checked={liveSettings.quiet_mode}
-            onCheckedChange={(v) => handleSwitch("quiet_mode", v)}
-            aria-label="quiet mode"
-          />
-        </div>
-      </div>
 
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          DIAGNOSTICS &amp; ISSUES
-        </Text>
-        <div className={styles.row}>
-          <Text size="2">Auto diagnostics</Text>
-          <Switch
-            checked={liveSettings.auto_diagnostics}
-            onCheckedChange={(v) => handleSwitch("auto_diagnostics", v)}
-            aria-label="auto diagnostics"
-            data-testid="buddy-toggle-auto-diagnostics"
-          />
+        <div className={`${styles.section} rf-enter-rise`}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            DIAGNOSTICS &amp; ISSUES
+          </Text>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Auto diagnostics</Text>
+            </span>
+            <Switch
+              checked={liveSettings.auto_diagnostics}
+              onCheckedChange={(v) => handleSwitch("auto_diagnostics", v)}
+              aria-label="auto diagnostics"
+              data-testid="buddy-toggle-auto-diagnostics"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Auto issue creation</Text>
+            </span>
+            <Switch
+              checked={liveSettings.auto_issue_creation}
+              onCheckedChange={(v) => handleSwitch("auto_issue_creation", v)}
+              aria-label="auto issue creation"
+              data-testid="buddy-toggle-auto-issue-creation"
+            />
+          </div>
         </div>
-        <div className={styles.row}>
-          <Text size="2">Auto issue creation</Text>
-          <Switch
-            checked={liveSettings.auto_issue_creation}
-            onCheckedChange={(v) => handleSwitch("auto_issue_creation", v)}
-            aria-label="auto issue creation"
-            data-testid="buddy-toggle-auto-issue-creation"
-          />
-        </div>
-      </div>
 
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          CHAT &amp; NOTIFICATIONS
-        </Text>
-        <div className={styles.row}>
-          <Text size="2">Proactive suggestions</Text>
-          <Switch
-            checked={liveSettings.proactive_enabled}
-            onCheckedChange={(v) => handleSwitch("proactive_enabled", v)}
-            aria-label="proactive suggestions"
-            data-testid="buddy-toggle-proactive"
-          />
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            CHAT &amp; NOTIFICATIONS
+          </Text>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Proactive suggestions</Text>
+            </span>
+            <Switch
+              checked={liveSettings.proactive_enabled}
+              onCheckedChange={(v) => handleSwitch("proactive_enabled", v)}
+              aria-label="proactive suggestions"
+              data-testid="buddy-toggle-proactive"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Chat pattern observation</Text>
+              <small className={styles.settingDescription}>
+                Periodic background scan for retry/stuck chat patterns.
+                Independent from live chat reactions.
+              </small>
+            </span>
+            <Switch
+              checked={liveSettings.message_observation_enabled}
+              onCheckedChange={(v) =>
+                handleSwitch("message_observation_enabled", v)
+              }
+              aria-label="chat pattern observation enabled"
+              data-testid="buddy-toggle-chat-pattern-observation"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Live chat reactions</Text>
+              <small className={styles.settingDescription}>
+                Pixel reacts to your messages with short comments, insights, or
+                bug-candidate flags. Uses redacted input transiently and does
+                not store it.
+              </small>
+            </span>
+            <Switch
+              checked={liveSettings.chat_reactions_enabled}
+              onCheckedChange={(v) => handleSwitch("chat_reactions_enabled", v)}
+              aria-label="live chat reactions enabled"
+              data-testid="buddy-toggle-live-chat-reactions"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Autonomous Buddy chats</Text>
+            </span>
+            <Switch
+              checked={liveSettings.autonomous_chats_enabled}
+              onCheckedChange={(v) =>
+                handleSwitch("autonomous_chats_enabled", v)
+              }
+              aria-label="autonomous buddy chats"
+              data-testid="buddy-toggle-autonomous-chats"
+            />
+          </div>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Housekeeping</Text>
+            </span>
+            <Switch
+              checked={liveSettings.housekeeping_enabled}
+              onCheckedChange={(v) => handleSwitch("housekeeping_enabled", v)}
+              aria-label="housekeeping enabled"
+            />
+          </div>
         </div>
-        <div className={styles.row}>
-          <span className={styles.settingText}>
-            <Text size="2">Chat pattern observation</Text>
-            <small className={styles.settingDescription}>
-              Periodic background scan for retry/stuck chat patterns.
-              Independent from live chat reactions.
-            </small>
-          </span>
-          <Switch
-            checked={liveSettings.message_observation_enabled}
-            onCheckedChange={(v) =>
-              handleSwitch("message_observation_enabled", v)
-            }
-            aria-label="chat pattern observation enabled"
-            data-testid="buddy-toggle-chat-pattern-observation"
-          />
-        </div>
-        <div className={styles.row}>
-          <span className={styles.settingText}>
-            <Text size="2">Live chat reactions</Text>
-            <small className={styles.settingDescription}>
-              Pixel reacts to your messages with short comments, insights, or
-              bug-candidate flags. Uses redacted input transiently and does not
-              store it.
-            </small>
-          </span>
-          <Switch
-            checked={liveSettings.chat_reactions_enabled}
-            onCheckedChange={(v) => handleSwitch("chat_reactions_enabled", v)}
-            aria-label="live chat reactions enabled"
-            data-testid="buddy-toggle-live-chat-reactions"
-          />
-        </div>
-        <div className={styles.row}>
-          <Text size="2">Autonomous Buddy chats</Text>
-          <Switch
-            checked={liveSettings.autonomous_chats_enabled}
-            onCheckedChange={(v) => handleSwitch("autonomous_chats_enabled", v)}
-            aria-label="autonomous buddy chats"
-            data-testid="buddy-toggle-autonomous-chats"
-          />
-        </div>
-        <div className={styles.row}>
-          <Text size="2">Housekeeping</Text>
-          <Switch
-            checked={liveSettings.housekeeping_enabled}
-            onCheckedChange={(v) => handleSwitch("housekeeping_enabled", v)}
-            aria-label="housekeeping enabled"
-          />
-        </div>
-      </div>
 
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          PERSONALITY
-        </Text>
-        <div className={styles.row}>
-          <Text size="2">Humor</Text>
-          <Switch
-            checked={liveSettings.humor_enabled}
-            onCheckedChange={(v) => handleSwitch("humor_enabled", v)}
-            aria-label="humor enabled"
-          />
+        <div className={`${styles.section} rf-enter-rise`}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            PERSONALITY
+          </Text>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Humor</Text>
+            </span>
+            <Switch
+              checked={liveSettings.humor_enabled}
+              onCheckedChange={(v) => handleSwitch("humor_enabled", v)}
+              aria-label="humor enabled"
+            />
+          </div>
+          <div className={`${styles.row} ${styles.segmentedRow}`}>
+            <span className={styles.settingText}>
+              <Text size="2">Humor level</Text>
+            </span>
+            <SegmentedControl
+              aria-label="humor level"
+              className={styles.segmentedControl}
+              name="buddy-humor-level"
+              options={HUMOR_OPTIONS}
+              size="sm"
+              value={liveSettings.humor_level}
+              onValueChange={(value) =>
+                handleSegmented("humor_level", value as HumorLevel)
+              }
+            />
+          </div>
+          <div className={`${styles.row} ${styles.segmentedRow}`}>
+            <span className={styles.settingText}>
+              <Text size="2">Autonomy</Text>
+            </span>
+            <SegmentedControl
+              aria-label="autonomy level"
+              className={styles.segmentedControl}
+              name="buddy-autonomy-level"
+              options={AUTONOMY_OPTIONS}
+              size="sm"
+              value={liveSettings.autonomy_level}
+              onValueChange={(value) =>
+                handleSegmented("autonomy_level", value as AutonomyLevel)
+              }
+            />
+          </div>
         </div>
-        <div className={styles.row}>
-          <Text size="2">Humor level</Text>
-          <div
-            className={styles.radioGroup}
-            role="group"
-            aria-label="humor level"
-          >
-            {(["off", "light", "normal"] as HumorLevel[]).map((lvl) => (
-              <button
-                key={lvl}
-                type="button"
-                aria-pressed={liveSettings.humor_level === lvl}
-                className={classNames(styles.radioBtn, {
-                  [styles.radioBtnActive]: liveSettings.humor_level === lvl,
-                })}
-                onClick={() => handleSegmented("humor_level", lvl)}
+
+        <div className={`${styles.section} rf-enter-rise`}>
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            SCHEDULE
+          </Text>
+          <div className={styles.row}>
+            <span className={styles.settingText}>
+              <Text size="2">Daily digest hour</Text>
+              <small className={styles.settingDescription}>
+                0–23, blank disables
+              </small>
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              className={styles.digestInput}
+              value={liveSettings.daily_digest_hour ?? ""}
+              onChange={(e) =>
+                handleDigestHourChange(
+                  e.target.value,
+                  e.target.validity.badInput,
+                )
+              }
+              aria-label="daily digest hour"
+              placeholder="off"
+              data-testid="buddy-digest-hour"
+            />
+          </div>
+        </div>
+
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
+          <Field
+            label={
+              <Text
+                size="1"
+                weight="bold"
+                color="gray"
+                className={styles.label}
               >
-                {lvl}
-              </button>
+                PERSONALITY PROMPT
+              </Text>
+            }
+            helper="Custom instructions are autosaved after edits and committed immediately on blur."
+          >
+            <FieldTextarea
+              rows={3}
+              placeholder="Custom personality instructions…"
+              value={promptDraft}
+              onChange={handlePromptChange}
+              onFocus={() => setPromptFocused(true)}
+              onBlur={handlePromptBlur}
+              aria-label="personality prompt"
+              data-testid="buddy-personality-prompt"
+            />
+          </Field>
+          {promptDraft ? (
+            <div className={styles.promptActions}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handlePromptClear}
+                data-testid="buddy-clear-prompt"
+              >
+                Clear prompt
+              </Button>
+            </div>
+          ) : null}
+        </div>
+
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
+          <div className={styles.sectionHeader}>
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              OBSERVERS
+            </Text>
+            <Text size="1" color="gray">
+              {Object.values(liveSettings.observers).filter(Boolean).length}{" "}
+              active
+            </Text>
+          </div>
+          <div className={styles.observersGrid}>
+            {(
+              Object.keys(
+                OBSERVER_LABELS,
+              ) as (keyof BuddySettings["observers"])[]
+            ).map((key) => (
+              <div key={key} className={styles.toggleRow}>
+                <Text size="1" className={styles.toggleLabel}>
+                  {OBSERVER_LABELS[key]}
+                </Text>
+                <Switch
+                  checked={liveSettings.observers[key]}
+                  onCheckedChange={(v) => handleObserver(key, v)}
+                  aria-label={OBSERVER_LABELS[key]}
+                />
+              </div>
             ))}
           </div>
         </div>
-        <div className={styles.row}>
-          <Text size="2">Autonomy</Text>
-          <div
-            className={styles.radioGroup}
-            role="group"
-            aria-label="autonomy level"
-          >
-            {(["read_only", "suggest", "safe_auto"] as AutonomyLevel[]).map(
-              (lvl) => (
-                <button
-                  key={lvl}
-                  type="button"
-                  aria-pressed={liveSettings.autonomy_level === lvl}
-                  className={classNames(styles.radioBtn, {
-                    [styles.radioBtnActive]:
-                      liveSettings.autonomy_level === lvl,
-                  })}
-                  onClick={() => handleSegmented("autonomy_level", lvl)}
-                >
-                  {lvl}
-                </button>
-              ),
-            )}
-          </div>
-        </div>
-      </div>
 
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          PERSONALITY PROMPT
-        </Text>
-        <TextArea
-          size="1"
-          rows={3}
-          placeholder="Custom personality instructions…"
-          value={promptDraft}
-          onChange={(e) => handlePromptChange(e.target.value)}
-          onFocus={() => setPromptFocused(true)}
-          onBlur={handlePromptBlur}
-          aria-label="personality prompt"
-          data-testid="buddy-personality-prompt"
-        />
-        {promptDraft ? (
-          <Button
-            size="1"
-            variant="ghost"
-            onClick={handlePromptClear}
-            data-testid="buddy-clear-prompt"
-          >
-            Clear
-          </Button>
-        ) : null}
-      </div>
-
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          SCHEDULE
-        </Text>
-        <div className={styles.row}>
-          <Text size="2">Daily digest hour (0–23)</Text>
-          <input
-            type="number"
-            min={0}
-            max={23}
-            className={styles.digestInput}
-            value={liveSettings.daily_digest_hour ?? ""}
-            onChange={(e) =>
-              handleDigestHourChange(e.target.value, e.target.validity.badInput)
-            }
-            aria-label="daily digest hour"
-            placeholder="off"
-            data-testid="buddy-digest-hour"
-          />
-        </div>
-      </div>
-
-      <div className={styles.section}>
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          OBSERVERS
-        </Text>
-        <div className={styles.observersGrid}>
-          {(
-            Object.keys(OBSERVER_LABELS) as (keyof BuddySettings["observers"])[]
-          ).map((key) => (
-            <label key={key} className={styles.toggleRow}>
-              <input
-                type="checkbox"
-                checked={liveSettings.observers[key]}
-                onChange={(e) => handleObserver(key, e.target.checked)}
-                aria-label={OBSERVER_LABELS[key]}
-              />
-              <Text size="1">{OBSERVER_LABELS[key]}</Text>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      <div className={styles.section} data-testid="buddy-storage-diagnostics">
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          ADVANCED / DIAGNOSTICS
-        </Text>
-        {storage ? (
-          <div className={styles.diagnosticsGrid}>
-            <Text size="1" color="gray">
-              Active Buddy folder
-            </Text>
-            <code className={styles.pathValue}>{storage.buddy_dir}</code>
-            <Text size="1" color="gray">
-              Settings file
-            </Text>
-            <code className={styles.pathValue}>{storage.settings_path}</code>
-            <Text size="1" color="gray">
-              Project root
-            </Text>
-            <code className={styles.pathValue}>{storage.project_root}</code>
-          </div>
-        ) : (
-          <Text size="1" color="gray">
-            Storage metadata is unavailable from this engine response.
-          </Text>
-        )}
         <div
-          className={styles.diagnosticsGrid}
-          data-testid="buddy-chat-reaction-diagnostics"
+          className={`${styles.sectionWide} rf-enter-rise`}
+          data-testid="buddy-storage-diagnostics"
         >
-          <Text size="1" color="gray">
-            Chat reactions
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            ADVANCED / DIAGNOSTICS
           </Text>
-          <Text size="1">{formatChatReactionStatus(chatReactionDebug)}</Text>
-          {chatReactionDebug?.last_emitted_at ? (
-            <>
+          {storage ? (
+            <div className={styles.diagnosticsGrid}>
               <Text size="1" color="gray">
-                Last emitted
+                Active Buddy folder
               </Text>
-              <code className={styles.pathValue}>
-                {chatReactionDebug.last_emitted_at}
-              </code>
-            </>
-          ) : null}
+              <code className={styles.pathValue}>{storage.buddy_dir}</code>
+              <Text size="1" color="gray">
+                Settings file
+              </Text>
+              <code className={styles.pathValue}>{storage.settings_path}</code>
+              <Text size="1" color="gray">
+                Project root
+              </Text>
+              <code className={styles.pathValue}>{storage.project_root}</code>
+            </div>
+          ) : (
+            <Text size="1" color="gray">
+              Storage metadata is unavailable from this engine response.
+            </Text>
+          )}
+          <div
+            className={styles.diagnosticsGrid}
+            data-testid="buddy-chat-reaction-diagnostics"
+          >
+            <Text size="1" color="gray">
+              Chat reactions
+            </Text>
+            <Text size="1">{formatChatReactionStatus(chatReactionDebug)}</Text>
+            {chatReactionDebug?.last_emitted_at ? (
+              <>
+                <Text size="1" color="gray">
+                  Last emitted
+                </Text>
+                <code className={styles.pathValue}>
+                  {chatReactionDebug.last_emitted_at}
+                </code>
+              </>
+            ) : null}
+          </div>
         </div>
       </div>
 
       {onClose ? (
         <div className={styles.footer}>
-          <Button size="1" variant="ghost" onClick={onClose}>
+          <Button size="sm" variant="ghost" onClick={onClose}>
             Close
           </Button>
         </div>
       ) : null}
-    </div>
+    </Surface>
   );
 };

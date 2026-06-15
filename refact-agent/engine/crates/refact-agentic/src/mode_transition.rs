@@ -278,7 +278,10 @@ pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMe
                 for cap in MEMORY_PATH_REGEX.captures_iter(text) {
                     if let Some(path) = cap.get(1) {
                         let path_str = clean_path_string(path.as_str());
-                        if !path_str.is_empty() && seen_memories.insert(path_str.clone()) {
+                        if !path_str.is_empty()
+                            && !is_generated_refact_index_path(&path_str)
+                            && seen_memories.insert(path_str.clone())
+                        {
                             metadata.memory_paths.push(path_str);
                         }
                     }
@@ -288,6 +291,54 @@ pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMe
     }
 
     metadata
+}
+
+fn is_generated_refact_index_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some(refact_pos) = parts.iter().position(|part| *part == ".refact") else {
+        return false;
+    };
+    let rest = &parts[refact_pos..];
+    matches!(rest, [".refact", "trajectories", "index.json"])
+        || matches!(rest, [".refact", "tasks", "index.json"])
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "planner",
+                "index.json"
+            ]
+        )
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "agents",
+                "index.json"
+            ]
+        )
+        || matches!(
+            rest,
+            [
+                ".refact",
+                "tasks",
+                _task_id,
+                "trajectories",
+                "agents",
+                _agent_id,
+                "index.json"
+            ]
+        )
 }
 
 fn clean_path_string(s: &str) -> String {
@@ -1785,6 +1836,27 @@ MSG_ID:2
         assert_eq!(
             decisions.messages_to_preserve,
             vec!["MSG_ID:10", "MSG_ID:2", "MSG_ID:5", "MSG_ID:2"]
+        );
+    }
+
+    #[test]
+    fn extract_conversation_metadata_excludes_generated_index_memories() {
+        let messages = vec![ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(
+                "/repo/.refact/trajectories/index.json\n/repo/.refact/tasks/task-1/trajectories/planner/index.json\n/repo/.refact/knowledge/index.json\n/repo/.refact/knowledge/preference.md"
+                    .to_string(),
+            ),
+            ..Default::default()
+        }];
+        let metadata = extract_conversation_metadata(&messages);
+
+        assert_eq!(
+            metadata.memory_paths,
+            vec![
+                "/repo/.refact/knowledge/index.json",
+                "/repo/.refact/knowledge/preference.md"
+            ]
         );
     }
 

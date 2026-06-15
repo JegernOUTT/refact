@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 
-import { Flex, Box, Text } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -92,6 +92,18 @@ function isInsideComposerControls(element: Element): boolean {
   );
 }
 
+function isInsideNoExpandControl(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  // Radix portals re-dispatch events through the React tree, so a focus or
+  // click inside portaled content reaches composer handlers with a DOM target
+  // outside the composer. Treat those as non-expanding too: explicit menu
+  // tracking (handleComposerMenuOpenChange) owns expansion for menus.
+  return (
+    Boolean(target.closest("[data-composer-no-expand]")) ||
+    isInsideRadixPortal(target)
+  );
+}
+
 import {
   BackToSideBarButton,
   UnifiedSendButton,
@@ -127,6 +139,7 @@ import { ChatSettingsDropdown } from "./ChatSettingsDropdown";
 import { ModeSelect } from "./ModeSelect";
 import { WorktreeControl } from "../../features/Worktrees";
 import { addCheckboxValuesToInput } from "./utils";
+import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector, useAppDispatch } from "../../hooks";
 import { getErrorMessage } from "../../features/Errors/errorsSlice";
@@ -163,6 +176,13 @@ import { useUsageCounter } from "../UsageCounter/useUsageCounter";
 import { ChatInputTopControls } from "./ChatInputTopControls";
 
 import classNames from "classnames";
+type ComposerHelpProps = {
+  children: React.ReactNode;
+};
+
+const ComposerHelp: React.FC<ComposerHelpProps> = ({ children }) => (
+  <div className={styles.helpText}>{children}</div>
+);
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -170,12 +190,16 @@ export type ChatFormProps = {
   onSubmit: (str: string, sendPolicy?: SendPolicy) => void;
   onClose?: () => void;
   className?: string;
+  embedded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
 export const ChatForm: React.FC<ChatFormProps> = ({
   onSubmit,
   onClose,
   className,
+  embedded = false,
+  onExpandedChange,
 }) => {
   const dispatch = useAppDispatch();
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -327,6 +351,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
+  const argumentPlaceholdersRef = React.useRef<string[]>([]);
+
   const onClearInformation = useCallback(
     () => dispatch(clearInformation()),
     [dispatch],
@@ -340,7 +366,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const handleSubmit = useCallback(
     (sendPolicy: SendPolicy = "after_flow", inputValue = value) => {
-      const trimmedValue = inputValue.trim();
+      const trimmedValue = stripUnfilledPlaceholders(
+        inputValue,
+        argumentPlaceholdersRef.current,
+      ).trim();
       const hasImages = attachedImages.length > 0;
       const hasTextFiles = textFiles.length > 0;
       const canSubmit =
@@ -360,6 +389,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         );
         setLineSelectionInteracted(false);
         onSubmit(valueIncludingChecks, sendPolicy);
+        argumentPlaceholdersRef.current = [];
         setValue("");
         setInputResetKey((k) => k + 1);
         unCheckAll();
@@ -492,6 +522,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     (event: React.PointerEvent<HTMLFormElement>) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
+      if (isInsideNoExpandControl(target)) return;
       composerPointerDownInsideRef.current = true;
       if (clearComposerPointerDownRef.current !== null) {
         window.clearTimeout(clearComposerPointerDownRef.current);
@@ -532,15 +563,23 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     [openComposerMenus],
   );
 
-  const handleComposerFocusCapture = useCallback(() => {
-    setIsComposerExpanded(true);
-  }, []);
+  const handleComposerFocusCapture = useCallback(
+    (event: React.FocusEvent<HTMLDivElement>) => {
+      if (isInsideNoExpandControl(event.target)) return;
+      setIsComposerExpanded(true);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (openComposerMenus > 0) {
       setIsComposerExpanded(true);
     }
   }, [openComposerMenus]);
+
+  useEffect(() => {
+    onExpandedChange?.(isComposerExpanded);
+  }, [isComposerExpanded, onExpandedChange]);
 
   useEffect(() => {
     if (openComposerMenus <= 0) return;
@@ -614,11 +653,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   }
 
   return (
-    <Box
+    <div
       ref={composerRef}
+      className={styles.composerRoot}
       onBlur={handleComposerBlur}
       onFocusCapture={handleComposerFocusCapture}
-      style={{ flexShrink: 0, position: "relative" }}
     >
       {!globalError && !chatError && information && (
         <InformationCallout
@@ -636,19 +675,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         </Callout>
       )}
 
-      <Flex
-        style={{
-          flexDirection: "column",
-          alignSelf: "stretch",
-          flex: 1,
-          width: "100%",
-        }}
-      >
-        {helpInfo && (
-          <Flex mb="3" direction="column">
-            {helpInfo}
-          </Flex>
-        )}
+      <div className={styles.composerStack}>
+        {helpInfo && <ComposerHelp>{helpInfo}</ComposerHelp>}
         <Form
           disabled={disableSend}
           className={classNames(
@@ -658,9 +686,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             isComposerExpanded
               ? styles.chatFormExpanded
               : styles.chatFormCollapsed,
+            { [styles.chatFormEmbedded]: embedded },
             className,
           )}
-          onClick={() => {
+          onClick={(event) => {
+            if (isInsideNoExpandControl(event.target)) return;
             if (!isComposerExpanded) {
               focusComposerInput();
             }
@@ -668,13 +698,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           onPointerDownCapture={handleComposerPointerDownCapture}
           onSubmit={() => handleSubmit("after_flow")}
         >
-          <Box
+          <div
             className={styles.expandedComposerContent}
             onFocus={() => setIsComposerExpanded(true)}
           >
-            <Box className={styles.expandedComposerContentInner}>
-              <Box className={styles.textareaWrapper}>
-                <Box className={styles.inputHeader}>
+            <div className={styles.expandedComposerContentInner}>
+              <div className={styles.textareaWrapper}>
+                <div className={styles.inputHeader}>
                   <UnifiedAttachmentsTray
                     attachedFiles={attachedFiles}
                     previewFiles={previewFiles}
@@ -722,7 +752,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       </span>
                     </Flex>
                   </Flex>
-                </Box>
+                </div>
 
                 <ComboBox
                   key={inputResetKey}
@@ -734,8 +764,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   onSubmit={(event) => {
                     handleEnter(event);
                   }}
-                  onSubmitAcceptedValue={(acceptedValue) => {
-                    handleSubmit("after_flow", acceptedValue);
+                  onArgumentPlaceholdersChange={(placeholders) => {
+                    argumentPlaceholdersRef.current = placeholders;
                   }}
                   placeholder={
                     isVoiceActive
@@ -753,14 +783,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       onOpenFile={queryPathThenOpenFile}
                       autoFocus={isComposerExpanded && autoFocus}
                       readOnly={isVoiceActive}
-                      style={{ boxShadow: "none", outline: "none" }}
                       onPaste={handlePastingFile}
                     />
                   )}
                 />
-              </Box>
-            </Box>
-          </Box>
+              </div>
+            </div>
+          </div>
           <Flex
             gap="2"
             wrap="nowrap"
@@ -797,78 +826,109 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               align="center"
               className={styles.bottomActionControls}
             >
-              <span className={styles.hideActionFirst}>
-                <BrowserToggleButton chatId={chatId} />
-              </span>
-              <span className={styles.hideActionSecond}>
-                <AutoEnrichmentToggleButton
-                  disabled={isStreaming || isWaiting}
-                />
-              </span>
-              <span className={styles.hideActionThird}>
-                <AutoCompactToggleButton disabled={isStreaming || isWaiting} />
-              </span>
-              <span className={styles.hideActionFourth}>
-                <WandButton
-                  currentText={value}
-                  disabled={isStreaming || isWaiting}
-                  onUpdateText={handleChange}
-                />
-              </span>
-              {onClose && (
-                <span className={styles.hideActionFifth}>
-                  <BackToSideBarButton
-                    disabled={isStreaming}
-                    title="Return to sidebar"
-                    onClick={onClose}
-                  />
-                </span>
-              )}
-              {config.features?.images !== false &&
-                isMultimodalitySupportedForCurrentModel && (
-                  <span className={styles.hideActionSixth}>
-                    <AttachImagesButton />
+              <div className={styles.actionControlsSwap}>
+                <div
+                  className={classNames(
+                    styles.controlsSwapItem,
+                    styles.expandedActionsSet,
+                  )}
+                >
+                  <span className={styles.hideActionFirst}>
+                    <BrowserToggleButton chatId={chatId} />
                   </span>
-                )}
-              <span className={styles.hideActionSeventh}>
-                <MicrophoneButton
-                  ref={microphoneRef}
-                  onTranscript={(text) => {
-                    setValue((prev) => {
-                      if (prev.trim()) {
-                        return `${prev}\n${text}`;
-                      }
-                      return text;
-                    });
-                  }}
-                  onLiveTranscript={handleLiveTranscript}
-                  onRecordingChange={handleRecordingChange}
-                  disabled={disableMicrophone}
+                  <span className={styles.hideActionSecond}>
+                    <AutoEnrichmentToggleButton
+                      disabled={isStreaming || isWaiting}
+                    />
+                  </span>
+                  <span className={styles.hideActionThird}>
+                    <AutoCompactToggleButton
+                      disabled={isStreaming || isWaiting}
+                    />
+                  </span>
+                  <span className={styles.hideActionFourth}>
+                    <WandButton
+                      currentText={value}
+                      disabled={isStreaming || isWaiting}
+                      onUpdateText={handleChange}
+                    />
+                  </span>
+                  {onClose && (
+                    <span className={styles.hideActionFifth}>
+                      <BackToSideBarButton
+                        disabled={isStreaming}
+                        title="Return to sidebar"
+                        onClick={onClose}
+                      />
+                    </span>
+                  )}
+                  {config.features?.images !== false &&
+                    isMultimodalitySupportedForCurrentModel && (
+                      <span className={styles.hideActionSixth}>
+                        <AttachImagesButton />
+                      </span>
+                    )}
+                  <span className={styles.hideActionSeventh}>
+                    <MicrophoneButton
+                      ref={microphoneRef}
+                      onTranscript={(text) => {
+                        setValue((prev) => {
+                          if (prev.trim()) {
+                            return `${prev}\n${text}`;
+                          }
+                          return text;
+                        });
+                      }}
+                      onLiveTranscript={handleLiveTranscript}
+                      onRecordingChange={handleRecordingChange}
+                      disabled={disableMicrophone}
+                    />
+                  </span>
+                  <span className={styles.hideActionSeventh}>
+                    <ThreadInfoButton
+                      chatId={chatId}
+                      onOpenChange={handleComposerMenuOpenChange}
+                    />
+                  </span>
+                </div>
+                <div
+                  className={classNames(
+                    styles.controlsSwapItem,
+                    styles.collapsedStatusSet,
+                  )}
+                  data-composer-no-expand="true"
+                  data-testid="composer-collapsed-status"
+                >
+                  <span className={styles.hideCollapsedStatusFirst}>
+                    <StreamingTokenCounter />
+                  </span>
+                  <span className={styles.hideCollapsedStatusSecond}>
+                    <ProviderUsageIndicator />
+                  </span>
+                  <UsageCounter />
+                </div>
+              </div>
+              <span data-composer-no-expand="true">
+                <UnifiedSendButton
+                  disabled={isVoiceActive || !isOnline || allDisabled}
+                  isStreaming={isStreaming || isWaiting}
+                  hasText={
+                    value.trim().length > 0 ||
+                    attachedImages.length > 0 ||
+                    textFiles.length > 0
+                  }
+                  hasMessages={messages.length > 0}
+                  queuedCount={queuedItems.length}
+                  onSend={() => handleSubmit("after_flow")}
+                  onSendImmediately={handleSendImmediately}
+                  onStop={() => void abort()}
+                  onResend={() => void regenerate()}
                 />
               </span>
-              <ThreadInfoButton
-                chatId={chatId}
-                onOpenChange={handleComposerMenuOpenChange}
-              />
-              <UnifiedSendButton
-                disabled={isVoiceActive || !isOnline || allDisabled}
-                isStreaming={isStreaming || isWaiting}
-                hasText={
-                  value.trim().length > 0 ||
-                  attachedImages.length > 0 ||
-                  textFiles.length > 0
-                }
-                hasMessages={messages.length > 0}
-                queuedCount={queuedItems.length}
-                onSend={() => handleSubmit("after_flow")}
-                onSendImmediately={handleSendImmediately}
-                onStop={() => void abort()}
-                onResend={() => void regenerate()}
-              />
             </Flex>
           </Flex>
         </Form>
-      </Flex>
-    </Box>
+      </div>
+    </div>
   );
 };

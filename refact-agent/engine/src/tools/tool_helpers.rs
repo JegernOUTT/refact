@@ -19,6 +19,7 @@ pub struct CodeSubagentConfig {
     pub subchat_max_new_tokens: Option<usize>,
     pub subchat_tokens_for_rag: Option<usize>,
     pub subchat_reasoning_effort: Option<String>,
+    pub subchat_cache_control: Option<String>,
 }
 
 impl Default for CodeSubagentConfig {
@@ -39,6 +40,7 @@ impl Default for CodeSubagentConfig {
             subchat_max_new_tokens: None,
             subchat_tokens_for_rag: None,
             subchat_reasoning_effort: None,
+            subchat_cache_control: None,
         }
     }
 }
@@ -73,6 +75,7 @@ pub async fn load_code_subagent_config(
     config.subchat_max_new_tokens = subagent_config.subchat.max_new_tokens;
     config.subchat_tokens_for_rag = subagent_config.subchat.tokens_for_rag;
     config.subchat_reasoning_effort = subagent_config.subchat.reasoning_effort.clone();
+    config.subchat_cache_control = subagent_config.subchat.cache_control.clone();
     config.max_steps = subagent_config.subchat.max_steps;
     config.gather_subagent = subagent_config.gather_files.subagent.clone();
     config.gather_max_steps = subagent_config.gather_files.max_steps;

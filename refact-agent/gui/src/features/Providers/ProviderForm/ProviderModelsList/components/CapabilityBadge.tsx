@@ -1,6 +1,8 @@
-import { Badge } from "@radix-ui/themes";
-import { CheckIcon, Cross1Icon } from "@radix-ui/react-icons";
-import { FC } from "react";
+import { Check, X } from "lucide-react";
+import { type FC } from "react";
+
+import { Badge, Icon } from "../../../../../components/ui";
+import styles from "../ModelCard.module.css";
 
 type CapabilityBadgeProps = {
   name: string;
@@ -10,9 +12,6 @@ type CapabilityBadgeProps = {
   interactive?: boolean;
 };
 
-/**
- * Reusable component for model capability badges
- */
 export const CapabilityBadge: FC<CapabilityBadgeProps> = ({
   name,
   enabled,
@@ -20,19 +19,18 @@ export const CapabilityBadge: FC<CapabilityBadgeProps> = ({
   displayValue = null,
   interactive = true,
 }) => {
-  const icon = enabled ? (
-    <CheckIcon width="12px" />
-  ) : (
-    <Cross1Icon width="12px" />
-  );
-
   return (
     <Badge
-      color={enabled ? "green" : "gray"}
+      tone={enabled ? "success" : "muted"}
       onClick={interactive ? onClick : undefined}
-      style={interactive ? { cursor: "pointer" } : undefined}
+      className={interactive ? styles.capabilityBadgeInteractive : undefined}
     >
-      {name} {displayValue ? displayValue : icon}
+      {name}{" "}
+      {displayValue ? (
+        displayValue
+      ) : (
+        <Icon icon={enabled ? Check : X} size="sm" />
+      )}
     </Badge>
   );
 };

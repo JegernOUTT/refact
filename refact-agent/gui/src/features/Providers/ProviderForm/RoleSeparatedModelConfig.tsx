@@ -1,14 +1,15 @@
 import { useCallback, useMemo, useState } from "react";
+
 import {
   Button,
-  Card,
-  Flex,
+  FieldError,
+  FieldStack,
+  FieldText,
+  FieldTextarea,
+  SaveStatus,
   Select,
-  Text,
-  TextArea,
-  TextField,
-} from "@radix-ui/themes";
-
+} from "../../../components/ui";
+import { SettingsGroup } from "../../Settings/SettingsSection";
 import type {
   CompletionProviderModelConfig,
   ProviderDetailResponse,
@@ -18,6 +19,7 @@ import {
   providersApi,
   providerIdentitySettings,
 } from "../../../services/refact";
+import styles from "./RoleSeparatedModelConfig.module.css";
 
 const COMPLETION_ENDPOINT_STYLES = [
   "openai_completions",
@@ -171,6 +173,33 @@ function embeddingInitialState(
   };
 }
 
+type EndpointStyleSelectProps = {
+  ariaLabel: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+};
+
+function EndpointStyleSelect({
+  ariaLabel,
+  value,
+  options,
+  onChange,
+}: EndpointStyleSelectProps) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <Select.Trigger aria-label={ariaLabel} />
+      <Select.Content>
+        {options.map((style) => (
+          <Select.Item key={style} value={style}>
+            {style}
+          </Select.Item>
+        ))}
+      </Select.Content>
+    </Select>
+  );
+}
+
 type RoleSeparatedModelConfigProps = {
   provider: ProviderDetailResponse;
 };
@@ -308,274 +337,289 @@ export function RoleSeparatedModelConfig({
     setEmbeddingSaved(true);
   }, [embedding, provider, updateProvider]);
 
-  return (
-    <Card size="2">
-      <Flex direction="column" gap="4">
-        <Flex direction="column" gap="1">
-          <Text size="2" weight="medium">
-            Role-separated model configuration
-          </Text>
-          <Text size="1" color="gray">
-            Configure completion and embedding roles separately from chat custom
-            models. Endpoint style controls the HTTP API shape; scratchpad style
-            controls FIM prompt formatting for completion models.
-          </Text>
-        </Flex>
+  const disabled = isLoading || provider.readonly;
 
-        <Flex direction="column" gap="3">
-          <Text size="2" weight="medium">
-            Completion model
-          </Text>
-          <TextField.Root
-            aria-label="Completion endpoint"
-            placeholder="https://api.example.com/v1/completions"
-            value={completion.endpoint}
-            onChange={(event) =>
-              setCompletion((prev) => ({
-                ...prev,
-                endpoint: event.target.value,
-              }))
-            }
-          />
-          <Select.Root
-            value={completion.endpointStyle}
-            onValueChange={(value) =>
-              setCompletion((prev) => ({ ...prev, endpointStyle: value }))
-            }
-          >
-            <Select.Trigger aria-label="Completion endpoint style" />
-            <Select.Content>
-              {COMPLETION_ENDPOINT_STYLES.map((style) => (
-                <Select.Item key={style} value={style}>
-                  {style}
-                </Select.Item>
-              ))}
-            </Select.Content>
-          </Select.Root>
-          <Text size="1" color="gray">
-            Use openai_completions for classic FIM completion endpoints or
-            openai_chat_completions when completion is served through a chat
-            API.
-          </Text>
-          <TextField.Root
-            aria-label="Completion model name"
-            placeholder="qwen2.5-coder:1.5b-base"
-            value={completion.modelName}
-            onChange={(event) =>
-              setCompletion((prev) => ({
-                ...prev,
-                modelName: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Completion context"
-            type="number"
-            value={completion.nCtx}
-            onChange={(event) =>
-              setCompletion((prev) => ({ ...prev, nCtx: event.target.value }))
-            }
-          />
-          <TextField.Root
-            aria-label="Completion tokenizer"
-            placeholder="hf://Qwen/Qwen2.5-Coder-1.5B"
-            value={completion.tokenizer}
-            onChange={(event) =>
-              setCompletion((prev) => ({
-                ...prev,
-                tokenizer: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Completion scratchpad"
-            placeholder="FIM-PSM"
-            value={completion.scratchpad}
-            onChange={(event) =>
-              setCompletion((prev) => ({
-                ...prev,
-                scratchpad: event.target.value,
-              }))
-            }
-          />
-          <TextArea
-            aria-label="Completion scratchpad patch"
-            value={completion.scratchpadPatch}
-            onChange={(event) =>
-              setCompletion((prev) => ({
-                ...prev,
-                scratchpadPatch: event.target.value,
-              }))
-            }
-          />
-          {completionError && (
-            <Text size="1" color="red">
-              {completionError}
-            </Text>
-          )}
-          {completionSaved && !completionError && (
-            <Text size="1" color="green">
-              Completion configuration saved.
-            </Text>
-          )}
+  return (
+    <section className={`${styles.root} rf-enter`}>
+      <div className={styles.intro}>
+        <h2 className={styles.title}>Role-separated model configuration</h2>
+        <p className={styles.description}>
+          Configure completion and embedding roles separately from chat custom
+          models. Endpoint style controls the HTTP API shape; scratchpad style
+          controls FIM prompt formatting for completion models.
+        </p>
+      </div>
+
+      <SettingsGroup title="Completion model">
+        <FieldStack
+          label="Endpoint"
+          control={
+            <FieldText
+              aria-label="Completion endpoint"
+              placeholder="https://api.example.com/v1/completions"
+              value={completion.endpoint}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, endpoint: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Endpoint style"
+          helper="Use openai_completions for classic FIM completion endpoints or openai_chat_completions when completion is served through a chat API."
+          control={
+            <EndpointStyleSelect
+              ariaLabel="Completion endpoint style"
+              value={completion.endpointStyle}
+              options={COMPLETION_ENDPOINT_STYLES}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, endpointStyle: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Model name"
+          control={
+            <FieldText
+              aria-label="Completion model name"
+              placeholder="qwen2.5-coder:1.5b-base"
+              value={completion.modelName}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, modelName: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Context length"
+          control={
+            <FieldText
+              aria-label="Completion context"
+              type="number"
+              value={completion.nCtx}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, nCtx: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Tokenizer"
+          control={
+            <FieldText
+              aria-label="Completion tokenizer"
+              placeholder="hf://Qwen/Qwen2.5-Coder-1.5B"
+              value={completion.tokenizer}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, tokenizer: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Scratchpad"
+          control={
+            <FieldText
+              aria-label="Completion scratchpad"
+              placeholder="FIM-PSM"
+              value={completion.scratchpad}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, scratchpad: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Scratchpad patch (JSON)"
+          control={
+            <FieldTextarea
+              aria-label="Completion scratchpad patch"
+              value={completion.scratchpadPatch}
+              onChange={(value) =>
+                setCompletion((prev) => ({ ...prev, scratchpadPatch: value }))
+              }
+            />
+          }
+        />
+        {completionError ? <FieldError>{completionError}</FieldError> : null}
+        <div className={styles.footer}>
           <Button
-            size="1"
+            variant="primary"
             onClick={() => void saveCompletion()}
-            disabled={isLoading || provider.readonly}
+            disabled={disabled}
           >
             Save completion model
           </Button>
-        </Flex>
+          <SaveStatus
+            state={completionSaved && !completionError ? "saved" : "idle"}
+            label="Completion configuration saved"
+          />
+        </div>
+      </SettingsGroup>
 
-        <Flex direction="column" gap="3">
-          <Text size="2" weight="medium">
-            Embedding model
-          </Text>
-          <TextField.Root
-            aria-label="Embedding endpoint"
-            placeholder="https://api.example.com/v1/embeddings"
-            value={embedding.endpoint}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                endpoint: event.target.value,
-              }))
-            }
-          />
-          <Select.Root
-            value={embedding.endpointStyle}
-            onValueChange={(value) =>
-              setEmbedding((prev) => ({ ...prev, endpointStyle: value }))
-            }
-          >
-            <Select.Trigger aria-label="Embedding endpoint style" />
-            <Select.Content>
-              {EMBEDDING_ENDPOINT_STYLES.map((style) => (
-                <Select.Item key={style} value={style}>
-                  {style}
-                </Select.Item>
-              ))}
-            </Select.Content>
-          </Select.Root>
-          <Text size="1" color="gray">
-            OpenAI-compatible embeddings use /v1/embeddings style payloads;
-            Ollama-native embeddings use Ollama&apos;s embedding API and model
-            names.
-          </Text>
-          <TextField.Root
-            aria-label="Embedding model name"
-            placeholder="text-embedding-3-small"
-            value={embedding.modelName}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                modelName: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding context"
-            type="number"
-            value={embedding.nCtx}
-            onChange={(event) =>
-              setEmbedding((prev) => ({ ...prev, nCtx: event.target.value }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding size"
-            type="number"
-            value={embedding.embeddingSize}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                embeddingSize: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding batch"
-            type="number"
-            value={embedding.embeddingBatch}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                embeddingBatch: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding threshold"
-            type="number"
-            value={embedding.rejectionThreshold}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                rejectionThreshold: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding tokenizer"
-            placeholder="hf://Xenova/text-embedding-3-small"
-            value={embedding.tokenizer}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                tokenizer: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding dimensions"
-            type="number"
-            placeholder="optional"
-            value={embedding.dimensions}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                dimensions: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding query prefix"
-            value={embedding.queryPrefix}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                queryPrefix: event.target.value,
-              }))
-            }
-          />
-          <TextField.Root
-            aria-label="Embedding document prefix"
-            value={embedding.documentPrefix}
-            onChange={(event) =>
-              setEmbedding((prev) => ({
-                ...prev,
-                documentPrefix: event.target.value,
-              }))
-            }
-          />
-          {embeddingError && (
-            <Text size="1" color="red">
-              {embeddingError}
-            </Text>
-          )}
-          {embeddingSaved && !embeddingError && (
-            <Text size="1" color="green">
-              Embedding configuration saved.
-            </Text>
-          )}
+      <SettingsGroup title="Embedding model">
+        <FieldStack
+          label="Endpoint"
+          control={
+            <FieldText
+              aria-label="Embedding endpoint"
+              placeholder="https://api.example.com/v1/embeddings"
+              value={embedding.endpoint}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, endpoint: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Endpoint style"
+          helper="OpenAI-compatible embeddings use /v1/embeddings style payloads; Ollama-native embeddings use Ollama's embedding API and model names."
+          control={
+            <EndpointStyleSelect
+              ariaLabel="Embedding endpoint style"
+              value={embedding.endpointStyle}
+              options={EMBEDDING_ENDPOINT_STYLES}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, endpointStyle: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Model name"
+          control={
+            <FieldText
+              aria-label="Embedding model name"
+              placeholder="text-embedding-3-small"
+              value={embedding.modelName}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, modelName: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Context length"
+          control={
+            <FieldText
+              aria-label="Embedding context"
+              type="number"
+              value={embedding.nCtx}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, nCtx: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Embedding size"
+          control={
+            <FieldText
+              aria-label="Embedding size"
+              type="number"
+              value={embedding.embeddingSize}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, embeddingSize: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Embedding batch"
+          control={
+            <FieldText
+              aria-label="Embedding batch"
+              type="number"
+              value={embedding.embeddingBatch}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, embeddingBatch: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Rejection threshold"
+          control={
+            <FieldText
+              aria-label="Embedding threshold"
+              type="number"
+              value={embedding.rejectionThreshold}
+              onChange={(value) =>
+                setEmbedding((prev) => ({
+                  ...prev,
+                  rejectionThreshold: value,
+                }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Tokenizer"
+          control={
+            <FieldText
+              aria-label="Embedding tokenizer"
+              placeholder="hf://Xenova/text-embedding-3-small"
+              value={embedding.tokenizer}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, tokenizer: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Dimensions (optional)"
+          control={
+            <FieldText
+              aria-label="Embedding dimensions"
+              type="number"
+              placeholder="optional"
+              value={embedding.dimensions}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, dimensions: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Query prefix"
+          control={
+            <FieldText
+              aria-label="Embedding query prefix"
+              value={embedding.queryPrefix}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, queryPrefix: value }))
+              }
+            />
+          }
+        />
+        <FieldStack
+          label="Document prefix"
+          control={
+            <FieldText
+              aria-label="Embedding document prefix"
+              value={embedding.documentPrefix}
+              onChange={(value) =>
+                setEmbedding((prev) => ({ ...prev, documentPrefix: value }))
+              }
+            />
+          }
+        />
+        {embeddingError ? <FieldError>{embeddingError}</FieldError> : null}
+        <div className={styles.footer}>
           <Button
-            size="1"
+            variant="primary"
             onClick={() => void saveEmbedding()}
-            disabled={isLoading || provider.readonly}
+            disabled={disabled}
           >
             Save embedding model
           </Button>
-        </Flex>
-      </Flex>
-    </Card>
+          <SaveStatus
+            state={embeddingSaved && !embeddingError ? "saved" : "idle"}
+            label="Embedding configuration saved"
+          />
+        </div>
+      </SettingsGroup>
+    </section>
   );
 }

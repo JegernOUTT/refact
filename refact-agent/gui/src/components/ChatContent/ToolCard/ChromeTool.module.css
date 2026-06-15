@@ -1,25 +1,21 @@
 .url {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 0.95em;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .meta {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .logContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
+  composes: resultPanel from "./ToolCardBody.module.css";
 }
 
 .section {
-  padding-top: var(--space-2);
+  composes: section from "./ToolCardBody.module.css";
 }
 
 .sectionLabel {
-  color: var(--gray-11);
-  font-size: 11px;
-  margin-bottom: var(--space-1);
+  composes: sectionLabel from "./ToolCardBody.module.css";
 }

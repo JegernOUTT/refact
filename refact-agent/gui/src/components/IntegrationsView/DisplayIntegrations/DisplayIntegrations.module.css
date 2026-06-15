@@ -1,0 +1,24 @@
+.settingsSection {
+  padding-top: 0;
+}
+
+.groupDescription {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.cards {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.grid {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: var(--rf-space-3);
+}

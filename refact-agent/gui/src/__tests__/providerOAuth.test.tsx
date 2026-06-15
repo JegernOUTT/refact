@@ -79,10 +79,11 @@ describe("ProviderOAuth", () => {
     expect(screen.getByText(/Checking every 60 seconds/i)).toBeInTheDocument();
   });
 
-  test("renders Claude Code manual-code flow after OAuth start", async () => {
+  test("renders Claude Code auto-callback flow after OAuth start", async () => {
     mockProviderOauthStart("claude_code", {
       session_id: "claude-session",
       authorize_url: "https://claude.ai/oauth/authorize",
+      mode: "callback",
     });
 
     const { user } = renderProviderOAuth("claude_code");
@@ -91,13 +92,10 @@ describe("ProviderOAuth", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("Paste the authorization code"),
+        screen.getByText("Waiting for authentication..."),
       ).toBeInTheDocument();
     });
-    expect(
-      screen.getByPlaceholderText("Paste code here..."),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+    expect(screen.queryByText("Paste the authorization code")).toBeNull();
   });
 
   test("renders OpenAI Codex auto-callback flow after OAuth start", async () => {

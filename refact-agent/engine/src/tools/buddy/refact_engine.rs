@@ -17,7 +17,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
-const REFACT_ENGINE_URL: &str = "https://github.com/smallcloudai/refact.git";
+const REFACT_ENGINE_URL: &str = "https://github.com/JegernOUTT/refact.git";
 const MIRROR_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_CAT_BYTES: u64 = 200 * 1024;
 const MAX_SEARCH_MATCHES: usize = 50;

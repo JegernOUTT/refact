@@ -1,17 +1,17 @@
 import React, { useState } from "react";
-import {
-  Box,
-  Flex,
-  Text,
-  Badge,
-  Button,
-  TextArea,
-  Tooltip,
-  Spinner,
-} from "@radix-ui/themes";
-import { FileTextIcon, PersonIcon } from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { Box, Flex, Text } from "@radix-ui/themes";
+import { FileText, MessageCircle, User } from "lucide-react";
 import { AgentStatusDot } from "../AgentStatusDot";
 import { Markdown } from "../../../components/Markdown";
+import {
+  Badge,
+  Button,
+  Field,
+  FieldTextarea,
+  Icon,
+  Tooltip,
+} from "../../../components/ui";
 import {
   useAddCardCommentMutation,
   type CardComment,
@@ -46,7 +46,7 @@ function threadComments(comments: CardComment[]): CardComment[] {
 
 interface CommentItemProps {
   comment: CardComment;
-  onReply: () => void;
+  onReply?: () => void;
   isReply: boolean;
 }
 
@@ -63,31 +63,30 @@ const CommentItem: React.FC<CommentItemProps> = ({
 
   const roleIcon =
     comment.author_role === "planner" ? (
-      <Badge size="1" color="violet">
-        <FileTextIcon />
+      <Badge tone="accent">
+        <Icon icon={FileText} size="sm" tone="accent" />
       </Badge>
     ) : comment.author_role === "agents" ? (
       <AgentStatusDot status="doing" size="small" />
     ) : comment.author_role === "user" ? (
-      <Badge size="1" color="green">
-        <PersonIcon />
+      <Badge tone="success">
+        <Icon icon={User} size="sm" tone="success" />
       </Badge>
     ) : (
-      <Badge size="1" color="gray">
-        sys
-      </Badge>
+      <Badge tone="muted">sys</Badge>
     );
 
   return (
     <Box
-      style={isReply ? { marginLeft: "var(--space-4)" } : undefined}
-      className={styles.commentItem}
+      className={classNames(
+        styles.commentItem,
+        isReply && styles.commentReply,
+        "rf-enter-rise",
+      )}
     >
       <Flex align="center" gap="1" mb="1" wrap="wrap">
         {roleIcon}
-        <Badge size="1" variant="soft">
-          {comment.author_role}
-        </Badge>
+        <Badge tone="muted">{comment.author_role}</Badge>
         <Text size="1" color="gray">
           {authorDisplay}
         </Text>
@@ -100,11 +99,13 @@ const CommentItem: React.FC<CommentItemProps> = ({
       <Box className={styles.commentBody}>
         <Markdown canHaveInteractiveElements={false}>{comment.body}</Markdown>
       </Box>
-      <Flex justify="end">
-        <Button size="1" variant="ghost" onClick={onReply}>
-          Reply
-        </Button>
-      </Flex>
+      {onReply && (
+        <Flex justify="end">
+          <Button size="sm" variant="ghost" onClick={onReply}>
+            Reply
+          </Button>
+        </Flex>
+      )}
     </Box>
   );
 };
@@ -156,14 +157,20 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
   const threaded = threadComments(comments);
 
   return (
-    <Box>
-      <Flex justify="between" align="center">
-        <Text size="2" weight="medium" color="gray">
+    <section className={classNames(styles.commentsRoot, "rf-enter-rise")}>
+      <div className={styles.commentsHeader}>
+        <Icon icon={MessageCircle} size="sm" tone="muted" />
+        <Text size="2" weight="medium">
           Comments ({comments.length})
         </Text>
-      </Flex>
+      </div>
 
-      <Flex direction="column" gap="2" mt="2">
+      <Flex
+        direction="column"
+        gap="2"
+        mt="2"
+        className={classNames(styles.commentList, "rf-stagger")}
+      >
         {threaded.length === 0 ? (
           <Text size="1" color="gray">
             No comments yet.
@@ -173,45 +180,49 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
             <CommentItem
               key={comment.id}
               comment={comment}
-              onReply={() => setReplyTo(comment.id)}
+              onReply={
+                comment.reply_to === null
+                  ? () => setReplyTo(comment.id)
+                  : undefined
+              }
               isReply={comment.reply_to !== null}
             />
           ))
         )}
       </Flex>
 
-      <Box mt="3" className={styles.composer}>
+      <Box className={classNames(styles.composer, "rf-enter-rise")}>
         {replyTo && (
           <Flex align="center" gap="2" mb="1">
-            <Badge size="1" variant="soft">
-              Replying to {replyTo.slice(0, 8)}
-            </Badge>
-            <Button size="1" variant="ghost" onClick={() => setReplyTo(null)}>
+            <Badge tone="muted">Replying to {replyTo.slice(0, 8)}</Badge>
+            <Button size="sm" variant="ghost" onClick={() => setReplyTo(null)}>
               Cancel reply
             </Button>
           </Flex>
         )}
-        <TextArea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Add a comment..."
-          disabled={isSubmitting}
+        <Field
+          error={error}
+          label="Add a comment"
+          control={
+            <FieldTextarea
+              value={body}
+              onChange={setBody}
+              placeholder="Add a comment..."
+              disabled={isSubmitting}
+            />
+          }
         />
         <Flex justify="end" mt="1">
           <Button
-            size="1"
+            size="sm"
             disabled={body.trim().length === 0 || isSubmitting}
+            loading={isSubmitting}
             onClick={() => void handleSubmit()}
           >
-            {isSubmitting ? <Spinner size="1" /> : "Comment"}
+            Comment
           </Button>
         </Flex>
-        {error && (
-          <Text size="1" color="red" mt="1">
-            {error}
-          </Text>
-        )}
       </Box>
-    </Box>
+    </section>
   );
 };

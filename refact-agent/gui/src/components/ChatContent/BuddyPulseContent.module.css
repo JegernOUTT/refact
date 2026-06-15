@@ -1,32 +1,64 @@
 .card {
-  margin: var(--space-2) 0;
-  border: 1px solid var(--gray-a5);
-  background: linear-gradient(135deg, var(--accent-2), var(--gray-2));
+  margin: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .header {
+  display: flex;
   width: 100%;
-  background: none;
-  border: none;
-  padding: var(--space-3);
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
   text-align: left;
   cursor: pointer;
-  color: var(--gray-12);
 }
 
-.header:hover {
-  background: var(--accent-a3);
+.header:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.headerTitle,
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  margin: 0;
+  min-width: 0;
+}
+
+.headerTitle {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
 }
 
 .sections {
-  padding: 0 var(--space-3) var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+  display: grid;
+  gap: var(--rf-space-3);
+  padding: 0 0 var(--rf-space-2);
 }
 
 .section {
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.sectionTitle {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  font-weight: 650;
+}
+
+.sectionBody {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+}
+
+.line {
+  margin: var(--rf-space-1) 0;
 }

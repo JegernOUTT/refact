@@ -44,6 +44,7 @@ const processEvent = makeEvent(
 const cronEvent = makeEvent("event-4", "cron_fire", "Cron fired", {
   task_id: "task-1",
 });
+const planDeltaEvent = makeEvent("event-5", "plan_delta", "Plan updated");
 
 const events = [modeSwitchEvent, toolDecisionEvent, processEvent];
 
@@ -81,6 +82,38 @@ describe("EventLog", () => {
     expect(screen.getByText("Event log")).toBeInTheDocument();
     expect(screen.getByText("3 events")).toBeInTheDocument();
     expect(container.querySelector("details")).not.toHaveAttribute("open");
+  });
+
+  it("keeps native disclosure semantics for the event log summary", () => {
+    const { container } = render(
+      <EventLog events={events} threadId="thread-semantics" />,
+    );
+
+    const details = container.querySelector("details");
+    const summary = container.querySelector("summary");
+
+    expect(details).toBeInTheDocument();
+    expect(summary).toHaveTextContent("Event log");
+
+    openLog();
+
+    expect(details).toHaveAttribute("open");
+  });
+
+  it("excludes plan_delta events from the visible log", () => {
+    render(
+      <EventLog
+        events={[modeSwitchEvent, planDeltaEvent]}
+        threadId="thread-plan-delta"
+      />,
+    );
+
+    openLog();
+
+    expect(screen.getByText("1 event")).toBeInTheDocument();
+    expect(screen.getByText("Mode switched")).toBeInTheDocument();
+    expect(screen.queryByText("Plan updated")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/plan_delta/)).not.toBeInTheDocument();
   });
 
   it("click to expand reveals all entries", () => {

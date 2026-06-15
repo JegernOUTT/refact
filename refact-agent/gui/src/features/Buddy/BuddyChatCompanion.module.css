@@ -5,15 +5,40 @@
   z-index: 50;
   display: flex;
   justify-content: flex-end;
-  width: min(620px, calc(100vw - var(--space-4)));
-  max-width: calc(100vw - var(--space-4));
-  padding-bottom: 4px;
+  width: min(620px, calc(100vw - var(--rf-space-4)));
+  max-width: calc(100vw - var(--rf-space-4));
+  padding-bottom: var(--rf-space-1);
   pointer-events: none;
-  animation: slideUp 0.25s ease-out;
 }
 
 .companion > * {
   pointer-events: auto;
+}
+
+.companion[data-leaving="true"] {
+  pointer-events: none;
+}
+
+.companion[data-leaving="true"] > * {
+  pointer-events: none;
+}
+
+.stage {
+  transform-origin: 78% 100%;
+  animation: companionArrive 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.companion[data-leaving="true"] .stage {
+  animation: companionDepart 0.32s cubic-bezier(0.55, 0, 0.85, 0.36) both;
+}
+
+.idle {
+  animation: companionFloat 5.4s ease-in-out 1.4s infinite alternate;
+  transition: transform 0.24s ease;
+}
+
+.stage:hover .idle {
+  transform: translateY(-3px) rotate(-1.4deg);
 }
 
 .disabledCompanion {
@@ -23,15 +48,63 @@
   z-index: 50;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  margin-bottom: 4px;
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-1);
-  box-shadow: var(--shadow-3);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  margin-bottom: var(--rf-space-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
   animation: slideUp 0.25s ease-out;
   white-space: nowrap;
+}
+
+@keyframes companionArrive {
+  0% {
+    opacity: 0;
+    transform: translateY(26px) scale(0.55) rotate(-7deg);
+  }
+
+  58% {
+    opacity: 1;
+    transform: translateY(-5px) scale(1.06) rotate(2deg);
+  }
+
+  80% {
+    transform: translateY(2px) scale(0.98) rotate(-0.6deg);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+}
+
+@keyframes companionDepart {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  32% {
+    opacity: 1;
+    transform: translateY(-7px) scale(1.05) rotate(1.6deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(30px) scale(0.5) rotate(6deg);
+  }
+}
+
+@keyframes companionFloat {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(-3.5px);
+  }
 }
 
 @keyframes slideUp {
@@ -42,5 +115,21 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage,
+  .companion[data-leaving="true"] .stage,
+  .idle,
+  .disabledCompanion {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
+
+  .idle,
+  .stage:hover .idle {
+    transform: none;
+    transition-duration: 0.01ms;
   }
 }

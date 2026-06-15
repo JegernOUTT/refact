@@ -1,7 +1,7 @@
 use std::fs;
 #[cfg(not(windows))]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 const LARGE_FILE_SIZE_THRESHOLD: u64 = 4096 * 1024; // 4Mb files
 const SMALL_FILE_SIZE_THRESHOLD: u64 = 5; // 5 Bytes
@@ -78,6 +78,31 @@ pub const SOURCE_FILE_EXTENSIONS: &[&str] = &[
     "liquid",
 ];
 
+pub fn is_generated_index_path(path: &Path) -> bool {
+    if !path.file_name().is_some_and(|name| name == "index.json") {
+        return false;
+    }
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let Some(refact_pos) = parts.iter().position(|part| part == ".refact") else {
+        return false;
+    };
+    let rest = &parts[refact_pos..];
+    matches!(rest, [refact, trajectories, index] if refact == ".refact" && trajectories == "trajectories" && index == "index.json")
+        || matches!(rest, [refact, tasks, index] if refact == ".refact" && tasks == "tasks" && index == "index.json")
+        || matches!(rest, [refact, tasks, _task_id, trajectories, planner, index]
+            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && planner == "planner" && index == "index.json")
+        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, index]
+            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
+        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, _agent_id, index]
+            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
+}
+
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {
     path.ancestors().any(|ancestor| {
         ancestor
@@ -129,4 +154,36 @@ pub fn is_valid_file(
         return Err("Unable to access file metadata".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_generated_index_path;
+    use std::path::Path;
+
+    #[test]
+    fn generated_refact_index_paths_match_exact_generated_shapes() {
+        for path in [
+            "/repo/.refact/trajectories/index.json",
+            "/repo/.refact/tasks/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/planner/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/agents/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/agents/agent-1/index.json",
+        ] {
+            assert!(is_generated_index_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn generated_refact_index_paths_do_not_match_near_misses() {
+        for path in [
+            "/repo/trajectories/planner/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/docs/index.json",
+            "/repo/.refact/tasks/task-1/trajectories/planner/archive/index.json",
+            "/repo/.refact/tasks/task-1/notes/index.json",
+            "/repo/.refact/knowledge/index.json",
+        ] {
+            assert!(!is_generated_index_path(Path::new(path)), "{path}");
+        }
+    }
 }

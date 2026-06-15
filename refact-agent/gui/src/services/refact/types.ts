@@ -514,6 +514,7 @@ export function getAssistantCompressionMetadata(message: {
 export interface SummarizationMessage extends BaseMessage {
   role: "summarization";
   content: string;
+  paired_summary_content?: string;
   summarized_range?: [number, number];
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
@@ -1298,6 +1299,12 @@ export type KnowledgeGraphResponse = {
   nodes: KnowledgeGraphNode[];
   edges: KnowledgeGraphEdge[];
   stats: KnowledgeGraphStats;
+};
+
+export type RelinkMemoriesResponse = {
+  docs_scanned: number;
+  docs_updated: number;
+  links_added: number;
 };
 
 export type VecDbStatus = {

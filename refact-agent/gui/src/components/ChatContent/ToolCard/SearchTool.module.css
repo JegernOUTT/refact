@@ -1,18 +1,16 @@
 .query {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 0.95em;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
   vertical-align: baseline;
 }
 
 .count {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   vertical-align: baseline;
   white-space: nowrap;
 }
 
 .resultContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
+  composes: resultPanel from "./ToolCardBody.module.css";
 }

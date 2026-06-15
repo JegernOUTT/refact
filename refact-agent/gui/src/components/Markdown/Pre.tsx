@@ -1,6 +1,6 @@
 import React from "react";
-import { IconButton, Tooltip } from "@radix-ui/themes";
-import { CopyIcon } from "@radix-ui/react-icons";
+import { Copy } from "lucide-react";
+import { IconButton, Tooltip } from "../ui";
 import styles from "./Markdown.module.css";
 
 const PreTagWithButtons: React.FC<
@@ -11,16 +11,18 @@ const PreTagWithButtons: React.FC<
 > = ({ children, onCopyClick, className, ...props }) => {
   return (
     <pre className={className} {...props}>
-      <Tooltip content="Copy">
-        <IconButton
-          size="1"
-          variant="soft"
-          className={styles.copy_button}
-          onClick={onCopyClick}
-          aria-label="Copy code"
-        >
-          <CopyIcon width={12} height={12} />
-        </IconButton>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
+          <IconButton
+            size="sm"
+            variant="soft"
+            className={styles.copy_button}
+            onClick={onCopyClick}
+            aria-label="Copy code"
+            icon={Copy}
+          />
+        </Tooltip.Trigger>
+        <Tooltip.Content>Copy</Tooltip.Content>
       </Tooltip>
       {children}
     </pre>

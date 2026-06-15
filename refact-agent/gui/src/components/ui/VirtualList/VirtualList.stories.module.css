@@ -1,0 +1,26 @@
+.frame {
+  display: grid;
+  min-width: 0;
+  width: min(100%, 520px);
+  gap: var(--rf-space-3);
+}
+
+.row {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.meta {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}

@@ -1,32 +1,75 @@
 .root {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  min-width: 0;
   height: 100%;
   min-height: 0;
-  padding: var(--space-2);
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   overflow: hidden;
 }
 
 .header {
+  min-width: 0;
   flex-shrink: 0;
+}
+
+.headerCopy {
+  min-width: 0;
+}
+
+.mutedText,
+.cardPreviewMuted,
+.cardDate,
+.emptyContent,
+.pendingState {
+  color: var(--rf-color-muted);
 }
 
 .filters {
   flex-shrink: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  padding: var(--rf-panel-pad);
+}
+
+.filterRow,
+.tagActions {
+  min-width: 0;
 }
 
 .filterControl {
-  min-width: 140px;
+  width: min(180px, 100%);
+  min-width: min(140px, 100%);
+}
+
+.searchBox,
+.tagSearchBox {
+  position: relative;
+  display: flex;
+  min-width: min(180px, 100%);
+  align-items: center;
 }
 
 .searchBox {
-  flex: 1;
-  min-width: 180px;
+  flex: 1 1 220px;
+}
+
+.tagSearchBox {
+  flex: 1 1 100%;
+  margin-bottom: var(--rf-space-1);
+}
+
+.searchIcon {
+  position: absolute;
+  left: var(--rf-space-2);
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  color: var(--rf-color-muted);
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  padding-left: var(--rf-space-5);
 }
 
 .tagSummary {
@@ -37,26 +80,46 @@
   min-width: 0;
 }
 
+.tagCloudInner {
+  min-width: 0;
+  padding-top: var(--rf-space-2);
+  overflow: hidden;
+}
+
 .tagChips {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   min-width: 0;
   max-height: 200px;
   overflow: hidden auto;
-  padding-right: var(--space-1);
-}
-
-.tagSearchBox {
-  flex-basis: 100%;
-  min-width: 180px;
-  margin-bottom: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .tagChip {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 22px;
+  align-items: center;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  overflow: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-muted);
   cursor: pointer;
+  font: 650 var(--rf-text-1) / 1 var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagChip:hover {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
 }
 
 .tagChipActive {
-  box-shadow: 0 0 0 1px var(--accent-8);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .tagChipStale {
@@ -64,29 +127,43 @@
   text-decoration: line-through;
 }
 
+.errorState {
+  flex-shrink: 0;
+}
+
 .list {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
+}
+
+.list > * {
+  flex-shrink: 0;
+}
+
+.loadingState {
+  display: flex;
+  justify-content: center;
+  padding: var(--rf-space-4);
 }
 
 .card {
-  border: 1px solid var(--gray-a5);
-  background: var(--color-background);
-  padding: var(--space-3);
   min-height: 64px;
-  max-height: 96px;
+  padding: var(--rf-panel-pad);
+  cursor: default;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.card[data-expanded="true"] {
-  max-height: none;
+.card:hover {
+  background: var(--rf-surface-1);
 }
 
 .cardPinned {
-  border-color: var(--amber-8);
-  box-shadow: 0 0 0 1px var(--amber-a7);
+  box-shadow: inset 2px 0 0 var(--rf-color-warning);
 }
 
 .cardFrame {
@@ -94,17 +171,18 @@
 }
 
 .cardCollapsedRow {
+  min-width: 0;
   min-height: 40px;
 }
 
 .cardBodyButton {
-  appearance: none;
   display: flex;
-  flex: 1;
   min-width: 0;
   min-height: 40px;
+  flex: 1;
   padding: 0;
   border: 0;
+  appearance: none;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -113,19 +191,19 @@
 }
 
 .cardBodyButton:hover .cardTitle {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .cardBodyButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: 2px;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-ctl);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .cardBodyColumn {
-  flex: 1;
   min-width: 0;
   min-height: 40px;
+  flex: 1;
 }
 
 .cardTitleRow {
@@ -133,8 +211,8 @@
 }
 
 .cardBadges {
-  flex-shrink: 0;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .cardControls {
@@ -142,12 +220,15 @@
 }
 
 .cardIconButton {
-  width: 22px;
-  height: 22px;
+  color: var(--rf-color-muted);
 }
 
-.cardIconButton:hover {
-  color: var(--accent-11);
+.cardIconButton:hover:not(:disabled) {
+  color: var(--rf-color-accent);
+}
+
+.iconButtonPinned {
+  color: var(--rf-color-warning);
 }
 
 .cardTitle {
@@ -159,7 +240,7 @@
 }
 
 .cardTitleEmpty {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   font-style: italic;
 }
 
@@ -167,7 +248,7 @@
   min-width: 0;
 }
 
-.cardPreview {
+.cardPreviewMuted {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -176,13 +257,13 @@
 }
 
 .cardPreviewEmpty {
-  flex: 1;
   min-width: 0;
+  flex: 1;
 }
 
 .cardDate {
-  flex: 0 0 auto;
   max-width: 34%;
+  flex: 0 0 auto;
   overflow: hidden;
   text-align: right;
   text-overflow: ellipsis;
@@ -190,23 +271,38 @@
 }
 
 .archivePopover {
-  width: 220px;
+  width: min(220px, calc(100vw - 2 * var(--rf-space-3)));
+}
+
+.expandedGrid {
+  pointer-events: none;
+}
+
+.expandedGrid[data-open="true"] {
+  pointer-events: auto;
 }
 
 .expandedContent {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
   max-height: 420px;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3) 0 0;
   overflow: auto;
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  opacity: 0;
+  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+}
+
+.expandedGrid[data-open="true"] .expandedContent {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
 }
 
 .expandedMarkdown {
-  color: var(--gray-12);
+  min-width: 0;
+  color: var(--rf-color-fg);
 }
 
 .expandedTags {
@@ -215,27 +311,29 @@
 
 .frontmatterTable {
   width: 100%;
+  min-width: 0;
   border-collapse: collapse;
-  color: var(--gray-11);
-  font-size: var(--font-size-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
 }
 
 .frontmatterTable th,
 .frontmatterTable td {
-  padding: var(--space-1) var(--space-2);
-  border-top: 1px solid var(--gray-a4);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
   vertical-align: top;
 }
 
 .frontmatterTable th {
   width: 1%;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   font-weight: 500;
   text-align: left;
   white-space: nowrap;
 }
 
 .frontmatterTable td {
+  min-width: 0;
   word-break: break-word;
 }
 
@@ -243,11 +341,65 @@
   font-style: italic;
 }
 
-.pendingState {
-  color: var(--gray-11);
+.emptyState {
+  padding: var(--rf-space-6) var(--rf-space-3);
+  color: var(--rf-color-muted);
+  text-align: center;
 }
 
-.emptyState {
-  padding: var(--space-6) var(--space-3);
-  text-align: center;
+@media (max-width: 480px) {
+  .root {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .header,
+  .tagSummary,
+  .cardCollapsedRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filters,
+  .card {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .filterControl,
+  .searchBox {
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .cardControls {
+    align-items: flex-start;
+  }
+
+  .cardDate {
+    max-width: 42%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .tagChip,
+  .expandedContent {
+    transition: none;
+  }
+
+  .expandedContent {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .expandedContent {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+    will-change: opacity, transform;
+  }
+
+  .expandedGrid:not([data-open="true"]) .expandedContent {
+    will-change: auto;
+  }
 }

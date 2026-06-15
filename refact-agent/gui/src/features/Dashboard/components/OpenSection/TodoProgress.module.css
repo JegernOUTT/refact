@@ -1,38 +1,38 @@
 .compact {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .miniBar {
   display: flex;
-  gap: 1px;
+  gap: var(--rf-space-2xs);
 }
 
 .miniSegment {
   width: 8px;
   height: 4px;
   border-radius: 1px;
-  background: var(--gray-a6);
+  background: var(--rf-border-strong);
 }
 
 .miniSegment[data-status="completed"] {
-  background: var(--green-9);
+  background: var(--rf-color-success);
 }
 
 .miniSegment[data-status="in_progress"] {
-  background: var(--blue-9);
+  background: var(--rf-color-accent);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
 .miniSegment[data-status="failed"] {
-  background: var(--red-9);
+  background: var(--rf-color-danger);
 }
 
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   min-width: 0;
   overflow: hidden;
 }
@@ -40,7 +40,7 @@
 .item {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   min-width: 0;
   overflow: hidden;
 }
@@ -50,26 +50,26 @@
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
-  background: var(--gray-a7);
+  background: var(--rf-border-strong);
 }
 
 .statusDot[data-status="completed"] {
-  background: var(--green-9);
+  background: var(--rf-color-success);
 }
 
 .statusDot[data-status="in_progress"] {
-  background: var(--blue-9);
+  background: var(--rf-color-accent);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
 .statusDot[data-status="failed"] {
-  background: var(--red-9);
+  background: var(--rf-color-danger);
 }
 
 .itemText {
   flex: 1;
   min-width: 0;
-  color: var(--gray-11);
+  color: var(--rf-color-fg);
 }
 
 @keyframes pulse {

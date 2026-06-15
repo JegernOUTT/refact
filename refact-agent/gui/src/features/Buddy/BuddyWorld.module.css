@@ -2,10 +2,10 @@
   position: relative;
   height: 280px;
   min-height: 220px;
-  margin: 0 var(--space-3) var(--space-2);
+  margin: 0 var(--rf-space-3) var(--rf-space-2);
   overflow: hidden;
-  border: 1px solid var(--gray-a3);
-  border-radius: var(--radius-4);
+  border: 1px solid var(--rf-surface-2);
+  border-radius: var(--rf-radius-card);
   background: transparent;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
   flex-shrink: 0;
@@ -63,15 +63,49 @@
 }
 
 .hotspot {
-  width: 82px;
-  height: 82px;
+  width: 52px;
+  height: 52px;
   padding: 0;
 }
 
 .objectHotspot {
-  width: 58px;
-  height: 58px;
+  width: 44px;
+  height: 44px;
   padding: 0;
+}
+
+.hotspot::after,
+.objectHotspot::after {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.35);
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  pointer-events: none;
+}
+
+.scene:hover .hotspot::after,
+.scene:focus-within .hotspot::after,
+.scene:hover .objectHotspot::after,
+.scene:focus-within .objectHotspot::after {
+  opacity: 0.55;
+  transform: scale(1);
+  animation: buddyHotspotTwinkle 2.2s ease-in-out infinite;
+}
+
+.hotspot:hover::after,
+.hotspot:focus-visible::after,
+.objectHotspot:hover::after,
+.objectHotspot:focus-visible::after {
+  opacity: 0.95;
+  animation: none;
 }
 
 .hotspot:hover,
@@ -89,8 +123,8 @@
 }
 
 .homeHotspot {
-  width: 78px;
-  height: 64px;
+  width: 64px;
+  height: 56px;
 }
 
 .objectTooltip {
@@ -104,7 +138,7 @@
   max-width: 122px;
   padding: 4px 7px;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: var(--radius-3);
+  border-radius: var(--rf-radius-card);
   background: rgba(17, 24, 39, 0.64);
   opacity: 0;
   pointer-events: none;
@@ -115,6 +149,8 @@
   backdrop-filter: blur(8px);
 }
 
+.hotspot:hover .objectTooltip,
+.hotspot:focus-visible .objectTooltip,
 .objectHotspot:hover .objectTooltip,
 .objectHotspot:focus-visible .objectTooltip {
   opacity: 1;
@@ -143,6 +179,7 @@
   z-index: 5;
   left: 50%;
   bottom: -32px;
+  pointer-events: none;
   transform: translateX(-50%) scale(var(--buddy-scene-scale, 1));
   transform-origin: 50% 100%;
   filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.18));
@@ -216,6 +253,40 @@
   opacity: 0.94;
 }
 
+.characterBody[data-traveling="true"] {
+  animation: buddySceneTravelHop 0.56s ease-in-out infinite;
+}
+
+.characterBody[data-traveling="true"][data-travel-direction="right"] {
+  rotate: 2.2deg;
+}
+
+.characterBody[data-traveling="true"][data-travel-direction="left"] {
+  rotate: -2.2deg;
+}
+
+.characterBody[data-arrived="true"] {
+  animation: buddySceneArrive 0.58s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.playCatcher {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  cursor: crosshair;
+  background: transparent;
+}
+
+.foregroundCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+
 .waypointPing {
   position: absolute;
   z-index: 3;
@@ -245,21 +316,21 @@
   z-index: 6;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
 }
 
 .setupDock {
-  left: var(--space-2);
-  bottom: var(--space-2);
+  left: var(--rf-space-2);
+  bottom: var(--rf-space-2);
   max-width: 36%;
 }
 
 .careDock {
-  right: var(--space-2);
-  bottom: var(--space-2);
+  right: var(--rf-space-2);
+  bottom: var(--rf-space-2);
   justify-content: flex-end;
   max-width: 36%;
 }
@@ -313,13 +384,13 @@
 }
 
 .compact .objectHotspot {
-  width: 50px;
-  height: 50px;
+  width: 40px;
+  height: 40px;
 }
 
 .compact .setupDock,
 .compact .careDock {
-  bottom: var(--space-1);
+  bottom: var(--rf-space-1);
 }
 
 @keyframes buddyWaypointPing {
@@ -331,6 +402,19 @@
   100% {
     opacity: 0;
     transform: translate(-50%, -50%) scale(4.6);
+  }
+}
+
+@keyframes buddyHotspotTwinkle {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: scale(1.08);
   }
 }
 
@@ -419,6 +503,39 @@
   }
 }
 
+@keyframes buddySceneTravelHop {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+
+  30% {
+    transform: translateY(-7px) scaleY(1.04);
+  }
+
+  62% {
+    transform: translateY(-2px) scaleY(0.99);
+  }
+
+  82% {
+    transform: translateY(0) scaleY(0.965);
+  }
+}
+
+@keyframes buddySceneArrive {
+  0% {
+    transform: translateY(-4px) scale(1.04, 0.92);
+  }
+
+  45% {
+    transform: translateY(1px) scale(0.96, 1.05);
+  }
+
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hotspot,
   .objectHotspot,
@@ -427,6 +544,13 @@
   .careDock,
   .sceneButton,
   .sceneButtonGhost {
+    transition-duration: 0.01ms;
+  }
+
+  .hotspot::after,
+  .objectHotspot::after {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
     transition-duration: 0.01ms;
   }
 

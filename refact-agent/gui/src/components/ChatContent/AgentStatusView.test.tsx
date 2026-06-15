@@ -106,6 +106,19 @@ describe("AgentStatusContent", () => {
     });
   });
 
+  it("toggles agent row details with aria-expanded", async () => {
+    const { user } = render(<AgentStatusContent report={parsedReport()} />);
+    const toggle = screen.getByLabelText("Toggle details T-1");
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Last status update")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Last status update")).toBeInTheDocument();
+  });
+
   it("dispatches action commands on button clicks", async () => {
     const onSubmitCommand = vi.fn((command: string): Promise<void> => {
       void command;

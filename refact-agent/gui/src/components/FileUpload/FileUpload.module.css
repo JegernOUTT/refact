@@ -1,0 +1,28 @@
+.label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.checkbox {
+  width: var(--rf-icon-md);
+  height: var(--rf-icon-md);
+  flex-shrink: 0;
+  accent-color: var(--rf-color-accent);
+  cursor: pointer;
+}
+
+.checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

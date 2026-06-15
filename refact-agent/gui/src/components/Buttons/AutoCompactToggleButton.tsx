@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { HoverCard, Text } from "@radix-ui/themes";
-import { ArchiveIcon } from "@radix-ui/react-icons";
-import iconStyles from "./iconButton.module.css";
+import { Archive } from "lucide-react";
+import { IconButton } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectCurrentThreadId,
@@ -46,21 +46,16 @@ export const AutoCompactToggleButton = ({
   return (
     <HoverCard.Root>
       <HoverCard.Trigger>
-        <button
-          type="button"
-          className={iconStyles.iconButton}
-          onClick={handleClick}
-          disabled={disabled}
+        <IconButton
           aria-label={actionLabel}
           aria-pressed={isEnabled}
           data-testid="auto-compact-toggle"
-        >
-          <ArchiveIcon
-            style={
-              isEnabled ? { color: "var(--accent-11)" } : { opacity: 0.45 }
-            }
-          />
-        </button>
+          disabled={disabled}
+          icon={Archive}
+          onClick={handleClick}
+          size="sm"
+          variant={isEnabled ? "primary" : "ghost"}
+        />
       </HoverCard.Trigger>
       <HoverCard.Content size="1" side="top">
         <Text as="p" size="2">

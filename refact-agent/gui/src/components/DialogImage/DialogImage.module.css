@@ -1,0 +1,48 @@
+.trigger {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: zoom-in;
+}
+
+.trigger:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-offset);
+}
+
+.thumbnail {
+  display: block;
+  width: var(--dialog-image-size, 72px);
+  height: var(--dialog-image-size, 72px);
+  object-fit: cover;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.thumbnail:not([src]),
+.thumbnail[src=""] {
+  display: none;
+}
+
+.thumbnail[src]:not([src=""]) + .fallback {
+  display: none;
+}
+
+.fallback {
+  display: inline-flex;
+  width: var(--dialog-image-size, 72px);
+  height: var(--dialog-image-size, 72px);
+  align-items: center;
+  justify-content: center;
+  background: var(--rf-surface-1);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.image {
+  display: block;
+  width: 100%;
+  object-fit: cover;
+  border-radius: var(--rf-radius-card);
+}

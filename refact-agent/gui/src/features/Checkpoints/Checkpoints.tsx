@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Dialog, Flex, Text, Button, RadioGroup } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Dialog, Button, SegmentedControl } from "../../components/ui";
 import { useCheckpoints, useEventsBusForIDE } from "../../hooks";
 import { TruncateLeft } from "../../components/Text";
 import { Link } from "../../components/Link";
@@ -40,73 +41,63 @@ export const Checkpoints = () => {
   } from checkpoint at ${formattedDate}`;
 
   return (
-    <Dialog.Root
+    <Dialog
       open={shouldCheckpointsPopupBeShown}
       onOpenChange={(state) => {
         if (!state) {
           handleUndo();
         }
-        // Don't auto-call handleFix on open - user must click the button
       }}
     >
       <Dialog.Content className={styles.CheckpointsDialog}>
-        <Dialog.Description size="1" color="gray">
+        <Dialog.Description>
           Restores chat and your project&apos;s files back to a snapshot taken
           at this point
         </Dialog.Description>
-        <Dialog.Title as="h2" size="3" mt="4" mb="3">
+        <Dialog.Title>
           {errorLog.length >= 1
             ? "Oops... Something went wrong"
             : checkpointsTitle}
         </Dialog.Title>
-        <ScrollArea scrollbars="vertical" style={{ maxHeight: "300px" }}>
-          <Flex direction="column" gap="2">
+        <ScrollArea scrollbars="vertical" className={styles.fileScroll}>
+          <div className={classNames(styles.fileList, "rf-stagger")}>
             {wereFilesChanged &&
               allChangedFiles.map((file, index) => {
                 const formattedWorkspaceFolder = formatPathName(
                   file.workspace_folder,
                 );
                 return (
-                  <Flex
+                  <div
                     key={`${file.absolute_path}-${index}`}
-                    gap="2"
-                    py="2"
-                    px="2"
-                    justify="between"
-                    align="center"
-                    style={{
-                      backgroundColor: "var(--gray-3)",
-                      borderRadius: "var(--radius-3)",
-                    }}
+                    className={classNames(styles.fileRow, "rf-enter-rise")}
                   >
-                    <Flex align="center" gap="2" width="100%">
-                      <TruncateLeft size="2" style={{ maxWidth: "50%" }}>
+                    <div className={styles.fileInfo}>
+                      <TruncateLeft size="2" className={styles.filePathWrap}>
                         <Link
                           title="Open file"
                           onClick={(event) => {
                             event.preventDefault();
                             openFile({ file_path: file.absolute_path });
                           }}
-                          style={{
-                            textDecoration:
-                              file.status === "DELETED"
-                                ? "line-through"
-                                : undefined,
-                          }}
+                          className={
+                            file.status === "DELETED"
+                              ? styles.deletedLink
+                              : undefined
+                          }
                         >
                           {formatPathName(file.absolute_path)}
                         </Link>
                       </TruncateLeft>
-                      <Text size="2" color="gray" style={{ opacity: 0.65 }}>
+                      <span className={styles.workspaceFolder}>
                         {formattedWorkspaceFolder}
-                      </Text>
+                      </span>
 
                       <CheckpointsStatusIndicator status={file.status} />
-                    </Flex>
-                  </Flex>
+                    </div>
+                  </div>
                 );
               })}
-          </Flex>
+          </div>
         </ScrollArea>
         {errorLog.length > 0 && (
           <ErrorCallout mx="0" preventRetry>
@@ -114,58 +105,46 @@ export const Checkpoints = () => {
           </ErrorCallout>
         )}
 
-        <Flex direction="column" gap="2" mt="4">
-          <Text size="2" weight="medium">
-            Restore options:
-          </Text>
-          <RadioGroup.Root
+        <div className={styles.restoreOptions}>
+          <span className={styles.optionTitle}>Restore options:</span>
+          <SegmentedControl
+            size="sm"
             value={restoreMode}
             onValueChange={(value) => setRestoreMode(value as RestoreMode)}
-          >
-            <Flex direction="column" gap="2">
-              <Text as="label" size="2">
-                <Flex gap="2" align="center">
-                  <RadioGroup.Item value="files_and_messages" />
-                  <span>Restore files and undo messages after this point</span>
-                </Flex>
-              </Text>
-              <Text as="label" size="2">
-                <Flex gap="2" align="center">
-                  <RadioGroup.Item value="files_only" />
-                  <span>Restore files only (keep messages)</span>
-                </Flex>
-              </Text>
-            </Flex>
-          </RadioGroup.Root>
-        </Flex>
+            options={[
+              {
+                value: "files_and_messages",
+                label: "Files + messages",
+              },
+              {
+                value: "files_only",
+                label: "Files only",
+              },
+            ]}
+          />
+        </div>
 
-        <Flex gap="3" mt="4" justify="between" wrap="wrap">
-          <Flex gap="3" wrap="wrap" justify="start">
-            <Button
-              type="button"
-              variant="soft"
-              color="gray"
-              onClick={handleUndo}
-            >
-              Cancel
-            </Button>
-            <Button
-              loading={isRestoring}
-              disabled={errorLog.length > 0}
-              onClick={() => void handleFix(restoreMode)}
-              title={
-                isRestoring
-                  ? "Rolling back..."
-                  : errorLog.length > 0
-                    ? "There are some errors, you cannot roll back to this checkpoint"
-                    : "Roll back to checkpoint"
-              }
-            >
-              Roll back to checkpoint
-            </Button>
-          </Flex>
-        </Flex>
+        <div className={styles.actions}>
+          <Button type="button" variant="soft" onClick={handleUndo}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            loading={isRestoring}
+            disabled={errorLog.length > 0}
+            onClick={() => void handleFix(restoreMode)}
+            title={
+              isRestoring
+                ? "Rolling back..."
+                : errorLog.length > 0
+                  ? "There are some errors, you cannot roll back to this checkpoint"
+                  : "Roll back to checkpoint"
+            }
+          >
+            Roll back to checkpoint
+          </Button>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

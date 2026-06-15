@@ -1,16 +1,22 @@
 .args {
-  color: var(--gray-11);
-  font-family: var(--code-font-family);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
   font-size: inherit;
 }
 
+.section {
+  composes: section from "./ToolCardBody.module.css";
+}
+
+.sectionLabel {
+  composes: sectionLabel from "./ToolCardBody.module.css";
+}
+
 .resultContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
+  composes: resultPanel from "./ToolCardBody.module.css";
 }
 
 .markdownContent {
-  padding: var(--space-2);
-  font-size: var(--font-size-1);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
 }

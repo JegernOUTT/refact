@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import type { EventMessage } from "../../../services/refact/types";
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
-import { eventSubkindIcon } from "./eventSubkind";
+import { eventSubkindIconElement } from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 type EventLogEntryProps = {
@@ -96,17 +96,21 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
   };
 
   return (
-    <Box className={styles.entry} data-testid="event-log-entry">
+    <Box
+      className={styles.entry}
+      data-expanded={expanded}
+      data-testid="event-log-entry"
+    >
       <button
         type="button"
-        className={styles.entryButton}
+        className={`${styles.entryButton} rf-pressable`}
         aria-expanded={expanded}
         aria-controls={jsonId}
         onClick={handleClick}
       >
         <Flex align="center" gap="2" className={styles.entryRow}>
           <Text as="span" className={styles.icon} aria-hidden="true">
-            {eventSubkindIcon(normalizedEvent.subkind)}
+            {eventSubkindIconElement(normalizedEvent.subkind)}
           </Text>
           <Text as="span" size="1" className={styles.timestamp}>
             {timestamp}

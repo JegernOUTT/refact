@@ -22,10 +22,10 @@ Welcome to the Refact.ai project! We’re excited to have you join our community
 * Maintainers will review it
 
 ### 🐛 Report Bugs
-Encountered an issue? Help us improve Refact.ai by reporting bugs in issue section, make sure you label the issue with correct tag [here](https://github.com/smallcloudai/refact-lsp/issues)! 
+Encountered an issue? Help us improve Refact.ai by reporting bugs in issue section, make sure you label the issue with correct tag [here](https://github.com/JegernOUTT/refact/issues)!
 
 ### 📖 Improving Documentation
-Help us make Refact.ai more accessible by contributing to our documentation, make sure you label the issue with correct tag! Create issues [here](https://github.com/smallcloudai/web_docs_refact_ai/issues).
+Help us make Refact.ai more accessible by contributing to our documentation, make sure you label the issue with correct tag! Create issues [here](https://github.com/JegernOUTT/refact/issues).
 
 ### Contributing To Code
 

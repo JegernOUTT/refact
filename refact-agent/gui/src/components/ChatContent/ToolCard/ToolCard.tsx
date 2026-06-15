@@ -1,8 +1,17 @@
 import React from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
 import classNames from "classnames";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import { LoaderCircle } from "lucide-react";
+import { ToolCard as KitToolCard } from "../../ui";
+import { Icon } from "../../ui/Icon";
+import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../useChatScrollAnchor";
 import { ToolCall } from "../../../services/refact/types";
 import styles from "./ToolCard.module.css";
 
@@ -33,60 +42,68 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   animate = true,
   toolCall,
 }) => {
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
+  const { shouldRender } = useDelayedUnmount(
     isOpen,
-    200,
+    COLLAPSE_ANIMATION_MS,
     animate,
   );
+  const shouldRenderBody = isOpen || shouldRender;
+  const handleToggle = React.useCallback(() => {
+    preserveScrollAnchor(onToggle);
+  }, [onToggle, preserveScrollAnchor]);
 
-  const header = (
-    <Flex className={styles.header} align="center" gap="2" onClick={onToggle}>
+  const summaryContent =
+    status === "running" &&
+    (typeof summary === "string" || typeof summary === "number") ? (
+      <span className="rf-text-shimmer">{summary}</span>
+    ) : (
+      summary
+    );
+
+  const title = (
+    <span className={styles.titleRow}>
       <span className={styles.iconWrapper}>
-        {status === "running" ? <Spinner size="1" /> : icon}
+        {status === "running" ? (
+          <Icon className="rf-spin" icon={LoaderCircle} />
+        ) : (
+          icon
+        )}
       </span>
-
-      <Text size="1" className={styles.summary}>
-        {summary}
-      </Text>
-
-      {meta && (
-        <Text size="1" color="gray" className={styles.meta}>
-          {meta}
-        </Text>
-      )}
-    </Flex>
+      <span className={styles.summary}>{summaryContent}</span>
+      {meta && <span className={styles.meta}>{meta}</span>}
+    </span>
   );
 
-  return (
-    <div
+  const card = (
+    <KitToolCard
       className={classNames(
+        "rf-enter",
         styles.card,
         status === "running" && styles.running,
         status === "success" && styles.completed,
         status === "error" && styles.error,
         className,
       )}
+      open={isOpen}
+      onPointerDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onKeyDownCapture={prepareScrollAnchor}
+      onOpenChange={handleToggle}
+      status={status}
+      title={title}
     >
-      {toolCall ? (
-        <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
-      ) : (
-        header
-      )}
+      {shouldRenderBody ? (
+        <div className={styles.content}>{children}</div>
+      ) : null}
+    </KitToolCard>
+  );
 
-      {shouldRender && children && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-            !animate && styles.noTransition,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <div className={styles.content}>{children}</div>
-          </div>
-        </div>
-      )}
-    </div>
+  return toolCall ? (
+    <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
+  ) : (
+    card
   );
 };
 

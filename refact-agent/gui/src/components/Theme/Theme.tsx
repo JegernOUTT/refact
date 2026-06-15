@@ -1,52 +1,33 @@
 import React from "react";
 import { Theme as RadixTheme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
+import "../../styles/tokens.css";
+import "../../styles/glass.css";
+import "../../styles/motion.css";
+import "../../styles/responsive.css";
+import "../../styles/scrollbar.css";
 import "./theme-config.css";
 import "../shared/tokens.css";
 import { useAppearance, useConfig } from "../../hooks";
 
-export type ThemeProps = {
-  children: JSX.Element;
-  appearance?: "inherit" | "light" | "dark";
+export type ThemeProps = React.ComponentPropsWithoutRef<typeof RadixTheme>;
 
-  accentColor?:
-    | "tomato"
-    | "red"
-    | "ruby"
-    | "crimson"
-    | "pink"
-    | "plum"
-    | "purple"
-    | "violet"
-    | "iris"
-    | "indigo"
-    | "blue"
-    | "cyan"
-    | "teal"
-    | "jade"
-    | "green"
-    | "grass"
-    | "brown"
-    | "orange"
-    | "sky"
-    | "mint"
-    | "lime"
-    | "yellow"
-    | "amber"
-    | "gold"
-    | "bronze"
-    | "gray";
+export const Theme = React.forwardRef<HTMLDivElement, ThemeProps>(
+  (props, ref) => {
+    const { host, themeProps } = useConfig();
+    const { appearance } = useAppearance();
 
-  grayColor?: "gray" | "mauve" | "slate" | "sage" | "olive" | "sand" | "auto";
-  panelBackground?: "solid" | "translucent";
-  radius?: "none" | "small" | "medium" | "large" | "full";
-  scaling?: "90%" | "95%" | "100%" | "105%" | "110%";
-  hasBackground?: boolean;
-};
+    return (
+      <RadixTheme
+        {...themeProps}
+        {...props}
+        ref={ref}
+        appearance={appearance}
+        data-host={host}
+        data-appearance={appearance}
+      />
+    );
+  },
+);
 
-export const Theme: React.FC<ThemeProps> = (props) => {
-  const { themeProps } = useConfig();
-  const { appearance } = useAppearance();
-
-  return <RadixTheme {...themeProps} {...props} appearance={appearance} />;
-};
+Theme.displayName = "Theme";

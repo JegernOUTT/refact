@@ -199,7 +199,9 @@ export const ProcessOutputView: React.FC<ProcessOutputViewProps> = ({
             </Flex>
             <Box className={styles.outputBody}>
               {section.rendered ? (
-                <pre className={styles.outputPre}>{section.rendered}</pre>
+                <Box className="scrollX">
+                  <pre className={styles.outputPre}>{section.rendered}</pre>
+                </Box>
               ) : (
                 <Text size="1" color="gray">
                   empty

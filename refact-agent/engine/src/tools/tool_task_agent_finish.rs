@@ -9,9 +9,12 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::chat::verifier::schedule_card_verifier_after_finish;
+use crate::chat::verifier::{schedule_card_verifier_after_finish, ExpectedCardState};
 use crate::tasks::storage;
-use crate::tasks::types::{BoardCard, FinalReport, StatusUpdate, SuggestedCard, VerificationResult};
+use crate::tasks::types::{
+    AbVariantFinish, AbVariantInfo, BoardCard, FinalReport, StatusUpdate, SuggestedCard,
+    VerificationResult,
+};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::types::WorktreeMeta;
 
@@ -64,6 +67,24 @@ fn resolve_agent_worktree(
         })
 }
 
+fn resolve_ab_variant_worktree(
+    thread_worktree: Option<WorktreeMeta>,
+    variant: &AbVariantInfo,
+) -> ResolvedAgentWorktree {
+    if let Some(meta) = thread_worktree {
+        return ResolvedAgentWorktree {
+            root: meta.root,
+            branch: meta.branch,
+            name: Some(meta.id),
+        };
+    }
+    ResolvedAgentWorktree {
+        root: PathBuf::from(&variant.worktree),
+        branch: variant.branch.clone(),
+        name: variant.worktree_name.clone(),
+    }
+}
+
 static FINISH_LOCKS: OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
 fn get_finish_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()>>>> {
@@ -96,6 +117,76 @@ async fn ensure_lock_for<T>(
         }
     }
     result
+}
+
+async fn refresh_finish_heartbeat_if_current(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    finish_chat_id: &str,
+    expected_agent_id: Option<&str>,
+) -> Result<(), String> {
+    let card_id_owned = card_id.to_string();
+    let finish_chat_id_owned = finish_chat_id.to_string();
+    let expected_agent_id_owned = expected_agent_id.map(str::to_string);
+    let heartbeat = Utc::now().to_rfc3339();
+    storage::update_board_atomic(gcx, task_id, move |board| {
+        let card = board
+            .get_card_mut(&card_id_owned)
+            .ok_or_else(|| format!("Card {} not found", card_id_owned))?;
+        if card.column != "doing" {
+            return Err(format!(
+                "Card {} is in '{}' column. Cannot finish from stale agent state.",
+                card_id_owned, card.column
+            ));
+        }
+        if let Some(variants) = card.ab_variants.as_ref() {
+            let variant = if variants.a.chat_id == finish_chat_id_owned {
+                &variants.a
+            } else if variants.b.chat_id == finish_chat_id_owned {
+                &variants.b
+            } else {
+                return Err(format!(
+                    "Card {} has A/B variants {:?} and {:?}, not {}",
+                    card_id_owned, variants.a.chat_id, variants.b.chat_id, finish_chat_id_owned
+                ));
+            };
+            if variant.finish.is_some() {
+                return Err(format!(
+                    "A/B variant {} for card {} has already finished. Cannot finish twice.",
+                    finish_chat_id_owned, card_id_owned
+                ));
+            }
+            if let Some(expected_agent_id) = expected_agent_id_owned.as_deref() {
+                if variant.agent_id != expected_agent_id {
+                    return Err(format!(
+                        "A/B variant {} for card {} belongs to agent {}, not {}",
+                        finish_chat_id_owned, card_id_owned, variant.agent_id, expected_agent_id
+                    ));
+                }
+            }
+            card.last_heartbeat_at = Some(heartbeat.clone());
+            return Ok(());
+        }
+        if card.agent_chat_id.as_deref() != Some(finish_chat_id_owned.as_str()) {
+            return Err(format!(
+                "Card {} is now owned by agent_chat_id={:?}, not {}",
+                card_id_owned, card.agent_chat_id, finish_chat_id_owned
+            ));
+        }
+        if let Some(expected_agent_id) = expected_agent_id_owned.as_deref() {
+            if card.assignee.as_deref() != Some(expected_agent_id) {
+                return Err(format!(
+                    "Card {} is now assigned to {:?}, not {}",
+                    card_id_owned, card.assignee, expected_agent_id
+                ));
+            }
+        }
+        card.last_heartbeat_at = Some(heartbeat.clone());
+        Ok(())
+    })
+    .await
+    .map(|_| ())
 }
 
 fn parse_success_arg(args: &HashMap<String, Value>) -> Result<bool, String> {
@@ -439,9 +530,95 @@ fn mark_finished_card(
     }
 }
 
+fn mark_ab_variant_finished(
+    card: &mut BoardCard,
+    variant_key: &str,
+    finish_chat_id: &str,
+    expected_agent_id: Option<&str>,
+    success: bool,
+    report: &ParsedFinishReport,
+    commit_hash: Option<&str>,
+) -> Result<bool, String> {
+    if card.column != "doing" {
+        return Err(format!(
+            "Card {} is in '{}' column. Cannot finish from stale agent state.",
+            card.id, card.column
+        ));
+    }
+    let variant_label = variant_key.to_ascii_uppercase();
+    let all_finished = {
+        let variants = card
+            .ab_variants
+            .as_mut()
+            .ok_or_else(|| format!("Card {} has no A/B variants", card.id))?;
+        let variant = variants
+            .variant_mut(variant_key)
+            .ok_or_else(|| format!("A/B variant {} not found", variant_key))?;
+        if variant.chat_id != finish_chat_id {
+            return Err(format!(
+                "A/B variant {} for card {} is chat {}, not {}",
+                variant_label, card.id, variant.chat_id, finish_chat_id
+            ));
+        }
+        if variant.finish.is_some() {
+            return Err(format!(
+                "A/B variant {} for card {} has already finished. Cannot finish twice.",
+                finish_chat_id, card.id
+            ));
+        }
+        if let Some(expected_agent_id) = expected_agent_id {
+            if variant.agent_id != expected_agent_id {
+                return Err(format!(
+                    "A/B variant {} for card {} belongs to agent {}, not {}",
+                    finish_chat_id, card.id, variant.agent_id, expected_agent_id
+                ));
+            }
+        }
+        variant.finish = Some(AbVariantFinish {
+            success,
+            final_report: report.markdown.clone(),
+            final_report_structured: report.structured.clone(),
+            completed_at: Utc::now().to_rfc3339(),
+            commit_hash: commit_hash.map(str::to_string),
+        });
+        variants.all_finished()
+    };
+    if let Some(hash) = commit_hash {
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("A/B variant {} auto-committed: {}", variant_label, hash),
+        });
+    }
+    card.status_updates.push(StatusUpdate {
+        timestamp: Utc::now().to_rfc3339(),
+        message: format!(
+            "A/B variant {} {}",
+            variant_label,
+            if success {
+                "completed successfully"
+            } else {
+                "failed"
+            }
+        ),
+    });
+    Ok(all_finished)
+}
+
 fn clear_finished_agent_session(card: &mut BoardCard) {
     card.agent_chat_id = None;
     card.assignee = None;
+}
+
+fn clear_finished_agent_session_if_current(
+    card: &mut BoardCard,
+    expected_state: &ExpectedCardState,
+    board_rev: u64,
+) -> Result<(), String> {
+    if !expected_state.matches_board_card(board_rev, card) {
+        return Err("stale finish cleanup".to_string());
+    }
+    clear_finished_agent_session(card);
+    Ok(())
 }
 
 fn agents_active(cards: &[BoardCard]) -> usize {
@@ -606,7 +783,7 @@ impl Tool for ToolTaskAgentFinish {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let task_id = get_task_id(&ccx).await?;
         let card_id = get_card_id(&ccx).await?;
-        let (planner_chat_id, finish_chat_id) = {
+        let (planner_chat_id, finish_chat_id, finish_agent_id) = {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock
@@ -614,6 +791,10 @@ impl Tool for ToolTaskAgentFinish {
                     .as_ref()
                     .and_then(|meta| meta.planner_chat_id.clone()),
                 ccx_lock.chat_id.clone(),
+                ccx_lock
+                    .task_meta
+                    .as_ref()
+                    .and_then(|meta| meta.agent_id.clone()),
             )
         };
 
@@ -630,12 +811,14 @@ impl Tool for ToolTaskAgentFinish {
 
         ensure_lock_for(&lock_task_id, &lock_card_id, async move {
 
-        let _ = crate::chat::task_agent_monitor::update_card_heartbeat(
-            crate::app_state::AppState::from_gcx(gcx.clone()).await,
+        refresh_finish_heartbeat_if_current(
+            gcx.clone(),
             &task_id,
             &card_id,
+            &finish_chat_id,
+            finish_agent_id.as_deref(),
         )
-        .await;
+        .await?;
 
         let board_pre = storage::load_board(gcx.clone(), &task_id).await?;
         let card_pre = board_pre
@@ -648,7 +831,45 @@ impl Tool for ToolTaskAgentFinish {
             ));
         }
         let thread_worktree = ccx.lock().await.execution_scope_worktree();
-        let resolved_worktree = resolve_agent_worktree(thread_worktree, card_pre);
+        let ab_variant_key = if let Some(variants) = card_pre.ab_variants.as_ref() {
+            let variant_key = variants
+                .variant_key_for_chat_id(&finish_chat_id)
+                .ok_or_else(|| {
+                    format!(
+                        "Card {} has A/B variants {:?} and {:?}, not {}",
+                        card_id, variants.a.chat_id, variants.b.chat_id, finish_chat_id
+                    )
+                })?;
+            let variant = variants
+                .variant(variant_key)
+                .ok_or_else(|| format!("A/B variant {} not found", variant_key))?;
+            if variant.finish.is_some() {
+                return Err(format!(
+                    "A/B variant {} for card {} has already finished. Cannot finish twice.",
+                    finish_chat_id, card_id
+                ));
+            }
+            if let Some(expected_agent_id) = finish_agent_id.as_deref() {
+                if variant.agent_id != expected_agent_id {
+                    return Err(format!(
+                        "A/B variant {} for card {} belongs to agent {}, not {}",
+                        finish_chat_id, card_id, variant.agent_id, expected_agent_id
+                    ));
+                }
+            }
+            Some(variant_key.to_string())
+        } else {
+            None
+        };
+        let resolved_worktree = if let Some(variant_key) = ab_variant_key.as_deref() {
+            let variants = card_pre.ab_variants.as_ref().expect("variant key requires A/B");
+            let variant = variants
+                .variant(variant_key)
+                .ok_or_else(|| format!("A/B variant {} not found", variant_key))?;
+            Some(resolve_ab_variant_worktree(thread_worktree, variant))
+        } else {
+            resolve_agent_worktree(thread_worktree, card_pre)
+        };
         let card_title_for_commit = card_pre.title.clone();
 
         let commit_result = if success {
@@ -677,11 +898,33 @@ impl Tool for ToolTaskAgentFinish {
         let success_clone = success;
         let commit_hash = commit_result.clone();
 
-        let (board, (card_title, all_finished)) =
+        let finish_agent_id_for_update = finish_agent_id.clone();
+        let ab_variant_key_for_update = ab_variant_key.clone();
+        let (board, (card_title, all_finished, verifier_expected_state, finished_ab_variant)) =
             storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                let next_board_rev = board.rev + 1;
                 let card = board
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found in task", card_id_owned))?;
+
+                if let Some(variant_key) = ab_variant_key_for_update.as_deref() {
+                    let card_title = card.title.clone();
+                    let all_finished = mark_ab_variant_finished(
+                        card,
+                        variant_key,
+                        &finish_chat_id,
+                        finish_agent_id_for_update.as_deref(),
+                        success_clone,
+                        &report_clone,
+                        commit_hash.as_deref(),
+                    )?;
+                    return Ok((
+                        card_title,
+                        all_finished,
+                        None,
+                        Some(variant_key.to_string()),
+                    ));
+                }
 
                 if card.column == "done" || card.column == "failed" {
                     return Err(format!(
@@ -690,11 +933,17 @@ impl Tool for ToolTaskAgentFinish {
                     ));
                 }
 
-                if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
-                    if !agent_chat_id.is_empty() && agent_chat_id != finish_chat_id {
+                if card.agent_chat_id.as_deref() != Some(finish_chat_id.as_str()) {
+                    return Err(format!(
+                        "Card {} is now owned by agent_chat_id={:?}, not {}",
+                        card_id_owned, card.agent_chat_id, finish_chat_id
+                    ));
+                }
+                if let Some(expected_agent_id) = finish_agent_id_for_update.as_deref() {
+                    if card.assignee.as_deref() != Some(expected_agent_id) {
                         return Err(format!(
-                            "Card {} is now owned by agent_chat_id={}, not {}",
-                            card_id_owned, agent_chat_id, finish_chat_id
+                            "Card {} is now assigned to {:?}, not {}",
+                            card_id_owned, card.assignee, expected_agent_id
                         ));
                     }
                 }
@@ -702,17 +951,43 @@ impl Tool for ToolTaskAgentFinish {
                 let card_title = card.title.clone();
 
                 mark_finished_card(card, success_clone, &report_clone, commit_hash.as_deref());
+                let verifier_expected_state = ExpectedCardState::from_card(next_board_rev, card);
 
                 let agents_active = agents_active(&board.cards);
                 let all_finished = agents_active == 0;
 
-                Ok((card_title, all_finished))
+                Ok((card_title, all_finished, Some(verifier_expected_state), None))
             })
             .await?;
 
         storage::update_task_stats(gcx.clone(), &task_id).await?;
 
-        let result_message = if success {
+        let result_message = if let Some(variant_key) = finished_ab_variant.as_deref() {
+            let variant_label = variant_key.to_ascii_uppercase();
+            if success {
+                if all_finished {
+                    format!(
+                        "✅ **A/B Variant {} Completed: {}**\n\n**Report:**\n{}\n\nAll A/B variants have finished. Planner notified; use `pick_ab_winner` to promote the selected variant.",
+                        variant_label, card_title, report.markdown
+                    )
+                } else {
+                    format!(
+                        "✅ **A/B Variant {} Completed: {}**\n\n**Report:**\n{}\n\nPlanner notified. The other A/B variant is still running.",
+                        variant_label, card_title, report.markdown
+                    )
+                }
+            } else if all_finished {
+                format!(
+                    "❌ **A/B Variant {} Failed: {}**\n\n**Reason:**\n{}\n\nAll A/B variants have finished. Planner notified; use `pick_ab_winner` to promote the selected variant outcome.",
+                    variant_label, card_title, report.markdown
+                )
+            } else {
+                format!(
+                    "❌ **A/B Variant {} Failed: {}**\n\n**Reason:**\n{}\n\nPlanner notified. The other A/B variant is still running.",
+                    variant_label, card_title, report.markdown
+                )
+            }
+        } else if success {
             if all_finished {
                 format!(
                     "✅ **Card Completed: {}**\n\n**Report:**\n{}\n\nAll agents have completed. Planner notified.",
@@ -763,15 +1038,21 @@ impl Tool for ToolTaskAgentFinish {
         }
 
         if success {
-            schedule_card_verifier_after_finish(gcx.clone(), task_id.clone(), card_id.clone())
+            if let Some(verifier_expected_state) = verifier_expected_state {
+                schedule_card_verifier_after_finish(
+                    gcx.clone(),
+                    task_id.clone(),
+                    card_id.clone(),
+                    verifier_expected_state,
+                )
                 .await;
-        }
-
-        if !success {
+            }
+        } else if let Some(expected_state) = verifier_expected_state {
             let card_id_clear = card_id.clone();
             let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                let board_rev = board.rev;
                 if let Some(c) = board.get_card_mut(&card_id_clear) {
-                    clear_finished_agent_session(c);
+                    clear_finished_agent_session_if_current(c, &expected_state, board_rev)?;
                 }
                 Ok(())
             })
@@ -814,7 +1095,9 @@ impl Tool for ToolTaskAgentFinish {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::types::BoardCard;
+    use crate::tasks::types::{
+        AbVariantInfo, AbVariants, BoardCard, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus,
+    };
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
@@ -871,6 +1154,45 @@ mod tests {
         }
     }
 
+    fn ab_variant(key: &str) -> AbVariantInfo {
+        AbVariantInfo {
+            agent_id: format!("agent-{}", key),
+            chat_id: format!("agent-chat-{}", key),
+            worktree: format!("/tmp/agent-{}", key),
+            worktree_name: Some(format!("worktree-{}", key)),
+            branch: Some(format!("branch-{}", key)),
+            model: Some(format!("model-{}", key)),
+            finish: None,
+        }
+    }
+
+    fn ab_card() -> BoardCard {
+        let mut card = test_card(None);
+        card.assignee = Some("ab".to_string());
+        card.agent_chat_id = None;
+        card.agent_branch = None;
+        card.agent_worktree = None;
+        card.agent_worktree_name = None;
+        card.ab_variants = Some(AbVariants {
+            a: ab_variant("a"),
+            b: ab_variant("b"),
+            winner: None,
+        });
+        card
+    }
+
+    fn parsed_report(summary: &str, success: bool) -> ParsedFinishReport {
+        let structured = FinalReport {
+            summary: summary.to_string(),
+            success,
+            ..Default::default()
+        };
+        ParsedFinishReport {
+            markdown: structured.to_markdown(),
+            structured: Some(structured),
+        }
+    }
+
     fn sample_worktree_meta(temp: &Path) -> WorktreeMeta {
         let root = temp.join("thread-worktree");
         let source = temp.join("source");
@@ -890,6 +1212,48 @@ mod tests {
             agent_id: Some("agent-1".to_string()),
             enforce: true,
         }
+    }
+
+    async fn write_task(
+        root: &Path,
+        gcx: Arc<crate::global_context::GlobalContext>,
+        card: BoardCard,
+    ) {
+        let task_dir = root.join(".refact").join("tasks").join("task-1");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        let now = Utc::now().to_rfc3339();
+        let meta = StoredTaskMeta {
+            schema_version: 1,
+            id: "task-1".to_string(),
+            name: "Task".to_string(),
+            status: TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 1,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 1,
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        };
+        storage::save_task_meta(gcx.clone(), "task-1", &meta)
+            .await
+            .unwrap();
+        storage::save_board(
+            gcx,
+            "task-1",
+            &TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -938,6 +1302,53 @@ mod tests {
         assert_eq!(agents_active(&[card]), 0);
     }
 
+    #[tokio::test]
+    async fn finish_heartbeat_rejects_restarted_card_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card(None);
+        card.assignee = Some("agent-new".to_string());
+        card.agent_chat_id = Some("agent-chat-new".to_string());
+        write_task(temp.path(), gcx.clone(), card).await;
+
+        let error = refresh_finish_heartbeat_if_current(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            "agent-chat-1",
+            Some("agent-1"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("agent-chat-new"), "{error}");
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.last_heartbeat_at.is_none());
+        assert_eq!(card.agent_chat_id.as_deref(), Some("agent-chat-new"));
+    }
+
+    #[tokio::test]
+    async fn finish_heartbeat_accepts_current_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(temp.path(), gcx.clone(), test_card(None)).await;
+
+        refresh_finish_heartbeat_if_current(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            "agent-chat-1",
+            Some("agent-1"),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.last_heartbeat_at.is_some());
+    }
+
     #[test]
     fn spawn_agent_finish_prefers_thread_worktree_over_board_mirror() {
         let temp = tempfile::tempdir().unwrap();
@@ -981,6 +1392,126 @@ mod tests {
         assert_eq!(card.agent_worktree.as_deref(), Some(worktree.as_str()));
         assert_eq!(card.agent_branch, branch);
         assert_eq!(card.agent_worktree_name, name);
+    }
+
+    #[test]
+    fn finish_failure_cleanup_preserves_restarted_owner() {
+        let mut card = test_card(None);
+        let report = ParsedFinishReport {
+            markdown: "agent failed".to_string(),
+            structured: None,
+        };
+        mark_finished_card(&mut card, false, &report, None);
+        let expected = ExpectedCardState::from_card(1, &card);
+        card.column = "doing".to_string();
+        card.assignee = Some("agent-2".to_string());
+        card.agent_chat_id = Some("agent-chat-2".to_string());
+
+        let error = clear_finished_agent_session_if_current(&mut card, &expected, 2).unwrap_err();
+
+        assert_eq!(error, "stale finish cleanup");
+        assert_eq!(card.assignee.as_deref(), Some("agent-2"));
+        assert_eq!(card.agent_chat_id.as_deref(), Some("agent-chat-2"));
+    }
+
+    #[test]
+    fn spawn_ab_first_variant_finish_does_not_terminalize_shared_card() {
+        let mut card = ab_card();
+        let report = parsed_report("variant A done", true);
+
+        let all_finished = mark_ab_variant_finished(
+            &mut card,
+            "a",
+            "agent-chat-a",
+            Some("agent-a"),
+            true,
+            &report,
+            Some("abc123"),
+        )
+        .unwrap();
+
+        assert!(!all_finished);
+        assert_eq!(card.column, "doing");
+        assert!(card.final_report.is_none());
+        assert!(card.final_report_structured.is_none());
+        assert!(card.completed_at.is_none());
+        let variants = card.ab_variants.as_ref().unwrap();
+        let finish = variants.a.finish.as_ref().unwrap();
+        assert!(finish.success);
+        assert_eq!(finish.final_report, report.markdown);
+        assert_eq!(finish.commit_hash.as_deref(), Some("abc123"));
+        assert!(variants.b.finish.is_none());
+    }
+
+    #[test]
+    fn spawn_ab_both_variant_finishes_persist_separately() {
+        let mut card = ab_card();
+        let report_a = parsed_report("variant A done", true);
+        let report_b = parsed_report("variant B failed", false);
+
+        assert!(!mark_ab_variant_finished(
+            &mut card,
+            "a",
+            "agent-chat-a",
+            Some("agent-a"),
+            true,
+            &report_a,
+            None,
+        )
+        .unwrap());
+        assert!(mark_ab_variant_finished(
+            &mut card,
+            "b",
+            "agent-chat-b",
+            Some("agent-b"),
+            false,
+            &report_b,
+            None,
+        )
+        .unwrap());
+
+        assert_eq!(card.column, "doing");
+        assert!(card.final_report.is_none());
+        let variants = card.ab_variants.as_ref().unwrap();
+        assert_eq!(
+            variants.a.finish.as_ref().unwrap().final_report,
+            report_a.markdown
+        );
+        assert_eq!(
+            variants.b.finish.as_ref().unwrap().final_report,
+            report_b.markdown
+        );
+        assert!(variants.a.finish.as_ref().unwrap().success);
+        assert!(!variants.b.finish.as_ref().unwrap().success);
+    }
+
+    #[test]
+    fn spawn_ab_variant_finish_rejects_second_finish() {
+        let mut card = ab_card();
+        let report = parsed_report("variant A done", true);
+
+        mark_ab_variant_finished(
+            &mut card,
+            "a",
+            "agent-chat-a",
+            Some("agent-a"),
+            true,
+            &report,
+            None,
+        )
+        .unwrap();
+        let error = mark_ab_variant_finished(
+            &mut card,
+            "a",
+            "agent-chat-a",
+            Some("agent-a"),
+            true,
+            &report,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("already finished"), "{error}");
     }
 
     #[test]

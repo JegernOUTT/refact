@@ -1,5 +1,4 @@
 import React, { CSSProperties, useEffect, useState, useMemo } from "react";
-import { Code, CodeProps, Box } from "@radix-ui/themes";
 import classNames from "classnames";
 import { PreTag, PreTagProps } from "./Pre";
 import styles from "./Markdown.module.css";
@@ -10,9 +9,7 @@ import { useAppearance } from "../../hooks/useAppearance";
 import { MermaidBlock } from "./MermaidBlock";
 import { SvgBlock } from "./SvgBlock";
 import { ArtifactBlock } from "./ArtifactBlock";
-
-const DIAGRAM_LANGUAGES = new Set(["mermaid", "svg"]);
-const ARTIFACT_LANGUAGES = new Set(["html"]);
+import { ARTIFACT_LANGUAGES, DIAGRAM_LANGUAGES } from "./renderUtils";
 
 export type MarkdownControls = {
   onCopyClick: (str: string) => void;
@@ -26,7 +23,7 @@ export type ShikiCodeBlockProps = React.JSX.IntrinsicElements["code"] & {
     noMargin?: boolean;
     widthMaxContent?: boolean;
   };
-  color?: CodeProps["color"];
+  color?: string;
   showLineNumbers?: boolean;
   isStreaming?: boolean;
 } & Partial<MarkdownControls>;
@@ -54,7 +51,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
   const textWithOutIndent = trimIndent(textWithOutTrailingNewLine);
 
   const isBlock = match !== null || String(children).includes("\n");
-  const language: string = match?.[1] ?? "text";
+  const language: string = (match?.[1] ?? "text").toLowerCase();
   const isDark = appearance === "dark";
 
   const isSpecialBlock =
@@ -119,31 +116,24 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     }
   }
 
-  if (isBlock && ARTIFACT_LANGUAGES.has(language)) {
+  if (isBlock && ARTIFACT_LANGUAGES.has(language) && !isStreaming) {
     const artifactCode = textWithOutIndent ?? String(children);
-    return (
-      <ArtifactBlock
-        code={artifactCode}
-        isStreaming={isStreaming}
-        onCopyClick={onCopyClick}
-      />
-    );
+    return <ArtifactBlock code={artifactCode} onCopyClick={onCopyClick} />;
   }
 
   if (!isBlock) {
     return (
-      <Code
-        variant="ghost"
+      <code
         className={classNames(styles.code, styles.code_inline, className)}
-        color={color}
+        data-color={color}
       >
         {children}
-      </Code>
+      </code>
     );
   }
 
   return (
-    <Box className={styles.shiki_wrapper}>
+    <div className={classNames("scrollX", "rf-enter", styles.shiki_wrapper)}>
       <PreTag
         className={classNames({
           [styles.pre_width_max_content]: preOptions.widthMaxContent,
@@ -189,7 +179,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
           )}
         </div>
       </PreTag>
-    </Box>
+    </div>
   );
 };
 

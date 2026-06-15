@@ -1,44 +1,36 @@
 .url {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 0.95em;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .inlineCode {
-  font-family: var(--code-font-family);
-  color: var(--gray-12);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-muted);
 }
 
 .query {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .resultList {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
-  margin-top: var(--space-1);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
+  composes: resultList from "./ToolCardBody.module.css";
 }
 
 .resultItem {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
-}
-
-.resultItem:last-child {
-  border-bottom: none;
+  composes: resultItem from "./ToolCardBody.module.css";
 }
 
 .resultContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
+  composes: resultPanel from "./ToolCardBody.module.css";
 }
 
 .markdownContent {
   width: 100%;
+  min-width: 0;
+  line-height: var(--rf-line);
 }
 
 .markdownContent :global(p) {

@@ -653,6 +653,7 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
         subchat_temperature: Some(0.9),
         subchat_tokens_for_rag: 0,
         subchat_reasoning_effort: None,
+        subchat_cache_control: crate::llm::params::CacheControl::Ephemeral,
     };
     let model = match crate::subchat::resolve_subchat_model(gcx.gcx.clone(), &params).await {
         Ok(model) => model,

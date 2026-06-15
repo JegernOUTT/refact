@@ -1,0 +1,37 @@
+.skeleton {
+  width: var(--skeleton-width, 100%);
+  height: var(--skeleton-height, var(--rf-control-h));
+  min-width: 0;
+}
+
+.radiusNone {
+  border-radius: 0;
+}
+
+.radiusChip {
+  border-radius: var(--rf-radius-chip);
+}
+
+.radiusControl {
+  border-radius: var(--rf-radius-ctl);
+}
+
+.radiusCard {
+  border-radius: var(--rf-radius-card);
+}
+
+.radiusPill {
+  border-radius: var(--rf-radius-pill);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+}
+
+.textLine {
+  height: var(--rf-text-3);
+}

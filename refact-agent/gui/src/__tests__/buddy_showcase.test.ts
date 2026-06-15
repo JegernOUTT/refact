@@ -1464,3 +1464,214 @@ describe("buddy showcase director", () => {
     expect(current).toBeNull();
   });
 });
+
+describe("buddy flavor showcases", () => {
+  const FIXTURE_TARGETS: BuddyShowcaseTargetCandidate[] = [
+    { id: "home", x: 33, y: 76, label: "home" },
+    { id: "pond", x: 36, y: 82, label: "pond" },
+    { id: "campfire", x: 58, y: 81, label: "campfire" },
+    { id: "meadow", x: 47, y: 80, label: "meadow" },
+    { id: "great_tree", x: 34, y: 78, label: "great tree" },
+  ];
+  const FLAVOR_KINDS = [
+    "rain_shelter_dash",
+    "koi_pond_watch",
+    "campfire_story",
+    "firefly_meadow_chase",
+    "snow_sculpting",
+    "leaf_storm_play",
+    "aurora_dance",
+    "komorebi_nap",
+  ] as const;
+
+  function collectIdleKinds(args: {
+    layers?: readonly string[];
+    season?: "spring" | "summer" | "autumn" | "winter";
+    weather?: "clear" | "aurora" | "rain" | "wind";
+    phase?: "morning" | "day" | "evening" | "night";
+  }): Set<string> {
+    const kinds = new Set<string>();
+    for (let bucket = 0; bucket < 60; bucket += 1) {
+      const choice = chooseBuddyShowcase({
+        targets: [MEMORY_TARGET, OBSERVATORY_TARGET, ...FIXTURE_TARGETS],
+        nowPlaying: null,
+        activeSpeechVisible: false,
+        pet: makePet(),
+        nowMs:
+          BUDDY_SHOWCASE_INITIAL_GRACE_MS +
+          bucket * BUDDY_SHOWCASE_IDLE_COOLDOWN_MS,
+        idleGraceUntilMs: 0,
+        world: {
+          phase: args.phase ?? "night",
+          weather: args.weather ?? "clear",
+          layers: args.layers,
+          season: args.season,
+        },
+        pulse: makePulse(),
+      });
+      if (choice) kinds.add(choice.kind);
+    }
+    return kinds;
+  }
+
+  it("keeps flavor showcases out without world layer context", () => {
+    const kinds = collectIdleKinds({});
+
+    expect(kinds.size).toBeGreaterThan(0);
+    for (const kind of kinds) {
+      expect(["memory_firefly_night", "stargazing_constellation"]).toContain(
+        kind,
+      );
+    }
+  });
+
+  it("opens cozy night flavor showcases when layers are present", () => {
+    const kinds = collectIdleKinds({
+      layers: ["campfire", "pond_life", "fireflies", "aurora"],
+      season: "summer",
+      weather: "aurora",
+    });
+
+    const flavorSeen = [...kinds].filter((kind) =>
+      (FLAVOR_KINDS as readonly string[]).includes(kind),
+    );
+    expect(flavorSeen.length).toBeGreaterThan(0);
+    expect(kinds.has("rain_shelter_dash")).toBe(false);
+    expect(kinds.has("snow_sculpting")).toBe(false);
+    expect(kinds.has("komorebi_nap")).toBe(false);
+  });
+
+  it("offers the rain shelter dash only in rain", () => {
+    const rainy = collectIdleKinds({
+      weather: "rain",
+      phase: "day",
+      season: "spring",
+      layers: [],
+    });
+    const clear = collectIdleKinds({
+      weather: "clear",
+      phase: "day",
+      season: "spring",
+      layers: [],
+    });
+
+    expect(rainy.has("rain_shelter_dash")).toBe(true);
+    expect(clear.has("rain_shelter_dash")).toBe(false);
+  });
+
+  it("offers komorebi naps on warm clear days", () => {
+    const kinds = collectIdleKinds({
+      weather: "clear",
+      phase: "day",
+      season: "summer",
+      layers: [],
+    });
+
+    expect(kinds.has("komorebi_nap")).toBe(true);
+    expect(kinds.has("campfire_story")).toBe(false);
+  });
+
+  it("draws every flavor showcase kind across phases without invalid values", () => {
+    const world = makeWorld();
+    const phases = [
+      "travel",
+      "anticipate",
+      "showcase",
+      "react",
+      "cooldown",
+    ] as const;
+
+    for (const kind of FLAVOR_KINDS) {
+      const target =
+        FIXTURE_TARGETS.find((candidate) =>
+          kind === "rain_shelter_dash"
+            ? candidate.id === "home"
+            : kind === "koi_pond_watch"
+              ? candidate.id === "pond"
+              : kind === "campfire_story"
+                ? candidate.id === "campfire"
+                : kind === "komorebi_nap"
+                  ? candidate.id === "great_tree"
+                  : candidate.id === "meadow",
+        ) ?? FIXTURE_TARGETS[0];
+      for (const phase of phases) {
+        const ctx = makeCanvasContext();
+        drawShowcaseEvent({
+          ctx,
+          run: makeShowcaseRun({
+            kind,
+            phase,
+            target: {
+              id: target.id,
+              x: target.x,
+              y: target.y,
+              label: target.label,
+            },
+          }),
+          world,
+          palette: PALETTES[0],
+          frame: 240,
+          width: 720,
+          height: 260,
+          compact: false,
+          reducedMotion: false,
+          nowMs: 1_500,
+        });
+        expectAlphaWritesClamped(ctx);
+        expectDrawOpsFinite(ctx);
+      }
+    }
+  });
+
+  it("flavor showcase drawing is deterministic for identical args", () => {
+    const world = makeWorld();
+    const args = {
+      run: makeShowcaseRun({
+        kind: "campfire_story" as const,
+        phase: "showcase" as const,
+        target: { id: "campfire", x: 58, y: 81, label: "campfire" },
+      }),
+      world,
+      palette: PALETTES[0],
+      frame: 360,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      nowMs: 4_200,
+    };
+    const firstCtx = makeCanvasContext();
+    const secondCtx = makeCanvasContext();
+
+    drawShowcaseEvent({ ctx: firstCtx, ...args });
+    drawShowcaseEvent({ ctx: secondCtx, ...args });
+
+    expect(secondCtx.drawOps).toEqual(firstCtx.drawOps);
+  });
+
+  it("draws reduced motion flavor showcases with calmer output", () => {
+    const world = makeWorld();
+    const standardCtx = makeCanvasContext();
+    const reducedCtx = makeCanvasContext();
+    const base = {
+      run: makeShowcaseRun({
+        kind: "firefly_meadow_chase" as const,
+        phase: "showcase" as const,
+        target: { id: "meadow", x: 47, y: 80, label: "meadow" },
+      }),
+      world,
+      palette: PALETTES[0],
+      frame: 300,
+      width: 720,
+      height: 260,
+      compact: false,
+      nowMs: 3_600,
+    };
+
+    drawShowcaseEvent({ ctx: standardCtx, ...base, reducedMotion: false });
+    drawShowcaseEvent({ ctx: reducedCtx, ...base, reducedMotion: true });
+
+    expect(reducedCtx.drawOps.length).toBeLessThan(standardCtx.drawOps.length);
+    expectAlphaWritesClamped(reducedCtx);
+  });
+});

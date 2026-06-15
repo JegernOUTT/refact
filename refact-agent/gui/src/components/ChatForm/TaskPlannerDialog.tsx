@@ -1,14 +1,8 @@
 import React, { useCallback, useState } from "react";
-import {
-  Dialog,
-  Flex,
-  Text,
-  Button,
-  Callout,
-  Badge,
-  Spinner,
-} from "@radix-ui/themes";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { LoaderCircle } from "lucide-react";
+import { Dialog, Icon } from "../ui";
+import { Callout } from "../Callout";
 import {
   createChatWithId,
   requestSseRefresh,
@@ -92,6 +86,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   const isLoading = isCreatingTask || isCreatingPlanner || isTransitioning;
 
   const handleApply = useCallback(async () => {
+    if (isLoading) return;
     setError(null);
     const now = new Date().toISOString();
     try {
@@ -122,7 +117,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
         }).unwrap();
         newChatId = result.new_chat_id;
       } else {
-        const result = await createPlannerChat(resolved.id).unwrap();
+        const result = await createPlannerChat({
+          taskId: resolved.id,
+        }).unwrap();
         newChatId = result.chat_id;
       }
 
@@ -177,6 +174,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       setError(extractErrorMessage(err));
     }
   }, [
+    isLoading,
     isInTaskWorkspace,
     taskId,
     pendingTask,
@@ -195,6 +193,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
   const handleOpenChange = useCallback(
     (newOpen: boolean) => {
+      if (!newOpen && isLoading) {
+        return;
+      }
       if (!newOpen) {
         // If the user is closing after a failed attempt with a half-created
         // task, roll it back so we don't leak orphan tasks.
@@ -206,7 +207,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       }
       onOpenChange(newOpen);
     },
-    [onOpenChange, pendingTask, deleteTask],
+    [onOpenChange, pendingTask, deleteTask, isLoading],
   );
 
   const title = isInTaskWorkspace ? "New Planner" : "Switch to Task Planner";
@@ -225,63 +226,60 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       : "Creating planner...";
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content
-        maxWidth="500px"
-        className={styles.dialogContent}
-        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-      >
-        <Dialog.Title>
-          <Flex align="center" gap="2">
-            <Text>{title}</Text>
-            <Badge color="blue">task_planner</Badge>
-          </Flex>
-        </Dialog.Title>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
+        <Flex
+          direction="column"
+          gap="3"
+          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
+        >
+          <Dialog.Title>
+            <Flex align="center" gap="2">
+              <Text>{title}</Text>
+              <Badge color="blue">task_planner</Badge>
+            </Flex>
+          </Dialog.Title>
 
-        <Dialog.Description size="2" color="gray">
-          {description}
-        </Dialog.Description>
+          <Dialog.Description>{description}</Dialog.Description>
 
-        {error && (
-          <Callout.Root color="red" className={styles.callout}>
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{error}</Callout.Text>
-          </Callout.Root>
-        )}
+          {error && (
+            <Callout type="error" preventClose className={styles.callout}>
+              {error}
+            </Callout>
+          )}
 
-        {isLoading && (
-          <Flex
-            align="center"
-            justify="center"
-            gap="2"
-            className={styles.loadingContainer}
-          >
-            <Spinner />
-            <Text color="gray">{loadingLabel}</Text>
-          </Flex>
-        )}
-
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray" disabled={isLoading}>
-              Cancel
-            </Button>
-          </Dialog.Close>
-          <Button onClick={() => void handleApply()} disabled={isLoading}>
-            {isLoading ? (
-              <>
-                <Spinner size="1" />
+          {isLoading && (
+            <Flex
+              align="center"
+              justify="center"
+              gap="2"
+              className={styles.loadingContainer}
+            >
+              <Icon
+                icon={LoaderCircle}
+                size="md"
+                tone="accent"
+                className={styles.spinnerIcon}
+              />
+              <Text color="gray" role="status" aria-live="polite">
                 {loadingLabel}
-              </>
-            ) : (
-              buttonLabel
-            )}
-          </Button>
+              </Text>
+            </Flex>
+          )}
+
+          <Flex gap="3" mt="4" justify="end">
+            <Dialog.Close asChild>
+              <Button variant="soft" color="gray" disabled={isLoading}>
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button onClick={() => void handleApply()} disabled={isLoading}>
+              {isLoading ? loadingLabel : buttonLabel}
+            </Button>
+          </Flex>
         </Flex>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 

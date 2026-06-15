@@ -1,9 +1,13 @@
 .container {
-  border: 1px solid var(--gray-6);
-  border-radius: var(--radius-2);
-  padding: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-3);
 }
 
 .accentLink {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
+}
+
+.accentLink:hover {
+  text-decoration: underline;
 }

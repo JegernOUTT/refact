@@ -1,29 +1,29 @@
 import React, { useCallback, useState } from "react";
 import {
-  Badge,
-  Flex,
-  HoverCard,
-  Text,
-  TextField,
-  Tooltip,
-} from "@radix-ui/themes";
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  GitBranch,
+  Link,
+  Pencil,
+  Repeat,
+  User,
+  Settings,
+  X,
+  Zap,
+} from "lucide-react";
 import {
-  Pencil1Icon,
-  Cross1Icon,
-  CheckIcon,
-  Link2Icon,
-  LoopIcon,
-  BorderSplitIcon,
-  LightningBoltIcon,
-  DotFilledIcon,
-  PersonIcon,
-  GearIcon,
-  ChevronRightIcon,
-  ChevronDownIcon,
-} from "@radix-ui/react-icons";
-import { StatusDot } from "../../../../components/StatusDot";
+  DashboardBadge as Badge,
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardText as Text,
+  DashboardTextField as TextField,
+  DashboardTooltip as Tooltip,
+  dashboardToneFromMode,
+} from "../DashboardPrimitives";
+import { Icon, StatusDot } from "../../../../components/ui";
 import { getStatusFromSessionState } from "../../../../utils/sessionStatus";
-import { getModeColor } from "../../../../utils/modeColors";
 import { DotTrail } from "../DotTrail/DotTrail";
 import type { HistoryTreeNode } from "../../../History/historySlice";
 import type { DashboardBreakpoint } from "../../types";
@@ -59,10 +59,8 @@ function formatRelativeTime(dateStr: string): string {
 type RelationInfo = {
   icon: React.ReactNode;
   label: string;
-  color: string;
+  tone: "muted" | "accent" | "success" | "warning";
 };
-
-const ICON_SIZE = 10;
 
 function compactWorktreeLabel(label: string): string {
   const normalized = label.replace(/[\\/]+$/, "");
@@ -100,12 +98,7 @@ function WorktreeBadge({ node }: { node: HistoryTreeNode }) {
 
   return (
     <Tooltip content={`Worktree: ${fullLabel}`}>
-      <Badge
-        size="1"
-        color="green"
-        variant="soft"
-        className={styles.worktreeBadge}
-      >
+      <Badge tone="success" className={styles.worktreeBadge}>
         <span className={styles.worktreeName}>{label}</span>
         {hasDiffStats(node) && (
           <span className={styles.diffStatsBadge}>
@@ -127,47 +120,47 @@ function getRelationInfo(
   if (node.task_id) {
     return node.task_role === "planner"
       ? {
-          icon: <GearIcon width={ICON_SIZE} height={ICON_SIZE} />,
+          icon: <Icon icon={Settings} size="sm" tone="accent" />,
           label: "Planner",
-          color: "var(--purple-9)",
+          tone: "accent",
         }
       : {
-          icon: <PersonIcon width={ICON_SIZE} height={ICON_SIZE} />,
+          icon: <Icon icon={User} size="sm" tone="accent" />,
           label: "Agent",
-          color: "var(--blue-9)",
+          tone: "accent",
         };
   }
   switch (node.link_type) {
     case "subagent":
       return {
-        icon: <Link2Icon width={ICON_SIZE} height={ICON_SIZE} />,
+        icon: <Icon icon={Link} size="sm" tone="success" />,
         label: "Subagent",
-        color: "var(--green-9)",
+        tone: "success",
       };
     case "handoff":
       return {
-        icon: <LoopIcon width={ICON_SIZE} height={ICON_SIZE} />,
+        icon: <Icon icon={Repeat} size="sm" tone="success" />,
         label: "Handoff",
-        color: "var(--green-9)",
+        tone: "success",
       };
     case "branch":
       return {
-        icon: <BorderSplitIcon width={ICON_SIZE} height={ICON_SIZE} />,
+        icon: <Icon icon={GitBranch} size="sm" tone="warning" />,
         label: "Branched",
-        color: "var(--amber-9)",
+        tone: "warning",
       };
     case "mode_transition":
       return {
-        icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,
+        icon: <Icon icon={Zap} size="sm" tone="warning" />,
         label: "Mode Switch",
-        color: "var(--amber-9)",
+        tone: "warning",
       };
     default:
       if (depth > 0 && !node.link_type && !node.task_id) {
         return {
-          icon: <DotFilledIcon width={ICON_SIZE} height={ICON_SIZE} />,
+          icon: <Icon icon={Circle} size="sm" tone="muted" />,
           label: "Original",
-          color: "var(--gray-9)",
+          tone: "muted",
         };
       }
       return null;
@@ -191,7 +184,7 @@ function ItemHoverContent({
 
       {node.model && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Model:
           </Text>
           <Text size="1">{node.model}</Text>
@@ -200,10 +193,10 @@ function ItemHoverContent({
 
       {node.mode && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Mode:
           </Text>
-          <Badge size="1" color={getModeColor(node.mode)} variant="soft">
+          <Badge size="1" tone={dashboardToneFromMode(node.mode)}>
             {node.mode}
           </Badge>
         </Flex>
@@ -211,10 +204,10 @@ function ItemHoverContent({
 
       {relation && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Type:
           </Text>
-          <Flex align="center" gap="1" style={{ color: relation.color }}>
+          <Flex align="center" gap="1">
             {relation.icon}
             <Text size="1">{relation.label}</Text>
           </Flex>
@@ -223,7 +216,7 @@ function ItemHoverContent({
 
       {label && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Worktree:
           </Text>
           <Text size="1">{label}</Text>
@@ -232,7 +225,7 @@ function ItemHoverContent({
 
       {messageCount > 0 && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Messages:
           </Text>
           <Text size="1">{messageCount}</Text>
@@ -242,16 +235,16 @@ function ItemHoverContent({
       {((node.total_lines_added ?? 0) > 0 ||
         (node.total_lines_removed ?? 0) > 0) && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Changes:
           </Text>
           {(node.total_lines_added ?? 0) > 0 && (
-            <Text size="1" style={{ color: "var(--green-9)" }}>
+            <Text size="1" tone="success">
               +{node.total_lines_added}
             </Text>
           )}
           {(node.total_lines_removed ?? 0) > 0 && (
-            <Text size="1" style={{ color: "var(--red-9)" }}>
+            <Text size="1" tone="danger">
               −{node.total_lines_removed}
             </Text>
           )}
@@ -260,13 +253,13 @@ function ItemHoverContent({
 
       {(node.tasks_total ?? 0) > 0 && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Tasks:
           </Text>
           <Text size="1">
             {node.tasks_done ?? 0}/{node.tasks_total}
             {(node.tasks_failed ?? 0) > 0 && (
-              <Text size="1" color="red">
+              <Text size="1" tone="danger">
                 {" "}
                 ({node.tasks_failed} failed)
               </Text>
@@ -277,14 +270,14 @@ function ItemHoverContent({
 
       {node.session_state && node.session_state !== "idle" && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Status:
           </Text>
           <Text size="1">{node.session_state}</Text>
         </Flex>
       )}
 
-      <Text size="1" color="gray">
+      <Text size="1" tone="muted">
         {new Date(node.createdAt).toLocaleString()}
       </Text>
     </Flex>
@@ -398,7 +391,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
       className={styles.editInput}
     />
   ) : showHover ? (
-    <HoverCard.Root openDelay={400} closeDelay={100}>
+    <HoverCard.Root>
       <HoverCard.Trigger>
         <span className={styles.titleTrigger}>
           <Text size="2" truncate className={styles.title}>
@@ -406,13 +399,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
           </Text>
         </span>
       </HoverCard.Trigger>
-      <HoverCard.Content
-        size="1"
-        side="top"
-        align="center"
-        className={styles.hoverCard}
-        avoidCollisions
-      >
+      <HoverCard.Content className={styles.hoverCard}>
         <ItemHoverContent node={node} relation={relation} />
       </HoverCard.Content>
     </HoverCard.Root>
@@ -426,10 +413,10 @@ export const RecentItem: React.FC<RecentItemProps> = ({
     <div
       role="button"
       tabIndex={0}
-      className={styles.item}
+      className={`${styles.item} rf-enter-rise rf-pressable`}
       style={
         indent > 0
-          ? { paddingLeft: `calc(var(--space-2) + ${indent}px)` }
+          ? { paddingLeft: `calc(var(--rf-space-2) + ${indent}px)` }
           : undefined
       }
       onClick={isEditing ? undefined : onClick}
@@ -445,21 +432,22 @@ export const RecentItem: React.FC<RecentItemProps> = ({
             aria-expanded={isExpanded}
           >
             {isExpanded ? (
-              <ChevronDownIcon width={12} height={12} />
+              <Icon icon={ChevronDown} size="sm" tone="muted" />
             ) : (
-              <ChevronRightIcon width={12} height={12} />
+              <Icon icon={ChevronRight} size="sm" tone="muted" />
             )}
           </button>
         ) : (
           <span className={styles.treeIndent} />
         )}
-        <StatusDot state={statusState} size="small" />
+        <StatusDot
+          status={statusState}
+          size="small"
+          pulse={statusState === "in_progress"}
+        />
         {relation && (
           <Tooltip content={relation.label}>
-            <span
-              className={styles.relationIcon}
-              style={{ color: relation.color }}
-            >
+            <span className={styles.relationIcon} data-tone={relation.tone}>
               {relation.icon}
             </span>
           </Tooltip>
@@ -475,12 +463,12 @@ export const RecentItem: React.FC<RecentItemProps> = ({
           />
         )}
         {breakpoint !== "narrow" && node.mode && (
-          <Badge size="1" color={getModeColor(node.mode)} variant="soft">
+          <Badge size="1" tone={dashboardToneFromMode(node.mode)}>
             {node.mode}
           </Badge>
         )}
         <WorktreeBadge node={node} />
-        <Text size="1" color="gray" className={styles.time}>
+        <Text size="1" tone="muted" className={styles.time}>
           {formatRelativeTime(node.updatedAt)}
         </Text>
         <div className={styles.actions}>
@@ -493,7 +481,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
                   onClick={handleConfirmEdit}
                   aria-label="Save rename"
                 >
-                  <CheckIcon width={12} height={12} />
+                  <Icon icon={Check} size="sm" tone="success" />
                 </button>
               </Tooltip>
               <Tooltip content="Cancel">
@@ -503,7 +491,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
                   onClick={handleCancelEdit}
                   aria-label="Cancel rename"
                 >
-                  <Cross1Icon width={10} height={10} />
+                  <Icon icon={X} size="sm" tone="danger" />
                 </button>
               </Tooltip>
             </>
@@ -517,7 +505,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
                     onClick={handleStartEdit}
                     aria-label="Rename chat"
                   >
-                    <Pencil1Icon width={12} height={12} />
+                    <Icon icon={Pencil} size="sm" tone="muted" />
                   </button>
                 </Tooltip>
               )}
@@ -529,7 +517,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
                     onClick={handleDelete}
                     aria-label="Delete chat"
                   >
-                    <Cross1Icon width={10} height={10} />
+                    <Icon icon={X} size="sm" tone="danger" />
                   </button>
                 </Tooltip>
               )}

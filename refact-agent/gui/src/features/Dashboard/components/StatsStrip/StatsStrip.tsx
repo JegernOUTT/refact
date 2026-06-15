@@ -1,10 +1,20 @@
 import React, { useMemo } from "react";
-import { Badge, Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
+import {
+  DashboardBadge as Badge,
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardSkeleton as Skeleton,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
 import { useGetStatsSummaryQuery } from "../../../../services/refact/stats";
 import { useGetConfiguredProvidersQuery } from "../../../../hooks";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  type ClaudeCodeUsageData,
+  type ClaudeCodeUsageWindow,
+  type OpenAICodexAdditionalRateLimit,
+  type OpenAICodexRateLimit,
 } from "../../../../services/refact/providers";
 import { integrationsApi } from "../../../../services/refact/integrations";
 import { useGetKnowledgeGraphQuery } from "../../../../services/refact/knowledgeGraphApi";
@@ -16,6 +26,19 @@ import { TokenDonut } from "./TokenDonut";
 import { ModelBars } from "./ModelBars";
 import { MiniDonut } from "./MiniDonut";
 import { formatTokenCount } from "../../../StatsDashboard/utils/formatters";
+import {
+  clampPercent,
+  formatClaudeExtraUsage,
+  formatCodexCreditsDetails,
+  formatCodexCreditsSummary,
+  formatCodexSpendControl,
+  formatLimitWindowSeconds,
+  formatQuotaMeta,
+  formatResetAfterSeconds,
+  formatResetAt,
+  formatUsagePercent,
+  formatWindowLabel,
+} from "../../../../utils/providerQuota";
 import type { DashboardBreakpoint } from "../../types";
 import type { ConversationStats } from "../../../StatsDashboard/types";
 import styles from "./StatsStrip.module.css";
@@ -69,33 +92,21 @@ function HoverStat({
   );
 }
 
-function formatResetAt(resetAt: string | null | undefined): string | null {
-  if (!resetAt) return null;
-  const d = new Date(resetAt);
-  if (isNaN(d.getTime())) return null;
-  return `Resets ${d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })}`;
-}
-
 function UsageBar({ pct }: { pct: number }) {
-  const clamped = Math.max(0, Math.min(pct, 100));
+  const clamped = clampPercent(pct);
   const color =
     clamped >= 90
-      ? "var(--red-9)"
+      ? "var(--rf-color-danger)"
       : clamped >= 70
-        ? "var(--orange-9)"
-        : "var(--green-9)";
+        ? "var(--rf-color-warning)"
+        : "var(--rf-color-success)";
   return (
     <div
       style={{
         height: "3px",
         width: "100%",
         borderRadius: "2px",
-        background: "var(--gray-a4)",
+        background: "var(--rf-surface-2)",
         overflow: "hidden",
         marginTop: "3px",
       }}
@@ -117,33 +128,131 @@ function WindowRow({
   label,
   pct,
   resetAt,
+  resetAfterSeconds,
   limitReached,
+  windowSeconds,
 }: {
   label: string;
   pct: number;
   resetAt?: string | null;
+  resetAfterSeconds?: number | null;
   limitReached?: boolean;
+  windowSeconds?: number | null;
 }) {
-  const clamped = Math.max(0, Math.min(pct, 100));
-  const reset = formatResetAt(resetAt);
+  const clamped = clampPercent(pct);
+  const windowText = formatLimitWindowSeconds(windowSeconds);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(clamped),
+    windowText ? `Window ${windowText}` : null,
+    formatResetAfterSeconds(resetAfterSeconds),
+    formatResetAt(resetAt),
+  ]);
   return (
     <div style={{ marginBottom: "6px" }}>
       <Flex justify="between" align="center">
         <Flex align="center" gap="1">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {label}
           </Text>
           {limitReached && (
-            <Badge color="red" size="1">
+            <Badge tone="danger" size="1">
               Limit
             </Badge>
           )}
         </Flex>
-        <Text size="1" color="gray">
-          {Math.round(clamped)}%{reset ? ` · ${reset}` : ""}
+        <Text size="1" tone="muted">
+          {meta}
         </Text>
       </Flex>
       <UsageBar pct={clamped} />
+    </div>
+  );
+}
+
+type ClaudeUsageWindowKey = keyof Pick<
+  ClaudeCodeUsageData,
+  | "five_hour"
+  | "seven_day"
+  | "seven_day_sonnet"
+  | "seven_day_oauth_apps"
+  | "seven_day_opus"
+  | "seven_day_cowork"
+  | "seven_day_omelette"
+>;
+
+const CLAUDE_USAGE_WINDOWS: {
+  key: ClaudeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "five_hour", label: "Current session" },
+  { key: "seven_day", label: "Current week" },
+  { key: "seven_day_sonnet", label: "Sonnet week" },
+  { key: "seven_day_opus", label: "Opus week" },
+  { key: "seven_day_oauth_apps", label: "OAuth apps week" },
+  { key: "seven_day_cowork", label: "Cowork week" },
+  { key: "seven_day_omelette", label: "Omelette week" },
+];
+
+function CodexRateLimitRows({
+  rateLimit,
+  primaryLabel,
+  secondaryLabel,
+}: {
+  rateLimit: OpenAICodexRateLimit;
+  primaryLabel: string;
+  secondaryLabel: string;
+}) {
+  return (
+    <>
+      {rateLimit.primary_window && (
+        <WindowRow
+          label={formatWindowLabel(
+            primaryLabel,
+            rateLimit.primary_window.limit_window_seconds,
+          )}
+          pct={rateLimit.primary_window.used_percent}
+          resetAt={rateLimit.primary_window.reset_at}
+          resetAfterSeconds={rateLimit.primary_window.reset_after_seconds}
+          limitReached={rateLimit.limit_reached}
+          windowSeconds={rateLimit.primary_window.limit_window_seconds}
+        />
+      )}
+      {rateLimit.secondary_window && (
+        <WindowRow
+          label={formatWindowLabel(
+            secondaryLabel,
+            rateLimit.secondary_window.limit_window_seconds,
+          )}
+          pct={rateLimit.secondary_window.used_percent}
+          resetAt={rateLimit.secondary_window.reset_at}
+          resetAfterSeconds={rateLimit.secondary_window.reset_after_seconds}
+          windowSeconds={rateLimit.secondary_window.limit_window_seconds}
+        />
+      )}
+    </>
+  );
+}
+
+function AdditionalRateLimitLine({
+  limit,
+}: {
+  limit: OpenAICodexAdditionalRateLimit;
+}) {
+  return (
+    <div>
+      <Text size="1" tone="muted">
+        {formatQuotaMeta([
+          limit.limit_name ?? "Additional quota",
+          limit.metered_feature ?? null,
+        ])}
+      </Text>
+      {limit.rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={limit.rate_limit}
+          primaryLabel="Primary"
+          secondaryLabel="Secondary"
+        />
+      )}
     </div>
   );
 }
@@ -161,8 +270,12 @@ function ModelRow({
   return (
     <HoverCard.Root openDelay={300} closeDelay={100}>
       <HoverCard.Trigger>
-        <Flex align="center" gap="2" style={{ cursor: "help" }}>
-          <Text size="1" color="gray" style={{ minWidth: 70, flexShrink: 0 }}>
+        <Flex
+          align="center"
+          gap="2"
+          className={`${styles.modelRow} rf-pressable`}
+        >
+          <Text size="1" tone="muted" style={{ minWidth: 70, flexShrink: 0 }}>
             {label}
           </Text>
           <Text size="1" weight="medium" truncate>
@@ -181,7 +294,7 @@ function ModelRow({
           <Text size="2" weight="bold">
             {label}
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {explanation}
           </Text>
           <Text size="1">Current: {model}</Text>
@@ -196,14 +309,14 @@ function DefaultModelsCard() {
   const { data: caps, isLoading } = useGetCapsQuery(undefined);
 
   return (
-    <div className={styles.card}>
+    <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
       <Flex justify="between" align="center" className={styles.cardTitle}>
-        <Text size="1" weight="bold" color="gray">
+        <Text size="1" weight="bold" tone="muted">
           DEFAULT MODELS
         </Text>
         <button
           type="button"
-          className={styles.configureButton}
+          className={`${styles.configureButton} rf-pressable`}
           onClick={() => dispatch(push({ name: "default models" }))}
         >
           <Text size="1">Configure</Text>
@@ -273,7 +386,7 @@ function DefaultModelsCard() {
               explanation="Model for inline code completion."
             />
           )}
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {Object.keys(caps.chat_models).length} chat +{" "}
             {Object.keys(caps.completion_models).length} completion available
           </Text>
@@ -296,7 +409,20 @@ function ClaudeCodeInstanceRow({
   );
   const data = claudeUsage?.data;
   if (!data) return null;
-  if (!data.five_hour && !data.seven_day) return null;
+  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: ClaudeUsageWindowKey;
+      label: string;
+      window: ClaudeCodeUsageWindow;
+    } => Boolean(row.window),
+  );
+  if (windowRows.length === 0 && !data.extra_usage) return null;
 
   return (
     <div className={styles.cardSection}>
@@ -304,31 +430,21 @@ function ClaudeCodeInstanceRow({
         <Text size="1" weight="medium">
           {displayName}
         </Text>
-        <Text size="1" color="gray">
+        <Text size="1" tone="muted">
           ({providerName})
         </Text>
       </Flex>
-      {data.five_hour && (
+      {windowRows.map(({ key, label, window }) => (
         <WindowRow
-          label="Session (5h)"
-          pct={data.five_hour.percent_used}
-          resetAt={data.five_hour.resets_at}
+          key={key}
+          label={label}
+          pct={window.percent_used}
+          resetAt={window.resets_at}
         />
-      )}
-      {data.seven_day && (
-        <WindowRow
-          label="Weekly"
-          pct={data.seven_day.percent_used}
-          resetAt={data.seven_day.resets_at}
-        />
-      )}
+      ))}
       {data.extra_usage && (
-        <Text size="1" color="gray">
-          Extra: {data.extra_usage.is_enabled ? "on" : "off"} · $
-          {data.extra_usage.used_credits.toFixed(2)} spent
-          {typeof data.extra_usage.monthly_limit === "number"
-            ? ` / $${data.extra_usage.monthly_limit.toFixed(0)}`
-            : ""}
+        <Text size="1" tone="muted">
+          Extra: {formatClaudeExtraUsage(data.extra_usage)}
         </Text>
       )}
     </div>
@@ -347,7 +463,9 @@ function OpenAICodexInstanceRow({
     { pollingInterval: 5 * 60_000 },
   );
   const data = codexUsage?.data;
-  if (!data?.rate_limit) return null;
+  if (!data) return null;
+  if (!data.rate_limit && !data.additional_rate_limits?.length && !data.credits)
+    return null;
 
   return (
     <div className={styles.cardSection}>
@@ -355,7 +473,7 @@ function OpenAICodexInstanceRow({
         <Text size="1" weight="medium">
           {displayName}
         </Text>
-        <Text size="1" color="gray">
+        <Text size="1" tone="muted">
           ({providerName})
         </Text>
         {data.plan_type && (
@@ -364,36 +482,39 @@ function OpenAICodexInstanceRow({
           </Badge>
         )}
       </Flex>
-      {data.rate_limit.primary_window && (
-        <WindowRow
-          label="Session (5h)"
-          pct={data.rate_limit.primary_window.used_percent}
-          resetAt={data.rate_limit.primary_window.reset_at}
-          limitReached={data.rate_limit.limit_reached}
+      {data.rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={data.rate_limit}
+          primaryLabel="Main"
+          secondaryLabel="Secondary"
         />
       )}
-      {data.rate_limit.secondary_window && (
-        <WindowRow
-          label="Weekly"
-          pct={data.rate_limit.secondary_window.used_percent}
-          resetAt={data.rate_limit.secondary_window.reset_at}
+      {data.code_review_rate_limit && (
+        <CodexRateLimitRows
+          rateLimit={data.code_review_rate_limit}
+          primaryLabel="Code review"
+          secondaryLabel="Code review secondary"
         />
       )}
-      {data.code_review_rate_limit?.primary_window && (
-        <WindowRow
-          label="Code review"
-          pct={data.code_review_rate_limit.primary_window.used_percent}
-          limitReached={data.code_review_rate_limit.limit_reached}
-        />
-      )}
+      {data.additional_rate_limits
+        ?.slice(0, 2)
+        .map((limit, index) => (
+          <AdditionalRateLimitLine
+            key={`${limit.limit_name ?? "quota"}-${index}`}
+            limit={limit}
+          />
+        ))}
       {data.credits && (
-        <Text size="1" color="gray">
-          Credits:{" "}
-          {data.credits.unlimited
-            ? "unlimited"
-            : data.credits.has_credits
-              ? `${data.credits.balance} remaining`
-              : "none"}
+        <Text size="1" tone="muted">
+          Credits: {formatCodexCreditsSummary(data.credits)}
+          {formatCodexCreditsDetails(data.credits)
+            ? ` · ${formatCodexCreditsDetails(data.credits)}`
+            : ""}
+        </Text>
+      )}
+      {data.spend_control && (
+        <Text size="1" tone="muted">
+          Spend: {formatCodexSpendControl(data.spend_control)}
         </Text>
       )}
     </div>
@@ -441,8 +562,8 @@ function ProviderQuotaCard() {
   );
 
   return (
-    <div className={styles.card}>
-      <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>
+    <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
+      <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
         PROVIDER QUOTAS
       </Text>
       {rows.map((row, idx) => (
@@ -483,7 +604,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
   if (isError) {
     return (
       <div className={styles.compactRow}>
-        <Text size="1" color="red">
+        <Text size="1" tone="danger">
           Failed to load stats
         </Text>
       </div>
@@ -502,15 +623,15 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     }
     return (
       <div className={styles.statsGrid} data-breakpoint={breakpoint}>
-        <div className={styles.card}>
+        <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
           <Skeleton width="100%" height="100px" />
         </div>
         {breakpoint !== "narrow" && (
           <>
-            <div className={styles.card}>
+            <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
               <Skeleton width="100%" height="100px" />
             </div>
-            <div className={styles.card}>
+            <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
               <Skeleton width="100%" height="100px" />
             </div>
           </>
@@ -540,7 +661,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
   if (compact) {
     return (
       <div className={styles.compactRow}>
-        <Text size="1" color="gray">
+        <Text size="1" tone="muted">
           {totals.total_conversations} chats ·{" "}
           {formatTokenCount(totals.total_tokens)} tok · {costStr}
           {totals.total_calls > 0 ? ` · ${successRate}% ok` : ""}
@@ -553,11 +674,11 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     return (
       <div className={styles.narrowStats}>
         <Flex justify="between" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {totals.total_conversations} chats ·{" "}
             {formatTokenCount(totals.total_tokens)} tok
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {costStr}
           </Text>
         </Flex>
@@ -568,7 +689,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
             </Badge>
           )}
           {providerCount > 0 && (
-            <Text size="1" color="gray">
+            <Text size="1" tone="muted">
               {providerCount} active providers
             </Text>
           )}
@@ -588,8 +709,8 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       <DefaultModelsCard />
       <ProviderQuotaCard />
       {/* Card 1: 7-Day Activity */}
-      <div className={styles.card}>
-        <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
+        <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           7-DAY ACTIVITY
         </Text>
 
@@ -600,7 +721,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 <Text size="2" weight="bold">
                   Conversations
                 </Text>
-                <Text size="1" color="gray">
+                <Text size="1" tone="muted">
                   Total unique chat sessions in the last 7 days.
                 </Text>
                 <Text size="1">
@@ -646,7 +767,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 {formatTokenCount(totals.total_cache_creation_tokens)}
               </Text>
               {cacheHitRate > 0 && (
-                <Text size="1" color="gray">
+                <Text size="1" tone="muted">
                   Cache hit rate: {cacheHitRate}% of tokens served from cache.
                 </Text>
               )}
@@ -669,7 +790,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                   <Text size="2" weight="bold">
                     LLM Call Success Rate
                   </Text>
-                  <Text size="1" color="gray">
+                  <Text size="1" tone="muted">
                     Percentage of successful LLM API calls out of all attempts.
                     Failures include network errors, rate limits, and model
                     errors.
@@ -679,7 +800,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                     total calls
                   </Text>
                   {failedCalls > 0 && (
-                    <Text size="1" color="red">
+                    <Text size="1" tone="danger">
                       {failedCalls} failed calls (retries, timeouts, rate
                       limits)
                     </Text>
@@ -699,7 +820,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 <Text size="2" weight="bold">
                   Average Response Time
                 </Text>
-                <Text size="1" color="gray">
+                <Text size="1" tone="muted">
                   Mean duration of LLM API calls, from request to full response.
                   Includes network latency and model inference time.
                 </Text>
@@ -711,8 +832,8 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       </div>
 
       {/* Card 2: Project Pulse */}
-      <div className={styles.card}>
-        <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
+        <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           PROJECT PULSE
         </Text>
 
@@ -723,11 +844,11 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 segments={topModes.map((m, i) => ({
                   value: m.total_calls,
                   color: [
-                    "var(--blue-8)",
-                    "var(--green-8)",
-                    "var(--amber-8)",
-                    "var(--purple-8)",
-                    "var(--red-8)",
+                    "var(--rf-color-accent)",
+                    "var(--rf-color-success)",
+                    "var(--rf-color-warning)",
+                    "var(--rf-color-accent-soft)",
+                    "var(--rf-color-danger)",
                   ][i % 5],
                   label: m.mode,
                 }))}
@@ -739,7 +860,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                   <Text size="2" weight="bold">
                     Agent Modes
                   </Text>
-                  <Text size="1" color="gray">
+                  <Text size="1" tone="muted">
                     Different modes determine which tools and prompts the AI
                     uses. Common modes: Agent (full tools), Explore (read-only),
                     Chat (no tools).
@@ -747,7 +868,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                   {by_mode.map((m) => (
                     <Flex key={m.mode} justify="between" gap="2">
                       <Text size="1">{m.mode}</Text>
-                      <Text size="1" color="gray">
+                      <Text size="1" tone="muted">
                         {m.total_calls} calls
                       </Text>
                     </Flex>
@@ -757,7 +878,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               {topModes.slice(0, 3).map((m) => {
                 const pct = Math.round((m.total_calls / totalModeCalls) * 100);
                 return (
-                  <Text key={m.mode} size="1" color="gray">
+                  <Text key={m.mode} size="1" tone="muted">
                     {m.mode} {pct}%
                   </Text>
                 );
@@ -775,11 +896,11 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 segments={by_model.slice(0, 5).map((m, i) => ({
                   value: m.total_tokens,
                   color: [
-                    "var(--blue-8)",
-                    "var(--green-8)",
-                    "var(--amber-8)",
-                    "var(--purple-8)",
-                    "var(--red-8)",
+                    "var(--rf-color-accent)",
+                    "var(--rf-color-success)",
+                    "var(--rf-color-warning)",
+                    "var(--rf-color-accent-soft)",
+                    "var(--rf-color-danger)",
                   ][i % 5],
                   label: m.model.split("/").pop() ?? m.model,
                 }))}
@@ -791,7 +912,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                   <Text size="2" weight="bold">
                     Model Usage
                   </Text>
-                  <Text size="1" color="gray">
+                  <Text size="1" tone="muted">
                     Token usage across different LLM models in the last 7 days.
                   </Text>
                   {by_model.slice(0, 5).map((m) => (
@@ -799,7 +920,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                       <Text size="1" truncate>
                         {m.model.split("/").pop() ?? m.model}
                       </Text>
-                      <Text size="1" color="gray">
+                      <Text size="1" tone="muted">
                         {formatTokenCount(m.total_tokens)} tok
                       </Text>
                     </Flex>
@@ -819,17 +940,17 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               segments={[
                 {
                   value: providerCount,
-                  color: "var(--blue-8)",
+                  color: "var(--rf-color-accent)",
                   label: "Providers",
                 },
                 {
                   value: integrationCount,
-                  color: "var(--green-8)",
+                  color: "var(--rf-color-success)",
                   label: "Integrations",
                 },
                 {
                   value: memoryCount,
-                  color: "var(--amber-8)",
+                  color: "var(--rf-color-warning)",
                   label: "Memories",
                 },
               ]}
@@ -841,7 +962,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                     <Text size="2" weight="bold">
                       LLM Providers
                     </Text>
-                    <Text size="1" color="gray">
+                    <Text size="1" tone="muted">
                       Enabled LLM providers (e.g. OpenAI, Anthropic, local
                       models).
                     </Text>
@@ -859,7 +980,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                     <Text size="2" weight="bold">
                       Integrations
                     </Text>
-                    <Text size="1" color="gray">
+                    <Text size="1" tone="muted">
                       Connected tools and services: GitHub, Docker, databases,
                       MCP servers, etc.
                     </Text>
@@ -872,7 +993,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                     <Text size="2" weight="bold">
                       Knowledge Memories
                     </Text>
-                    <Text size="1" color="gray">
+                    <Text size="1" tone="muted">
                       Persistent knowledge entries the AI remembers across
                       sessions. Includes project patterns, decisions, and
                       learned preferences.
@@ -886,8 +1007,8 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       </div>
 
       {/* Card 3: Spending */}
-      <div className={styles.card}>
-        <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
+        <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           SPENDING
         </Text>
 
@@ -900,7 +1021,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               {totals.total_cost_usd != null && totals.total_cost_usd > 0 && (
                 <Text size="1">USD: ${totals.total_cost_usd.toFixed(4)}</Text>
               )}
-              <Text size="1" color="gray">
+              <Text size="1" tone="muted">
                 Cost is calculated per LLM API call based on token usage. Not
                 all conversations may have tracked cost data.
               </Text>
@@ -915,7 +1036,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               <Text size="2" weight="bold">
                 Daily Spend Rate
               </Text>
-              <Text size="1" color="gray">
+              <Text size="1" tone="muted">
                 Average daily cost over the last 7 days. Actual daily spend
                 varies based on usage patterns.
               </Text>
@@ -927,7 +1048,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
 
         {top_conversations.length > 0 && (
           <div className={styles.cardSection}>
-            <Text size="1" color="gray">
+            <Text size="1" tone="muted">
               Top spenders:
             </Text>
             {top_conversations.slice(0, 3).map((conv: ConversationStats) => {
@@ -944,7 +1065,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                   <Text size="1" truncate style={{ flex: 1, minWidth: 0 }}>
                     {shortModel}
                   </Text>
-                  <Text size="1" color="gray" style={{ flexShrink: 0 }}>
+                  <Text size="1" tone="muted" style={{ flexShrink: 0 }}>
                     {formatTokenCount(conv.total_tokens)} tok · {convCost}
                   </Text>
                 </Flex>
@@ -965,7 +1086,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               <Text size="2" weight="bold">
                 Prompt Tokens
               </Text>
-              <Text size="1" color="gray">
+              <Text size="1" tone="muted">
                 Tokens sent to the LLM (system prompt + conversation context +
                 tool results). This is typically the largest cost component.
               </Text>
@@ -980,7 +1101,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
               <Text size="2" weight="bold">
                 Completion Tokens
               </Text>
-              <Text size="1" color="gray">
+              <Text size="1" tone="muted">
                 Tokens generated by the LLM (responses, tool calls, reasoning).
                 Usually 3-5x more expensive per token than prompt tokens.
               </Text>
@@ -992,7 +1113,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
                 <Text size="2" weight="bold">
                   Cache Efficiency
                 </Text>
-                <Text size="1" color="gray">
+                <Text size="1" tone="muted">
                   Percentage of tokens served from provider cache (Anthropic
                   prompt caching, etc.). Cached tokens are significantly cheaper
                   than fresh computation.

@@ -1,9 +1,10 @@
 import React, { useMemo } from "react";
-import { Flex, Text, Slider, Switch } from "@radix-ui/themes";
-import { Cross1Icon } from "@radix-ui/react-icons";
+import { RotateCcw } from "lucide-react";
+
+import { IconButton, FieldSlider, FieldSwitch, SegmentedControl } from "../ui";
 import { useGetCapsQuery } from "../../services/refact/caps";
-import { ReasoningIcon } from "../../features/Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
 import type { ModelType } from "../../services/refact";
+import { ReasoningIcon } from "../../features/Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
 import styles from "./ModelSamplingParams.module.css";
 
 export type SamplingValues = {
@@ -40,21 +41,11 @@ function formatTokens(tokens: number): string {
   return `${Math.round(tokens / 1000)}K`;
 }
 
-function completionDefaults(nCtx: number | undefined): SamplingModelDetail {
-  const contextWindow = nCtx ?? 16384;
-  const maxTokens = Math.max(1024, Math.min(contextWindow, 16384));
-  return {
-    default_max_tokens: maxTokens,
-    max_output_tokens: maxTokens,
-  };
-}
-
 export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
   model,
   values,
   onChange,
   disabled = false,
-  size = "1",
   capability = "chat",
 }) => {
   const { data: capsData } = useGetCapsQuery(undefined);
@@ -67,9 +58,13 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
       const completionModel = Object.entries(capsData.completion_models).find(
         ([name]) => name === model,
       )?.[1];
-      return completionDefaults(
-        completionModel?.n_ctx ?? capsData.code_completion_n_ctx,
-      );
+      const contextWindow =
+        completionModel?.n_ctx ?? capsData.code_completion_n_ctx;
+      const maxTokens = Math.max(1024, Math.min(contextWindow, 16384));
+      return {
+        default_max_tokens: maxTokens,
+        max_output_tokens: maxTokens,
+      };
     }
 
     return (
@@ -84,14 +79,7 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
   }
 
   const defaultMaxTokens = modelDetail?.default_max_tokens ?? 4096;
-  const maxOutputTokens = Math.max(
-    1024,
-    modelDetail?.max_output_tokens ?? defaultMaxTokens,
-  );
-  const sliderValue = Math.min(
-    values.max_new_tokens ?? defaultMaxTokens,
-    maxOutputTokens,
-  );
+  const maxOutputTokens = modelDetail?.max_output_tokens ?? 16384;
   const reasoningEffortOptions = modelDetail?.reasoning_effort_options;
   const supportsThinkingBudget = modelDetail?.supports_thinking_budget ?? false;
   const supportsReasoning =
@@ -100,22 +88,17 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
       supportsThinkingBudget);
 
   return (
-    <div className={styles.container}>
-      {supportsReasoning && (
-        <div className={styles.reasoningSection}>
-          <Flex align="center" justify="between" gap="3">
-            <Flex align="center" gap="1">
-              <Text size={size}>
-                <ReasoningIcon />
-              </Text>
-              <Text size={size} weight="medium">
-                Reasoning
-              </Text>
-            </Flex>
-            <Switch
-              size="1"
+    <div className={`${styles.container} rf-stagger`}>
+      {supportsReasoning ? (
+        <div className={`${styles.reasoningSection} rf-enter`}>
+          <div className={styles.reasoningHeader}>
+            <span className={styles.labelGroup}>
+              <ReasoningIcon />
+              Reasoning
+            </span>
+            <FieldSwitch
               checked={values.boost_reasoning ?? false}
-              onCheckedChange={(checked) => {
+              onChange={(checked) => {
                 onChange("boost_reasoning", checked || undefined);
                 if (!checked) {
                   onChange("reasoning_effort", undefined);
@@ -124,110 +107,101 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
               }}
               disabled={disabled}
             />
-          </Flex>
+          </div>
 
-          {values.boost_reasoning && (
-            <>
-              {reasoningEffortOptions != null &&
-                reasoningEffortOptions.length > 0 && (
-                  <div className={styles.effortRow}>
-                    <Text size={size} color="gray">
-                      Effort
-                    </Text>
-                    <div className={styles.effortButtons}>
-                      {reasoningEffortOptions.map((level) => (
-                        <button
-                          key={level}
-                          type="button"
-                          className={`${styles.effortButton} ${
-                            (values.reasoning_effort ?? "medium") === level
-                              ? styles.effortButtonActive
-                              : ""
-                          }`}
-                          onClick={() => onChange("reasoning_effort", level)}
-                          disabled={disabled}
-                        >
-                          <Text size={size}>{level}</Text>
-                        </button>
-                      ))}
+          <div
+            className="rf-expand-grid"
+            data-open={values.boost_reasoning ? true : undefined}
+          >
+            <div>
+              {values.boost_reasoning ? (
+                <div className={styles.reasoningSection}>
+                  {reasoningEffortOptions != null &&
+                  reasoningEffortOptions.length > 0 ? (
+                    <div className={styles.effortRow}>
+                      <span className={styles.label}>Effort</span>
+                      <SegmentedControl
+                        className={styles.segmented}
+                        size="sm"
+                        value={values.reasoning_effort ?? "medium"}
+                        onValueChange={(level) =>
+                          onChange("reasoning_effort", level)
+                        }
+                        options={reasoningEffortOptions.map((level) => ({
+                          value: level,
+                          label: level,
+                          disabled,
+                        }))}
+                      />
                     </div>
-                  </div>
-                )}
+                  ) : null}
 
-              {supportsThinkingBudget && (
-                <div className={styles.sliderRow}>
-                  <div className={styles.sliderHeader}>
-                    <Text size={size} color="gray">
-                      Thinking tokens
-                    </Text>
-                    <Text size={size} weight="medium">
-                      {values.thinking_budget ?? 16384}
-                    </Text>
-                  </div>
-                  <div className={styles.sliderTrack}>
-                    <Text size="1" color="gray">
-                      1K
-                    </Text>
-                    <Slider
-                      size="1"
-                      min={1024}
-                      max={32768}
-                      step={1024}
-                      value={[values.thinking_budget ?? 16384]}
-                      onValueChange={(v) => onChange("thinking_budget", v[0])}
-                      disabled={disabled}
-                      className={styles.slider}
-                    />
-                    <Text size="1" color="gray">
-                      32K
-                    </Text>
-                  </div>
+                  {supportsThinkingBudget ? (
+                    <div className={styles.sliderRow}>
+                      <div className={styles.sliderHeader}>
+                        <span className={styles.label}>Thinking tokens</span>
+                        <span className={styles.value}>
+                          {values.thinking_budget ?? 16384}
+                        </span>
+                      </div>
+                      <div className={styles.sliderTrack}>
+                        <span className={styles.boundary}>1K</span>
+                        <FieldSlider
+                          className={styles.slider}
+                          min={1024}
+                          max={32768}
+                          step={1024}
+                          value={[values.thinking_budget ?? 16384]}
+                          onChange={(v) => onChange("thinking_budget", v[0])}
+                          disabled={disabled}
+                          aria-label="Thinking tokens"
+                        />
+                        <span className={styles.boundary}>32K</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              )}
-            </>
-          )}
+              ) : null}
+            </div>
+          </div>
         </div>
-      )}
+      ) : null}
 
-      <div className={styles.sliderRow}>
+      <div className={`${styles.sliderRow} rf-enter`}>
         <div className={styles.sliderHeader}>
-          <Text size={size} color="gray">
-            Max tokens
-          </Text>
-          <Flex align="center" gap="2">
-            <Text size={size} weight="medium">
+          <span className={styles.label}>Max tokens</span>
+          <span className={styles.valueGroup}>
+            <span className={styles.value}>
               {values.max_new_tokens ?? `${defaultMaxTokens} (default)`}
-            </Text>
-            {values.max_new_tokens != null && (
-              <button
-                type="button"
+            </span>
+            {values.max_new_tokens != null ? (
+              <IconButton
                 className={styles.resetButton}
+                icon={RotateCcw}
+                size="sm"
+                variant="plain"
                 onClick={() => onChange("max_new_tokens", undefined)}
                 disabled={disabled}
                 aria-label="Reset max tokens"
-              >
-                <Cross1Icon />
-              </button>
-            )}
-          </Flex>
+              />
+            ) : null}
+          </span>
         </div>
         <div className={styles.sliderTrack}>
-          <Text size="1" color="gray">
-            1K
-          </Text>
-          <Slider
-            size="1"
+          <span className={styles.boundary}>1K</span>
+          <FieldSlider
+            className={styles.slider}
             min={1024}
             max={maxOutputTokens}
             step={1024}
-            value={[sliderValue]}
-            onValueChange={(v) => onChange("max_new_tokens", v[0])}
+            value={[values.max_new_tokens ?? defaultMaxTokens]}
+            onChange={(v) => onChange("max_new_tokens", v[0])}
             disabled={disabled}
-            className={styles.slider}
+            aria-label="Max tokens"
           />
-          <Text size="1" color="gray">
+          <span className={styles.boundary}>
             {formatTokens(maxOutputTokens)}
-          </Text>
+          </span>
         </div>
       </div>
     </div>

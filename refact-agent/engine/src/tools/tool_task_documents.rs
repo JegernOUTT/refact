@@ -412,6 +412,10 @@ async fn replace_document_content_at(
     validate_slug(slug)?;
     let path = document_path(documents_dir, slug);
     let mut document = read_document(&path).await?;
+    let pinned_changed = pinned.is_some_and(|pinned| pinned != document.frontmatter.pinned);
+    if document.content == content && !pinned_changed {
+        return Ok(document);
+    }
     snapshot_existing(documents_dir, slug).await?;
     document.content = content;
     if let Some(pinned) = pinned {
@@ -763,7 +767,7 @@ pub async fn create_task_document_for_api(
     task_id: &str,
     request: CreateDocumentRequest,
 ) -> Result<TaskDocumentDetail, String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
+    let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
     let document = create_document_at(
         &documents_dir,
         &request.slug,
@@ -775,7 +779,9 @@ pub async fn create_task_document_for_api(
         "user",
     )
     .await?;
-    Ok(document_to_detail(document))
+    let detail = document_to_detail(document);
+    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
+    Ok(detail)
 }
 
 pub async fn update_task_document_for_api(
@@ -783,13 +789,16 @@ pub async fn update_task_document_for_api(
     task_id: &str,
     slug: &str,
     content: String,
+    pinned: Option<bool>,
 ) -> Result<TaskDocumentDetail, String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
+    let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
     if !document_path(&documents_dir, slug).exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
-    let document = update_document_at(&documents_dir, slug, &content).await?;
-    Ok(document_to_detail(document))
+    let document = replace_document_content_at(&documents_dir, slug, content, pinned).await?;
+    let detail = document_to_detail(document);
+    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
+    Ok(detail)
 }
 
 pub async fn append_task_document_for_api(
@@ -798,12 +807,14 @@ pub async fn append_task_document_for_api(
     slug: &str,
     section: String,
 ) -> Result<TaskDocumentDetail, String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
+    let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
     if !document_path(&documents_dir, slug).exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
     let document = append_document_at(&documents_dir, slug, &section).await?;
-    Ok(document_to_detail(document))
+    let detail = document_to_detail(document);
+    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
+    Ok(detail)
 }
 
 pub async fn delete_task_document_for_api(
@@ -811,8 +822,9 @@ pub async fn delete_task_document_for_api(
     task_id: &str,
     slug: &str,
 ) -> Result<(), String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
+    let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
     delete_document_at(&documents_dir, slug).await?;
+    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(slug)).await;
     Ok(())
 }
 
@@ -822,12 +834,14 @@ pub async fn pin_task_document_for_api(
     slug: &str,
     pinned: bool,
 ) -> Result<TaskDocumentDetail, String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
+    let documents_dir = documents_dir_for_task(gcx.clone(), task_id).await?;
     if !document_path(&documents_dir, slug).exists() {
         return Err(format!("document `{}` does not exist", slug));
     }
     let document = pin_document_at(&documents_dir, slug, pinned).await?;
-    Ok(document_to_detail(document))
+    let detail = document_to_detail(document);
+    crate::tasks::events::emit_task_document_changed(gcx, task_id, Some(&detail.slug)).await;
+    Ok(detail)
 }
 
 pub async fn history_task_document_for_api(
@@ -976,7 +990,7 @@ impl Tool for ToolDocCreate {
         let content = string_arg(args, "content")?;
         let pinned = optional_bool_arg(args, "pinned")?.unwrap_or(true);
         let relevant_cards = optional_cards_arg(args, "relevant_cards")?;
-        let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
+        let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
         let document = create_document_at(
             &documents_dir,
             &slug,
@@ -988,6 +1002,12 @@ impl Tool for ToolDocCreate {
             &author_role,
         )
         .await?;
+        crate::tasks::events::emit_task_document_changed(
+            gcx,
+            &task_id,
+            Some(&document.frontmatter.slug),
+        )
+        .await;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1048,8 +1068,14 @@ impl Tool for ToolDocUpdate {
         let (gcx, task_id, _) = task_context(&ccx, args).await?;
         let slug = string_arg(args, "slug")?;
         let content = string_arg(args, "content")?;
-        let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
+        let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
         let document = update_document_at(&documents_dir, &slug, &content).await?;
+        crate::tasks::events::emit_task_document_changed(
+            gcx,
+            &task_id,
+            Some(&document.frontmatter.slug),
+        )
+        .await;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1090,8 +1116,14 @@ impl Tool for ToolDocAppend {
         let (gcx, task_id, _) = task_context(&ccx, args).await?;
         let slug = string_arg(args, "slug")?;
         let section = string_arg(args, "section")?;
-        let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
+        let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
         let document = append_document_at(&documents_dir, &slug, &section).await?;
+        crate::tasks::events::emit_task_document_changed(
+            gcx,
+            &task_id,
+            Some(&document.frontmatter.slug),
+        )
+        .await;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1130,8 +1162,9 @@ impl Tool for ToolDocDelete {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, task_id, _) = task_context(&ccx, args).await?;
         let slug = string_arg(args, "slug")?;
-        let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
+        let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
         let deleted_path = delete_document_at(&documents_dir, &slug).await?;
+        crate::tasks::events::emit_task_document_changed(gcx, &task_id, Some(&slug)).await;
         Ok((
             false,
             tool_message(
@@ -1179,8 +1212,14 @@ impl Tool for ToolDocPin {
         let slug = string_arg(args, "slug")?;
         let pinned = optional_bool_arg(args, "pinned")?
             .ok_or_else(|| "argument `pinned` is required".to_string())?;
-        let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
+        let documents_dir = documents_dir_for_task(gcx.clone(), &task_id).await?;
         let document = pin_document_at(&documents_dir, &slug, pinned).await?;
+        crate::tasks::events::emit_task_document_changed(
+            gcx,
+            &task_id,
+            Some(&document.frontmatter.slug),
+        )
+        .await;
         Ok((
             false,
             tool_message(tool_call_id, format_document(&document)),
@@ -1643,7 +1682,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let updated = update_task_document_for_api(gcx.clone(), tid, "upd", "v2".to_string())
+        let updated = update_task_document_for_api(gcx.clone(), tid, "upd", "v2".to_string(), None)
             .await
             .unwrap();
         assert_eq!(updated.version, 2);
@@ -1653,6 +1692,61 @@ mod tests {
             .unwrap();
         assert!(!hist.history.is_empty());
         assert_eq!(hist.history[0].version, 1);
+    }
+
+    #[tokio::test]
+    async fn update_task_document_for_api_updates_content_and_pin_in_one_version() {
+        let (_temp, gcx) = setup_task_gcx("task-docs-update-pin").await;
+        let tid = "task-docs-update-pin";
+        create_task_document_for_api(
+            gcx.clone(),
+            tid,
+            CreateDocumentRequest {
+                slug: "combined".to_string(),
+                name: "Combined".to_string(),
+                kind: "plan".to_string(),
+                content: "v1".to_string(),
+                pinned: Some(true),
+                relevant_cards: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = update_task_document_for_api(
+            gcx.clone(),
+            tid,
+            "combined",
+            "v2".to_string(),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.content, "v2");
+        assert!(!updated.pinned);
+        let hist = history_task_document_for_api(gcx.clone(), tid, "combined")
+            .await
+            .unwrap();
+        assert_eq!(hist.history.len(), 1);
+        assert_eq!(hist.history[0].version, 1);
+
+        let unchanged = update_task_document_for_api(
+            gcx.clone(),
+            tid,
+            "combined",
+            "v2".to_string(),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(unchanged.version, 2);
+        let hist = history_task_document_for_api(gcx, tid, "combined")
+            .await
+            .unwrap();
+        assert_eq!(hist.history.len(), 1);
     }
 
     #[tokio::test]
@@ -1677,10 +1771,18 @@ mod tests {
             .await
             .unwrap();
         assert!(!unpinned.pinned);
-        let repinned = pin_task_document_for_api(gcx, tid, "pin-doc", true)
+        assert_eq!(unpinned.version, 2);
+        let repinned = pin_task_document_for_api(gcx.clone(), tid, "pin-doc", true)
             .await
             .unwrap();
         assert!(repinned.pinned);
+        assert_eq!(repinned.version, 3);
+        let history = history_task_document_for_api(gcx, tid, "pin-doc")
+            .await
+            .unwrap();
+        assert_eq!(history.history.len(), 2);
+        assert_eq!(history.history[0].version, 1);
+        assert_eq!(history.history[1].version, 2);
     }
 
     #[tokio::test]
@@ -1726,10 +1828,10 @@ mod tests {
         )
         .await
         .unwrap();
-        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v2".to_string())
+        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v2".to_string(), None)
             .await
             .unwrap();
-        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v3".to_string())
+        update_task_document_for_api(gcx.clone(), tid, "hist-doc", "v3".to_string(), None)
             .await
             .unwrap();
         let hist = history_task_document_for_api(gcx, tid, "hist-doc")

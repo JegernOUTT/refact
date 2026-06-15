@@ -1,5 +1,8 @@
 import React from "react";
-import { Badge, Text } from "@radix-ui/themes";
+import {
+  DashboardBadge as Badge,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
 import { StatusDot } from "../../../../components/StatusDot";
 import { getStatusFromSessionState } from "../../../../utils/sessionStatus";
 import { getModeColor } from "../../../../utils/modeColors";
@@ -30,7 +33,7 @@ export const OpenTabCard: React.FC<OpenTabCardProps> = ({
   return (
     <button
       type="button"
-      className={styles.card}
+      className={`${styles.card} rf-glass-panel rf-enter-rise rf-pressable`}
       data-active={isActive || undefined}
       onClick={onClick}
     >

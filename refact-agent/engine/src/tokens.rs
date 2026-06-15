@@ -12,6 +12,7 @@ use crate::custom_error::MapErrToString;
 use crate::files_correction::canonical_path;
 use crate::global_context::GlobalContext;
 use crate::caps::{default_hf_tokenizer_template, strip_model_from_finetune, BaseModelRecord};
+use refact_core::model_caps::is_predefined_cloud_tokenizer;
 
 async fn try_open_tokenizer(res: Response, to: impl AsRef<Path>) -> Result<(), String> {
     let mut file = tokio::fs::OpenOptions::new()
@@ -69,6 +70,10 @@ fn check_json_file(path: &Path) -> bool {
         Ok(_) => true,
         Err(_) => false,
     }
+}
+
+fn tokenizer_load_is_disabled(tokenizer: &str) -> bool {
+    tokenizer.starts_with("fake") || is_predefined_cloud_tokenizer(tokenizer)
 }
 
 async fn try_download_tokenizer_file_and_open(
@@ -176,7 +181,7 @@ pub async fn cached_tokenizer(
                 "failed to load tokenizer: empty tokenizer for {model_id}"
             ))
         }
-        fake_tok if fake_tok.starts_with("fake") => return Ok(None),
+        disabled_tok if tokenizer_load_is_disabled(disabled_tok) => return Ok(None),
         hf_tok if hf_tok.starts_with("hf://") => {
             let hf_model = hf_tok.strip_prefix("hf://").unwrap();
             let url = hf_tokenizer_template.replace("$HF_MODEL", hf_model);
@@ -252,4 +257,28 @@ pub fn count_text_tokens_with_fallback(tokenizer: Option<Arc<Tokenizer>>, text: 
         tracing::error!("{e}");
         estimate_tokens(text)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenizer_load_is_disabled_for_fake_and_predefined_cloud_tokenizers() {
+        assert!(tokenizer_load_is_disabled("fake"));
+        assert!(tokenizer_load_is_disabled("fake-gemini"));
+        assert!(tokenizer_load_is_disabled("openai"));
+        assert!(tokenizer_load_is_disabled("anthropic"));
+        assert!(tokenizer_load_is_disabled("claude"));
+    }
+
+    #[test]
+    fn tokenizer_load_remains_enabled_for_external_tokenizer_sources() {
+        assert!(!tokenizer_load_is_disabled("hf://Xenova/claude-tokenizer"));
+        assert!(!tokenizer_load_is_disabled(
+            "https://example.com/tokenizer.json"
+        ));
+        assert!(!tokenizer_load_is_disabled("file:///tmp/tokenizer.json"));
+        assert!(!tokenizer_load_is_disabled("/tmp/tokenizer.json"));
+    }
 }

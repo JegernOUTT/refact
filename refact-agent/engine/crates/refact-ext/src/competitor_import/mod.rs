@@ -9,8 +9,8 @@ pub mod types;
 pub mod writer;
 
 use types::{
-    ImportCandidate, ImportIssue, ImportPrivacyFilter, ImportReport, ImportReportScopeKind,
-    ImportScope, ImportStatus, ImportSummary,
+    Competitor, ImportCandidate, ImportIssue, ImportPrivacyFilter, ImportReport,
+    ImportReportScopeKind, ImportScope, ImportStatus, ImportSummary,
 };
 
 pub async fn run_global_import_with_paths(
@@ -30,6 +30,16 @@ pub async fn run_global_import_with_paths_and_filter(
     home_dir: Option<&Path>,
     filter: &ImportPrivacyFilter,
 ) -> ImportSummary {
+    run_global_import_with_paths_and_filter_for_source(refact_config_dir, home_dir, filter, None)
+        .await
+}
+
+pub async fn run_global_import_with_paths_and_filter_for_source(
+    refact_config_dir: &Path,
+    home_dir: Option<&Path>,
+    filter: &ImportPrivacyFilter,
+    source: Option<Competitor>,
+) -> ImportSummary {
     let scope = ImportScope::Global;
     let mut summary = ImportSummary::from_scopes(vec![scope.clone()]);
     let Some(home_dir) = home_dir else {
@@ -45,41 +55,56 @@ pub async fn run_global_import_with_paths_and_filter(
         return summary;
     };
     let config_dir = sources::config_root_from_refact_config_dir(refact_config_dir);
-    summary.discovered_sources = sources::discover_global_sources(home_dir, &config_dir);
+    summary.discovered_sources = sources::discover_global_sources(home_dir, &config_dir)
+        .into_iter()
+        .filter(|candidate| source.map_or(true, |source| candidate.competitor == source))
+        .collect();
     let mut candidates = Vec::new();
 
-    let (claude_candidates, claude_issues) =
-        sources::claude::collect_global_candidates_with_filter(home_dir, refact_config_dir, filter);
-    candidates.extend(claude_candidates);
-    add_issues(&mut summary, claude_issues);
+    if source.map_or(true, |source| source == Competitor::ClaudeCode) {
+        let (claude_candidates, claude_issues) =
+            sources::claude::collect_global_candidates_with_filter(
+                home_dir,
+                refact_config_dir,
+                filter,
+            );
+        candidates.extend(claude_candidates);
+        add_issues(&mut summary, claude_issues);
+    }
 
-    let opencode_scan = sources::opencode::scan_global_root_with_filter(
-        &config_dir.join("opencode"),
-        refact_config_dir,
-        filter,
-    );
-    collect_opencode_scan(&mut summary, &mut candidates, opencode_scan);
+    if source.map_or(true, |source| source == Competitor::OpenCode) {
+        let opencode_scan = sources::opencode::scan_global_root_with_filter(
+            &config_dir.join("opencode"),
+            refact_config_dir,
+            filter,
+        );
+        collect_opencode_scan(&mut summary, &mut candidates, opencode_scan);
+    }
 
-    let kilo_scan = sources::kilo::scan_global_root_with_filter(
-        home_dir,
-        &config_dir,
-        refact_config_dir,
-        filter,
-    );
-    collect_opencode_scan(&mut summary, &mut candidates, kilo_scan);
+    if source.map_or(true, |source| source == Competitor::KiloCode) {
+        let kilo_scan = sources::kilo::scan_global_root_with_filter(
+            home_dir,
+            &config_dir,
+            refact_config_dir,
+            filter,
+        );
+        collect_opencode_scan(&mut summary, &mut candidates, kilo_scan);
+    }
 
-    let continue_staging_root = refact_config_dir
-        .join("imports")
-        .join("staging")
-        .join("continue");
-    let continue_scan = sources::continue_dev::scan_global_root_with_filter(
-        home_dir,
-        &continue_staging_root,
-        filter,
-    );
-    collect_continue_scan(&mut summary, &mut candidates, continue_scan);
+    if source.map_or(true, |source| source == Competitor::ContinueDev) {
+        let continue_staging_root = refact_config_dir
+            .join("imports")
+            .join("staging")
+            .join("continue");
+        let continue_scan = sources::continue_dev::scan_global_root_with_filter(
+            home_dir,
+            &continue_staging_root,
+            filter,
+        );
+        collect_continue_scan(&mut summary, &mut candidates, continue_scan);
+    }
 
-    write_candidates_and_merge(refact_config_dir, &scope, &mut summary, &candidates).await;
+    write_candidates_and_merge(refact_config_dir, &scope, &mut summary, &candidates, source).await;
     persist_last_report_if_needed(refact_config_dir, &mut summary).await;
     summary
 }
@@ -93,6 +118,14 @@ pub async fn run_project_import_with_paths_and_filter(
     workspace_roots: &[PathBuf],
     filter: &ImportPrivacyFilter,
 ) -> ImportSummary {
+    run_project_import_with_paths_and_filter_for_source(workspace_roots, filter, None).await
+}
+
+pub async fn run_project_import_with_paths_and_filter_for_source(
+    workspace_roots: &[PathBuf],
+    filter: &ImportPrivacyFilter,
+    source: Option<Competitor>,
+) -> ImportSummary {
     let discovered_scopes = sources::discover_project_scopes(workspace_roots);
     let mut summary = ImportSummary::default();
 
@@ -102,34 +135,46 @@ pub async fn run_project_import_with_paths_and_filter(
         };
         let scope = ImportScope::Project { root: root.clone() };
         let mut scope_summary = ImportSummary::from_scopes(vec![scope.clone()]);
-        scope_summary.discovered_sources = sources::discover_project_sources(&root);
+        scope_summary.discovered_sources = sources::discover_project_sources(&root)
+            .into_iter()
+            .filter(|candidate| source.map_or(true, |source| candidate.competitor == source))
+            .collect();
         let mut candidates = Vec::new();
 
-        let (claude_candidates, claude_issues) =
-            sources::claude::collect_project_candidates_with_filter(&root, filter);
-        candidates.extend(claude_candidates);
-        add_issues(&mut scope_summary, claude_issues);
+        if source.map_or(true, |source| source == Competitor::ClaudeCode) {
+            let (claude_candidates, claude_issues) =
+                sources::claude::collect_project_candidates_with_filter(&root, filter);
+            candidates.extend(claude_candidates);
+            add_issues(&mut scope_summary, claude_issues);
+        }
 
-        let opencode_scan = sources::opencode::scan_project_root_with_filter(&root, filter);
-        collect_opencode_scan(&mut scope_summary, &mut candidates, opencode_scan);
+        if source.map_or(true, |source| source == Competitor::OpenCode) {
+            let opencode_scan = sources::opencode::scan_project_root_with_filter(&root, filter);
+            collect_opencode_scan(&mut scope_summary, &mut candidates, opencode_scan);
+        }
 
-        let kilo_scan = sources::kilo::scan_project_root_with_filter(&root, filter);
-        collect_opencode_scan(&mut scope_summary, &mut candidates, kilo_scan);
+        if source.map_or(true, |source| source == Competitor::KiloCode) {
+            let kilo_scan = sources::kilo::scan_project_root_with_filter(&root, filter);
+            collect_opencode_scan(&mut scope_summary, &mut candidates, kilo_scan);
+        }
 
-        let continue_staging_root = root
-            .join(".refact")
-            .join("imports")
-            .join("staging")
-            .join("continue");
-        let continue_scan = sources::continue_dev::scan_project_root_with_filter(
-            &root,
-            &continue_staging_root,
-            filter,
-        );
-        collect_continue_scan(&mut scope_summary, &mut candidates, continue_scan);
+        if source.map_or(true, |source| source == Competitor::ContinueDev) {
+            let continue_staging_root = root
+                .join(".refact")
+                .join("imports")
+                .join("staging")
+                .join("continue");
+            let continue_scan = sources::continue_dev::scan_project_root_with_filter(
+                &root,
+                &continue_staging_root,
+                filter,
+            );
+            collect_continue_scan(&mut scope_summary, &mut candidates, continue_scan);
+        }
 
         let scope_root = root.join(".refact");
-        write_candidates_and_merge(&scope_root, &scope, &mut scope_summary, &candidates).await;
+        write_candidates_and_merge(&scope_root, &scope, &mut scope_summary, &candidates, source)
+            .await;
         persist_last_report_if_needed(&scope_root, &mut scope_summary).await;
         summary.merge(scope_summary);
     }
@@ -166,13 +211,15 @@ pub async fn write_candidates_and_merge(
     scope: &ImportScope,
     summary: &mut ImportSummary,
     candidates: &[ImportCandidate],
+    stale_filter: Option<Competitor>,
 ) {
     let existing_issues = summary.issues.clone();
-    let writer_summary = writer::write_candidates_for_scope_with_issues(
+    let writer_summary = writer::write_candidates_for_scope_with_issues_and_filter(
         scope_root,
         scope,
         candidates,
         &existing_issues,
+        stale_filter,
     )
     .await;
     summary.merge(writer_summary);

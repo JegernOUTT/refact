@@ -36,7 +36,7 @@ pub fn default_headers() -> HashMap<String, String> {
     HashMap::from([
         (
             "User-Agent".to_string(),
-            "Refact.ai (+https://github.com/smallcloudai/refact)".to_string(),
+            "Refact.ai (+https://github.com/JegernOUTT/refact)".to_string(),
         ),
         ("Accept".to_string(), "text/event-stream".to_string()),
         ("Content-Type".to_string(), "application/json".to_string()),

@@ -1,0 +1,33 @@
+.root {
+  min-width: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.trigger {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.content {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.content[data-state="open"] {
+  grid-template-rows: 1fr;
+}
+
+.contentInner {
+  min-height: 0;
+  overflow: hidden;
+}

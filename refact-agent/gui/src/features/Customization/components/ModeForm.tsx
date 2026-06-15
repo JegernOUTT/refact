@@ -1,13 +1,5 @@
 import React, { useState, useCallback, useMemo } from "react";
-import {
-  Flex,
-  TextField,
-  Text,
-  Switch,
-  TextArea,
-  Tabs,
-  Select,
-} from "@radix-ui/themes";
+import { SlidersHorizontal, Wrench, Brain, Settings } from "lucide-react";
 import { StringListEditor } from "./StringListEditor";
 import { RulesTableEditor } from "./RulesTableEditor";
 import {
@@ -18,17 +10,32 @@ import {
   safeObject,
   isString,
   safeToolConfirmRules,
+  parseIntSafe,
 } from "./configUtils";
 import { useGetCapsQuery } from "../../../services/refact/caps";
 import { useCapsForToolUse } from "../../../hooks";
 import { enrichAndGroupModels } from "../../../utils/enrichModels";
-import { RichModelSelectItem } from "../../../components/Select/RichModelSelectItem";
+import { CapabilityIcons } from "../../Providers/ProviderForm/ProviderModelsList/components";
+import {
+  formatContextWindow,
+  formatPricing,
+} from "../../Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import {
   ModelSamplingParams,
   type SamplingValues,
 } from "../../../components/ModelSamplingParams";
+import {
+  Field,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+  ModelSelector,
+  SettingsShell,
+  type ModelOption,
+  type ModelSelectorBadge,
+  type ModelSelectorGroup,
+} from "../../../components/ui";
 import styles from "./editors.module.css";
-import selectStyles from "../../../components/Select/select.module.css";
 
 type ModeFormProps = {
   config: Record<string, unknown>;
@@ -36,11 +43,55 @@ type ModeFormProps = {
   availableTools?: string[];
 };
 
+type EnrichedModelGroup = ReturnType<typeof enrichAndGroupModels>;
+type EnrichedModel = EnrichedModelGroup[number]["models"][number];
+
+function modelBadges(model: EnrichedModel) {
+  const badges: ModelSelectorBadge[] = [];
+  if (model.isDefault) badges.push("default");
+  if (model.isThinking) badges.push("reasoning");
+  if (model.isLight) badges.push("light");
+  if (model.isBuddy) badges.push("buddy");
+  if (model.isTaskPlannerAgent) badges.push("task-agent");
+  if (model.isChat2) badges.push("chat2");
+  return badges;
+}
+
+function pricingOption(model: EnrichedModel) {
+  if (!model.pricing) return undefined;
+  const [prompt, output] = formatPricing(model.pricing, true).split("/");
+  return { prompt, output };
+}
+
+function modelGroups(groupedModels: EnrichedModelGroup): ModelSelectorGroup[] {
+  return groupedModels.map((group) => ({
+    id: group.provider,
+    label: group.displayName,
+  }));
+}
+
+function modelOptions(groupedModels: EnrichedModelGroup): ModelOption[] {
+  return groupedModels.flatMap((group) =>
+    group.models.map((model) => ({
+      value: model.value,
+      displayName: model.value,
+      group: group.provider,
+      disabled: model.disabled,
+      pricing: pricingOption(model),
+      contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+      badges: modelBadges(model),
+      capabilities: model.capabilities ? (
+        <CapabilityIcons capabilities={model.capabilities} />
+      ) : undefined,
+    })),
+  );
+}
+
 type ModelTypeSectionProps = {
   title: string;
   typeKey: "default" | "light" | "thinking";
   config: Record<string, unknown>;
-  groupedModels: ReturnType<typeof enrichAndGroupModels>;
+  groupedModels: EnrichedModelGroup;
   onPatch: (path: (string | number)[], value: unknown) => void;
 };
 
@@ -95,69 +146,20 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
   );
 
   return (
-    <Flex
-      direction="column"
-      gap="2"
-      p="2"
-      style={{
-        border: "1px solid var(--gray-6)",
-        borderRadius: "var(--radius-2)",
-      }}
-    >
-      <Text size="1" weight="medium">
-        {title}
-      </Text>
-      <Flex direction="column" gap="1">
-        <Text size="1" color="gray">
-          Model
-        </Text>
-        <Select.Root
-          value={model || "__inherit__"}
-          onValueChange={(v) =>
-            onPatch([...basePath, "model"], v === "__inherit__" ? undefined : v)
+    <section className={styles.modelDefaultsSection}>
+      <h3 className={styles.sectionTitle}>{title}</h3>
+      <Field label="Model">
+        <ModelSelector
+          allowUnset
+          groups={modelGroups(groupedModels)}
+          models={modelOptions(groupedModels)}
+          unsetLabel="Inherit from global"
+          value={model || null}
+          onSelect={(v) =>
+            onPatch([...basePath, "model"], v === "" ? undefined : v)
           }
-          size="1"
-        >
-          <Select.Trigger
-            placeholder="Inherit from global"
-            style={{ width: "100%" }}
-          />
-          <Select.Content position="popper">
-            <Select.Item value="__inherit__">
-              <Text color="gray">Inherit from global</Text>
-            </Select.Item>
-            <Select.Separator />
-            {groupedModels.map((group) => (
-              <Select.Group key={group.provider}>
-                <Select.Label>{group.displayName}</Select.Label>
-                {group.models.map((m) => (
-                  <Select.Item
-                    key={m.value}
-                    value={m.value}
-                    textValue={m.value}
-                  >
-                    <span className={selectStyles.trigger_only}>{m.value}</span>
-                    <span className={selectStyles.dropdown_only}>
-                      <RichModelSelectItem
-                        displayName={m.value}
-                        pricing={m.pricing}
-                        nCtx={m.nCtx}
-                        capabilities={m.capabilities}
-                        isDefault={m.isDefault}
-                        isChat2={m.isChat2}
-                        isTaskPlannerAgent={m.isTaskPlannerAgent}
-                        isThinking={m.isThinking}
-                        isLight={m.isLight}
-                        isBuddy={m.isBuddy}
-                      />
-                    </span>
-                  </Select.Item>
-                ))}
-              </Select.Group>
-            ))}
-          </Select.Content>
-        </Select.Root>
-      </Flex>
+        />
+      </Field>
 
       <ModelSamplingParams
         model={model || undefined}
@@ -165,34 +167,38 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
         onChange={handleSamplingChange}
       />
 
-      <Flex gap="2" wrap="wrap" align="center">
-        <Flex align="center" gap="1">
-          <Switch
-            size="1"
+      <div className={styles.switchGrid}>
+        <Field label="Parallel Tool Calls">
+          <FieldSwitch
             checked={parallelToolCalls}
-            onCheckedChange={(c) =>
-              onPatch([...basePath, "parallel_tool_calls"], c || undefined)
+            onChange={(checked) =>
+              onPatch(
+                [...basePath, "parallel_tool_calls"],
+                checked || undefined,
+              )
             }
           />
-          <Text size="1">Parallel Tool Calls</Text>
-        </Flex>
-        <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 80 }}>
-          <Text size="1" color="gray">
-            Tool Choice
-          </Text>
-          <TextField.Root
-            size="1"
+        </Field>
+        <Field label="Tool Choice">
+          <FieldText
             value={toolChoice}
             placeholder="auto/none"
-            onChange={(e) =>
-              onPatch([...basePath, "tool_choice"], e.target.value || undefined)
+            onChange={(value) =>
+              onPatch([...basePath, "tool_choice"], value || undefined)
             }
           />
-        </Flex>
-      </Flex>
-    </Flex>
+        </Field>
+      </div>
+    </section>
   );
 };
+
+const MODE_SECTIONS = [
+  { id: "basic", label: "Basic", icon: SlidersHorizontal },
+  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "llm", label: "LLM Settings", icon: Brain },
+  { id: "advanced", label: "Advanced", icon: Settings },
+];
 
 export const ModeForm: React.FC<ModeFormProps> = ({
   config,
@@ -232,125 +238,91 @@ export const ModeForm: React.FC<ModeFormProps> = ({
   const { data: capsData } = useGetCapsQuery(undefined);
   const capsForToolUse = useCapsForToolUse();
 
-  // Use the same filtered model list as the main chat selector
   const groupedModels = useMemo(() => {
     return enrichAndGroupModels(capsForToolUse.usableModelsForPlan, capsData);
   }, [capsForToolUse.usableModelsForPlan, capsData]);
 
   return (
-    <Tabs.Root
-      value={activeTab}
-      onValueChange={setActiveTab}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        flex: 1,
-        minHeight: 0,
-      }}
+    <SettingsShell
+      active={activeTab}
+      sections={MODE_SECTIONS}
+      title="Mode"
+      description="Edit mode identity, tools, model defaults, and advanced matching."
+      onSectionChange={setActiveTab}
     >
-      <Tabs.List>
-        <Tabs.Trigger value="basic">Basic</Tabs.Trigger>
-        <Tabs.Trigger value="tools">Tools</Tabs.Trigger>
-        <Tabs.Trigger value="llm">LLM Settings</Tabs.Trigger>
-        <Tabs.Trigger value="advanced">Advanced</Tabs.Trigger>
-      </Tabs.List>
-
       {activeTab === "basic" && (
         <div className={styles.formTabContentExpanding}>
-          <Flex direction="column" gap="3" style={{ flexShrink: 0 }}>
-            <Flex direction="column" gap="1">
-              <Text size="1" weight="medium">
-                Title
-              </Text>
-              <TextField.Root
-                size="1"
+          <div className={styles.formStackShrink}>
+            <Field label="Title">
+              <FieldText
                 value={title}
-                onChange={(e) => patch(["title"], e.target.value)}
+                onChange={(value) => patch(["title"], value)}
                 placeholder="Display name"
               />
-            </Flex>
+            </Field>
 
-            <Flex direction="column" gap="1">
-              <Text size="1" weight="medium">
-                Description
-              </Text>
-              <TextField.Root
-                size="1"
+            <Field label="Description">
+              <FieldText
                 value={description}
-                onChange={(e) => patch(["description"], e.target.value)}
+                onChange={(value) => patch(["description"], value)}
                 placeholder="Brief description"
               />
-            </Flex>
+            </Field>
 
-            <Flex align="center" gap="2">
-              <Switch
-                size="1"
+            <Field label="Internal Only" helper="Hide from mode selector.">
+              <FieldSwitch
                 checked={specific}
-                onCheckedChange={(checked) => patch(["specific"], checked)}
+                onChange={(checked) => patch(["specific"], checked)}
               />
-              <Text size="1">Internal Only</Text>
-              <Text size="1" color="gray">
-                (hide from mode selector)
-              </Text>
-            </Flex>
-          </Flex>
+            </Field>
+          </div>
 
-          <div className={styles.expandingField}>
-            <Text size="1" weight="medium">
-              System Prompt
-            </Text>
-            <TextArea
+          <Field
+            label="System Prompt"
+            helper="Supports: %PROJECT_TREE%, %WORKSPACE_INFO%, %ARGS%, etc."
+            className={styles.expandingField}
+          >
+            <FieldTextarea
               value={prompt}
-              onChange={(e) => patch(["prompt"], e.target.value)}
+              onChange={(value) => patch(["prompt"], value)}
               placeholder="System prompt for this mode..."
               className={styles.promptTextareaExpand}
             />
-            <Text size="1" color="gray">
-              Supports: %PROJECT_TREE%, %WORKSPACE_INFO%, %ARGS%, etc.
-            </Text>
-          </div>
+          </Field>
         </div>
       )}
 
       {activeTab === "tools" && (
         <div className={styles.formTabContent}>
-          <Flex direction="column" gap="2">
-            <Text size="1" weight="medium">
-              Automatically Include
-            </Text>
-            <Flex gap="3" wrap="wrap">
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={allowIntegrations}
-                  onCheckedChange={(checked) =>
-                    patch(["allow_integrations"], checked || undefined)
-                  }
-                />
-                <Text size="1">Integrations</Text>
-              </Flex>
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={allowMcp}
-                  onCheckedChange={(checked) =>
-                    patch(["allow_mcp"], checked || undefined)
-                  }
-                />
-                <Text size="1">MCP</Text>
-              </Flex>
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={allowSubagents}
-                  onCheckedChange={(checked) =>
-                    patch(["allow_subagents"], checked || undefined)
-                  }
-                />
-                <Text size="1">Subagents</Text>
-              </Flex>
-            </Flex>
-          </Flex>
+          <div className={styles.switchGrid}>
+            <Field
+              label="Integrations"
+              helper="Automatically include integrations."
+            >
+              <FieldSwitch
+                checked={allowIntegrations}
+                onChange={(checked) =>
+                  patch(["allow_integrations"], checked || undefined)
+                }
+              />
+            </Field>
+            <Field label="MCP" helper="Automatically include MCP tools.">
+              <FieldSwitch
+                checked={allowMcp}
+                onChange={(checked) =>
+                  patch(["allow_mcp"], checked || undefined)
+                }
+              />
+            </Field>
+            <Field label="Subagents" helper="Automatically include subagents.">
+              <FieldSwitch
+                checked={allowSubagents}
+                onChange={(checked) =>
+                  patch(["allow_subagents"], checked || undefined)
+                }
+              />
+            </Field>
+          </div>
 
           <StringListEditor
             value={tools}
@@ -370,123 +342,103 @@ export const ModeForm: React.FC<ModeFormProps> = ({
 
       {activeTab === "llm" && (
         <div className={styles.formTabContent}>
-          <Flex direction="column" gap="3">
-            <ModelTypeSection
-              title="Default Model"
-              typeKey="default"
-              config={modelDefaultsDefault}
-              groupedModels={groupedModels}
-              onPatch={patch}
-            />
-            <ModelTypeSection
-              title="Light Model"
-              typeKey="light"
-              config={modelDefaultsLight}
-              groupedModels={groupedModels}
-              onPatch={patch}
-            />
-            <ModelTypeSection
-              title="Thinking Model"
-              typeKey="thinking"
-              config={modelDefaultsThinking}
-              groupedModels={groupedModels}
-              onPatch={patch}
-            />
-          </Flex>
+          <ModelTypeSection
+            title="Default Model"
+            typeKey="default"
+            config={modelDefaultsDefault}
+            groupedModels={groupedModels}
+            onPatch={patch}
+          />
+          <ModelTypeSection
+            title="Light Model"
+            typeKey="light"
+            config={modelDefaultsLight}
+            groupedModels={groupedModels}
+            onPatch={patch}
+          />
+          <ModelTypeSection
+            title="Thinking Model"
+            typeKey="thinking"
+            config={modelDefaultsThinking}
+            groupedModels={groupedModels}
+            onPatch={patch}
+          />
         </div>
       )}
 
       {activeTab === "advanced" && (
         <div className={styles.formTabContent}>
-          <Flex direction="column" gap="2">
-            <Text size="1" weight="medium">
-              Thread Defaults
-            </Text>
-            <Flex gap="3" wrap="wrap">
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={
-                    typeof threadDefaults.include_project_info === "boolean"
-                      ? threadDefaults.include_project_info
-                      : false
-                  }
-                  onCheckedChange={(checked) =>
-                    patch(
-                      ["thread_defaults", "include_project_info"],
-                      checked || undefined,
-                    )
-                  }
-                />
-                <Text size="1">Project Info</Text>
-              </Flex>
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={
-                    typeof threadDefaults.checkpoints_enabled === "boolean"
-                      ? threadDefaults.checkpoints_enabled
-                      : false
-                  }
-                  onCheckedChange={(checked) =>
-                    patch(
-                      ["thread_defaults", "checkpoints_enabled"],
-                      checked || undefined,
-                    )
-                  }
-                />
-                <Text size="1">Checkpoints</Text>
-              </Flex>
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={
-                    typeof threadDefaults.auto_approve_editing_tools ===
-                    "boolean"
-                      ? threadDefaults.auto_approve_editing_tools
-                      : false
-                  }
-                  onCheckedChange={(checked) =>
-                    patch(
-                      ["thread_defaults", "auto_approve_editing_tools"],
-                      checked || undefined,
-                    )
-                  }
-                />
-                <Text size="1">Auto Approve Editing</Text>
-              </Flex>
-              <Flex align="center" gap="1">
-                <Switch
-                  size="1"
-                  checked={
-                    typeof threadDefaults.auto_approve_dangerous_commands ===
-                    "boolean"
-                      ? threadDefaults.auto_approve_dangerous_commands
-                      : false
-                  }
-                  onCheckedChange={(checked) =>
-                    patch(
-                      ["thread_defaults", "auto_approve_dangerous_commands"],
-                      checked || undefined,
-                    )
-                  }
-                />
-                <Text size="1">Auto Approve Dangerous</Text>
-              </Flex>
-            </Flex>
-          </Flex>
+          <div className={styles.switchGrid}>
+            <Field label="Project Info">
+              <FieldSwitch
+                checked={
+                  typeof threadDefaults.include_project_info === "boolean"
+                    ? threadDefaults.include_project_info
+                    : false
+                }
+                onChange={(checked) =>
+                  patch(
+                    ["thread_defaults", "include_project_info"],
+                    checked || undefined,
+                  )
+                }
+              />
+            </Field>
+            <Field label="Checkpoints">
+              <FieldSwitch
+                checked={
+                  typeof threadDefaults.checkpoints_enabled === "boolean"
+                    ? threadDefaults.checkpoints_enabled
+                    : false
+                }
+                onChange={(checked) =>
+                  patch(
+                    ["thread_defaults", "checkpoints_enabled"],
+                    checked || undefined,
+                  )
+                }
+              />
+            </Field>
+            <Field label="Auto Approve Editing">
+              <FieldSwitch
+                checked={
+                  typeof threadDefaults.auto_approve_editing_tools === "boolean"
+                    ? threadDefaults.auto_approve_editing_tools
+                    : false
+                }
+                onChange={(checked) =>
+                  patch(
+                    ["thread_defaults", "auto_approve_editing_tools"],
+                    checked || undefined,
+                  )
+                }
+              />
+            </Field>
+            <Field label="Auto Approve Dangerous">
+              <FieldSwitch
+                checked={
+                  typeof threadDefaults.auto_approve_dangerous_commands ===
+                  "boolean"
+                    ? threadDefaults.auto_approve_dangerous_commands
+                    : false
+                }
+                onChange={(checked) =>
+                  patch(
+                    ["thread_defaults", "auto_approve_dangerous_commands"],
+                    checked || undefined,
+                  )
+                }
+              />
+            </Field>
+          </div>
 
-          <Flex direction="column" gap="1">
-            <Text size="1" weight="medium">
-              Base Mode
-            </Text>
-            <TextField.Root
-              size="1"
+          <Field label="Base Mode">
+            <FieldText
               value={base ?? ""}
-              onChange={(e) => patch(["base"], e.target.value || undefined)}
+              onChange={(value) => patch(["base"], value || undefined)}
               placeholder="Inherit from (e.g., agent)"
             />
-          </Flex>
+          </Field>
 
           <StringListEditor
             value={matchModels ?? []}
@@ -497,23 +449,14 @@ export const ModeForm: React.FC<ModeFormProps> = ({
             placeholder="Model pattern..."
           />
 
-          <Flex gap="2" wrap="wrap">
-            <Flex direction="column" gap="1" style={{ minWidth: 80 }}>
-              <Text size="1">UI Order</Text>
-              <TextField.Root
-                size="1"
-                type="number"
-                value={typeof ui.order === "number" ? ui.order.toString() : ""}
-                onChange={(e) =>
-                  patch(
-                    ["ui", "order"],
-                    e.target.value ? parseInt(e.target.value, 10) : undefined,
-                  )
-                }
-                placeholder="Order"
-              />
-            </Flex>
-          </Flex>
+          <Field label="UI Order">
+            <FieldText
+              type="number"
+              value={typeof ui.order === "number" ? ui.order.toString() : ""}
+              onChange={(value) => patch(["ui", "order"], parseIntSafe(value))}
+              placeholder="Order"
+            />
+          </Field>
 
           <StringListEditor
             value={safeArray(ui.tags, isString)}
@@ -523,6 +466,6 @@ export const ModeForm: React.FC<ModeFormProps> = ({
           />
         </div>
       )}
-    </Tabs.Root>
+    </SettingsShell>
   );
 };

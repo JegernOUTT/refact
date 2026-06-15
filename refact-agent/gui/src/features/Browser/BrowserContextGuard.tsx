@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Card, Button, Text, Flex } from "@radix-ui/themes";
+import { TriangleAlert } from "lucide-react";
+import { Button, Icon, Surface } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBrowserContextOversize,
@@ -11,7 +12,6 @@ import {
   sendBrowserContextDecision,
 } from "../../services/refact/chatCommands";
 import { formatKB, estimateSize } from "./BrowserContextGuard.utils";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import styles from "./BrowserContextGuard.module.css";
 
 type BrowserContextGuardProps = {
@@ -152,137 +152,127 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
   if (!info || chatId !== currentChatId) return null;
 
   return (
-    <Card className={styles.guardCard}>
-      <Flex direction="column" gap="3">
-        <Flex align="baseline" gap="1" className={styles.heading}>
-          <Text as="span" color="amber">
-            <ExclamationTriangleIcon />
-          </Text>
-          <Text>Browser context is large ({formatKB(info.total_bytes)})</Text>
-        </Flex>
+    <Surface className={styles.guardCard} variant="glass">
+      <div className={styles.heading}>
+        <Icon icon={TriangleAlert} tone="warning" />
+        <span>Browser context is large ({formatKB(info.total_bytes)})</span>
+      </div>
 
-        <div className={styles.breakdownGrid}>
-          <span className={styles.breakdownLabel}>Actions:</span>
-          <span className={styles.breakdownCount}>{info.action_count}</span>
-          <span className={styles.breakdownSize}>
-            {formatKB(info.action_bytes)}
-          </span>
+      <div className={styles.breakdownGrid}>
+        <span className={styles.breakdownLabel}>Actions:</span>
+        <span className={styles.breakdownCount}>{info.action_count}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.action_bytes)}
+        </span>
 
-          <span className={styles.breakdownLabel}>Console:</span>
-          <span className={styles.breakdownCount}>{info.console_count}</span>
-          <span className={styles.breakdownSize}>
-            {formatKB(info.console_bytes)}
-          </span>
+        <span className={styles.breakdownLabel}>Console:</span>
+        <span className={styles.breakdownCount}>{info.console_count}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.console_bytes)}
+        </span>
 
-          <span className={styles.breakdownLabel}>Network:</span>
-          <span className={styles.breakdownCount}>{info.network_count}</span>
-          <span className={styles.breakdownSize}>
-            {formatKB(info.network_bytes)}
-          </span>
+        <span className={styles.breakdownLabel}>Network:</span>
+        <span className={styles.breakdownCount}>{info.network_count}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.network_bytes)}
+        </span>
 
-          <span className={styles.breakdownLabel}>Mutations:</span>
-          <span className={styles.breakdownCount}>—</span>
-          <span className={styles.breakdownSize}>
-            {formatKB(info.mutation_bytes)}
-          </span>
-        </div>
+        <span className={styles.breakdownLabel}>Mutations:</span>
+        <span className={styles.breakdownCount}>—</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.mutation_bytes)}
+        </span>
+      </div>
 
-        <div className={styles.sliderContainer}>
-          <label className={styles.sliderLabel}>
-            Include last {lastNActions} actions
-          </label>
+      <div className={styles.sliderContainer}>
+        <label className={styles.sliderLabel}>
+          Include last {lastNActions} actions
+        </label>
+        <input
+          type="range"
+          className={styles.slider}
+          min={0}
+          max={info.action_count}
+          value={lastNActions}
+          onChange={(e) => setLastNActions(Number(e.target.value))}
+        />
+      </div>
+
+      <div className={styles.checkboxGroup}>
+        <label className={styles.checkboxItem}>
           <input
-            type="range"
-            className={styles.slider}
-            min={0}
-            max={info.action_count}
-            value={lastNActions}
-            onChange={(e) => setLastNActions(Number(e.target.value))}
+            type="checkbox"
+            checked={includeActions}
+            onChange={(e) => setIncludeActions(e.target.checked)}
           />
-        </div>
+          Actions
+        </label>
+        <label className={styles.checkboxItem}>
+          <input
+            type="checkbox"
+            checked={includeConsole}
+            onChange={(e) => setIncludeConsole(e.target.checked)}
+          />
+          Console
+        </label>
+        <label className={styles.checkboxItem}>
+          <input
+            type="checkbox"
+            checked={includeNetwork}
+            onChange={(e) => setIncludeNetwork(e.target.checked)}
+          />
+          Network
+        </label>
+        <label className={styles.checkboxItem}>
+          <input
+            type="checkbox"
+            checked={includeMutations}
+            onChange={(e) => setIncludeMutations(e.target.checked)}
+          />
+          Mutations
+        </label>
+        <label className={styles.checkboxItem}>
+          <input
+            type="checkbox"
+            checked={includeScreenshot}
+            onChange={(e) => setIncludeScreenshot(e.target.checked)}
+          />
+          Screenshot
+        </label>
+      </div>
 
-        <div className={styles.checkboxGroup}>
-          <label className={styles.checkboxItem}>
-            <input
-              type="checkbox"
-              checked={includeActions}
-              onChange={(e) => setIncludeActions(e.target.checked)}
-            />
-            Actions
-          </label>
-          <label className={styles.checkboxItem}>
-            <input
-              type="checkbox"
-              checked={includeConsole}
-              onChange={(e) => setIncludeConsole(e.target.checked)}
-            />
-            Console
-          </label>
-          <label className={styles.checkboxItem}>
-            <input
-              type="checkbox"
-              checked={includeNetwork}
-              onChange={(e) => setIncludeNetwork(e.target.checked)}
-            />
-            Network
-          </label>
-          <label className={styles.checkboxItem}>
-            <input
-              type="checkbox"
-              checked={includeMutations}
-              onChange={(e) => setIncludeMutations(e.target.checked)}
-            />
-            Mutations
-          </label>
-          <label className={styles.checkboxItem}>
-            <input
-              type="checkbox"
-              checked={includeScreenshot}
-              onChange={(e) => setIncludeScreenshot(e.target.checked)}
-            />
-            Screenshot
-          </label>
-        </div>
+      <p className={styles.liveTotal}>Estimated: {formatKB(estimated)}</p>
 
-        <Text className={styles.liveTotal}>
-          Estimated: {formatKB(estimated)}
-        </Text>
-
-        <div className={styles.actions}>
-          <Button
-            color="grass"
-            variant="surface"
-            size="1"
-            onClick={() => void handleIncludeAll()}
-          >
-            Include All
-          </Button>
-          <Button
-            color="blue"
-            variant="surface"
-            size="1"
-            onClick={() => void handleIncludeSelected()}
-          >
-            Include Selected
-          </Button>
-          <Button
-            color="gray"
-            variant="surface"
-            size="1"
-            onClick={() => void handleSkipContext()}
-          >
-            Skip Context
-          </Button>
-          <Button
-            color="red"
-            variant="surface"
-            size="1"
-            onClick={() => void handleCancelSend()}
-          >
-            Cancel Send
-          </Button>
-        </div>
-      </Flex>
-    </Card>
+      <div className={styles.actions}>
+        <Button
+          size="sm"
+          variant="soft"
+          onClick={() => void handleIncludeAll()}
+        >
+          Include All
+        </Button>
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => void handleIncludeSelected()}
+        >
+          Include Selected
+        </Button>
+        <Button
+          size="sm"
+          variant="soft"
+          onClick={() => void handleSkipContext()}
+        >
+          Skip Context
+        </Button>
+        <Button
+          size="sm"
+          variant="danger"
+          onClick={() => void handleCancelSend()}
+        >
+          Cancel Send
+        </Button>
+      </div>
+    </Surface>
   );
 };

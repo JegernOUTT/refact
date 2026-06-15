@@ -1,0 +1,235 @@
+.trigger {
+  width: min(100%, 320px);
+  justify-content: space-between;
+}
+
+.triggerText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listRoot {
+  display: flex;
+  gap: var(--rf-space-2);
+  min-height: 0;
+  min-width: 0;
+  width: min(100%, 420px);
+  max-height: min(520px, calc(100dvh - var(--rf-space-6)));
+  flex-direction: column;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.searchBox {
+  display: flex;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.searchBox:focus-within {
+  border-color: var(--rf-color-accent);
+}
+
+.searchInput {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: var(--rf-color-faint);
+}
+
+.scrollArea {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-height: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.group {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.groupLabel {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.groupItems {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.row:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.row:disabled {
+  color: var(--rf-color-faint);
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.row:hover:not(:disabled) {
+  background: var(--rf-surface-1);
+}
+
+.row[data-selected="true"] {
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+}
+
+.rowContent {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.rowHeader {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.modelName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rf-text-3);
+  font-weight: 700;
+  line-height: var(--rf-line);
+}
+
+.badgeGroup {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.badge {
+  flex: 0 0 auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.metaItem {
+  display: inline-flex;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.capabilities {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.rowCheck {
+  flex: 0 0 auto;
+}
+
+.addButton {
+  display: inline-flex;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: var(--rf-hairline) dashed var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.addButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.addButton:disabled {
+  color: var(--rf-color-faint);
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.addButton:hover:not(:disabled) {
+  background: var(--rf-surface-1);
+}
+
+.empty {
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  text-align: center;
+}

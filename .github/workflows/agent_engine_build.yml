@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "*"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "refact-agent/engine/**"
+      - ".github/workflows/agent_engine_build.yml"
   workflow_call:
 #  workflow_run:
 #    workflows: ["Cache cleanup"]
@@ -27,6 +33,47 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.15
 
 jobs:
+  daemon-e2e:
+    name: daemon E2E (Linux x86_64)
+    runs-on: ubuntu-22.04
+    env:
+      REFACT_SKIP_GUI_BUILD: "1"
+      REFACT_DAEMON_E2E: "1"
+      PYTHON3: "python3"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ env.FETCH_DEPTH }}
+
+      - name: Install Rust toolchain
+        run: |
+          rustup update --no-self-update stable
+          rustup component add rust-src
+
+      - name: Ensure Python is available
+        run: python3 --version
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold lld
+
+      - name: Restore cached cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            refact-agent/engine -> target
+          key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
+          shared-key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
+          cache-bin: false
+
+      - name: Build refact daemon binary
+        run: cargo build --bin refact
+
+      - name: Run daemon E2E suite
+        run: cargo test --test daemon_e2e -- --nocapture
+
   dist:
     strategy:
       fail-fast: false
@@ -157,6 +204,7 @@ jobs:
         run: |
           cargo build --workspace --profile ci-release
           cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/ci-release/refact${{ matrix.ext }} ../..
 
       - name: Test artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
@@ -171,6 +219,7 @@ jobs:
         run: |
           OPENSSL_STATIC=1 cargo build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
 
       - name: Test linux-like artifact
         if: matrix.cross
@@ -187,6 +236,7 @@ jobs:
         run: |
           CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
+          cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -196,3 +246,5 @@ jobs:
           path: |
             refact-lsp
             refact-lsp.exe
+            refact
+            refact.exe

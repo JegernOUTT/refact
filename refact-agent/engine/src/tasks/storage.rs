@@ -133,26 +133,15 @@ pub async fn list_tasks(gcx: Arc<GlobalContext>) -> Result<Vec<TaskMeta>, String
             continue;
         }
 
-        let mut entries = match fs::read_dir(&tasks_dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.is_dir() {
-                let meta_path = path.join("meta.yaml");
-                if meta_path.exists() {
-                    match load_task_meta_from_path(&meta_path).await {
-                        Ok(meta) => {
-                            if seen_ids.insert(meta.id.clone()) {
-                                tasks.push(meta);
-                            }
-                        }
-                        Err(e) => warn!("Failed to load task meta from {:?}: {}", meta_path, e),
+        match super::index::list_tasks_from_index_or_rebuild(&tasks_dir).await {
+            Ok(metas) => {
+                for meta in metas {
+                    if seen_ids.insert(meta.id.clone()) {
+                        tasks.push(meta);
                     }
                 }
             }
+            Err(e) => warn!("Failed to list tasks from {:?}: {}", tasks_dir, e),
         }
     }
 
@@ -181,7 +170,11 @@ pub async fn save_task_meta(
     let content = serde_yaml::to_string(meta).map_err(|e| e.to_string())?;
     fs::write(&meta_path, content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Some(tasks_dir) = task_dir.parent() {
+        super::index::upsert_task_index_entry(tasks_dir, meta).await?;
+    }
+    Ok(())
 }
 
 pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBoard, String> {
@@ -404,9 +397,18 @@ pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta
 
 pub async fn delete_task(gcx: Arc<GlobalContext>, task_id: &str) -> Result<(), String> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    let tasks_dir = task_dir.parent().map(Path::to_path_buf);
     fs::remove_dir_all(&task_dir)
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(tasks_dir) = tasks_dir {
+        if let Err(e) = super::index::remove_task_index_entry(&tasks_dir, task_id).await {
+            warn!(
+                "Failed to remove task {} from index {:?}: {}",
+                task_id, tasks_dir, e
+            );
+        }
+    }
     emit_task_event(
         gcx,
         TaskEvent::TaskDeleted {
@@ -520,51 +522,29 @@ pub async fn list_task_trajectories(
         return Ok(vec![]);
     }
 
-    let mut trajectories: Vec<TrajectoryInfo> = vec![];
-    let mut entries = fs::read_dir(&traj_dir).await.map_err(|e| e.to_string())?;
-    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
-        let path = entry.path();
-        if path.extension().map_or(false, |e| e == "json") {
-            if let Some(stem) = path.file_stem() {
-                let id = stem.to_string_lossy().to_string();
-                if let Ok(content) = fs::read_to_string(&path).await {
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if !should_list_task_trajectory(role, &data) {
-                            continue;
-                        }
-                        let title = data
-                            .get("title")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let created_at = data
-                            .get("created_at")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let updated_at = data
-                            .get("updated_at")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-
-                        let waiting_for_card_ids: Vec<String> = data
-                            .get("waiting_for_card_ids")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        trajectories.push(TrajectoryInfo {
-                            id,
-                            title,
-                            created_at,
-                            updated_at,
-                            session_state: None,
-                            waiting_for_card_ids,
-                        });
-                    }
-                }
-            }
-        }
-    }
+    let entries = crate::chat::trajectory_index::list_trajectory_entries_from_index_or_rebuild(
+        &traj_dir, None,
+    )
+    .await?;
+    let mut trajectories: Vec<TrajectoryInfo> = entries
+        .into_iter()
+        .filter(|entry| {
+            should_list_task_trajectory(
+                role,
+                &serde_json::json!({ "link_type": entry.link_type.as_deref() }),
+            )
+        })
+        .map(|entry| TrajectoryInfo {
+            id: entry.id,
+            title: entry.title,
+            created_at: entry.created_at,
+            updated_at: entry.updated_at,
+            session_state: None,
+            mode: Some(entry.mode),
+            parent_id: entry.parent_id,
+            waiting_for_card_ids: entry.waiting_for_card_ids,
+        })
+        .collect();
 
     trajectories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
@@ -605,7 +585,7 @@ pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{save_board, save_task_meta, should_list_task_trajectory, update_board_atomic};
+    use super::*;
     use refact_buddy_core::user_action::UserAction;
     use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus};
     use chrono::Utc;
@@ -728,5 +708,112 @@ mod tests {
             "subchats",
             &json!({"link_type": "gather_files"})
         ));
+    }
+
+    fn test_meta(task_id: &str, name: &str, updated_at: &str) -> TaskMeta {
+        TaskMeta {
+            schema_version: 1,
+            id: task_id.to_string(),
+            name: name.to_string(),
+            status: TaskStatus::Planning,
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        }
+    }
+
+    async fn setup_workspace(root: &std::path::Path) -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        gcx
+    }
+
+    #[tokio::test]
+    async fn list_tasks_rebuilds_missing_index_and_uses_it_afterward() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_workspace(temp.path()).await;
+        let tasks_dir = temp.path().join(".refact/tasks");
+        let task_dir = tasks_dir.join("task-1");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let meta = test_meta("task-1", "Task", "2026-01-01T00:00:00Z");
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let listed = list_tasks(gcx).await.unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "task-1");
+        assert!(crate::tasks::index::task_index_path(&tasks_dir).exists());
+    }
+
+    #[tokio::test]
+    async fn create_update_delete_task_maintains_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_workspace(temp.path()).await;
+        let meta = create_task(gcx.clone(), "Indexed Task").await.unwrap();
+        let tasks_dir = temp.path().join(".refact/tasks");
+        let index = crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].id, meta.id);
+
+        let updated = update_task_name(gcx.clone(), &meta.id, "Renamed")
+            .await
+            .unwrap();
+        let index = crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].meta.name, updated.name);
+
+        delete_task(gcx.clone(), &meta.id).await.unwrap();
+        let index = crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(index.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tasks_repairs_corrupt_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_workspace(temp.path()).await;
+        let tasks_dir = temp.path().join(".refact/tasks");
+        let task_dir = tasks_dir.join("task-1");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let meta = test_meta("task-1", "Task", "2026-01-01T00:00:00Z");
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(crate::tasks::index::task_index_path(&tasks_dir), "not-json")
+            .await
+            .unwrap();
+
+        let listed = list_tasks(gcx).await.unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert!(crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .is_some());
     }
 }

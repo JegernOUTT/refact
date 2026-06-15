@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { server } from "../utils/mockServer";
 import { ExtItemList } from "../features/Extensions/components/ExtItemList";
 import { SkillEditor } from "../features/Extensions/components/SkillEditor";
+import { MarketplacePanel } from "../features/Extensions/components/MarketplacePanel";
 import { MarketplacePluginCard } from "../features/Extensions/components/MarketplacePluginCard";
 import { Extensions } from "../features/Extensions/Extensions";
 import type { SkillRegistryItem } from "../services/refact/extensions";
@@ -39,6 +40,15 @@ const MOCK_ITEMS: SkillRegistryItem[] = [
       "/home/.config/refact/plugins/installed/my-plugin/skills/plugin_skill/SKILL.md",
   },
 ];
+
+const MARKETPLACE_STATE = {
+  config: {
+    apiKey: "test",
+    lspPort: 8001,
+    themeProps: {},
+    host: "vscode" as const,
+  },
+};
 
 describe("ExtItemList", () => {
   it("renders items with correct source badges", () => {
@@ -141,16 +151,7 @@ describe("MarketplacePluginCard", () => {
     );
     render(
       <MarketplacePluginCard plugin={ENGINE_PLUGIN} isInstalled={false} />,
-      {
-        preloadedState: {
-          config: {
-            apiKey: "test",
-            lspPort: 8001,
-            themeProps: {},
-            host: "vscode",
-          },
-        },
-      },
+      { preloadedState: MARKETPLACE_STATE },
     );
     expect(screen.getByText("my-plugin")).toBeDefined();
     expect(screen.getByText("A useful plugin")).toBeDefined();
@@ -168,19 +169,96 @@ describe("MarketplacePluginCard", () => {
     );
     render(
       <MarketplacePluginCard plugin={ENGINE_PLUGIN} isInstalled={true} />,
-      {
-        preloadedState: {
-          config: {
-            apiKey: "test",
-            lspPort: 8001,
-            themeProps: {},
-            host: "vscode",
-          },
-        },
-      },
+      { preloadedState: MARKETPLACE_STATE },
     );
     expect(screen.getByText("Installed")).toBeDefined();
     expect(screen.getByText("Uninstall")).toBeDefined();
+  });
+});
+
+describe("MarketplacePanel", () => {
+  it("searches plugins with null descriptions and matches installed state by marketplace and name", async () => {
+    const deleteRequest = vi.fn();
+    server.use(
+      http.get("*/v1/plugins/marketplaces", () =>
+        HttpResponse.json({
+          marketplaces: [
+            {
+              name: "alpha",
+              source: "owner/alpha",
+              added_at: "2024-01-01T00:00:00Z",
+            },
+            {
+              name: "beta",
+              source: "owner/beta",
+              added_at: "2024-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/plugins/installed", () =>
+        HttpResponse.json({
+          installed: [
+            {
+              name: "duplicate-plugin",
+              marketplace: "alpha",
+              install_dir: "/plugins/duplicate-plugin",
+              installed_at: "2024-01-01T00:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/plugins/marketplace/alpha/plugins", () =>
+        HttpResponse.json({
+          plugins: [
+            {
+              name: "duplicate-plugin",
+              description: null,
+              marketplace: "alpha",
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/plugins/marketplace/beta/plugins", () =>
+        HttpResponse.json({
+          plugins: [
+            {
+              name: "duplicate-plugin",
+              description: "Beta marketplace copy",
+              marketplace: "beta",
+            },
+          ],
+        }),
+      ),
+      http.delete("*/v1/plugins/installed/duplicate-plugin", () => {
+        deleteRequest();
+        return HttpResponse.json({ deleted: true });
+      }),
+    );
+
+    const { user } = render(<MarketplacePanel />, {
+      preloadedState: MARKETPLACE_STATE,
+    });
+
+    await screen.findByText("Beta marketplace copy");
+    expect(screen.getByRole("button", { name: /^Install$/i })).toBeDefined();
+    expect(screen.getAllByText("Installed")).toHaveLength(1);
+
+    await user.type(
+      screen.getByPlaceholderText("Search plugins…"),
+      "duplicate",
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Beta marketplace copy")).toBeDefined();
+    });
+    expect(screen.getByRole("button", { name: /^Install$/i })).toBeDefined();
+
+    await user.click(screen.getAllByRole("button", { name: /uninstall/i })[0]);
+
+    await waitFor(() => {
+      expect(deleteRequest).toHaveBeenCalledOnce();
+    });
   });
 });
 
@@ -303,62 +381,5 @@ describe("Extensions", () => {
     await waitFor(() => {
       expect(screen.queryByText("Confirm Delete")).toBeNull();
     });
-  });
-
-  it("opens dedicated skills marketplace from skills tab", async () => {
-    server.use(
-      http.get("*/v1/ext/registry", () => {
-        return HttpResponse.json({
-          skills: [],
-          slash_commands: [],
-          hooks: [],
-          has_project_root: true,
-        });
-      }),
-    );
-
-    const { store } = render(
-      <Extensions
-        host="vscode"
-        tabbed={false}
-        backFromExtensions={() => undefined}
-      />,
-      { preloadedState: CONFIG_STATE },
-    );
-
-    const button = await screen.findByText("Browse Skills Marketplace");
-    fireEvent.click(button);
-
-    const pages = store.getState().pages;
-    expect(pages[pages.length - 1]).toEqual({ name: "skills marketplace" });
-  });
-
-  it("opens dedicated commands marketplace from commands tab", async () => {
-    server.use(
-      http.get("*/v1/ext/registry", () => {
-        return HttpResponse.json({
-          skills: [],
-          slash_commands: [],
-          hooks: [],
-          has_project_root: true,
-        });
-      }),
-    );
-
-    const { store } = render(
-      <Extensions
-        host="vscode"
-        tabbed={false}
-        backFromExtensions={() => undefined}
-        initialTab="commands"
-      />,
-      { preloadedState: CONFIG_STATE },
-    );
-
-    const button = await screen.findByText("Browse Commands Marketplace");
-    fireEvent.click(button);
-
-    const pages = store.getState().pages;
-    expect(pages[pages.length - 1]).toEqual({ name: "commands marketplace" });
   });
 });

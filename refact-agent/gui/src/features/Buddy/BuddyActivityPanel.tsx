@@ -1,15 +1,32 @@
 import React from "react";
-import { SegmentedControl, Text, Tooltip } from "@radix-ui/themes";
-import classNames from "classnames";
+import { History } from "lucide-react";
+import {
+  Badge,
+  Icon,
+  SegmentedControl,
+  Surface,
+  Tooltip,
+  Text,
+} from "../../components/ui";
 import type { BuddyActivityEntry } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
-import styles from "./BuddyHome.module.css";
+import { BuddySectionHeader } from "./BuddySectionHeader";
+import { activityIcon } from "./buddyIcons";
+import styles from "./BuddyActivityPanel.module.css";
 
 type ActivityFilter = "all" | "refact_" | "buddy_";
 
 interface BuddyActivityPanelProps {
   activities: BuddyActivityEntry[];
   onOpenChat?: (chatId: string, title: string) => void;
+}
+
+function activityTone(
+  entry: BuddyActivityEntry,
+): React.ComponentProps<typeof Icon>["tone"] {
+  if (entry.failure_category) return "warning";
+  if (entry.activity_type.startsWith("buddy_")) return "accent";
+  return "muted";
 }
 
 export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
@@ -26,30 +43,28 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
   );
 
   return (
-    <div
-      className={classNames(styles.panel, styles.panelScroll)}
+    <Surface
+      className={styles.panel}
       data-testid="buddy-activity-panel"
+      animated="rise"
+      radius="card"
+      variant="glass"
     >
-      <div className={styles.panelHeader}>
-        <Text
-          size="1"
-          weight="bold"
-          color="gray"
-          className={styles.sectionLabel}
-        >
-          ACTIVITY
-        </Text>
-      </div>
-      <SegmentedControl.Root
-        size="1"
+      <BuddySectionHeader icon={History} label="Activity" />
+      <SegmentedControl
+        aria-label="activity filter"
+        className={styles.filter}
+        name="buddy-activity-filter"
+        size="sm"
         value={filter}
         onValueChange={(value) => setFilter(value as ActivityFilter)}
-      >
-        <SegmentedControl.Item value="all">All</SegmentedControl.Item>
-        <SegmentedControl.Item value="refact_">refact_*</SegmentedControl.Item>
-        <SegmentedControl.Item value="buddy_">buddy_*</SegmentedControl.Item>
-      </SegmentedControl.Root>
-      <div className={styles.scrollList}>
+        options={[
+          { value: "all", label: "All" },
+          { value: "refact_", label: "refact_*" },
+          { value: "buddy_", label: "buddy_*" },
+        ]}
+      />
+      <div className={`${styles.scrollList} rf-stagger`}>
         {filteredActivities.length === 0 && (
           <Text size="1" className={styles.emptyText}>
             No recent activity
@@ -67,7 +82,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
               delayDuration={150}
             >
               <div
-                className={styles.listRow}
+                className={`${styles.listRow} rf-enter-rise`}
                 data-clickable={canOpen ? "true" : undefined}
                 {...(canOpen
                   ? {
@@ -88,12 +103,18 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
                     }
                   : {})}
               >
-                <span className={styles.listIcon}>{a.icon}</span>
+                <span className={styles.listIcon}>
+                  <Icon
+                    icon={activityIcon(a)}
+                    size="sm"
+                    tone={activityTone(a)}
+                  />
+                </span>
                 <div className={styles.listContent}>
                   <span className={styles.listTitle}>
                     {a.title}
                     {failureLabel && (
-                      <span className={styles.ackBadge}>{failureLabel}</span>
+                      <Badge tone="warning">{failureLabel}</Badge>
                     )}
                   </span>
                   {detail && (
@@ -108,6 +129,6 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           );
         })}
       </div>
-    </div>
+    </Surface>
   );
 };

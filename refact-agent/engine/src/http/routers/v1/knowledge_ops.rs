@@ -100,6 +100,13 @@ pub struct MemoryOperationResponse {
     pub error: Option<String>,
 }
 
+#[derive(Serialize, Default)]
+pub struct RelinkStats {
+    pub docs_scanned: usize,
+    pub docs_updated: usize,
+    pub links_added: usize,
+}
+
 pub async fn auto_link_memory(
     gcx: Arc<GlobalContext>,
     frontmatter: &mut KnowledgeFrontmatter,
@@ -144,6 +151,93 @@ pub async fn auto_link_memory(
     frontmatter.links.retain(|link| link != &doc_id);
 
     Ok(())
+}
+
+pub async fn auto_link_all_memories(gcx: Arc<GlobalContext>) -> Result<RelinkStats, String> {
+    let kg = build_knowledge_graph(gcx.clone()).await;
+    let mut candidates: Vec<_> = kg
+        .docs
+        .iter()
+        .filter(|(_, doc)| {
+            doc.frontmatter.is_active() && doc.frontmatter.kind.as_deref() != Some("trajectory")
+        })
+        .map(|(id, doc)| {
+            (
+                id.clone(),
+                doc.path.clone(),
+                doc.frontmatter.tags.clone(),
+                doc.frontmatter.filenames.clone(),
+                doc.entities.clone(),
+            )
+        })
+        .collect();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut stats = RelinkStats {
+        docs_scanned: candidates.len(),
+        ..Default::default()
+    };
+
+    for (doc_id, path, tags, filenames, entities) in candidates {
+        let similar = kg.find_similar_docs(&tags, &filenames, &entities);
+        let suggested: Vec<String> = similar
+            .into_iter()
+            .filter(|(target_id, score)| {
+                if *score < AUTO_LINK_MIN_SCORE || *target_id == doc_id {
+                    return false;
+                }
+                if let Some(doc) = kg.docs.get(target_id) {
+                    return doc.frontmatter.is_active()
+                        && doc.frontmatter.kind.as_deref() != Some("trajectory");
+                }
+                false
+            })
+            .take(AUTO_LINK_MAX_LINKS)
+            .map(|(id, _)| id)
+            .collect();
+
+        if suggested.is_empty() {
+            continue;
+        }
+
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read memory file {}: {}", path.display(), e))?;
+        let (mut fm, content_start) = KnowledgeFrontmatter::parse(&text);
+        let body = text.get(content_start..).unwrap_or("").to_string();
+        let self_id = fm
+            .id
+            .clone()
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+        let mut added = 0usize;
+        for link in suggested {
+            if fm.links.len() >= AUTO_LINK_MAX_TOTAL {
+                break;
+            }
+            if link != self_id && link != doc_id && !fm.links.contains(&link) {
+                fm.links.push(link);
+                added += 1;
+            }
+        }
+        fm.links.retain(|link| link != &self_id && link != &doc_id);
+
+        if added == 0 {
+            continue;
+        }
+
+        rewrite_memory_document(gcx.clone(), &path, &fm, &body).await?;
+        stats.docs_updated += 1;
+        stats.links_added += added;
+    }
+
+    tracing::info!(
+        "auto_link_all_memories: scanned {} docs, updated {}, added {} links",
+        stats.docs_scanned,
+        stats.docs_updated,
+        stats.links_added
+    );
+    Ok(stats)
 }
 
 async fn get_knowledge_root(gcx: &Arc<GlobalContext>) -> Result<PathBuf, ScratchError> {
@@ -322,6 +416,21 @@ pub async fn handle_v1_knowledge_update_memory(
         .unwrap())
 }
 
+pub async fn handle_v1_knowledge_relink_memories(
+    State(app): State<AppState>,
+    _body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let stats = auto_link_all_memories(gcx)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&stats).unwrap()))
+        .unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +543,111 @@ mod tests {
             ),
         )
         .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_link_all_memories_links_similar_active_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        tokio::fs::write(dir.path().join("shared.rs"), "fn shared() {}")
+            .await
+            .unwrap();
+        let first_path = knowledge_dir.join("first.md");
+        let second_path = knowledge_dir.join("second.md");
+        let mut first = active_frontmatter("first");
+        first.tags = strings(&["component:foo", "workflow:bar"]);
+        first.filenames = strings(&["shared.rs"]);
+        let mut second = active_frontmatter("second");
+        second.tags = strings(&["component:foo", "workflow:bar"]);
+        second.filenames = strings(&["shared.rs"]);
+        write_memory_frontmatter(&first_path, first, "First body").await;
+        write_memory_frontmatter(&second_path, second, "Second body").await;
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let stats = auto_link_all_memories(gcx).await.unwrap();
+
+        let (first, _) = read_frontmatter_body(&first_path).await;
+        let (second, _) = read_frontmatter_body(&second_path).await;
+        assert!(first.links.contains(&"second".to_string()));
+        assert!(second.links.contains(&"first".to_string()));
+        assert!(stats.docs_updated >= 1);
+        assert!(stats.links_added >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_link_all_memories_skips_trajectory_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let active_path = knowledge_dir.join("active.md");
+        let trajectory_path = knowledge_dir.join("trajectory.md");
+        let mut active = active_frontmatter("active");
+        active.tags = strings(&["component:foo", "workflow:bar"]);
+        let mut trajectory = active_frontmatter("trajectory");
+        trajectory.kind = Some("trajectory".to_string());
+        trajectory.tags = strings(&["component:foo", "workflow:bar"]);
+        write_memory_frontmatter(&active_path, active, "Active body").await;
+        write_memory_frontmatter(&trajectory_path, trajectory, "Trajectory body").await;
+        let before = tokio::fs::read_to_string(&trajectory_path).await.unwrap();
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let stats = auto_link_all_memories(gcx).await.unwrap();
+
+        let (active, _) = read_frontmatter_body(&active_path).await;
+        let after = tokio::fs::read_to_string(&trajectory_path).await.unwrap();
+        assert!(!active.links.contains(&"trajectory".to_string()));
+        assert_eq!(before, after);
+        assert_eq!(stats.docs_updated, 0);
+        assert_eq!(stats.links_added, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_link_all_memories_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let first_path = knowledge_dir.join("first.md");
+        let second_path = knowledge_dir.join("second.md");
+        let mut first = active_frontmatter("first");
+        first.tags = strings(&["component:foo", "workflow:bar"]);
+        let mut second = active_frontmatter("second");
+        second.tags = strings(&["component:foo", "workflow:bar"]);
+        write_memory_frontmatter(&first_path, first, "First body").await;
+        write_memory_frontmatter(&second_path, second, "Second body").await;
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let first_stats = auto_link_all_memories(gcx.clone()).await.unwrap();
+        let second_stats = auto_link_all_memories(gcx).await.unwrap();
+
+        assert!(first_stats.links_added >= 1);
+        assert_eq!(second_stats.docs_updated, 0);
+        assert_eq!(second_stats.links_added, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_link_all_memories_preserves_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let first_path = knowledge_dir.join("first.md");
+        let second_path = knowledge_dir.join("second.md");
+        let missing = "missing/not-in-workspace.rs";
+        let mut first = active_frontmatter("first");
+        first.tags = strings(&["component:foo", "workflow:bar"]);
+        first.filenames = strings(&[missing]);
+        let mut second = active_frontmatter("second");
+        second.tags = strings(&["component:foo", "workflow:bar"]);
+        write_memory_frontmatter(&first_path, first, "First body").await;
+        write_memory_frontmatter(&second_path, second, "Second body").await;
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+
+        let stats = auto_link_all_memories(gcx).await.unwrap();
+
+        let (first, _) = read_frontmatter_body(&first_path).await;
+        assert!(stats.links_added >= 1);
+        assert!(first.links.contains(&"second".to_string()));
+        assert_eq!(first.filenames, strings(&[missing]));
     }
 
     #[tokio::test(flavor = "multi_thread")]

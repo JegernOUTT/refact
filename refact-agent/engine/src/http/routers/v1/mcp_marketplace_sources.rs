@@ -59,7 +59,7 @@ fn default_remote_source() -> MarketplaceSource {
         label: "Refact Curated".to_string(),
         source_type: SourceType::RefactIndex,
         enabled: true,
-        url: Some("https://raw.githubusercontent.com/smallcloudai/refact/refs/heads/main/refact-agent/engine/src/yaml_configs/mcp_marketplace_index.json".to_string()),
+        url: Some("https://raw.githubusercontent.com/JegernOUTT/refact/refs/heads/main/refact-agent/engine/src/yaml_configs/mcp_marketplace_index.json".to_string()),
         api_key: None,
     }
 }

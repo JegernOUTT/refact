@@ -8,17 +8,6 @@ import {
   type ShikiCodeBlockProps,
   type MarkdownControls,
 } from "./ShikiCodeBlock";
-import {
-  Text,
-  Heading,
-  Blockquote,
-  Em,
-  Kbd,
-  Quote,
-  Strong,
-  Flex,
-  Table,
-} from "@radix-ui/themes";
 import { Link } from "../Link";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -26,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
 import type { PluggableList } from "unified";
 import { useLinksFromLsp } from "../../hooks";
+import { maskIncompleteSpecialCodeFences } from "./renderUtils";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
 const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
@@ -49,54 +39,8 @@ export type MarkdownProps = Pick<
   Pick<ShikiCodeBlockProps, "showLineNumbers" | "color" | "isStreaming"> & {
     canHaveInteractiveElements?: boolean;
     wrap?: boolean;
+    variant?: "chat" | "tool" | "terminal";
   } & Partial<MarkdownControls>;
-
-const STREAMING_SAFE_FENCE_LANGUAGE = "text";
-const STREAMING_SPECIAL_FENCE_LANGUAGES = new Set(["mermaid", "html", "svg"]);
-
-function maskIncompleteSpecialCodeFences(text: string): string {
-  const lines = text.split(/(?<=\n)/);
-  let inFence = false;
-  let fenceChar = "`";
-  let fenceLength = 0;
-  let specialFenceLineIndex = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/\r?\n$/, "");
-
-    if (!inFence) {
-      const opening = /^( {0,3})(`{3,}|~{3,})([^`~]*)$/.exec(line);
-      if (!opening) continue;
-
-      const info = opening[3].trim();
-      const language = info.split(/\s+/)[0]?.toLowerCase() ?? "";
-      inFence = true;
-      fenceChar = opening[2][0];
-      fenceLength = opening[2].length;
-      specialFenceLineIndex = STREAMING_SPECIAL_FENCE_LANGUAGES.has(language)
-        ? i
-        : -1;
-      continue;
-    }
-
-    const closingPattern = new RegExp(
-      `^ {0,3}${fenceChar}{${fenceLength},}\\s*$`,
-    );
-    if (closingPattern.test(line)) {
-      inFence = false;
-      specialFenceLineIndex = -1;
-    }
-  }
-
-  if (!inFence || specialFenceLineIndex < 0) return text;
-
-  lines[specialFenceLineIndex] = lines[specialFenceLineIndex].replace(
-    /^( {0,3})(`{3,}|~{3,})([^\r\n]*)(\r?\n?)$/,
-    `$1$2${STREAMING_SAFE_FENCE_LANGUAGE}$4`,
-  );
-
-  return lines.join("");
-}
 
 const PuzzleLink: React.FC<{
   children: string;
@@ -107,9 +51,9 @@ const PuzzleLink: React.FC<{
   if (!link) return children;
 
   return (
-    <Flex direction="column" align="start" gap="2" mt="2">
+    <div className={styles.puzzle_link}>
       <ChatLinkButton link={link} onClick={handleLinkAction} />
-    </Flex>
+    </div>
   );
 };
 
@@ -125,11 +69,7 @@ const MaybeInteractiveElement: React.FC<{
     return child;
   });
 
-  return (
-    <Text as="div" className={styles.maybe_pin} my="2">
-      {processed}
-    </Text>
-  );
+  return <div className={styles.maybe_pin}>{processed}</div>;
 };
 
 const _Markdown: React.FC<MarkdownProps> = ({
@@ -140,6 +80,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
   color,
   showLineNumbers,
   wrap,
+  variant = "chat",
   onCopyClick,
   isStreaming,
 }) => {
@@ -181,34 +122,34 @@ const _Markdown: React.FC<MarkdownProps> = ({
         if (canHaveInteractiveElements) {
           return <MaybeInteractiveElement {...props} />;
         }
-        return <Text as="p" {...props} />;
+        return <p {...props} />;
       },
       h1({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="4" size="4" as="h1" {...props} />;
+        return <h1 {...props} />;
       },
       h2({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h2" {...props} />;
+        return <h2 {...props} />;
       },
       h3({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h3" {...props} />;
+        return <h3 {...props} />;
       },
       h4({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h4" {...props} />;
+        return <h4 {...props} />;
       },
       h5({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h5" {...props} />;
+        return <h5 {...props} />;
       },
       h6({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h6" {...props} />;
+        return <h6 {...props} />;
       },
       blockquote({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Blockquote {...props} />;
+        return <blockquote {...props} />;
       },
       em({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Em {...props} />;
+        return <em {...props} />;
       },
       kbd({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Kbd {...props} />;
+        return <kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
         const href = props.href ?? "";
@@ -246,34 +187,44 @@ const _Markdown: React.FC<MarkdownProps> = ({
         );
       },
       q({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Quote {...props} />;
+        return <q {...props} />;
       },
       strong({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Strong {...props} />;
+        return <strong {...props} />;
       },
       b({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Text {...props} weight="bold" />;
+        return (
+          <span
+            {...props}
+            className={classNames(styles.bold, props.className)}
+          />
+        );
       },
       i({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Em {...props} />;
+        return <em {...props} />;
       },
       table({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Root my="2" variant="surface" {...props} />;
+        return (
+          <table
+            {...props}
+            className={classNames(styles.table, props.className)}
+          />
+        );
       },
       tbody({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Body {...props} />;
+        return <tbody {...props} />;
       },
       thead({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Header {...props} />;
+        return <thead {...props} />;
       },
       tr({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Row {...props} />;
+        return <tr {...props} />;
       },
       th({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.ColumnHeaderCell {...props} />;
+        return <th {...props} />;
       },
       td({ color: _color, ref: _ref, node: _node, width: _width, ...props }) {
-        return <Table.Cell {...props} />;
+        return <td {...props} />;
       },
     };
   }, [
@@ -292,7 +243,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
 
   return (
     <ReactMarkdown
-      className={styles.markdown}
+      className={classNames(styles.markdown, styles[`variant_${variant}`])}
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={REHYPE_PLUGINS}
       urlTransform={transformMarkdownUrl}

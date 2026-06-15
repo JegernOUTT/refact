@@ -68,3 +68,44 @@ pub fn safe_truncate(s: &str, max_len: usize) -> &str {
     }
     &s[..end]
 }
+
+pub fn is_redaction_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | ';' | ')' | ']' | '}' | '"' | '\'' | '`' | '<' | '>'
+        )
+}
+
+/// Returns a prefix window of `text` suitable for redaction scanning, backed off to the
+/// last redaction boundary so secret-like tokens are never split mid-token at the window
+/// edge. The second tuple element reports whether the input was truncated.
+pub fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
+    if text.len() <= scan_cap {
+        return (text, false);
+    }
+
+    let prefix = safe_truncate(text, scan_cap);
+    if prefix
+        .chars()
+        .last()
+        .map(is_redaction_boundary)
+        .unwrap_or(true)
+        || text[prefix.len()..]
+            .chars()
+            .next()
+            .map(is_redaction_boundary)
+            .unwrap_or(false)
+    {
+        return (prefix, true);
+    }
+
+    let end = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| is_redaction_boundary(*ch))
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    (&prefix[..end], true)
+}

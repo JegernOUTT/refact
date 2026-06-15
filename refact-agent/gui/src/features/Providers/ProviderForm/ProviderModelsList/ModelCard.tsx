@@ -1,16 +1,14 @@
 import { useCallback, useMemo, type FC } from "react";
 import classNames from "classnames";
+import { MoreVertical } from "lucide-react";
+
 import {
   Badge,
-  Card,
-  DropdownMenu,
-  Flex,
   IconButton,
-  Text,
+  Menu,
+  Surface,
   Tooltip,
-} from "@radix-ui/themes";
-import { DotsVerticalIcon } from "@radix-ui/react-icons";
-
+} from "../../../../components/ui";
 import { ModelCardPopup } from "./components/ModelCardPopup";
 import {
   CapabilityIcons,
@@ -34,9 +32,6 @@ export type ModelCardProps = {
   currentModelNames: string[];
 };
 
-/**
- * Card component that displays model information and provides access to model settings
- */
 export const ModelCard: FC<ModelCardProps> = ({
   model,
   modelType,
@@ -114,13 +109,19 @@ export const ModelCard: FC<ModelCardProps> = ({
     handleSetCompletionModelForIDE,
   ]);
 
-  const dropdownOptionsCount = useMemo(() => {
-    return dropdownOptions.filter((option) => option.visible).length;
+  const visibleDropdownOptions = useMemo(() => {
+    return dropdownOptions.filter((option) => option.visible);
   }, [dropdownOptions]);
 
   return (
-    <Card className={classNames({ [styles.disabledCard]: isSavingModel })}>
-      {dialogOpen && (
+    <Surface
+      variant="glass"
+      animated="rise"
+      className={classNames(styles.modelCard, {
+        [styles.disabledCard]: isSavingModel,
+      })}
+    >
+      {dialogOpen ? (
         <ModelCardPopup
           minifiedModel={model}
           isOpen={dialogOpen}
@@ -134,66 +135,72 @@ export const ModelCard: FC<ModelCardProps> = ({
           isRemovable={removable}
           currentModelNames={currentModelNames}
         />
-      )}
+      ) : null}
 
-      <Flex align="center" justify="between">
-        <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
-          <Flex gap="2" align="center" wrap="wrap">
-            <Text as="span" size="2" weight="medium">
-              {name}
-            </Text>
-            <Badge size="1" color={enabled ? "green" : "gray"}>
+      <div className={styles.modelHeader}>
+        <div className={styles.modelCopy}>
+          <div className={styles.modelTitleRow}>
+            <span className={styles.modelName}>{name}</span>
+            <Badge tone={enabled ? "success" : "muted"}>
               {enabled ? "Active" : "Inactive"}
             </Badge>
-          </Flex>
+          </div>
 
-          <Flex gap="2" align="center" wrap="wrap">
-            {model.pricingLabel && (
-              <Tooltip content="Price per 1M tokens (prompt/output)">
-                <ModelDetailIcon icon={<PricingIcon />}>
-                  {model.pricingLabel}
-                </ModelDetailIcon>
+          <div className={styles.modelMetaRow}>
+            {model.pricingLabel ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <ModelDetailIcon icon={<PricingIcon />}>
+                      {model.pricingLabel}
+                    </ModelDetailIcon>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>
+                  Price per 1M tokens (prompt/output)
+                </Tooltip.Content>
               </Tooltip>
-            )}
-            {model.nCtxLabel && (
-              <Tooltip
-                content={`Context window: ${model.nCtx?.toLocaleString()} tokens`}
-              >
-                <ModelDetailIcon icon={<ContextWindowIcon />}>
-                  {model.nCtxLabel}
-                </ModelDetailIcon>
+            ) : null}
+            {model.nCtxLabel ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <ModelDetailIcon icon={<ContextWindowIcon />}>
+                      {model.nCtxLabel}
+                    </ModelDetailIcon>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>
+                  Context window: {model.nCtx?.toLocaleString()} tokens
+                </Tooltip.Content>
               </Tooltip>
-            )}
-            {model.capabilities && (
+            ) : null}
+            {model.capabilities ? (
               <CapabilityIcons capabilities={model.capabilities} size="1" />
-            )}
-          </Flex>
-        </Flex>
+            ) : null}
+          </div>
+        </div>
 
-        {dropdownOptionsCount > 0 && (
-          <DropdownMenu.Root open={dropdownOpen} onOpenChange={setDropdownOpen}>
-            <DropdownMenu.Trigger>
-              <IconButton size="1" variant="outline" color="gray">
-                <DotsVerticalIcon />
-              </IconButton>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Content side="bottom" align="end" size="1">
-              {dropdownOptions.map(({ label, visible, onClick }) => {
-                if (!visible) return null;
-                return (
-                  <DropdownMenu.Item
-                    key={label}
-                    onClick={onClick}
-                    title={label}
-                  >
-                    {label}
-                  </DropdownMenu.Item>
-                );
-              })}
-            </DropdownMenu.Content>
-          </DropdownMenu.Root>
-        )}
-      </Flex>
-    </Card>
+        {visibleDropdownOptions.length > 0 ? (
+          <Menu open={dropdownOpen} onOpenChange={setDropdownOpen}>
+            <Menu.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                aria-label="Model actions"
+                icon={MoreVertical}
+              />
+            </Menu.Trigger>
+            <Menu.Content side="bottom" align="end" maxWidth="260px">
+              {visibleDropdownOptions.map(({ label, onClick }) => (
+                <Menu.Item key={label} onClick={onClick} title={label}>
+                  {label}
+                </Menu.Item>
+              ))}
+            </Menu.Content>
+          </Menu>
+        ) : null}
+      </div>
+    </Surface>
   );
 };

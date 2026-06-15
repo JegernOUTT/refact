@@ -1,11 +1,11 @@
-import { Flex, Heading, Text } from "@radix-ui/themes";
 import { FC } from "react";
-import { GearIcon } from "@radix-ui/react-icons";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
+import { SettingsGroup } from "../../../features/Settings/SettingsSection";
 import { IntegrationCard } from "./IntegrationCard";
+import styles from "./DisplayIntegrations.module.css";
 
 type GlobalIntegrationsProps = {
   globalIntegrations?: IntegrationWithIconRecord[];
@@ -20,26 +20,20 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
   globalIntegrations,
   handleIntegrationShowUp,
 }) => {
+  const count = globalIntegrations?.length ?? 0;
+
   return (
-    <Flex
-      align="start"
-      direction="column"
-      justify="between"
-      gap="4"
-      width="100%"
+    <SettingsGroup
+      title={`Globally configured · ${count} ${
+        count !== 1 ? "integrations" : "integration"
+      }`}
     >
-      <Heading as="h4" size="3" style={{ width: "100%" }}>
-        <GearIcon /> Globally configured {globalIntegrations?.length ?? 0}{" "}
-        {(globalIntegrations?.length ?? 0) !== 1
-          ? "integrations"
-          : "integration"}
-      </Heading>
-      <Text size="2" color="gray">
-        Global configurations are shared in your IDE and available for all your
+      <p className={styles.groupDescription}>
+        Global configurations are shared in your IDE and available for all
         projects.
-      </Text>
-      {globalIntegrations && (
-        <Flex direction="column" align="start" gap="3" width="100%">
+      </p>
+      {globalIntegrations ? (
+        <div className={styles.cards}>
           {globalIntegrations.map((integration, index) => (
             <IntegrationCard
               key={`${index}-${integration.integr_config_path}`}
@@ -47,8 +41,8 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
               handleIntegrationShowUp={handleIntegrationShowUp}
             />
           ))}
-        </Flex>
-      )}
-    </Flex>
+        </div>
+      ) : null}
+    </SettingsGroup>
   );
 };

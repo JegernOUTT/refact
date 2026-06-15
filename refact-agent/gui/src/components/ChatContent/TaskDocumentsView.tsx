@@ -1,6 +1,5 @@
 import React, { useMemo } from "react";
-import { Badge, Box, Flex, Text } from "@radix-ui/themes";
-import { FileTextIcon } from "@radix-ui/react-icons";
+import { FileText } from "lucide-react";
 import { useAppSelector } from "../../hooks";
 import {
   selectIsStreaming,
@@ -9,13 +8,14 @@ import {
 } from "../../features/Chat/Thread/selectors";
 import type { ToolCall } from "../../services/refact/types";
 import { Markdown } from "../Markdown";
+import { Badge, Icon } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
 import styles from "./TaskDocumentsView.module.css";
 
 type ToolType = "doc_list" | "doc_get";
 type Kind = "plan" | "design" | "runbook" | "brief" | "postmortem" | "spec";
-type BadgeColor = React.ComponentProps<typeof Badge>["color"];
+type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
 type Row = {
   slug: string;
   name: string;
@@ -38,13 +38,13 @@ type ParsedDocument = {
 type Props = { toolType: ToolType; content: string };
 type TaskDocumentsToolProps = { toolCall: ToolCall; toolType: ToolType };
 
-const KIND_COLORS: Record<Kind, BadgeColor> = {
-  plan: "blue",
-  design: "purple",
-  runbook: "green",
-  brief: "cyan",
-  postmortem: "amber",
-  spec: "orange",
+const KIND_TONES: Record<Kind, BadgeTone> = {
+  plan: "accent",
+  design: "accent",
+  runbook: "success",
+  brief: "accent",
+  postmortem: "warning",
+  spec: "warning",
 };
 
 function tableCells(line: string): string[] {
@@ -95,8 +95,8 @@ function cellValue(cells: string[], index: number, fallback: string): string {
   return cells[index] ?? fallback;
 }
 
-function kindColor(kind: string): BadgeColor {
-  return kind in KIND_COLORS ? KIND_COLORS[kind as Kind] : "gray";
+function kindTone(kind: string): BadgeTone {
+  return kind in KIND_TONES ? KIND_TONES[kind as Kind] : "muted";
 }
 
 function parseRows(markdown: string): Row[] {
@@ -170,16 +170,14 @@ const RawMarkdownFallback: React.FC<{ content: string; notice: string }> = ({
   content,
   notice,
 }) => (
-  <Box className={styles.root}>
-    <Box className={styles.header}>
-      <Text size="1" color="gray">
-        {notice}
-      </Text>
-    </Box>
-    <Box className={styles.markdown}>
+  <div className={styles.root}>
+    <div className={styles.header}>
+      <span className={styles.headerMeta}>{notice}</span>
+    </div>
+    <div className={styles.markdown}>
       <Markdown>{content}</Markdown>
-    </Box>
-  </Box>
+    </div>
+  </div>
 );
 
 const PinStar: React.FC<{ pinned: boolean; slug?: string }> = ({
@@ -213,32 +211,22 @@ export const TaskDocumentsContent: React.FC<Props> = ({
     }
 
     return (
-      <Box className={styles.root}>
-        <Box className={styles.header}>
-          <Flex justify="between" align="center" gap="2" wrap="wrap">
-            <Text weight="medium">
-              {meta.name ?? meta.slug ?? "Task document"}
-            </Text>
-            {meta.version && (
-              <Badge color="gray" variant="soft">
-                v{meta.version}
-              </Badge>
-            )}
-          </Flex>
-          <Flex gap="2" wrap="wrap" mt="2" align="center">
-            {meta.slug && <Badge variant="outline">{meta.slug}</Badge>}
-            {meta.kind && (
-              <Badge color={kindColor(meta.kind)} variant="soft">
-                {meta.kind}
-              </Badge>
-            )}
-            {meta.pinned && <PinStar pinned={parsePinned(meta.pinned)} />}
-          </Flex>
-        </Box>
-        <Box className={styles.markdown}>
+      <div className={styles.root}>
+        <div className={styles.header}>
+          <span className={styles.headerTitle}>
+            {meta.name ?? meta.slug ?? "Task document"}
+          </span>
+          {meta.version && <Badge tone="muted">v{meta.version}</Badge>}
+        </div>
+        <div className={styles.badges}>
+          {meta.slug && <Badge tone="muted">{meta.slug}</Badge>}
+          {meta.kind && <Badge tone={kindTone(meta.kind)}>{meta.kind}</Badge>}
+          {meta.pinned && <PinStar pinned={parsePinned(meta.pinned)} />}
+        </div>
+        <div className={styles.markdown}>
           <Markdown>{body || content}</Markdown>
-        </Box>
-      </Box>
+        </div>
+      </div>
     );
   }
 
@@ -252,44 +240,32 @@ export const TaskDocumentsContent: React.FC<Props> = ({
   }
 
   return (
-    <Box className={styles.root}>
-      <Flex justify="between" align="center" gap="2" className={styles.header}>
-        <Text weight="medium">Task documents</Text>
-        <Text size="1" color="gray">
-          {rows.length} documents
-        </Text>
-      </Flex>
-      <Flex direction="column" gap="2">
+    <div className={styles.root}>
+      <div className={styles.header}>
+        <span className={styles.headerTitle}>Task documents</span>
+        <span className={styles.headerMeta}>{rows.length} documents</span>
+      </div>
+      <div className={styles.rows}>
         {rows.map((row) => (
-          <Box key={row.slug} className={styles.row}>
-            <Flex align="center" justify="between" gap="3">
-              <Flex align="center" gap="2" className={styles.identity}>
+          <article key={row.slug} className={styles.row}>
+            <div className={styles.rowBody}>
+              <div className={styles.identity}>
                 <PinStar pinned={row.pinned} slug={row.slug} />
-                <Box className={styles.identityText}>
-                  <Text as="div" size="2" weight="medium">
-                    {row.name}
-                  </Text>
-                  <Text as="div" size="1" color="gray">
-                    {row.slug}
-                  </Text>
-                </Box>
-              </Flex>
-              <Flex align="center" gap="2" wrap="wrap" justify="end">
-                <Badge color={kindColor(row.kind)} variant="soft">
-                  {row.kind}
-                </Badge>
-                <Badge color="gray" variant="soft">
-                  v{row.version}
-                </Badge>
-                <Text size="1" color="gray" className={styles.updatedAt}>
-                  {row.updated_at}
-                </Text>
-              </Flex>
-            </Flex>
-          </Box>
+                <div className={styles.identityText}>
+                  <span className={styles.name}>{row.name}</span>
+                  <span className={styles.slug}>{row.slug}</span>
+                </div>
+              </div>
+              <div className={styles.rowMeta}>
+                <Badge tone={kindTone(row.kind)}>{row.kind}</Badge>
+                <Badge tone="muted">v{row.version}</Badge>
+                <span className={styles.updatedAt}>{row.updated_at}</span>
+              </div>
+            </div>
+          </article>
         ))}
-      </Flex>
-    </Box>
+      </div>
+    </div>
   );
 };
 
@@ -319,7 +295,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
     <>
       <span data-testid="task-documents-view" hidden />
       <ToolCard
-        icon={<FileTextIcon />}
+        icon={<Icon icon={FileText} size="sm" />}
         summary={toolType === "doc_list" ? "Task documents" : "Task document"}
         meta={
           toolType === "doc_list" && content && rows.length > 0

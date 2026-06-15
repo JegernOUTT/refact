@@ -86,10 +86,6 @@ pub(crate) struct AgentStatusQuery {
 }
 
 impl AgentStatusQuery {
-    pub(crate) fn card_ids(&self) -> Option<&HashSet<String>> {
-        self.card_ids.as_ref()
-    }
-
     fn default_for_format(format: AgentReportFormat) -> Self {
         let default_status_filter = if matches!(
             format,
@@ -376,16 +372,7 @@ async fn statuses_from_board(
         if let Some(agent_chat_id) = &card.agent_chat_id {
             let live_state = chat_facade.session_state(agent_chat_id).await?;
             let snapshot = chat_facade.session_snapshot(agent_chat_id).await.ok();
-            let empty_snapshot_without_live = live_state.is_none()
-                && snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.messages.is_empty())
-                    .unwrap_or(false);
-            session_state = if empty_snapshot_without_live {
-                None
-            } else {
-                live_state.or_else(|| snapshot.as_ref().map(|snapshot| snapshot.session_state))
-            };
+            session_state = live_state;
             last_tool_name = snapshot
                 .as_ref()
                 .and_then(|snapshot| last_tool_name_from_messages(&snapshot.messages));
@@ -403,7 +390,7 @@ async fn statuses_from_board(
 }
 
 fn should_report_card(card: &BoardCard) -> bool {
-    card.agent_chat_id.is_some() || matches!(card.column.as_str(), "done" | "failed")
+    card.agent_chat_id.is_some() || matches!(card.column.as_str(), "doing" | "done" | "failed")
 }
 
 fn agent_status_from_card(
@@ -521,12 +508,37 @@ fn generation_loop_is_off(status: &AgentStatus) -> bool {
 
 pub(crate) fn has_active_agent_statuses(statuses: &[AgentStatus]) -> bool {
     let now = Utc::now();
-    statuses.iter().any(|status| {
-        matches!(
+    statuses
+        .iter()
+        .any(|status| waitable_agent_status_at(status, now))
+}
+
+fn waitable_agent_status_at(status: &AgentStatus, now: DateTime<Utc>) -> bool {
+    status.column == "doing"
+        && status.session_state.is_some()
+        && matches!(
             classify_agent_status(status, now),
             AgentStateKind::Running | AgentStateKind::Paused
         )
-    })
+}
+
+pub(crate) fn waitable_agent_statuses<'a>(
+    statuses: &'a [AgentStatus],
+    query: &AgentStatusQuery,
+    status_filter_explicit: bool,
+) -> Vec<&'a AgentStatus> {
+    let now = Utc::now();
+    let filtered = if status_filter_explicit {
+        filtered_statuses(statuses, query, now)
+    } else {
+        let mut query = query.clone();
+        query.status_filter = None;
+        filtered_statuses(statuses, &query, now)
+    };
+    filtered
+        .into_iter()
+        .filter(|status| waitable_agent_status_at(status, now))
+        .collect()
 }
 
 fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> String {
@@ -1038,7 +1050,7 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
-    use crate::tasks::types::{TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus};
+    use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus};
     use crate::tools::tool_task_wait_for_agents::ToolTaskWaitForAgents;
     use crate::tools::tools_description::Tool;
 
@@ -1093,6 +1105,41 @@ mod tests {
             .collect()
     }
 
+    fn board_card(id: &str, column: &str, agent_chat_id: Option<String>) -> BoardCard {
+        BoardCard {
+            id: id.to_string(),
+            title: format!("{} title", id),
+            column: column.to_string(),
+            priority: "P1".to_string(),
+            depends_on: vec![],
+            instructions: "do work".to_string(),
+            assignee: agent_chat_id.as_ref().map(|_| "agent-1".to_string()),
+            agent_chat_id,
+            status_updates: vec![],
+            comments: vec![],
+            final_report: None,
+            final_report_structured: None,
+            verifier_report: None,
+            created_at: now().to_rfc3339(),
+            started_at: Some(now().to_rfc3339()),
+            last_heartbeat_at: None,
+            completed_at: None,
+            agent_branch: None,
+            agent_worktree: None,
+            agent_worktree_name: None,
+            ab_variants: None,
+            team_members: vec![],
+            target_files: vec![],
+            scope_guard_mode: Default::default(),
+        }
+    }
+
+    fn orphan_doing_card(id: &str) -> BoardCard {
+        let mut card = board_card(id, "doing", None);
+        card.assignee = Some("agent-1".to_string());
+        card
+    }
+
     fn task_meta() -> StoredTaskMeta {
         let now = Utc::now().to_rfc3339();
         StoredTaskMeta {
@@ -1115,7 +1162,10 @@ mod tests {
         }
     }
 
-    async fn write_empty_task(root: &std::path::Path) -> Arc<crate::global_context::GlobalContext> {
+    async fn write_task_board(
+        root: &std::path::Path,
+        board: TaskBoard,
+    ) -> Arc<crate::global_context::GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let task_dir = root.join(".refact").join("tasks").join("task-1");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
@@ -1127,12 +1177,16 @@ mod tests {
         .unwrap();
         tokio::fs::write(
             task_dir.join("board.yaml"),
-            serde_yaml::to_string(&TaskBoard::default()).unwrap(),
+            serde_yaml::to_string(&board).unwrap(),
         )
         .await
         .unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
         gcx
+    }
+
+    async fn write_empty_task(root: &std::path::Path) -> Arc<crate::global_context::GlobalContext> {
+        write_task_board(root, TaskBoard::default()).await
     }
 
     async fn planner_ccx(
@@ -1210,6 +1264,126 @@ mod tests {
 
         assert!(output.starts_with("⚠️  Alerts: 1 stuck, 0 failed, 0 needing approval"));
         assert!(output.contains("STUCK"));
+    }
+
+    #[test]
+    fn check_agents_surfaces_doing_card_without_agent_chat_id_as_stuck() {
+        let card = orphan_doing_card("T-404");
+        assert!(should_report_card(&card));
+
+        let status = agent_status_from_card(&card, 0, None, None);
+        assert_eq!(status.agent_chat_id, "none");
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+
+        let output =
+            format_agent_statuses_at(&[status], &query(AgentReportFormat::Compact), now()).unwrap();
+
+        assert!(output.starts_with("⚠️  Alerts: 1 stuck"));
+        assert!(output.contains("T-404"));
+        assert!(output.contains("STUCK"));
+    }
+
+    #[tokio::test]
+    async fn get_agent_statuses_surfaces_doing_card_without_agent_chat_id_as_stuck() {
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![orphan_doing_card("T-404")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        let chat_facade = AppState::from_gcx(gcx.clone()).await.chat.facade.clone();
+
+        let statuses = get_agent_statuses(gcx, chat_facade, "task-1")
+            .await
+            .unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].card_id, "T-404");
+        assert_eq!(statuses[0].agent_chat_id, "none");
+        assert_eq!(
+            classify_agent_status(&statuses[0], now()),
+            AgentStateKind::Stuck
+        );
+    }
+
+    #[tokio::test]
+    async fn check_agents_tool_output_surfaces_doing_card_without_agent_chat_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![orphan_doing_card("T-404")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+
+        let output = tool_output_text(
+            ToolTaskCheckAgents::new()
+                .tool_execute(ccx, &"call".to_string(), &HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.starts_with("⚠️  Alerts: 1 stuck"));
+        assert!(output.contains("T-404"));
+        assert!(output.contains("STUCK"));
+        assert!(output.contains("needs attention"));
+    }
+
+    #[tokio::test]
+    async fn wait_agents_invalid_wait_does_not_record_wait_state_or_abort() {
+        use crate::chat::types::ChatSession;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![orphan_doing_card("T-1")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let app = {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.app.clone()
+        };
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            "planner-chat".to_string(),
+        )));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("planner-chat".to_string(), session_arc.clone());
+
+        let result = ToolTaskWaitForAgents::new()
+            .tool_execute(
+                ccx.clone(),
+                &"call".to_string(),
+                &args(&[("card_ids", json!(["T-1"]))]),
+            )
+            .await
+            .unwrap();
+
+        let ContextEnum::ChatMessage(message) = &result.1[0] else {
+            panic!("expected chat message")
+        };
+        assert_eq!(message.tool_failed, Some(true));
+        let ChatContent::SimpleText(text) = &message.content else {
+            panic!("expected text")
+        };
+        assert!(text.contains("planner wait mode was not entered"));
+        assert!(text.contains("T-1"));
+        assert!(text.contains("STUCK"));
+
+        let session = session_arc.lock().await;
+        assert!(session.waiting_for_card_ids.is_empty());
+        assert!(session.wake_up_at.is_none());
+        drop(session);
+
+        let aborted = {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.abort_flag.load(Ordering::SeqCst)
+        };
+        assert!(!aborted);
     }
 
     #[test]

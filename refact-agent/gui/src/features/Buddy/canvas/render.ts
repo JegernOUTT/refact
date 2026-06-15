@@ -1,7 +1,13 @@
-import { fillRect, fillPixel, strokeArc, strokeEllipse } from "./helpers";
+import {
+  fillEllipse,
+  fillPixel,
+  fillRect,
+  strokeArc,
+  strokeEllipse,
+} from "./helpers";
 import { buildColorMap } from "./colorMap";
 import { drawStageCharacter } from "./sprites";
-import { renderWalkingFeet, renderToy } from "./toys";
+import { renderToy } from "./toys";
 import {
   updateAndRenderSparks,
   updateAndRenderFloatingEmojis,
@@ -18,12 +24,84 @@ import {
   STAGE_SIZES,
   PALETTES,
 } from "../constants";
-import type { BuddyAnimState, BuddySemanticState } from "../types";
+import type { BuddyAnimState, BuddySemanticState, ColorMap } from "../types";
+
+function drawExpressionOverlays(
+  ctx: CanvasRenderingContext2D,
+  anim: BuddyAnimState,
+  ox: number,
+  oy: number,
+  spriteW: number,
+  spriteH: number,
+  m: ColorMap,
+): void {
+  if (anim.cheekPuffTimer > 0) {
+    const puff = Math.min(1, anim.cheekPuffTimer / 24);
+    const cheekY = oy + Math.round(spriteH * 0.58);
+    ctx.globalAlpha = 0.85 * puff;
+    fillRect(ctx, ox + 1, cheekY, 4, 3, m.body);
+    fillRect(ctx, ox + spriteW - 5, cheekY, 4, 3, m.body);
+    ctx.globalAlpha = 0.55 * puff;
+    fillRect(ctx, ox + 2, cheekY + 1, 2, 1, m.rosy);
+    fillRect(ctx, ox + spriteW - 4, cheekY + 1, 2, 1, m.rosy);
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.sweatTimer > 0) {
+    const slide = (1 - anim.sweatTimer / 110) * 7;
+    const dropX = ox + spriteW - 3;
+    const dropY = oy + 1 + slide;
+    ctx.globalAlpha = anim.sweatTimer < 20 ? anim.sweatTimer / 20 : 0.92;
+    fillPixel(ctx, dropX, dropY, 2, 3, "#9DD6F2");
+    fillPixel(ctx, dropX, dropY + 1, 1, 1, "#E3F5FD");
+    fillPixel(ctx, dropX + 1, dropY - 1, 1, 1, "#9DD6F2");
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.veinTimer > 0) {
+    const pulse = 0.55 + Math.abs(Math.sin(anim.frame * 0.18)) * 0.45;
+    const vx = ox + spriteW - 1;
+    const vy = oy - 3;
+    ctx.globalAlpha = pulse * Math.min(1, anim.veinTimer / 30);
+    fillPixel(ctx, vx, vy + 1, 3, 1, "#F87171");
+    fillPixel(ctx, vx + 1, vy, 1, 3, "#F87171");
+    fillPixel(ctx, vx - 2, vy + 3, 2, 1, "#F87171");
+    fillPixel(ctx, vx - 1, vy + 2, 1, 3, "#F87171");
+    ctx.globalAlpha = 1;
+  }
+
+  if (anim.auraTimer > 0) {
+    const fade = Math.min(1, anim.auraTimer / 40);
+    const auraCX = ox + spriteW / 2;
+    const auraCY = oy + spriteH / 2;
+    for (let i = 0; i < 6; i++) {
+      const a = anim.frame * 0.045 + (i * Math.PI) / 3;
+      const px = auraCX + Math.cos(a) * (spriteW / 2 + 6);
+      const py = auraCY + Math.sin(a) * (spriteH / 2 + 4);
+      ctx.globalAlpha = (0.4 + Math.sin(anim.frame * 0.1 + i) * 0.3) * fade;
+      fillPixel(ctx, px, py, 1, 1, m.gold);
+      if (i % 2 === 0) {
+        fillPixel(ctx, px, py - 1, 1, 1, "#FFF7CC");
+      }
+    }
+    ctx.globalAlpha = 0.12 * fade;
+    strokeEllipse(
+      ctx,
+      auraCX,
+      auraCY + spriteH / 2 + 2,
+      spriteW / 2 + 4,
+      3,
+      m.gold,
+    );
+    ctx.globalAlpha = 1;
+  }
+}
 
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   anim: BuddyAnimState,
   semantic: BuddySemanticState,
+  rawPixelScale = 1,
 ): void {
   ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
   ctx.imageSmoothingEnabled = false;
@@ -83,24 +161,27 @@ export function renderFrame(
   if (anim.mouseProximity > 0.3 && !anim.walking)
     leanX = Math.round(anim.cursorTargetX * anim.mouseProximity * 3);
   if (anim.walking) leanX += anim.walkDirection * 2;
+  if (!anim.walking && !isSleeping && anim.mouseProximity <= 0.3)
+    leanX += Math.round(Math.sin(anim.frame * 0.011) * 1.5);
+  const shiverX = anim.shiverTimer > 0 ? (anim.frame % 2 === 0 ? 1 : -1) : 0;
 
   const baseOX = Math.round(
     CANVAS_CENTER_X - spriteW / 2 + anim.nuzzleOffsetX + anim.walkOffsetX,
   );
   const baseOY = Math.round(CANVAS_CENTER_Y - spriteH / 2 + anim.nuzzleOffsetY);
-  const ox = baseOX + shakeX + leanX;
+  const ox = baseOX + shakeX + leanX + shiverX;
   const oy = baseOY + bobY - celebBounce + shakeY;
 
   updateAndRenderGroundEffects(ctx, anim, pal.accent);
 
   ctx.globalAlpha = 0.12;
-  const shadowWidth = Math.round((spriteW - 6) * anim.squashX);
-  fillRect(
+  const shadowWidth = (spriteW - 6) * anim.squashX;
+  fillEllipse(
     ctx,
-    ox + spriteW / 2 - shadowWidth / 2,
-    oy + spriteH + 1,
-    shadowWidth,
-    2,
+    ox + spriteW / 2,
+    oy + spriteH + 2,
+    shadowWidth / 2 + 1,
+    1.4,
     "#000",
   );
   ctx.globalAlpha = 1;
@@ -143,10 +224,24 @@ export function renderFrame(
   ctx.scale(anim.squashX, anim.squashY + anim.breathScale);
   ctx.translate(-centerX, -centerY);
   drawStageCharacter(ctx, stage, ox, oy, m, anim, semantic.paletteIndex);
+  if (anim.blushTimer > 0 || semantic.mood.affection > 70) {
+    ctx.globalAlpha = 0.3 + Math.sin(anim.frame * 0.15) * 0.1;
+    const cheekY = oy + spriteH * 0.62 + 0.5;
+    fillEllipse(ctx, ox + spriteW * 0.14 + 1.5, cheekY, 1.8, 0.8, "#FB7185");
+    fillEllipse(
+      ctx,
+      ox + spriteW - spriteW * 0.14 - 1.5,
+      cheekY,
+      1.8,
+      0.8,
+      "#FB7185",
+    );
+    ctx.globalAlpha = 1;
+  }
+  drawExpressionOverlays(ctx, anim, ox, oy, spriteW, spriteH, m);
   ctx.restore();
   ctx.restore();
 
-  renderWalkingFeet(ctx, ox, oy, spriteW, spriteH, m, anim);
   renderToy(ctx, ox, oy, spriteW, spriteH, m, anim);
 
   if (anim.quirkType === "shell_fall" && anim.quirkActive) {
@@ -191,18 +286,6 @@ export function renderFrame(
       spriteH / 2 + 2,
       pal.accent,
     );
-    ctx.globalAlpha = 1;
-  }
-
-  if (anim.idleAction === "wave" && !isSleeping) {
-    const wavePhase = Math.sin(anim.frame * 0.28);
-    const armBaseX = ox + spriteW + 1;
-    const armBaseY = Math.round(oy + spriteH / 3);
-    const handX = armBaseX + Math.round(wavePhase * 3);
-    const handY = armBaseY - Math.round(Math.abs(wavePhase) * 4);
-    ctx.globalAlpha = 0.85;
-    fillRect(ctx, armBaseX, armBaseY, 1, 4, pal.body);
-    fillRect(ctx, handX, handY, 2, 2, pal.light);
     ctx.globalAlpha = 1;
   }
 
@@ -261,12 +344,18 @@ export function renderFrame(
     for (let y = 0; y < CANVAS_SIZE; y += 3)
       fillRect(ctx, 0, y, CANVAS_SIZE, 1, "#000");
     if (Math.random() < anim.screenGlitch) {
+      const raw = Math.max(1, rawPixelScale);
       const gy = (Math.random() * CANVAS_SIZE) | 0;
       const gh = (2 + Math.random() * 4) | 0;
       const shift = ((Math.random() - 0.5) * 8) | 0;
       try {
-        const d = ctx.getImageData(0, gy, CANVAS_SIZE, gh);
-        ctx.putImageData(d, shift, gy);
+        const d = ctx.getImageData(
+          0,
+          Math.round(gy * raw),
+          Math.max(1, Math.round(CANVAS_SIZE * raw)),
+          Math.max(1, Math.round(gh * raw)),
+        );
+        ctx.putImageData(d, Math.round(shift * raw), Math.round(gy * raw));
       } catch (_) {
         void 0;
       }

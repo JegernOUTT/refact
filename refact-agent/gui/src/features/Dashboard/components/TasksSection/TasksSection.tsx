@@ -1,11 +1,19 @@
 import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
-import { Badge, Flex, Skeleton, Text, TextField } from "@radix-ui/themes";
 import {
-  MagnifyingGlassIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
-  PlusIcon,
-} from "@radix-ui/react-icons";
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  Icon,
+  LoadingState,
+  StatusDot,
+} from "../../../../components/ui";
+import {
+  DashboardText,
+  DashboardTextField,
+  dashboardToneFromTaskStatus,
+} from "../DashboardPrimitives";
+import { ChevronDown, ChevronUp, ListPlus, Search } from "lucide-react";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch, useAppSelector } from "../../../../hooks";
@@ -14,7 +22,6 @@ import {
   tasksApi,
   useCreateTaskMutation,
 } from "../../../../services/refact/tasks";
-import { StatusDot } from "../../../../components/StatusDot";
 import { getTaskStatusDotState } from "../../../../utils/sessionStatus";
 import type { TaskMeta } from "../../../../services/refact/tasks";
 import type { DashboardBreakpoint } from "../../types";
@@ -53,25 +60,6 @@ function getDateGroup(dateStr: string): string {
   if (diffDay === 0) return "Today";
   if (diffDay === 1) return "Yesterday";
   return "Earlier";
-}
-
-function getStatusColor(
-  status: string,
-): "blue" | "purple" | "amber" | "green" | "red" | "gray" {
-  switch (status) {
-    case "active":
-      return "blue";
-    case "planning":
-      return "purple";
-    case "paused":
-      return "amber";
-    case "completed":
-      return "green";
-    case "abandoned":
-      return "red";
-    default:
-      return "gray";
-  }
 }
 
 const GROUP_ORDER = ["Today", "Yesterday", "Earlier"] as const;
@@ -171,9 +159,7 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       .then((task) => {
         dispatch(push({ name: "task workspace", taskId: task.id }));
       })
-      .catch(() => {
-        // Task creation failed
-      });
+      .catch(() => undefined);
   }, [createTask, dispatch]);
 
   const activeCount = filteredTasks.filter(
@@ -185,48 +171,50 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
   const renderHeader = (children?: React.ReactNode, showSearch = false) => (
     <div className={styles.header}>
       <div className={styles.headerMain}>
-        <button
-          type="button"
+        <Button
+          variant="plain"
+          size="sm"
           className={styles.headerToggle}
           onClick={onToggleCollapsed}
           aria-expanded={!collapsed}
+          rightIcon={collapsed ? ChevronDown : ChevronUp}
         >
-          <Text size="1" weight="bold" color="gray" className={styles.label}>
+          <DashboardText
+            size="1"
+            weight="bold"
+            tone="muted"
+            className={styles.label}
+          >
             TASKS
-          </Text>
-          {collapsed ? (
-            <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
-          ) : (
-            <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-          )}
-        </button>
+          </DashboardText>
+        </Button>
         {showSearch && !collapsed && (
-          <TextField.Root
+          <DashboardTextField.Root
             size="1"
             placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className={styles.searchField}
           >
-            <TextField.Slot>
-              <MagnifyingGlassIcon width={12} height={12} />
-            </TextField.Slot>
-          </TextField.Root>
+            <DashboardTextField.Slot>
+              <Icon icon={Search} size="sm" tone="muted" />
+            </DashboardTextField.Slot>
+          </DashboardTextField.Root>
         )}
       </div>
       <div className={styles.headerActions}>
         {activeCount > 0 && (
-          <Text size="1" color="gray">
+          <DashboardText size="1" tone="muted">
             {activeCount} active
-          </Text>
+          </DashboardText>
         )}
-        <Text size="1" color={showTaskError ? "red" : "gray"}>
+        <DashboardText size="1" tone={showTaskError ? "danger" : "muted"}>
           {tasksLoading
             ? "Loading"
             : showTaskError
               ? "Error"
               : `${filteredTasks.length} total`}
-        </Text>
+        </DashboardText>
         {children}
       </div>
     </div>
@@ -237,14 +225,11 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       <div className={styles.section} data-collapsed={collapsed || undefined}>
         {renderHeader()}
         <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
-          <Flex direction="column" align="center" gap="2" p="4">
-            <Text size="2" color="red">
-              Failed to load tasks
-            </Text>
-            <Text size="1" color="gray" align="center">
-              {loadError ?? "Refact could not load the task list."}
-            </Text>
-          </Flex>
+          <ErrorState
+            title="Failed to load tasks"
+            error={loadError ?? "Refact could not load the task list."}
+            className={styles.stateBlock}
+          />
         </CollapsePanel>
       </div>
     );
@@ -255,26 +240,11 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
       <div className={styles.section} data-collapsed={collapsed || undefined}>
         {renderHeader()}
         <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
-          <Flex direction="column" gap="1" p="1">
-            {Array.from({ length: 3 }, (_, i) => (
-              <Flex key={i} align="center" gap="2" py="1" px="2">
-                <Skeleton>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%" }} />
-                </Skeleton>
-                <Skeleton>
-                  <Text size="2" style={{ width: `${120 + (i % 3) * 40}px` }}>
-                    &nbsp;
-                  </Text>
-                </Skeleton>
-                <div style={{ flex: 1 }} />
-                <Skeleton>
-                  <Text size="1" style={{ width: 40 }}>
-                    &nbsp;
-                  </Text>
-                </Skeleton>
-              </Flex>
-            ))}
-          </Flex>
+          <LoadingState
+            label="Loading tasks"
+            kind="skeleton"
+            className={styles.stateBlock}
+          />
         </CollapsePanel>
       </div>
     );
@@ -283,15 +253,16 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
   return (
     <div className={styles.section} data-collapsed={collapsed || undefined}>
       {renderHeader(
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           className={styles.newTaskButton}
           onClick={handleNewTask}
-          disabled={isCreatingTask}
+          loading={isCreatingTask}
+          leftIcon={ListPlus}
         >
-          <PlusIcon width={12} height={12} />
-          <Text size="1">New Task</Text>
-        </button>,
+          New Task
+        </Button>,
         true,
       )}
       <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
@@ -304,23 +275,24 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
               if (item.type === "header") {
                 return (
                   <div className={styles.groupLabel}>
-                    <Text
+                    <DashboardText
                       size="1"
-                      color="gray"
+                      tone="muted"
                       className={styles.groupLabelText}
                     >
                       {item.label}
-                    </Text>
+                    </DashboardText>
                     <div className={styles.groupDivider} />
                   </div>
                 );
               }
               const { task } = item;
+              const dotStatus = getTaskStatusDotState(task);
               return (
                 <div
                   role="button"
                   tabIndex={0}
-                  className={styles.taskItem}
+                  className={`${styles.taskItem} rf-enter-rise rf-pressable`}
                   onClick={() => handleTaskClick(task)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -332,51 +304,67 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
                   <div className={styles.taskLeft}>
                     <span className={styles.indent} />
                     <StatusDot
-                      state={getTaskStatusDotState(task)}
+                      status={dotStatus}
                       size="small"
+                      pulse={dotStatus === "in_progress"}
                     />
-                    <Text size="2" truncate className={styles.taskName}>
+                    <DashboardText
+                      size="2"
+                      truncate
+                      className={styles.taskName}
+                    >
                       {task.name}
-                    </Text>
+                    </DashboardText>
                   </div>
                   <div className={styles.taskRight}>
                     {task.cards_total > 0 && (
-                      <Text size="1" color="gray">
+                      <DashboardText size="1" tone="muted">
                         {task.cards_done}/{task.cards_total}
-                      </Text>
+                      </DashboardText>
                     )}
                     {breakpoint !== "narrow" && task.cards_failed > 0 && (
-                      <Text size="1" color="red">
+                      <DashboardText size="1" tone="danger">
                         {task.cards_failed} failed
-                      </Text>
+                      </DashboardText>
                     )}
                     {breakpoint !== "narrow" && (
-                      <Badge
-                        size="1"
-                        variant="soft"
-                        color={getStatusColor(task.status)}
-                      >
+                      <Badge tone={dashboardToneFromTaskStatus(task.status)}>
                         {task.status}
                       </Badge>
                     )}
-                    <Text size="1" color="gray" className={styles.taskTime}>
+                    <DashboardText
+                      size="1"
+                      tone="muted"
+                      className={styles.taskTime}
+                    >
                       {formatTaskTime(task.updated_at)}
-                    </Text>
+                    </DashboardText>
                   </div>
                 </div>
               );
             }}
           />
           {filteredTasks.length === 0 && (
-            <Text
-              size="2"
-              color="gray"
-              style={{ padding: "var(--space-4)", textAlign: "center" }}
-            >
-              {searchQuery
-                ? "No matching tasks"
-                : "No tasks yet — start a new one!"}
-            </Text>
+            <EmptyState
+              title={searchQuery ? "No matching tasks" : "No tasks yet"}
+              description={
+                searchQuery ? undefined : "Create a task when you are ready."
+              }
+              action={
+                searchQuery ? undefined : (
+                  <Button
+                    variant="soft"
+                    size="sm"
+                    onClick={handleNewTask}
+                    loading={isCreatingTask}
+                    leftIcon={ListPlus}
+                  >
+                    New Task
+                  </Button>
+                )
+              }
+              className={styles.stateBlock}
+            />
           )}
         </div>
       </CollapsePanel>

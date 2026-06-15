@@ -1,7 +1,7 @@
 import { FC, useCallback, useMemo } from "react";
+import { ArrowLeft } from "lucide-react";
 import { Config } from "../Config/configSlice";
-import { Button, Flex, Spinner, Text } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import { Button, LoadingState } from "../../components/ui";
 import { ChatRawJSON } from "../../components/ChatRawJSON";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectThreadById } from "../Chat/Thread/selectors";
@@ -22,13 +22,13 @@ import {
 } from "../../components/Callout/Callout";
 import styles from "./ThreadHistory.module.css";
 
-type ThreadHistoryProps = {
+interface ThreadHistoryProps {
   onCloseThreadHistory: () => void;
   backFromThreadHistory: () => void;
   host: Config["host"];
   tabbed: Config["tabbed"];
   chatId: string;
-};
+}
 
 export const ThreadHistory: FC<ThreadHistoryProps> = ({
   onCloseThreadHistory,
@@ -83,9 +83,11 @@ export const ThreadHistory: FC<ThreadHistoryProps> = ({
       return;
     }
 
-    void copyChatHistoryToClipboard(historyThreadToPass).then(() => {
-      dispatch(setInformation("Chat history copied to clipboard"));
-    });
+    void copyChatHistoryToClipboard(historyThreadToPass)
+      .then(() => {
+        dispatch(setInformation("Chat history copied to clipboard"));
+      })
+      .catch(() => dispatch(setError("Failed to copy chat history")));
   }, [dispatch, historyThreadToPass]);
 
   const handleBackFromThreadHistory = useCallback(
@@ -101,40 +103,23 @@ export const ThreadHistory: FC<ThreadHistoryProps> = ({
     [information, error, onClearError, onClearInformation],
   );
 
+  const backAction =
+    host === "vscode" && !tabbed ? backFromThreadHistory : onCloseThreadHistory;
+
   return (
-    <>
-      {host === "vscode" && !tabbed ? (
-        <Flex gap="2" pb="3">
-          <Button
-            variant="surface"
-            onClick={() => handleBackFromThreadHistory(backFromThreadHistory)}
-          >
-            <ArrowLeftIcon width="16" height="16" />
-            Back
-          </Button>
-        </Flex>
-      ) : (
+    <div className={styles.root}>
+      <div className={styles.header}>
         <Button
-          mr="auto"
-          variant="outline"
-          onClick={() => handleBackFromThreadHistory(onCloseThreadHistory)}
-          mb="4"
+          variant="soft"
+          leftIcon={ArrowLeft}
+          onClick={() => handleBackFromThreadHistory(backAction)}
         >
           Back
         </Button>
-      )}
-      {isLoading && (
-        <Flex align="center" justify="center" py="6" gap="2">
-          <Spinner size="2" />
-          <Text size="2" color="gray">
-            Loading thread history...
-          </Text>
-        </Flex>
-      )}
+      </div>
+      {isLoading && <LoadingState label="Loading thread history..." />}
       {fetchError && !historyThreadToPass && (
-        <Text size="2" color="red">
-          Failed to load thread history
-        </Text>
+        <p className={styles.errorText}>Failed to load thread history</p>
       )}
       {historyThreadToPass && (
         <ChatRawJSON
@@ -160,6 +145,6 @@ export const ThreadHistory: FC<ThreadHistoryProps> = ({
           {error}
         </ErrorCallout>
       )}
-    </>
+    </div>
   );
 };

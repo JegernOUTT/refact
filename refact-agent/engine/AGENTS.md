@@ -45,6 +45,13 @@ src/
   yaml_configs/        — defaults for modes, providers, toolbox commands, prompts
   postprocessing/      — token-aware truncation, AST prioritization
   agentic/             — commit messages, agentic edit flows
+  buddy/               — Buddy agent runtime (actor, jobs, observers, chat_reactions, diagnostics)
+  daemon/              — headless daemon (CLI, client, auth, config, chat client)
+  exec/                — unified exec runtime (PTY, spawn, registry, spill)
+  scheduler/           — cron expression, delivery, exec actions, jitter
+  ext/                 — extensions marketplace, hooks runner, competitor import
+  at_commands/         — `@`-prefixed IDE commands (file, search, ast_definition, knowledge)
+  bin/refact.rs        — alternate entry point
 ```
 
 ## Chat System
@@ -89,17 +96,30 @@ UserMessage → queue → prepare (system prompt, knowledge RAG, history limit) 
 
 - **`linearize.rs`**: merges consecutive user messages, strips thinking blocks for LLM cache compatibility.
 - **`stream_core.rs`**: `merge_thinking_blocks()` — deduplicates by (type,index) → (type,id) → (type,signature); signatures are opaque, latest-wins replacement.
-- **`history_limit.rs`**: 4-stage compression (dedup context files → compress tool results → fix tool calls → limit history). `CompressionStrength`: Absent/Low/Medium/High.
+- **`history_limit.rs`**: tool-call repair + history validation (`fix_and_limit_messages_history`) plus shared helpers: `compute_context_budget` (counts every message including plan roles, tool-call arguments, thinking blocks, ~1K tokens per image), `pressure_for_used_tokens` (70/85/95% → Low/Medium/High/Critical), `compress_duplicate_context_files` (keeps the `context_file` role on tool-answering messages so pairs stay valid). `CompressionStrength`: Absent/Low/Medium/High.
 
 ### Compression contract
 
 Chat compression produces first-class chat messages and runtime status, not trailing instructions.
 
 - `compression_report` is a visible message role for deterministic/reactive compression reports. It stores Markdown content plus `extra.compression_report = { kind: "chat_compression_report", context_files_removed, context_messages_dropped, tool_results_truncated, tokens_before, tokens_after, estimated_tokens_saved, reduction_percent }`, uses `summarization_tier: "tier2_reactive"`, and is preserved by model-switch/new-thread sanitization.
-- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after leading system messages and after the first user when present, removes equivalent existing reports for idempotency, and leaves non-equivalent reports intact.
+- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` (or the fingerprinted variant) and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after the entire leading control prefix (`system`/`event`/`plan`) and after the first user when present, and never between an assistant's tool calls and their results. Report equivalence for idempotent removal is decided by the stable `op_fingerprint` when both reports carry one (deterministic compaction hashes changed message ids, `compress_chat_apply` hashes its op lists, `compress_in_place` hashes options + affected ids); fingerprint-less legacy pairs still compare by metrics, and mixed pairs are never equivalent.
 - Runtime compression status is carried on both `ChatSession` and `RuntimeState` as `is_compressing`, `compression_phase`, and `compression_reason`, and is emitted through `RuntimeUpdated` and snapshots.
 - Active compression phases are `checking` and `running`; terminal phases are `applied`, `skipped`, and `failed`. Active phases must set/keep `is_compressing` consistently, while terminal runtime transitions clear stale active phases and preserve already-terminal phase/reason metadata.
 - Segment summarization writes compressed assistant messages with `extra.compression.kind === "llm_segment_summary"`; these summaries remain visible UI artifacts and are excluded from repeated summarization by source metadata.
+- The proactive per-iteration gate (`proactive_gate_quiet`) is event-silent: routine skips (low pressure, no eligible segment, attempt limits) record `compression_phase`/`compression_reason` on the session without emitting `RuntimeUpdated`, so the GUI indicator does not blink every generation round. Forced (reactive) compression keeps full Checking/Running/terminal event emission.
+- The proactive pressure gate uses the provider-visible estimate (`estimated_provider_context_pressure_with_usage`, post-linearize) rather than the raw transcript, because source-preserving summaries keep their sources in the session and the raw estimate only grows. The provider-usage side of the pressure is also computed from the linearized view, and `ChatSession.provider_usage_stale` (set by every compression apply path and `reset_compaction_runtime_state`, cleared on the next successful generation) suppresses stale pre-compression usage records so compression does not retrigger on its own output.
+- Quiet compression status writes (`set_compression_status_quiet`) never mutate state while another reserved attempt is active, and `compression_attempt_active` treats attempts older than 15 minutes (`compression_attempt_started_at_ms`) as stale so an aborted/cancelled summarizer cannot wedge `is_compressing` forever.
+- Source-preserving summary suppression is hash-validated at linearize time: when all summarized sources are present but the recomputed `source_hash` mismatches, the summary is stale — it is dropped from the provider wire and the sources stay visible. When sources are not fully present (handoff/branch flows carry summaries without their sources on purpose), the summary stays visible as carried context and suppresses nothing. Hash-less legacy summaries keep the trust-the-ids path. `remove_message`/`truncate_messages` invalidate referencing summaries like `update_message` does (in-thread orphans are removed at mutation time), and new-thread/model-switch sanitization recomputes summary + report `source_hash` over the fully-present sanitized sources.
+- Candidates below `MIN_SOURCE_TOKENS_FOR_COMPRESSION` are skipped before any summarizer LLM call, and source hashes whose summaries produced insufficient savings are remembered per session (`compression_insufficient_hashes`, cleared on edit/remove/truncate/replace) so the same useless LLM call is never repeated.
+- Applied report + summary pairs are emitted immediately as `MessageAdded` events (plus the final snapshot), so reports stay visible even if a later pass aborts.
+- The reactive context-limit breaker (`thread.reactive_compact_attempts`, max 2) is per-episode: it resets on any successful generation, on `reset_compaction_runtime_state` (manual `ctx_apply`, restores, external reloads), and trajectory load clamps persisted values to 1 so a reloaded thread always has one attempt available.
+- When LLM segment summarization cannot deliver on a context-limit error (failed, skipped, or breaker exhausted), `apply_deterministic_compaction_for_recovery` runs: it truncates old non-preserved tool outputs (keeps the most recent `4` *eligible* outputs — preserved/`srvtoolu_`/`TOOLS_TO_PRESERVE`/ui-only results neither consume the recent window nor get truncated; redacts before truncating), dedups context files, inserts a `compression_report`, resets `previous_response_id` and forces the cache guard, then generation retries. Idempotency is size-based (already-truncated outputs fall under the size threshold), so raw output that merely starts with the truncation marker is still compacted.
+- `compress_duplicate_context_files` treats a newer attachment of the same path with the same line range as superseding older copies (the file may have changed); across different ranges the largest copy still wins, with newer preferred on size ties. Wire preparation (`fix_and_limit_messages_history`) relocates stray tool results to sit contiguously after their assistant call, and history validation rejects results separated from their call by a `user`/`assistant`/`system` barrier.
+- Forced context-limit compression that still cannot apply appends a visible `event(system_notice, "chat.summarizer")` whose content starts with `Context compression failed:`; context-overflow threads must never fail without a visible explanation. The final error message points at `ctx_probe()`/`ctx_apply()`.
+- Provider length stops (`finish_reason: length`-class) are auto-recovered in `maybe_recover_after_length_stop`: empty/near-empty outputs (e.g. reasoning ate the budget) drop the dead-end assistant message, boost `max_new_tokens` once via `pending_max_new_tokens_boost` (16K, only when the user has not set `thread.max_tokens`), append a `cd_instruction` marker (`length_stop_continue`), and retry; partial cuts append a continue instruction and retry. The marker bound is checked **before** any compaction and is authoritative: recovery is bounded by marker count per user turn (max 2), every retry — including compaction-driven retries on the user-`max_tokens` partial path — appends a marker, and exhaustion appends a visible ui-only error without running compaction. High-pressure empty stops still trigger forced compaction first when the budget allows.
+- Editing a message via `update_message` removes any segment summaries (and their reports, matched by `source_hash`) whose `summarized_source_message_ids` reference the edited message, so stale summaries never keep suppressing changed sources.
+- `compression_report` never reaches the provider wire: prepare filters it, linearize drops it, and `render_extra::is_context_role` excludes it; the role is GUI-only.
 - Compressed/truncated tool previews and public summarization failure text must redact sensitive values before truncating or persisting preview text, so split secrets cannot leak through length caps.
 - Manual `compress_chat_apply` must follow trajectory compression placement, report-deduplication, memory-path detection, redaction, path-preservation, and provider-order tool-call cleanup rules. It only mutates the selected modifiable prefix; preserved and active tails remain byte-identical except for insertion of the current compression report at the boundary.
 
@@ -469,7 +489,7 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 
 ## Testing
 
-- **Python integration tests** (~38 files in `tests/`): live HTTP+SSE against running server. 7 `test_chat_session_*.py` files.
+- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus Rust e2e suites (`daemon_e2e.rs`, `daemon_proxy.rs`, `daemon_supervisor.rs`) that share the `tests/e2e_helpers/` module. Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
 - **Rust unit tests**: `src/chat/tests.rs`, AST parser tests, 50+ modules. `cargo test --lib`.
 - **Test data**: `tests/emergency_frog_situation/` — themed frog simulations for parsing edge cases.
 
@@ -478,4 +498,4 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 - **User**: `~/.config/refact/` (default_privacy.yaml, providers.d/*.yaml)
 - **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations)
 - **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/)
-- **System prompts**: `yaml_configs/defaults/` — modes, subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.
+- **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.

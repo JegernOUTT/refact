@@ -1,16 +1,13 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, HoverCard } from "@radix-ui/themes";
 import {
-  InfoCircledIcon,
-  LockClosedIcon,
-  LockOpen1Icon,
-  QuestionMarkCircledIcon,
-  Pencil2Icon,
-  ExclamationTriangleIcon,
-  PlusIcon,
-} from "@radix-ui/react-icons";
-import styles from "./ChatInputTopControls.module.css";
-import classNames from "classnames";
+  CircleHelp,
+  Info,
+  Lock,
+  Pencil,
+  Plus,
+  TriangleAlert,
+  Unlock,
+} from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectAutoApproveEditingTools,
@@ -25,8 +22,10 @@ import {
 import { ProjectInformationDialog } from "./ProjectInformationDialog";
 import { selectHost } from "../../features/Config/configSlice";
 import { Checkbox } from "../Checkbox";
+import { IconButton, Tooltip } from "../ui";
 import type { Checkbox as CheckboxType } from "./useCheckBoxes";
 import type { useAttachedFiles } from "./useCheckBoxes";
+import styles from "./ChatInputTopControls.module.css";
 
 export type ChatInputTopControlsProps = {
   checkboxes: Record<string, CheckboxType>;
@@ -76,81 +75,69 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
   return (
     <>
-      <Flex gap="1" align="center" wrap="wrap">
+      <div className={styles.controlsGroup}>
         <span className={styles.projectInfoControl}>
-          <HoverCard.Root>
-            <HoverCard.Trigger>
-              <button
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                icon={Info}
+                variant="plain"
+                size="sm"
                 type="button"
-                onClick={() => setDialogOpen(true)}
-                disabled={isDisabled}
                 aria-label="Configure project information"
-                className={classNames(
-                  styles.iconButton,
-                  includeProjectInfo && styles.active,
-                )}
-              >
-                <InfoCircledIcon />
-              </button>
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Project info: {includeProjectInfo ? "ON" : "OFF"}
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
+                disabled={isDisabled}
+                className={includeProjectInfo ? styles.accent : undefined}
+                onClick={() => setDialogOpen(true)}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              Project info: {includeProjectInfo ? "ON" : "OFF"}
+            </Tooltip.Content>
+          </Tooltip>
         </span>
 
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <button
+        <Tooltip>
+          <Tooltip.Trigger asChild>
+            <IconButton
+              icon={Pencil}
+              variant="plain"
+              size="sm"
               type="button"
-              onClick={() => handleEditingChange(!autoApproveEditing)}
-              disabled={isDisabled || !chatId}
               aria-label="Auto-approve file editing tools"
               aria-pressed={autoApproveEditing}
-              className={classNames(
-                styles.iconButton,
-                autoApproveEditing && styles.active,
-              )}
-            >
-              <Pencil2Icon />
-            </button>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
-
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <button
-              type="button"
-              onClick={() => handleDangerousChange(!autoApproveDangerous)}
               disabled={isDisabled || !chatId}
+              className={autoApproveEditing ? styles.accent : undefined}
+              onClick={() => handleEditingChange(!autoApproveEditing)}
+            />
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
+          </Tooltip.Content>
+        </Tooltip>
+
+        <Tooltip>
+          <Tooltip.Trigger asChild>
+            <IconButton
+              icon={TriangleAlert}
+              variant="plain"
+              size="sm"
+              type="button"
               aria-label="Auto-approve dangerous commands"
               aria-pressed={autoApproveDangerous}
-              className={classNames(
-                styles.iconButton,
-                autoApproveDangerous && styles.danger,
-              )}
-            >
-              <ExclamationTriangleIcon />
-            </button>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+              disabled={isDisabled || !chatId}
+              className={autoApproveDangerous ? styles.dangerIcon : undefined}
+              onClick={() => handleDangerousChange(!autoApproveDangerous)}
+            />
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
+          </Tooltip.Content>
+        </Tooltip>
 
         {showSelectedLines && (
           <>
             <span className={styles.divider}>|</span>
-            <Flex align="center" gap="1" className={styles.selectedLinesGroup}>
+            <div className={styles.selectedLinesGroup}>
               <Checkbox
                 size="1"
                 name={selectedLinesCheckbox.name}
@@ -160,74 +147,68 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                   onCheckedChange(selectedLinesCheckbox.name, value)
                 }
               >
-                <Text size="1">{selectedLinesCheckbox.label}</Text>
+                <span>{selectedLinesCheckbox.label}</span>
               </Checkbox>
-              <button
+              <IconButton
+                icon={selectedLinesCheckbox.locked ? Lock : Unlock}
+                variant="plain"
+                size="sm"
                 type="button"
-                className={styles.lockButton}
+                aria-label={
+                  selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
+                }
+                disabled={isDisabled || selectedLinesCheckbox.disabled}
                 onClick={() =>
                   onCheckedChange(
                     selectedLinesCheckbox.name,
                     !selectedLinesCheckbox.checked,
                   )
                 }
-                disabled={isDisabled || selectedLinesCheckbox.disabled}
-                aria-label={
-                  selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
-                }
-              >
-                {selectedLinesCheckbox.locked && <LockClosedIcon />}
-                {selectedLinesCheckbox.locked === false && <LockOpen1Icon />}
-              </button>
+              />
               {selectedLinesCheckbox.info && (
-                <HoverCard.Root>
-                  <HoverCard.Trigger>
-                    <button
+                <Tooltip>
+                  <Tooltip.Trigger asChild>
+                    <IconButton
+                      icon={CircleHelp}
+                      variant="plain"
+                      size="sm"
                       type="button"
-                      className={styles.helpButton}
+                      aria-label="Selected lines information"
                       disabled={isDisabled}
-                    >
-                      <QuestionMarkCircledIcon />
-                    </button>
-                  </HoverCard.Trigger>
-                  <HoverCard.Content maxWidth="240px" size="1">
-                    <Text as="div" size="1">
-                      {selectedLinesCheckbox.info.text}
-                    </Text>
-                  </HoverCard.Content>
-                </HoverCard.Root>
+                    />
+                  </Tooltip.Trigger>
+                  <Tooltip.Content maxWidth="240px">
+                    {selectedLinesCheckbox.info.text}
+                  </Tooltip.Content>
+                </Tooltip>
               )}
-            </Flex>
+            </div>
           </>
         )}
 
         {showAttachButton && (
           <>
             <span className={styles.divider}>|</span>
-            <HoverCard.Root>
-              <HoverCard.Trigger>
-                <button
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  icon={Plus}
+                  variant="plain"
+                  size="sm"
                   type="button"
-                  onClick={attachedFiles.addFile}
-                  disabled={isDisabled || attachedFiles.attached}
                   aria-label={`Attach ${attachedFiles.activeFile.name}`}
-                  className={classNames(
-                    styles.iconButton,
-                    attachedFiles.attached && styles.active,
-                  )}
-                >
-                  <PlusIcon />
-                </button>
-              </HoverCard.Trigger>
-              <HoverCard.Content size="1" side="top">
-                <Text as="p" size="2">
-                  Attach: {attachedFiles.activeFile.name}
-                </Text>
-              </HoverCard.Content>
-            </HoverCard.Root>
+                  disabled={isDisabled || attachedFiles.attached}
+                  className={attachedFiles.attached ? styles.accent : undefined}
+                  onClick={attachedFiles.addFile}
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>
+                Attach: {attachedFiles.activeFile.name}
+              </Tooltip.Content>
+            </Tooltip>
           </>
         )}
-      </Flex>
+      </div>
 
       <ProjectInformationDialog
         open={dialogOpen}

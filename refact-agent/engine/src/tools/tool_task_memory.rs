@@ -1311,8 +1311,9 @@ pub async fn set_task_memory_pinned_for_api(
     filename: &str,
     pinned: bool,
 ) -> Result<TaskMemoryPinApiResponse, String> {
-    let memories_dir = get_task_memories_dir(gcx, task_id).await?;
+    let memories_dir = get_task_memories_dir(gcx.clone(), task_id).await?;
     let (path, changed) = set_task_memory_pinned(&memories_dir, filename, pinned).await?;
+    crate::tasks::events::emit_task_memories_changed(gcx, task_id).await;
     Ok(TaskMemoryPinApiResponse {
         ok: true,
         filename: path
@@ -1330,8 +1331,9 @@ pub async fn archive_task_memory_for_api(
     task_id: &str,
     filename: &str,
 ) -> Result<TaskMemoryArchiveApiResponse, String> {
-    let memories_dir = get_task_memories_dir(gcx, task_id).await?;
+    let memories_dir = get_task_memories_dir(gcx.clone(), task_id).await?;
     let (source_path, dest_path) = archive_task_memory(&memories_dir, filename).await?;
+    crate::tasks::events::emit_task_memories_changed(gcx, task_id).await;
     Ok(TaskMemoryArchiveApiResponse {
         ok: true,
         filename: source_path
@@ -1352,9 +1354,10 @@ pub async fn mark_task_memories_triaged_for_api(
     task_id: &str,
     cursor: Option<DateTime<Utc>>,
 ) -> Result<TaskMemoryTriageApiResponse, String> {
-    let task_dir = find_task_dir(gcx, task_id).await?;
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     let cursor = cursor.unwrap_or_else(Utc::now);
     write_memory_inbox_cursor(&task_dir, cursor).await?;
+    crate::tasks::events::emit_task_memories_changed(gcx, task_id).await;
     Ok(TaskMemoryTriageApiResponse {
         ok: true,
         cursor: cursor.to_rfc3339(),
@@ -1837,6 +1840,7 @@ impl Tool for ToolTaskMemorySave {
         atomic_write_text(&file_path, &full_content)
             .await
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
+        crate::tasks::events::emit_task_memories_changed(gcx.clone(), &task_id).await;
 
         info!("Task memory saved: {}", file_path.display());
 
@@ -2047,12 +2051,13 @@ impl Tool for ToolTaskMemoryTriageDone {
                 planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_triage_done")?,
             )
         };
-        let task_dir = find_task_dir(gcx, &task_id).await?;
+        let task_dir = find_task_dir(gcx.clone(), &task_id).await?;
         let cursor = optional_string_arg(args, "cursor")?
             .map(|value| parse_rfc3339_utc(&value))
             .transpose()?
             .unwrap_or_else(Utc::now);
         write_memory_inbox_cursor(&task_dir, cursor).await?;
+        crate::tasks::events::emit_task_memories_changed(gcx, &task_id).await;
         Ok(task_memory_tool_output(
             tool_call_id,
             format!(
@@ -2109,8 +2114,9 @@ impl Tool for ToolTaskMemoryPin {
         };
         let memory_id = required_string_arg(args, "memory_id")?;
         let pinned = required_bool_arg(args, "pinned")?;
-        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let memories_dir = get_task_memories_dir(gcx.clone(), &task_id).await?;
         let (path, changed) = set_task_memory_pinned(&memories_dir, &memory_id, pinned).await?;
+        crate::tasks::events::emit_task_memories_changed(gcx, &task_id).await;
         info!(
             "Task memory pin updated: {} pinned={} changed={}",
             path.display(),
@@ -2175,8 +2181,9 @@ impl Tool for ToolTaskMemoryArchive {
             )
         };
         let memory_id = required_string_arg(args, "memory_id")?;
-        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let memories_dir = get_task_memories_dir(gcx.clone(), &task_id).await?;
         let (source_path, dest_path) = archive_task_memory(&memories_dir, &memory_id).await?;
+        crate::tasks::events::emit_task_memories_changed(gcx, &task_id).await;
         info!(
             "Task memory archived: {} -> {}",
             source_path.display(),
@@ -2239,8 +2246,9 @@ impl Tool for ToolTaskMemoryUnarchive {
             )
         };
         let memory_id = required_string_arg(args, "memory_id")?;
-        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let memories_dir = get_task_memories_dir(gcx.clone(), &task_id).await?;
         let (source_path, dest_path) = unarchive_task_memory(&memories_dir, &memory_id).await?;
+        crate::tasks::events::emit_task_memories_changed(gcx, &task_id).await;
         info!(
             "Task memory unarchived: {} -> {}",
             source_path.display(),

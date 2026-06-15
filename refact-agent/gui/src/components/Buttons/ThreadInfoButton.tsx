@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Flex, Popover, Text } from "@radix-ui/themes";
-import { CheckIcon, CopyIcon, InfoCircledIcon } from "@radix-ui/react-icons";
-import iconStyles from "./iconButton.module.css";
+import { Check, Copy, Info } from "lucide-react";
+import { Button, IconButton } from "../ui";
 import { useCopyToClipboard } from "../../hooks";
 import {
   useGetTrajectoryPathQuery,
@@ -70,20 +70,15 @@ const CopyInlineButton: React.FC<{
     [value, trigger],
   );
   return (
-    <button
-      type="button"
-      className={iconStyles.iconButton}
-      onClick={handleClick}
-      disabled={!value}
+    <IconButton
       aria-label={ariaLabel}
       data-testid={testId}
-    >
-      {copied ? (
-        <CheckIcon style={{ color: "var(--accent-11)" }} />
-      ) : (
-        <CopyIcon />
-      )}
-    </button>
+      disabled={!value}
+      icon={copied ? Check : Copy}
+      onClick={handleClick}
+      size="sm"
+      variant={copied ? "primary" : "ghost"}
+    />
   );
 };
 
@@ -179,15 +174,14 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
   return (
     <Popover.Root open={open && !isDisabled} onOpenChange={handleOpenChange}>
       <Popover.Trigger>
-        <button
-          type="button"
-          className={iconStyles.iconButton}
-          disabled={isDisabled}
+        <IconButton
           aria-label="Thread info"
           data-testid="thread-info-button"
-        >
-          <InfoCircledIcon style={{ opacity: 0.75 }} />
-        </button>
+          disabled={isDisabled}
+          icon={Info}
+          size="sm"
+          variant="ghost"
+        />
       </Popover.Trigger>
       <Popover.Content
         side="top"
@@ -239,16 +233,16 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
           </Flex>
 
           <Flex direction="column" gap="1">
-            <button
-              type="button"
-              className={styles.copyAllButton}
+            <Button
+              leftIcon={Copy}
               onClick={handleCopyWholeThread}
               disabled={copyAllDisabled}
               data-testid="copy-thread-json"
+              size="sm"
+              variant="soft"
             >
-              <CopyIcon />
-              <Text size="2">Copy whole thread as JSON</Text>
-            </button>
+              Copy whole thread as JSON
+            </Button>
             {copyAllError && (
               <Text size="1" color="red" data-testid="copy-thread-json-error">
                 {copyAllError}

@@ -1,6 +1,7 @@
 import React from "react";
-import { ChevronDownIcon } from "@radix-ui/react-icons";
+import { ChevronDown } from "lucide-react";
 import classNames from "classnames";
+import { Icon } from "../ui";
 import styles from "./Chevron.module.css";
 
 export type ChevronProps = {
@@ -15,8 +16,11 @@ export const Chevron: React.FC<ChevronProps> = ({
   isUpDownChevron = false,
 }) => {
   return (
-    <ChevronDownIcon
+    <Icon
+      icon={ChevronDown}
+      size="sm"
       className={classNames(
+        styles.chevron,
         {
           [styles.down]: open,
           [styles.right]: !open && !isUpDownChevron,
@@ -24,7 +28,7 @@ export const Chevron: React.FC<ChevronProps> = ({
         },
         className,
       )}
-      style={{ minWidth: 16, minHeight: 16 }}
+      aria-hidden
     />
   );
 };

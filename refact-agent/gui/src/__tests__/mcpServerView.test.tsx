@@ -4,6 +4,7 @@ import { MCPConnectionStatus } from "../components/IntegrationsView/MCPServerVie
 import { MCPToolsList } from "../components/IntegrationsView/MCPServerView/MCPToolsList";
 import { MCPResourcesList } from "../components/IntegrationsView/MCPServerView/MCPResourcesList";
 import { MCPPromptsList } from "../components/IntegrationsView/MCPServerView/MCPPromptsList";
+import badgeStyles from "../components/ui/Badge/Badge.module.css";
 import type {
   MCPToolInfo,
   MCPResourceInfo,
@@ -80,7 +81,9 @@ describe("MCPConnectionStatus", () => {
         isReconnecting={false}
       />,
     );
-    expect(screen.getByText("connected")).toBeInTheDocument();
+    const badge = screen.getByLabelText("MCP connection status: connected");
+    expect(badge.classList.contains(badgeStyles.badge)).toBe(true);
+    expect(badge.classList.contains(badgeStyles.success)).toBe(true);
     expect(screen.queryByRole("status")).toBeNull();
   });
 
@@ -92,22 +95,24 @@ describe("MCPConnectionStatus", () => {
         isReconnecting={false}
       />,
     );
-    expect(screen.getByText("reconnecting")).toBeInTheDocument();
-    const spinner = document.querySelector("pre");
-    expect(spinner).toBeTruthy();
+    const badge = screen.getByLabelText("MCP connection status: reconnecting");
+    expect(badge.classList.contains(badgeStyles.badge)).toBe(true);
+    expect(badge.classList.contains(badgeStyles.warning)).toBe(true);
+    expect(screen.getByRole("status", { name: "Reconnecting" })).toBeTruthy();
   });
 
   test("string disconnected shows red badge and no spinner", () => {
-    const { container } = render(
+    render(
       <MCPConnectionStatus
         status="disconnected"
         onReconnect={vi.fn()}
         isReconnecting={false}
       />,
     );
-    const badge = container.querySelector("[data-accent-color='red']");
-    expect(badge).toBeTruthy();
-    expect(screen.getByText("disconnected")).toBeInTheDocument();
+    const badge = screen.getByLabelText("MCP connection status: disconnected");
+    expect(badge.classList.contains(badgeStyles.badge)).toBe(true);
+    expect(badge.classList.contains(badgeStyles.danger)).toBe(true);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   test("object status with attempt and max_attempts shows attempt info", () => {
@@ -187,10 +192,9 @@ describe("MCPToolsList", () => {
     expect(screen.getByText("No tools available")).toBeInTheDocument();
   });
 
-  test("shows toggle switch for each tool", () => {
+  test("does not render non-functional tool toggles", () => {
     render(<MCPToolsList tools={tools} />);
-    const switches = screen.getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   test("expands schema when show schema clicked", async () => {

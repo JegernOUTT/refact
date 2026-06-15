@@ -31,6 +31,7 @@ pub mod tool_config_subagent;
 pub(crate) mod tool_cron_create;
 mod tool_cron_delete;
 mod tool_cron_list;
+mod tool_cron_update;
 mod tool_deep_research;
 pub mod tool_delegate;
 mod tool_get_plan;

@@ -471,6 +471,62 @@ describe("useSidebarSubscription", () => {
     disconnect();
   });
 
+  it("accepts task subresource update events", async () => {
+    server.use(
+      sidebarHandler([
+        sectionUpdate(0, "tasks", {
+          type: "task_comments_changed",
+          task_id: "task-a",
+          card_id: "T-1",
+        }),
+        sectionUpdate(1, "tasks", {
+          type: "task_document_changed",
+          task_id: "task-a",
+          slug: "main-plan",
+        }),
+        sectionUpdate(2, "tasks", {
+          type: "task_memories_changed",
+          task_id: "task-a",
+        }),
+      ]),
+    );
+    const { events, errors, disconnect } = subscribeForTest();
+
+    await waitFor(() => {
+      expect(events).toHaveLength(3);
+    });
+    expect(errors).toEqual([]);
+    expect(events.map((event) => event.event)).toEqual([
+      {
+        type: "section_update",
+        section: "tasks",
+        update: {
+          type: "task_comments_changed",
+          task_id: "task-a",
+          card_id: "T-1",
+        },
+      },
+      {
+        type: "section_update",
+        section: "tasks",
+        update: {
+          type: "task_document_changed",
+          task_id: "task-a",
+          slug: "main-plan",
+        },
+      },
+      {
+        type: "section_update",
+        section: "tasks",
+        update: {
+          type: "task_memories_changed",
+          task_id: "task-a",
+        },
+      },
+    ]);
+    disconnect();
+  });
+
   it("handles v2 section snapshots and null buddy snapshots", async () => {
     server.use(
       http.get(

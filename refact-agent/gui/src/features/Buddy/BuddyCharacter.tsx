@@ -2,9 +2,12 @@ import React, { type CSSProperties } from "react";
 import { BuddyCanvas } from "./BuddyCanvas";
 import type {
   BuddyControl,
+  BuddyCursorBridge,
+  BuddyEnvContext,
   BuddyEvent,
   BuddyScenePose,
   BuddySemanticState,
+  BuddySpeechStyle,
   BubblePosition,
   Palette,
   Stage,
@@ -24,7 +27,15 @@ interface BuddyCharacterProps {
   sceneYPercent?: number;
   sceneDepthScale?: number;
   scenePose?: BuddyScenePose;
+  traveling?: boolean;
+  arrived?: boolean;
+  travelDirection?: "left" | "right";
+  envContext?: BuddyEnvContext | null;
+  spritePointer?: boolean;
+  cursorBridgeRef?: React.MutableRefObject<BuddyCursorBridge | null>;
   speechText?: string | null;
+  speechStyle?: BuddySpeechStyle;
+  speechMedia?: React.ReactNode;
   speechControls?: BuddyControl[];
   speechIntent?: string;
   onCanvasEvent: (event: BuddyEvent) => void;
@@ -39,13 +50,15 @@ function buildBuddyCharacterStyle(args: {
   sceneXPercent: number | undefined;
   sceneYPercent: number | undefined;
   sceneDepthScale: number | undefined;
+  displaySize: number;
 }): BuddyCharacterStyle | undefined {
   const style: BuddyCharacterStyle = {};
   if (typeof args.sceneXPercent === "number") {
     style.left = `${args.sceneXPercent}%`;
   }
   if (typeof args.sceneYPercent === "number") {
-    style.bottom = `${100 - args.sceneYPercent}%`;
+    const feetOffsetPx = Math.round(args.displaySize * 0.3);
+    style.bottom = `calc(${100 - args.sceneYPercent}% - ${feetOffsetPx}px)`;
   }
   if (typeof args.sceneDepthScale === "number") {
     style["--buddy-scene-scale"] = args.sceneDepthScale;
@@ -66,7 +79,15 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
   sceneYPercent,
   sceneDepthScale,
   scenePose = "idle",
+  traveling = false,
+  arrived = false,
+  travelDirection = "right",
+  envContext,
+  spritePointer = false,
+  cursorBridgeRef,
   speechText,
+  speechStyle,
+  speechMedia,
   speechControls,
   speechIntent,
   onCanvasEvent,
@@ -78,19 +99,33 @@ export const BuddyCharacter: React.FC<BuddyCharacterProps> = ({
       sceneXPercent,
       sceneYPercent,
       sceneDepthScale,
+      displaySize,
     })}
     data-bubble-position={bubblePosition}
     data-compact-bubble={String(compactBubble)}
     data-pose={scenePose}
+    data-traveling={String(traveling)}
+    data-travel-direction={travelDirection}
     data-randomize-bubble-position={String(randomizeBubblePosition)}
     data-testid="buddy-world-character"
   >
-    <div className={styles.characterBody} data-pose={scenePose}>
+    <div
+      className={styles.characterBody}
+      data-pose={scenePose}
+      data-traveling={String(traveling)}
+      data-arrived={String(arrived)}
+      data-travel-direction={travelDirection}
+    >
       <BuddyCanvas
         state={state}
         onEvent={onCanvasEvent}
         displaySize={displaySize}
+        envContext={envContext}
+        spritePointer={spritePointer}
+        cursorBridgeRef={cursorBridgeRef}
         speechOverride={speechText}
+        speechStyle={speechStyle}
+        speechMedia={speechMedia}
         speechControls={speechControls}
         speechIntent={speechIntent}
         onSpeechControlClick={onSpeechControl}

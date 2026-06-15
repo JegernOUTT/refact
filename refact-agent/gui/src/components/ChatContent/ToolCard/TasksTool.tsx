@@ -1,10 +1,5 @@
+import { CircleCheck, Circle, CircleX, RefreshCw } from "lucide-react";
 import React, { useMemo } from "react";
-import {
-  CheckCircledIcon,
-  CircleIcon,
-  CrossCircledIcon,
-  UpdateIcon,
-} from "@radix-ui/react-icons";
 import { Flex, Text, Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -30,19 +25,19 @@ interface TasksToolProps {
 const TaskStatusIcon: React.FC<{ status: Task["status"] }> = ({ status }) => {
   switch (status) {
     case "completed":
-      return <CheckCircledIcon className={styles.completed} />;
+      return <CircleCheck className={styles.completed} />;
     case "failed":
-      return <CrossCircledIcon className={styles.failed} />;
+      return <CircleX className={styles.failed} />;
     case "in_progress":
-      return <UpdateIcon className={styles.inProgress} />;
+      return <RefreshCw className={`${styles.inProgress} rf-spin`} />;
     default:
-      return <CircleIcon className={styles.pending} />;
+      return <Circle className={styles.pending} />;
   }
 };
 
 const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
   return (
-    <Flex align="center" gap="2" className={styles.taskItem}>
+    <Flex align="center" gap="2" className={`${styles.taskItem} rf-enter-rise`}>
       <TaskStatusIcon status={task.status} />
       <Text size="1" className={styles[task.status]}>
         {task.content}
@@ -100,7 +95,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<CheckCircledIcon />}
+      icon={<CircleCheck />}
       summary={summary}
       status={status}
       isOpen={isOpen}
@@ -108,7 +103,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
       toolCall={toolCall}
     >
       {tasks.length > 0 && (
-        <Box className={styles.taskList}>
+        <Box className={`${styles.taskList} rf-stagger`}>
           {tasks.map((task) => (
             <TaskItem key={task.id} task={task} />
           ))}

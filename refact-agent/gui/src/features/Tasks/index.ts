@@ -7,6 +7,7 @@ export {
   tasksSlice,
   openTask,
   closeTask,
+  reorderOpenTasks,
   updateTaskName,
   addPlannerChat,
   removePlannerChat,

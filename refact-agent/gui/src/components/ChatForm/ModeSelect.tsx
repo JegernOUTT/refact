@@ -5,14 +5,8 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import {
-  Flex,
-  Text,
-  Badge,
-  Skeleton,
-  Popover,
-  Separator,
-} from "@radix-ui/themes";
+import classNames from "classnames";
+import { ChevronDown, Plus, RefreshCcw, Shuffle, Wrench } from "lucide-react";
 import {
   useGetChatModesQuery,
   ChatModeInfo,
@@ -25,6 +19,7 @@ import {
   selectCurrentThreadId,
 } from "../../features/Chat/Thread";
 import { push, selectCurrentPage } from "../../features/Pages/pagesSlice";
+import { Badge, Chip, Icon, Popover, Skeleton } from "../ui";
 import { ModeTransitionDialog } from "./ModeTransitionDialog";
 import { TaskPlannerDialog } from "./TaskPlannerDialog";
 import styles from "./ModeSelect.module.css";
@@ -82,9 +77,6 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
     return withTp;
   }, [rawModes, taskId]);
 
-  // Thread state can carry the mode id in either case (e.g. "TASK_PLANNER" from
-  // task chats vs "task_planner" from the chat-modes API). Normalise to lowercase
-  // for menu-item comparisons.
   const effectiveMode = (selectedMode || DEFAULT_MODE).toLowerCase();
   const currentMode = effectiveModes.find((m) => m.id === effectiveMode);
   const currentTitle = currentMode?.title ?? effectiveMode;
@@ -110,7 +102,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
 
   const handleModeSelect = useCallback(
     (mode: ChatModeInfo) => {
-      setIsOpen(false);
+      handlePopoverOpenChange(false);
       if (mode.id === "task_planner") {
         if (taskId) {
           setTaskPlannerDialogOpen(true);
@@ -128,7 +120,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
         onModeChange(mode.id, mode.thread_defaults);
       }
     },
-    [taskId, hasMessages, onModeChange],
+    [taskId, hasMessages, onModeChange, handlePopoverOpenChange],
   );
 
   const handleTransitionDialogClose = useCallback((open: boolean) => {
@@ -168,53 +160,54 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
 
   const handleCreateNewMode = () => {
     dispatch(push({ name: "customization", kind: "modes" }));
-    setIsOpen(false);
+    handlePopoverOpenChange(false);
   };
 
   if (isLoading) {
     return (
-      <Skeleton>
-        <div className={styles.trigger}>
-          <Text size="1">Loading...</Text>
-        </div>
+      <Skeleton className={styles.triggerSkeleton} radius="control">
+        Loading...
       </Skeleton>
     );
   }
 
   if (effectiveModes.length === 0) {
     return (
-      <div className={`${styles.trigger} ${styles.disabled}`}>
-        <Text size="1" color="gray">
-          No modes
-        </Text>
+      <div className={classNames(styles.trigger, styles.disabled)}>
+        <span className={styles.triggerTitle}>No modes</span>
       </div>
     );
   }
 
   const triggerContent = (
-    <Flex align="center" gap="1" className={styles.triggerContent}>
-      <Text size="1">{currentTitle}</Text>
+    <span className={styles.triggerContent}>
+      <span className={styles.triggerTitle}>{currentTitle}</span>
       {toolsCount > 0 && (
-        <>
-          <Text size="1" color="gray">
-            ·
-          </Text>
-          <Text size="1" color="gray">
-            {toolsCount} tools
-          </Text>
-        </>
+        <span className={styles.triggerMeta} aria-hidden="true">
+          ·
+        </span>
       )}
-    </Flex>
+      {toolsCount > 0 && (
+        <span className={styles.triggerMeta}>{toolsCount} tools</span>
+      )}
+      <Icon
+        icon={ChevronDown}
+        size="sm"
+        tone="muted"
+        className={styles.chevron}
+      />
+    </span>
   );
 
   return (
     <>
-      <Popover.Root open={isOpen} onOpenChange={handlePopoverOpenChange}>
-        <Popover.Trigger>
+      <Popover open={isOpen} onOpenChange={handlePopoverOpenChange}>
+        <Popover.Trigger asChild>
           <button
-            className={`${styles.trigger} ${
-              isModeDisabled ? styles.disabled : ""
-            }`}
+            className={classNames(
+              styles.trigger,
+              isModeDisabled && styles.disabled,
+            )}
             disabled={isModeDisabled}
             type="button"
             title={
@@ -232,15 +225,15 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           side="top"
           align="start"
           sideOffset={8}
+          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+          maxHeight="min(420px, calc(100dvh - var(--rf-space-5)))"
         >
           <div className={styles.modeList} ref={modeListRef}>
             {effectiveModes.map((mode, index) => {
               const isSelected = effectiveMode === mode.id;
               return (
                 <React.Fragment key={mode.id}>
-                  {index > 0 && (
-                    <Separator size="4" className={styles.separator} />
-                  )}
+                  {index > 0 && <div className={styles.separator} />}
                   <ModeMenuItem
                     ref={isSelected ? selectedModeRef : undefined}
                     mode={mode}
@@ -253,17 +246,18 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
                 </React.Fragment>
               );
             })}
-            <Separator size="4" className={styles.separator} />
+            <div className={styles.separator} />
             <button
               className={styles.addModeItem}
               onClick={handleCreateNewMode}
               type="button"
             >
-              <Text size="1">Create new mode...</Text>
+              <Icon icon={Plus} size="sm" tone="accent" />
+              <span>Create new mode...</span>
             </button>
           </div>
         </Popover.Content>
-      </Popover.Root>
+      </Popover>
 
       {targetModeForTransition && currentChatId && (
         <ModeTransitionDialog
@@ -274,6 +268,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           targetMode={targetModeForTransition.id}
           targetModeTitle={targetModeForTransition.title}
           targetModeDescription={targetModeForTransition.description}
+          taskId={taskId}
         />
       )}
 
@@ -298,7 +293,10 @@ type ModeMenuItemProps = {
   isSelfSwitch?: boolean;
 };
 
-const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
+export const ModeMenuItem = React.forwardRef<
+  HTMLButtonElement,
+  ModeMenuItemProps
+>(
   (
     { mode, isSelected, onSelect, disabled, showTransitionHint, isSelfSwitch },
     ref,
@@ -306,61 +304,56 @@ const ModeMenuItem = React.forwardRef<HTMLButtonElement, ModeMenuItemProps>(
     return (
       <button
         ref={ref}
-        className={`${styles.item} ${isSelected ? styles.itemSelected : ""} ${
-          disabled ? styles.itemDisabled : ""
-        }`}
+        className={classNames(
+          styles.item,
+          isSelected && styles.itemSelected,
+          disabled && styles.itemDisabled,
+        )}
         onClick={onSelect}
         type="button"
         disabled={disabled}
       >
-        <Flex direction="column" gap="1" style={{ width: "100%" }}>
-          <Flex align="center" gap="2">
-            <Text size="1" weight="medium">
-              {mode.title}
-            </Text>
-            {showTransitionHint && (
-              <Badge
-                size="1"
-                color={isSelfSwitch ? "green" : "amber"}
-                variant="soft"
-              >
+        <span className={styles.itemHeader}>
+          <span className={styles.itemTitle}>{mode.title}</span>
+          {showTransitionHint && (
+            <Badge tone={isSelfSwitch ? "success" : "warning"}>
+              <span className={styles.badgeContent}>
+                <Icon
+                  icon={isSelfSwitch ? RefreshCcw : Shuffle}
+                  size="sm"
+                  tone={isSelfSwitch ? "success" : "warning"}
+                />
                 {isSelfSwitch ? "restart" : "switch"}
-              </Badge>
-            )}
-          </Flex>
-
-          {mode.description && (
-            <Text size="1" color="gray" className={styles.description}>
-              {mode.description.length > 80
-                ? mode.description.slice(0, 80) + "..."
-                : mode.description}
-            </Text>
+              </span>
+            </Badge>
           )}
+        </span>
 
-          <Flex align="center" gap="1" wrap="wrap">
-            {mode.ui.tags.slice(0, 2).map((tag) => (
-              <Badge
-                key={tag}
-                size="1"
-                color="gray"
-                variant="soft"
-                className={styles.badge}
-              >
-                {tag}
-              </Badge>
-            ))}
-            {mode.tools_count > 0 && (
-              <Badge
-                size="1"
-                color="blue"
-                variant="soft"
-                className={styles.badge}
-              >
-                {mode.tools_count} tools
-              </Badge>
-            )}
-          </Flex>
-        </Flex>
+        {mode.description && (
+          <span className={styles.description}>
+            {mode.description.length > 80
+              ? `${mode.description.slice(0, 80)}...`
+              : mode.description}
+          </span>
+        )}
+
+        <span className={styles.metaRow}>
+          {mode.ui.tags.slice(0, 2).map((tag) => (
+            <Chip key={tag} radius="chip" className={styles.chip}>
+              {tag}
+            </Chip>
+          ))}
+          {mode.tools_count > 0 && (
+            <Chip
+              radius="chip"
+              selected={isSelected}
+              className={styles.chip}
+              icon={<Icon icon={Wrench} size="sm" tone="accent" />}
+            >
+              {mode.tools_count} tools
+            </Chip>
+          )}
+        </span>
       </button>
     );
   },

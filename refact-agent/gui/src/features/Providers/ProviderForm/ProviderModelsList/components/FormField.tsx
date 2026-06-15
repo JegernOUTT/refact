@@ -1,22 +1,19 @@
-import { Text, TextField } from "@radix-ui/themes";
-import { FC, ReactNode } from "react";
+import { type FC, type ReactNode } from "react";
 import { Markdown } from "../../../../../components/Markdown";
+import { FieldStack, FieldText } from "../../../../../components/ui";
 
 type FormFieldProps = {
   label: string;
   value?: string;
   placeholder?: string;
   description?: string;
-  type?: TextField.RootProps["type"];
+  type?: React.HTMLInputTypeAttribute;
   isDisabled?: boolean;
   max?: string;
   onChange?: React.ChangeEventHandler<HTMLInputElement>;
   children?: ReactNode;
 };
 
-/**
- * Reusable form field component with consistent styling
- */
 export const FormField: FC<FormFieldProps> = ({
   label,
   value,
@@ -29,25 +26,26 @@ export const FormField: FC<FormFieldProps> = ({
   children,
 }) => {
   return (
-    <label>
-      <Text as="div" size="2" mb="1" weight="bold">
-        {label}
-      </Text>
-      {description && (
-        <Text as="div" size="1" color="gray" my="1">
-          <Markdown>{description}</Markdown>
-        </Text>
-      )}
-      {children ?? (
-        <TextField.Root
-          value={value}
-          placeholder={placeholder}
-          type={type}
-          max={max}
-          onChange={onChange}
-          disabled={isDisabled}
-        />
-      )}
-    </label>
+    <FieldStack
+      label={label}
+      helper={description ? <Markdown>{description}</Markdown> : undefined}
+      control={
+        children ?? (
+          <FieldText
+            value={value ?? ""}
+            placeholder={placeholder}
+            type={type}
+            max={max}
+            onChange={(nextValue) =>
+              onChange?.({
+                target: { value: nextValue },
+                currentTarget: { value: nextValue },
+              } as React.ChangeEvent<HTMLInputElement>)
+            }
+            disabled={isDisabled}
+          />
+        )
+      }
+    />
   );
 };

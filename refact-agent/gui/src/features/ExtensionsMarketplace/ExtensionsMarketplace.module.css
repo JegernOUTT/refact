@@ -1,22 +1,207 @@
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--space-3);
+.pageStack,
+.header,
+.toolbar,
+.filterRow,
+.quickAddRow,
+.quickAddSection,
+.cardColumn,
+.cardTitle,
+.cardMeta,
+.cardFooter,
+.cardActionRow,
+.sourceSelector,
+.dialogStack,
+.dialogHeader,
+.paramsStack,
+.paramField,
+.sourceRow {
+  min-width: 0;
 }
 
-.card {
-  border: 1px solid var(--gray-5);
-  border-radius: var(--radius-3);
-  padding: var(--space-3);
-  background: var(--color-panel-solid);
-  height: 100%;
-  box-sizing: border-box;
+.pageStack,
+.quickAddSection,
+.dialogStack,
+.paramsStack,
+.paramField,
+.addSourceSection {
   display: flex;
   flex-direction: column;
 }
 
+.pageStack {
+  gap: var(--rf-space-4);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.quickAddSection,
+.dialogStack {
+  gap: var(--rf-space-3);
+}
+
+.paramsStack,
+.addSourceSection {
+  gap: var(--rf-space-2);
+}
+
+.paramField {
+  gap: var(--rf-space-1);
+}
+
+.header,
+.filterRow,
+.quickAddRow,
+.cardMeta,
+.cardFooter,
+.cardActionRow,
+.sourceSelector,
+.dialogHeader,
+.sourceRow {
+  display: flex;
+  align-items: center;
+}
+
+.header {
+  gap: var(--rf-space-3);
+}
+
+.filterRow,
+.cardFooter,
+.sourceSelector {
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
+.quickAddRow,
+.cardMeta,
+.cardActionRow,
+.dialogHeader,
+.sourceRow {
+  gap: var(--rf-space-2);
+}
+
+.toolbar > .quickAddRow {
+  flex: 1 1 220px;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--rf-text-4);
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--rf-color-fg);
+}
+
+.text,
+.mutedText,
+.smallText,
+.description,
+.bodyPreview,
+.errorText {
+  margin: 0;
+  line-height: var(--rf-line);
+}
+
+.text {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-fg);
+}
+
+.mutedText,
+.description {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-muted);
+}
+
+.smallText,
+.bodyPreview {
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+}
+
+.errorText {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-danger);
+}
+
+.card {
+  height: 100%;
+  box-sizing: border-box;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: var(--rf-space-3);
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
 .card:hover {
-  border-color: var(--accent-8);
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+}
+
+.cardInstalling {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-surface-glass);
+  animation: marketplace-install-pulse var(--rf-dur-slow)
+    var(--rf-ease-standard) infinite;
+}
+
+.cardColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  height: 100%;
+}
+
+.cardBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cardFooterGroup {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.cardTitle,
+.cardMeta,
+.grow,
+.sourceLabel {
+  flex: 1;
+}
+
+.cardTitle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .description {
@@ -32,9 +217,14 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-style: italic;
-  opacity: 0.7;
-  font-size: 0.72rem;
-  flex: 1;
+}
+
+.cardFooter {
+  min-width: 0;
+}
+
+.cardActionRow {
+  margin-top: var(--rf-space-2);
 }
 
 .sourceTab {
@@ -43,23 +233,31 @@
 }
 
 .sourceTab:hover {
-  opacity: 0.8;
+  opacity: 0.86;
+}
+
+.sourceTabDisabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  user-select: none;
 }
 
 .sourceBadge {
-  font-size: var(--font-size-1);
+  font-size: var(--rf-text-1);
+}
+
+.neutralBadge {
+  color: var(--rf-color-muted);
 }
 
 .installScope {
-  padding-top: var(--space-1);
+  padding-top: var(--rf-space-1);
 }
 
 .sourceRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--gray-4);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .sourceRow:last-child {
@@ -67,17 +265,74 @@
 }
 
 .sourceLabel {
-  flex: 1;
   min-width: 0;
 }
 
 .divider {
   border: none;
-  border-top: 1px solid var(--gray-5);
-  margin: var(--space-3) 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  margin: var(--rf-space-3) 0;
 }
 
-.addSourceSection {
+.installDialogContent {
+  max-width: 440px;
+}
+
+.sourceSettingsDialogContent {
+  max-width: 520px;
+}
+
+.successText {
+  color: var(--rf-color-success);
+}
+
+.notice {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  color: var(--rf-color-muted);
+}
+
+.noticeWarning {
+  color: var(--rf-color-warning);
+}
+
+.noticeDanger {
+  color: var(--rf-color-danger);
+}
+
+.iconInline {
+  display: inline-flex;
+  align-items: center;
+  color: currentColor;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .notice {
+    backdrop-filter: none;
+  }
+}
+
+@keyframes marketplace-install-pulse {
+  50% {
+    transform: translateY(-1px) scale(1.01);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .cardInstalling {
+    transition: none;
+    animation: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
 }

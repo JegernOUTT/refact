@@ -11,7 +11,7 @@ import {
   normalizeEventMessageMetadata,
 } from "../../../services/refact/types";
 import { EventLogEntry } from "./EventLogEntry";
-import { eventSubkindIcon } from "./eventSubkind";
+import { eventSubkindIconElement } from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 export type EventLogProps = {
@@ -220,10 +220,18 @@ export const EventLog: React.FC<EventLogProps> = ({
 
   return (
     <Card className={styles.card} data-testid="event-log">
-      <details open={!collapsed}>
-        <summary className={styles.summary} onClick={handleSummaryClick}>
-          <Flex align="center" gap="2" wrap="wrap">
-            <Text as="span" size="1" weight="medium">
+      <details className={styles.details} open={!collapsed}>
+        <summary
+          className={`${styles.summary} rf-pressable`}
+          onClick={handleSummaryClick}
+        >
+          <Flex
+            align="center"
+            gap="2"
+            wrap="wrap"
+            className={styles.summaryRow}
+          >
+            <Text as="span" size="1" weight="medium" className={styles.title}>
               Event log
             </Text>
             <Text as="span" size="1" className={styles.count}>
@@ -232,17 +240,21 @@ export const EventLog: React.FC<EventLogProps> = ({
             </Text>
           </Flex>
         </summary>
-        <Box className={styles.body}>
+        <Box className={`${styles.body} rf-enter-rise`}>
           <Flex gap="1" wrap="wrap" className={styles.filters}>
             {presentSubkinds.map((subkind) => (
-              <label key={subkind} className={styles.filterChip}>
+              <label
+                key={subkind}
+                className={styles.filterChip}
+                data-selected={selectedSet.has(subkind)}
+              >
                 <input
                   type="checkbox"
                   checked={selectedSet.has(subkind)}
                   onChange={() => toggleSubkind(subkind)}
                 />
                 <Text as="span" size="1" aria-hidden="true">
-                  {eventSubkindIcon(subkind)}
+                  {eventSubkindIconElement(subkind)}
                 </Text>
                 <Text as="span" size="1">
                   {subkind}

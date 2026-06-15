@@ -1,5 +1,11 @@
 import React, { useCallback } from "react";
-import { Flex, TextField, Text, Switch, TextArea } from "@radix-ui/themes";
+
+import {
+  Field,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+} from "../../../components/ui";
 import { MessageListEditor } from "./MessageListEditor";
 import {
   ConfigPatch,
@@ -7,7 +13,9 @@ import {
   safeBoolean,
   safeMessageArray,
   safeSelectionRange,
+  parseIntSafe,
 } from "./configUtils";
+import styles from "./editors.module.css";
 
 type ToolboxCommandFormProps = {
   config: Record<string, unknown>;
@@ -36,114 +44,86 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="4">
-      <Flex direction="column" gap="2">
-        <Text size="2" weight="medium">
-          Description
-        </Text>
-        <TextArea
+    <div className={styles.formStack}>
+      <Field label="Description">
+        <FieldTextarea
           value={description}
-          onChange={(e) => patch(["description"], e.target.value)}
+          onChange={(value) => patch(["description"], value)}
           placeholder="What this command does..."
           rows={2}
         />
-      </Flex>
+      </Field>
 
-      <Flex direction="column" gap="3">
-        <Text size="2" weight="medium">
-          Selection Requirements
-        </Text>
-
-        <Flex align="center" gap="2">
-          <Switch
-            checked={hasSelectionRange}
-            onCheckedChange={(checked) => {
-              if (checked) {
-                patch(["selection_needed"], [1, 10000]);
-                patch(["selection_unwanted"], false);
-              } else {
-                patch(["selection_needed"], undefined);
-              }
-            }}
-          />
-          <Text size="2">Require Selection</Text>
-        </Flex>
-
-        {hasSelectionRange && (
-          <Flex gap="3" align="center">
-            <Flex direction="column" gap="1">
-              <Text size="1" color="gray">
-                Min chars
-              </Text>
-              <TextField.Root
-                type="number"
-                value={selectionMin.toString()}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === ""
-                      ? undefined
-                      : parseInt(e.target.value);
-                  if (val !== undefined) {
-                    patch(["selection_needed"], [val, selectionMax]);
-                  }
-                }}
-                style={{ width: 100 }}
-              />
-            </Flex>
-            <Flex direction="column" gap="1">
-              <Text size="1" color="gray">
-                Max chars
-              </Text>
-              <TextField.Root
-                type="number"
-                value={selectionMax.toString()}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === ""
-                      ? undefined
-                      : parseInt(e.target.value);
-                  if (val !== undefined) {
-                    patch(["selection_needed"], [selectionMin, val]);
-                  }
-                }}
-                style={{ width: 100 }}
-              />
-            </Flex>
-          </Flex>
-        )}
-
-        {!hasSelectionRange && (
-          <Flex align="center" gap="2">
-            <Switch
-              checked={selectionUnwanted}
-              onCheckedChange={(checked) =>
-                patch(["selection_unwanted"], checked)
-              }
-            />
-            <Text size="2">Selection Unwanted</Text>
-            <Text size="1" color="gray">
-              (hide command when text is selected)
-            </Text>
-          </Flex>
-        )}
-      </Flex>
-
-      <Flex align="center" gap="2">
-        <Switch
-          checked={insertAtCursor}
-          onCheckedChange={(checked) => patch(["insert_at_cursor"], checked)}
+      <Field label="Require Selection">
+        <FieldSwitch
+          checked={hasSelectionRange}
+          onChange={(checked) => {
+            if (checked) {
+              patch(["selection_needed"], [1, 10000]);
+              patch(["selection_unwanted"], false);
+            } else {
+              patch(["selection_needed"], undefined);
+            }
+          }}
         />
-        <Text size="2">Insert at Cursor</Text>
-        <Text size="1" color="gray">
-          (insert response at cursor position)
-        </Text>
-      </Flex>
+      </Field>
+
+      {hasSelectionRange && (
+        <div className={styles.switchGrid}>
+          <Field label="Min chars">
+            <FieldText
+              type="number"
+              value={selectionMin.toString()}
+              onChange={(value) => {
+                const val = value === "" ? undefined : parseIntSafe(value);
+                if (val !== undefined) {
+                  patch(["selection_needed"], [val, selectionMax]);
+                }
+              }}
+            />
+          </Field>
+          <Field label="Max chars">
+            <FieldText
+              type="number"
+              value={selectionMax.toString()}
+              onChange={(value) => {
+                const val = value === "" ? undefined : parseIntSafe(value);
+                if (val !== undefined) {
+                  patch(["selection_needed"], [selectionMin, val]);
+                }
+              }}
+            />
+          </Field>
+        </div>
+      )}
+
+      {!hasSelectionRange && (
+        <Field
+          label="Selection Unwanted"
+          helper="Hide command when text is selected."
+        >
+          <FieldSwitch
+            checked={selectionUnwanted}
+            onChange={(checked) => patch(["selection_unwanted"], checked)}
+          />
+        </Field>
+      )}
+
+      <Field
+        label="Insert at Cursor"
+        helper="Insert response at cursor position."
+      >
+        <FieldSwitch
+          checked={insertAtCursor}
+          onChange={(checked) => patch(["insert_at_cursor"], checked)}
+        />
+      </Field>
 
       <MessageListEditor
         value={messages}
         onChange={(msgs) => patch(["messages"], msgs)}
         label="Messages"
       />
-    </Flex>
+    </div>
   );
 };

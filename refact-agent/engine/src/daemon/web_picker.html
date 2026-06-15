@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Refact daemon projects</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101114;
+        color: #f5f6f8;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at top left, #283044 0, #101114 34rem);
+      }
+      main {
+        width: min(1120px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0 48px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: flex-end;
+        margin-bottom: 24px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(28px, 5vw, 46px);
+        line-height: 1;
+      }
+      .muted {
+        color: #aeb4c1;
+      }
+      .status {
+        text-align: right;
+        font-size: 14px;
+      }
+      .panel {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 18px;
+        background: rgba(18, 20, 26, 0.78);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 13px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        text-align: left;
+        vertical-align: middle;
+        font-size: 14px;
+      }
+      th {
+        color: #cbd0da;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      .project {
+        display: grid;
+        gap: 4px;
+      }
+      .project strong {
+        font-size: 15px;
+      }
+      .root {
+        max-width: 420px;
+        overflow-wrap: anywhere;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      .dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin-right: 8px;
+        background: #8a92a3;
+      }
+      .dot-ready {
+        background: #57d681;
+      }
+      .dot-starting,
+      .dot-stopping {
+        background: #f2c94c;
+      }
+      .dot-crashed,
+      .dot-failed {
+        background: #ff6b6b;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 32px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: #7c8cff;
+        color: #fff;
+        text-decoration: none;
+        font-weight: 650;
+      }
+      .empty {
+        padding: 28px 16px;
+        text-align: center;
+      }
+      @media (max-width: 760px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .status {
+          text-align: left;
+        }
+        table,
+        thead,
+        tbody,
+        tr,
+        th,
+        td {
+          display: block;
+        }
+        thead {
+          display: none;
+        }
+        tr {
+          border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        td {
+          border-bottom: 0;
+          padding: 9px 16px;
+        }
+        td::before {
+          content: attr(data-label);
+          display: block;
+          color: #aeb4c1;
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          margin-bottom: 3px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Refact projects</h1>
+          <div class="muted">Open a daemon-managed workspace or watch worker status.</div>
+        </div>
+        <div class="status">
+          <div id="daemon-meta">__REFACT_DAEMON_PICKER_META__</div>
+          <div id="refresh-state" class="muted">Refreshing every 5s</div>
+        </div>
+      </header>
+      <section class="panel" aria-label="Projects">
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Worker</th>
+              <th>LSP clients</th>
+              <th>Cron next fire</th>
+              <th>Last active</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="projects-body">__REFACT_DAEMON_PICKER_ROWS__</tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      const initialData = __REFACT_DAEMON_PICKER_DATA__;
+      const state = { data: initialData };
+
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, function (ch) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[ch];
+        });
+      }
+
+      function stateClass(value) {
+        return String(value || "stopped").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+      }
+
+      function formatTime(ms) {
+        if (!ms) return "—";
+        const date = new Date(Number(ms));
+        if (Number.isNaN(date.getTime())) return "—";
+        return date.toLocaleString();
+      }
+
+      function formatUptime(seconds) {
+        const value = Number(seconds || 0);
+        if (value < 60) return `${value}s`;
+        if (value < 3600) return `${Math.floor(value / 60)}m ${value % 60}s`;
+        return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
+      }
+
+      function render(data) {
+        const daemon = data.daemon || {};
+        document.getElementById("daemon-meta").textContent = `v${daemon.version || "unknown"} · port ${daemon.port || "—"} · uptime ${formatUptime(daemon.uptime_secs)}`;
+        const projects = Array.isArray(data.projects) ? data.projects : [];
+        const body = document.getElementById("projects-body");
+        if (projects.length === 0) {
+          body.innerHTML = '<tr><td class="empty" colspan="6">No projects registered yet. Run <code>refact projects open .</code> from a workspace.</td></tr>';
+          return;
+        }
+        body.innerHTML = projects.map(function (project) {
+          const workerState = project.worker_state || "stopped";
+          const id = encodeURIComponent(project.id || "");
+          return `<tr>
+            <td data-label="Project"><div class="project"><strong>${escapeHtml(project.slug || project.id)}</strong><span class="root muted">${escapeHtml(project.root)}</span></div></td>
+            <td data-label="Worker"><span class="dot dot-${stateClass(workerState)}"></span>${escapeHtml(workerState)}</td>
+            <td data-label="LSP clients">${Number(project.lsp_clients || 0)}</td>
+            <td data-label="Cron next fire">${formatTime(project.cron_next_fire_ms)}</td>
+            <td data-label="Last active">${formatTime(project.last_active_ms)}</td>
+            <td data-label="Action"><a class="button" href="/p/${id}/">Open GUI</a></td>
+          </tr>`;
+        }).join("");
+      }
+
+      function parseDaemonEvents(text) {
+        return String(text || "").split("\n\n").map(function (block) {
+          return block.split("\n").filter(function (line) {
+            return line.startsWith("data:");
+          }).map(function (line) {
+            return line.slice(5).trimStart();
+          }).join("\n");
+        }).filter(Boolean).map(function (line) {
+          try {
+            return JSON.parse(line);
+          } catch (_error) {
+            return null;
+          }
+        }).filter(Boolean);
+      }
+
+      function mergeData(status, projects, events, previous) {
+        const prior = new Map((previous.projects || []).map(function (project) {
+          return [project.id, project];
+        }));
+        const cron = status.cron_pending || {};
+        const rows = (projects || []).map(function (entry) {
+          const old = prior.get(entry.id) || {};
+          return Object.assign({}, old, entry, {
+            root: entry.root || old.root || "",
+            worker_state: old.worker_state || "stopped",
+            lsp_clients: old.lsp_clients || 0,
+            busy_chats: old.busy_chats || 0,
+            exec_running: old.exec_running || 0,
+            cron_next_fire_ms: cron[entry.id] || null,
+          });
+        });
+        const byId = new Map(rows.map(function (project) {
+          return [project.id, project];
+        }));
+        events.forEach(function (event) {
+          const row = byId.get(event.project_id);
+          if (!row) return;
+          const payload = event.payload || {};
+          if (event.kind === "worker_starting") row.worker_state = "starting";
+          if (event.kind === "worker_ready") row.worker_state = "ready";
+          if (event.kind === "worker_stopped") row.worker_state = "stopped";
+          if (event.kind === "worker_crashed") row.worker_state = "crashed";
+          if (event.kind === "worker_status") {
+            row.lsp_clients = Number(payload.lsp_clients || 0);
+            row.busy_chats = Number(payload.busy_chats || 0);
+            row.exec_running = Number(payload.exec_running || 0);
+            row.last_active_ms = Math.max(Number(row.last_active_ms || 0), Number(payload.last_activity_ts || 0));
+          }
+        });
+        return {
+          daemon: {
+            version: status.version,
+            port: status.port,
+            uptime_secs: status.uptime_secs,
+            started_at_ms: status.started_at_ms,
+          },
+          projects: rows,
+        };
+      }
+
+      async function refresh() {
+        const label = document.getElementById("refresh-state");
+        try {
+          const responses = await Promise.all([
+            fetch("/daemon/v1/status"),
+            fetch("/daemon/v1/projects"),
+            fetch("/daemon/v1/events"),
+          ]);
+          if (responses.some(function (response) { return response.status === 401; })) throw new Error("Authentication required. Open this page through the daemon launch URL.");
+          if (!responses[0].ok || !responses[1].ok) throw new Error("daemon request failed");
+          const status = await responses[0].json();
+          const projects = await responses[1].json();
+          const events = responses[2].ok ? parseDaemonEvents(await responses[2].text()) : [];
+          state.data = mergeData(status, projects, events, state.data);
+          render(state.data);
+          label.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          label.textContent = `Refresh failed: ${error.message || error}`;
+        }
+      }
+
+      render(initialData);
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>

@@ -2,14 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
-  Checkbox,
   Dialog,
-  Flex,
-  Select,
-  Spinner,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
+  FieldSelect,
+  FieldText,
+} from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import {
   useMergeWorktreeMutation,
@@ -96,6 +92,15 @@ function responseSummary(response: MergeWorktreeResponse): string {
 
 function responseWarnings(response: MergeWorktreeResponse): string[] {
   return [...(response.warnings ?? []), ...(response.cleanup?.warnings ?? [])];
+}
+
+function resultTone(
+  merged: boolean,
+  conflicted: boolean,
+): React.ComponentProps<typeof Badge>["tone"] {
+  if (merged) return "success";
+  if (conflicted) return "warning";
+  return "muted";
 }
 
 export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
@@ -225,192 +230,177 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const merged = result ? isMerged(result) : false;
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content
-        className={styles.mergeDialog}
-        {...(closeOnNonInteractiveContentClick
-          ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
-          : {})}
-      >
-        <Dialog.Title>Merge worktree</Dialog.Title>
-        <Dialog.Description size="2" color="gray">
-          Merge {label} into a target branch.
-        </Dialog.Description>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className={styles.mergeDialog} maxWidth="900px">
+        <div
+          {...(closeOnNonInteractiveContentClick
+            ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
+            : {})}
+        >
+          <Dialog.Title>Merge worktree</Dialog.Title>
+          <Dialog.Description>
+            Merge {label} into a target branch.
+          </Dialog.Description>
 
-        <Flex direction="column" gap="3" mt="3">
-          <div className={styles.field}>
-            <Text size="2" weight="medium">
-              Strategy
-            </Text>
-            <Select.Root
-              value={strategy}
-              onValueChange={(value) =>
-                setStrategy(value as WorktreeMergeStrategy)
-              }
-              disabled={mergeState.isLoading}
-            >
-              <Select.Trigger aria-label="Merge strategy" />
-              <Select.Content>
-                <Select.Item value="squash">Squash merge</Select.Item>
-                <Select.Item value="merge">Regular merge</Select.Item>
-              </Select.Content>
-            </Select.Root>
-          </div>
+          <div className={styles.modalFields}>
+            <div className={styles.field}>
+              <span className={styles.labelText}>Strategy</span>
+              <FieldSelect
+                value={strategy}
+                options={[
+                  { value: "squash", label: "Squash merge" },
+                  { value: "merge", label: "Regular merge" },
+                ]}
+                onChange={(value) =>
+                  setStrategy(value as WorktreeMergeStrategy)
+                }
+                disabled={mergeState.isLoading}
+                aria-label="Merge strategy"
+              />
+            </div>
 
-          <label className={styles.field} htmlFor="worktree-target-branch">
-            <Text size="2" weight="medium">
-              Target branch
-            </Text>
-            <TextField.Root
-              id="worktree-target-branch"
-              value={targetBranch}
-              onChange={(event) => setTargetBranch(event.target.value)}
-              disabled={mergeState.isLoading}
-            />
-          </label>
+            <label className={styles.field} htmlFor="worktree-target-branch">
+              <span className={styles.labelText}>Target branch</span>
+              <FieldText
+                id="worktree-target-branch"
+                value={targetBranch}
+                onChange={setTargetBranch}
+                disabled={mergeState.isLoading}
+              />
+            </label>
 
-          <Flex direction="column" gap="2">
-            <Text as="label" size="2">
-              <Flex align="center" gap="2">
-                <Checkbox
+            <div className={styles.checkboxStack}>
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox"
                   checked={deleteAfterMerge}
-                  onCheckedChange={(checked) =>
-                    setDeleteAfterMerge(checked === true)
+                  onChange={(event) =>
+                    setDeleteAfterMerge(event.currentTarget.checked)
                   }
                   disabled={mergeState.isLoading}
                 />
                 Delete worktree after merge or if there is nothing to merge
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex align="center" gap="2">
-                <Checkbox
+              </label>
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox"
                   checked={includeUncommitted}
-                  onCheckedChange={(checked) =>
-                    setIncludeUncommitted(checked === true)
+                  onChange={(event) =>
+                    setIncludeUncommitted(event.currentTarget.checked)
                   }
                   disabled={mergeState.isLoading}
                 />
                 Include uncommitted changes by auto-committing first
-              </Flex>
-            </Text>
-          </Flex>
+              </label>
+            </div>
 
-          {error && (
-            <Text size="2" color="red" className={styles.warningBox}>
-              {error}
-            </Text>
-          )}
+            {error && <p className={styles.errorBox}>{error}</p>}
 
-          {result && (
-            <Flex direction="column" gap="2" className={styles.resultBox}>
-              <Flex gap="2" align="center" wrap="wrap">
-                <Badge color={merged ? "green" : conflicted ? "amber" : "gray"}>
-                  {result.status ?? (merged ? "merged" : "finished")}
-                </Badge>
-                {result.strategy && (
-                  <Badge color="gray" variant="soft">
-                    {result.strategy}
+            {result && (
+              <div className={styles.resultBox}>
+                <div className={styles.badgeRow}>
+                  <Badge tone={resultTone(merged, conflicted)}>
+                    {result.status ?? (merged ? "merged" : "finished")}
                   </Badge>
+                  {result.strategy && (
+                    <Badge tone="muted">{result.strategy}</Badge>
+                  )}
+                </div>
+                <p
+                  className={`${styles.resultSummary} ${
+                    conflicted
+                      ? styles.resultWarning
+                      : merged
+                        ? styles.resultSuccess
+                        : ""
+                  }`}
+                >
+                  {responseSummary(result)}
+                </p>
+                {result.source_branch && result.target_branch && (
+                  <p className={styles.metaText}>
+                    {result.source_branch} → {result.target_branch}
+                  </p>
                 )}
-              </Flex>
-              <Text
-                size="2"
-                color={conflicted ? "amber" : merged ? "green" : "gray"}
-              >
-                {responseSummary(result)}
-              </Text>
-              {result.source_branch && result.target_branch && (
-                <Text size="1" color="gray">
-                  {result.source_branch} → {result.target_branch}
-                </Text>
-              )}
-              {result.merge_commit && (
-                <Text size="1" color="gray">
-                  Merge commit: {result.merge_commit}
-                </Text>
-              )}
-              {result.cleanup && (
-                <Text size="1" color="gray">
-                  Cleanup: worktree{" "}
-                  {result.cleanup.worktree_deleted ? "deleted" : "kept"}, branch{" "}
-                  {result.cleanup.branch_deleted ? "deleted" : "kept"}
-                </Text>
-              )}
-              {conflicted && (
-                <Flex direction="column" gap="2">
-                  <Text size="2" weight="medium">
-                    Conflicted files
-                  </Text>
-                  <ul className={styles.conflictList}>
-                    {conflictFiles.length === 0 ? (
-                      <li>No conflicted files were reported.</li>
-                    ) : (
-                      conflictFiles.map((file) => <li key={file}>{file}</li>)
-                    )}
-                  </ul>
-                  <Flex gap="2" wrap="wrap">
-                    <Button
-                      type="button"
-                      size="2"
-                      variant="soft"
-                      onClick={() => void handleAskRefact()}
-                      disabled={!onAskRefact}
-                    >
-                      Ask Refact to resolve conflicts
-                    </Button>
-                    <Button
-                      type="button"
-                      size="2"
-                      variant="soft"
-                      color="gray"
-                      onClick={() => void handleOpenWorktree()}
-                      disabled={!onOpenWorktree}
-                    >
-                      Open worktree
-                    </Button>
-                  </Flex>
-                </Flex>
-              )}
-              {actionFeedback && (
-                <Text size="1" color="gray">
-                  {actionFeedback}
-                </Text>
-              )}
-              {warnings.length > 0 && (
-                <Flex direction="column" gap="1">
-                  {warnings.map((warning, index) => (
-                    <Text key={`${index}-${warning}`} size="1" color="amber">
-                      {warning}
-                    </Text>
-                  ))}
-                </Flex>
-              )}
-            </Flex>
-          )}
-        </Flex>
+                {result.merge_commit && (
+                  <p className={styles.metaText}>
+                    Merge commit: {result.merge_commit}
+                  </p>
+                )}
+                {result.cleanup && (
+                  <p className={styles.metaText}>
+                    Cleanup: worktree{" "}
+                    {result.cleanup.worktree_deleted ? "deleted" : "kept"},
+                    branch {result.cleanup.branch_deleted ? "deleted" : "kept"}
+                  </p>
+                )}
+                {conflicted && (
+                  <div className={styles.conflictBlock}>
+                    <span className={styles.labelText}>Conflicted files</span>
+                    <ul className={styles.conflictList}>
+                      {conflictFiles.length === 0 ? (
+                        <li>No conflicted files were reported.</li>
+                      ) : (
+                        conflictFiles.map((file) => <li key={file}>{file}</li>)
+                      )}
+                    </ul>
+                    <div className={styles.inlineActions}>
+                      <Button
+                        size="sm"
+                        variant="soft"
+                        onClick={() => void handleAskRefact()}
+                        disabled={!onAskRefact}
+                      >
+                        Ask Refact to resolve conflicts
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="soft"
+                        onClick={() => void handleOpenWorktree()}
+                        disabled={!onOpenWorktree}
+                      >
+                        Open worktree
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {actionFeedback && (
+                  <p className={styles.metaText}>{actionFeedback}</p>
+                )}
+                {warnings.length > 0 && (
+                  <div className={styles.warningStack}>
+                    {warnings.map((warning, index) => (
+                      <p
+                        key={`${index}-${warning}`}
+                        className={styles.warningText}
+                      >
+                        {warning}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
-        <Flex className={styles.modalActions}>
-          <Dialog.Close>
+          <div className={styles.modalActions}>
+            <Dialog.Close asChild>
+              <Button variant="soft" disabled={mergeState.isLoading}>
+                Close
+              </Button>
+            </Dialog.Close>
             <Button
-              type="button"
-              variant="soft"
-              color="gray"
-              disabled={mergeState.isLoading}
+              variant="primary"
+              onClick={() => void handleMerge()}
+              disabled={mergeState.isLoading || queryId.length === 0}
+              loading={mergeState.isLoading}
             >
-              Close
+              Merge
             </Button>
-          </Dialog.Close>
-          <Button
-            type="button"
-            onClick={() => void handleMerge()}
-            disabled={mergeState.isLoading || queryId.length === 0}
-          >
-            {mergeState.isLoading ? <Spinner size="1" /> : "Merge"}
-          </Button>
-        </Flex>
+          </div>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 

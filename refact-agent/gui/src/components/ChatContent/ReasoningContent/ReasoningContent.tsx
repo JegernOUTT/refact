@@ -5,13 +5,12 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
-import classNames from "classnames";
-import { LightningBoltIcon } from "@radix-ui/react-icons";
+import { LoaderCircle, Zap } from "lucide-react";
+import { Icon } from "../../ui";
 
 import { Markdown } from "../../Markdown";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
@@ -69,6 +68,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   const durationCapturedRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
+  const isActivelyThinking =
+    isStreaming && !!reasoningContent && !hasMessageContent;
+  const renderedOpen = isActivelyThinking || isOpen;
 
   useEffect(() => {
     if (stateKey && store) store.set(stateKey, isOpen);
@@ -76,9 +78,6 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
 
   // Track thinking duration - stop when message content starts appearing
   useEffect(() => {
-    const isActivelyThinking =
-      isStreaming && !!reasoningContent && !hasMessageContent;
-
     if (isActivelyThinking) {
       // Started thinking
       if (startTimeRef.current === null) {
@@ -95,7 +94,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       setThinkingDuration(duration);
       durationCapturedRef.current = true;
     }
-  }, [isStreaming, reasoningContent, hasMessageContent]);
+  }, [isActivelyThinking]);
 
   // Auto-collapse after entire message finishes streaming
   useEffect(() => {
@@ -126,7 +125,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   useEffect(() => {
     if (
       isStreaming &&
-      isOpen &&
+      renderedOpen &&
       contentRef.current &&
       !userScrolledRef.current
     ) {
@@ -135,7 +134,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
         el.scrollTop = el.scrollHeight;
       }
     }
-  }, [reasoningContent, isStreaming, isOpen]);
+  }, [reasoningContent, isStreaming, renderedOpen]);
 
   // Reset user scroll flag when streaming starts
   useEffect(() => {
@@ -156,13 +155,11 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     }
   }, [isStreaming]);
 
-  const handleToggle = useCallback(() => {
+  const handleOpenChange = useCallback((open: boolean) => {
     userToggledRef.current = true;
-    setIsOpen((prev) => !prev);
+    setIsOpen(open);
   }, []);
 
-  const isActivelyThinking =
-    isStreaming && !!reasoningContent && !hasMessageContent;
   const summaryText = isActivelyThinking
     ? "Thinking..."
     : thinkingDuration !== null
@@ -175,11 +172,11 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   );
   const deferredContent = useStreamingMarkdown(
     formattedContent,
-    isStreaming && isOpen,
+    isStreaming && renderedOpen,
   );
 
   useEffect(() => {
-    if (isStreaming && isOpen) {
+    if (isStreaming && renderedOpen) {
       const text = deferredContent ?? formattedContent;
       setBuddyCrashHotSlot("reasoning", text);
       addBuddyCrashBreadcrumb("reasoning", text);
@@ -187,55 +184,45 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     }
 
     setBuddyCrashHotSlot("reasoning", null);
-  }, [deferredContent, formattedContent, isOpen, isStreaming]);
+  }, [deferredContent, formattedContent, renderedOpen, isStreaming]);
 
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+  const headerIcon = isActivelyThinking ? (
+    <span className={styles.spinner}>
+      <Icon className="rf-spin" icon={LoaderCircle} size="sm" tone="accent" />
+    </span>
+  ) : (
+    <Icon icon={Zap} size="sm" tone="accent" />
+  );
 
   return (
-    <div className={styles.card}>
-      <Flex
-        className={classNames(
-          styles.header,
-          isActivelyThinking && styles.thinking,
-        )}
-        align="center"
-        gap="2"
-        onClick={handleToggle}
-      >
-        <span className={styles.iconWrapper}>
-          {isActivelyThinking ? <Spinner size="1" /> : <LightningBoltIcon />}
-        </span>
-        <Text size="1" className={styles.summary}>
-          {summaryText}
-        </Text>
-      </Flex>
-
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
+    <AnimatedCollapsible
+      className={styles.card}
+      header={
+        <span className={styles.summary}>
+          {isActivelyThinking ? (
+            <span className="rf-text-shimmer">{summaryText}</span>
+          ) : (
+            summaryText
           )}
-        >
-          <div className={styles.contentInner}>
-            <div
-              ref={contentRef}
-              className={styles.content}
-              onScroll={handleScroll}
-            >
-              <Text size="1" color="gray" as="div">
-                <Markdown
-                  canHaveInteractiveElements={true}
-                  onCopyClick={onCopyClick}
-                  isStreaming={isStreaming}
-                >
-                  {deferredContent ?? formattedContent}
-                </Markdown>
-              </Text>
-            </div>
-          </div>
+        </span>
+      }
+      icon={headerIcon}
+      open={renderedOpen}
+      onOpenChange={handleOpenChange}
+      status={isActivelyThinking ? "streaming" : "idle"}
+      variant="compact"
+    >
+      <div ref={contentRef} className={styles.content} onScroll={handleScroll}>
+        <div className={styles.markdown}>
+          <Markdown
+            canHaveInteractiveElements={true}
+            onCopyClick={onCopyClick}
+            isStreaming={isStreaming}
+          >
+            {deferredContent ?? formattedContent}
+          </Markdown>
         </div>
-      )}
-    </div>
+      </div>
+    </AnimatedCollapsible>
   );
 };

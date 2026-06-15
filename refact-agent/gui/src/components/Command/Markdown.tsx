@@ -21,6 +21,7 @@ export type MarkdownProps = {
   children: string;
   className?: string;
   isInsideScrollArea?: boolean;
+  variant?: "chat" | "tool" | "terminal";
 };
 
 const Image: React.FC<
@@ -36,13 +37,19 @@ export const Markdown: React.FC<MarkdownProps> = ({
   children,
   className,
   isInsideScrollArea,
+  variant = "terminal",
 }) => {
   return (
     <ReactMarkdown
       urlTransform={urlTransform}
-      className={classNames(styles.markdown, className, {
-        [styles.isInsideScrollArea]: isInsideScrollArea,
-      })}
+      className={classNames(
+        styles.markdown,
+        styles[`variant_${variant}`],
+        className,
+        {
+          [styles.isInsideScrollArea]: isInsideScrollArea,
+        },
+      )}
       components={{
         code({ color: _color, ref: _ref, node: _node, ...props }) {
           return <ShikiCodeBlock {...props} />;

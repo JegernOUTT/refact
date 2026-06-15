@@ -13,4 +13,4 @@ For local UI updates, build `refact-agent/gui` and copy its `dist` directory int
 
 ## Issues
 
-Report plugin issues in the monorepo issue tracker: <https://github.com/smallcloudai/refact/issues>.
+Report plugin issues in the monorepo issue tracker: <https://github.com/JegernOUTT/refact/issues>.

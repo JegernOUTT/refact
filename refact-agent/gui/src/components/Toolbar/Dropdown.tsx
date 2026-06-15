@@ -1,34 +1,25 @@
 import React, { useMemo } from "react";
+import {
+  BarChart3,
+  Bug,
+  FileText,
+  Gauge,
+  Menu as MenuIcon,
+  Settings,
+  SlidersHorizontal,
+} from "lucide-react";
+
 import { selectHost, type Config } from "../../features/Config/configSlice";
 import { useAppSelector, useEventsBusForIDE } from "../../hooks";
 import { useOpenUrl } from "../../hooks/useOpenUrl";
-import { DropdownMenu, HoverCard, Text } from "@radix-ui/themes";
-import {
-  BarChartIcon,
-  ExclamationTriangleIcon,
-  FileTextIcon,
-  GearIcon,
-  HamburgerMenuIcon,
-  KeyboardIcon,
-  LightningBoltIcon,
-  MixerHorizontalIcon,
-  ReaderIcon,
-  RocketIcon,
-  StarIcon,
-} from "@radix-ui/react-icons";
+import { Icon, IconButton, Menu, Tooltip } from "../ui";
 import styles from "./Toolbar.module.css";
-import { PuzzleIcon } from "../../images/PuzzleIcon";
 
 export type DropdownNavigationOptions =
   | "stats"
   | "settings"
-  | "hot keys"
-  | "integrations"
-  | "providers"
   | "knowledge graph"
-  | "customization"
-  | "default models"
-  | "extensions"
+  | "general settings"
   | "";
 
 type DropdownProps = {
@@ -54,69 +45,50 @@ export const Dropdown: React.FC<DropdownProps> = ({
     if (host === "jetbrains") return "Plugin";
     return "Extension";
   }, [host]);
-
   return (
-    <DropdownMenu.Root>
-      <HoverCard.Root>
-        <HoverCard.Trigger>
-          <DropdownMenu.Trigger>
-            <button
-              type="button"
-              className={triggerClassName ?? styles.iconButton}
+    <Menu>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
+          <Menu.Trigger asChild>
+            <IconButton
               aria-label="Menu"
-            >
-              <HamburgerMenuIcon />
-            </button>
-          </DropdownMenu.Trigger>
-        </HoverCard.Trigger>
-        <HoverCard.Content size="1" side="bottom">
-          <Text as="p" size="2">
-            Menu
-          </Text>
-        </HoverCard.Content>
-      </HoverCard.Root>
+              className={triggerClassName ?? styles.iconButton}
+              icon={MenuIcon}
+              size="sm"
+              variant="plain"
+            />
+          </Menu.Trigger>
+        </Tooltip.Trigger>
+        <Tooltip.Content side="bottom">Menu</Tooltip.Content>
+      </Tooltip>
 
-      <DropdownMenu.Content>
-        <DropdownMenu.Item onSelect={() => handleNavigation("integrations")}>
-          <PuzzleIcon /> Set up Agent Integrations
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("providers")}>
-          <MixerHorizontalIcon /> Configure Providers
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("default models")}>
-          <StarIcon /> Default Models
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("knowledge graph")}>
-          <ReaderIcon /> Manage Knowledge
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("settings")}>
-          <GearIcon /> {refactProductType} Settings
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("hot keys")}>
-          <KeyboardIcon /> IDE Hotkeys
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("customization")}>
-          <RocketIcon /> Customize Modes & Agents
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("extensions")}>
-          <LightningBoltIcon /> Skills, Commands & Hooks
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => void openPrivacyFile()}>
-          <FileTextIcon /> Edit privacy.yaml
-        </DropdownMenu.Item>
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item
+      <Menu.Content>
+        <Menu.Item onSelect={() => handleNavigation("general settings")}>
+          <Icon icon={Settings} size="sm" /> Settings
+        </Menu.Item>
+        <Menu.Item onSelect={() => handleNavigation("knowledge graph")}>
+          <Icon icon={Gauge} size="sm" /> Manage Knowledge
+        </Menu.Item>
+        <Menu.Item onSelect={() => handleNavigation("settings")}>
+          <Icon icon={SlidersHorizontal} size="sm" /> {refactProductType}{" "}
+          Settings
+        </Menu.Item>
+        <Menu.Item onSelect={() => void openPrivacyFile()}>
+          <Icon icon={FileText} size="sm" /> Edit privacy.yaml
+        </Menu.Item>
+        <Menu.Separator />
+        <Menu.Item
           onSelect={(event) => {
             event.preventDefault();
             openUrl(bugUrl);
           }}
         >
-          <ExclamationTriangleIcon /> Report a bug
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("stats")}>
-          <BarChartIcon /> Usage Dashboard
-        </DropdownMenu.Item>
-      </DropdownMenu.Content>
-    </DropdownMenu.Root>
+          <Icon icon={Bug} size="sm" /> Report a bug
+        </Menu.Item>
+        <Menu.Item onSelect={() => handleNavigation("stats")}>
+          <Icon icon={BarChart3} size="sm" /> Usage Dashboard
+        </Menu.Item>
+      </Menu.Content>
+    </Menu>
   );
 };

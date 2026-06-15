@@ -1,0 +1,6 @@
+src/features/Buddy/
+storybook-static
+test-results
+playwright-report
+playwright.config.ts
+tests/

@@ -6,14 +6,18 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: var(--space-7);
+  padding: var(--rf-space-6);
   background: radial-gradient(
       circle at 50% 35%,
-      var(--red-a4),
+      color-mix(in srgb, var(--rf-color-danger) 18%, transparent),
       transparent 32rem
     ),
-    radial-gradient(circle at 20% 80%, var(--accent-a3), transparent 24rem),
-    var(--color-background);
+    radial-gradient(
+      circle at 20% 80%,
+      color-mix(in srgb, var(--rf-color-accent) 12%, transparent),
+      transparent 24rem
+    ),
+    var(--rf-bg);
 }
 
 .root::before,
@@ -21,18 +25,19 @@
   position: absolute;
   width: 22rem;
   height: 22rem;
-  border: 1px solid var(--red-a5);
-  border-radius: 999px;
+  border: var(--rf-hairline) solid
+    color-mix(in srgb, var(--rf-color-danger) 24%, transparent);
+  border-radius: var(--rf-radius-pill);
   content: "";
   opacity: 0.45;
-  animation: orbit 8s ease-in-out infinite;
+  animation: orbit var(--rf-dur-slow) var(--rf-ease-standard) infinite alternate;
 }
 
 .root::after {
   width: 14rem;
   height: 14rem;
-  border-color: var(--accent-a5);
-  animation-delay: -3s;
+  border-color: color-mix(in srgb, var(--rf-color-accent) 24%, transparent);
+  animation-delay: calc(var(--rf-dur-slow) * -2);
 }
 
 .card {
@@ -42,15 +47,15 @@
   width: min(420px, 100%);
   flex-direction: column;
   align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-7);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-5);
-  background: color-mix(in srgb, var(--color-panel-solid) 82%, transparent);
-  box-shadow: 0 24px 80px var(--black-a7);
+  gap: var(--rf-space-4);
+  padding: var(--rf-space-6);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
   text-align: center;
-  backdrop-filter: blur(18px);
-  animation: appear 0.35s ease-out;
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  animation: appear var(--rf-dur-slow) var(--rf-ease-entrance);
 }
 
 .logoWrap {
@@ -59,16 +64,16 @@
   width: 96px;
   height: 96px;
   place-items: center;
-  color: var(--red-9);
+  color: var(--rf-color-danger);
 }
 
 .logoWrap::before {
   position: absolute;
   inset: 0;
-  border-radius: 28px;
-  background: var(--red-a3);
+  border-radius: var(--rf-radius-card);
+  background: color-mix(in srgb, var(--rf-color-danger) 16%, transparent);
   content: "";
-  animation: pulse 1.8s ease-in-out infinite;
+  animation: pulse 1.8s var(--rf-ease-standard) infinite;
 }
 
 .logo {
@@ -76,7 +81,16 @@
   z-index: 1;
   width: 64px;
   height: 64px;
-  filter: drop-shadow(0 10px 24px var(--red-a6));
+  filter: drop-shadow(
+    0 10px 24px color-mix(in srgb, var(--rf-color-danger) 32%, transparent)
+  );
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 .animation {
@@ -84,11 +98,17 @@
 }
 
 .title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: clamp(var(--rf-text-5), 7vw, 34px);
   letter-spacing: -0.03em;
 }
 
 .caption {
   max-width: 26rem;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-3);
 }
 
 @keyframes appear {
@@ -115,11 +135,10 @@
 }
 
 @keyframes orbit {
-  0%,
-  100% {
+  from {
     transform: rotate(0deg) scale(1);
   }
-  50% {
+  to {
     transform: rotate(14deg) scale(1.08);
   }
 }

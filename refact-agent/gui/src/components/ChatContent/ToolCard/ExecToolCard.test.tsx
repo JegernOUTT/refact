@@ -1,3 +1,4 @@
+import { act } from "react-dom/test-utils";
 import { describe, expect, test, vi } from "vitest";
 import {
   cleanup,
@@ -11,6 +12,8 @@ import { configureStore } from "@reduxjs/toolkit";
 import { Theme } from "@radix-ui/themes";
 
 import { ExecToolCard } from "./ExecToolCard";
+import { CollapsibleStoreProvider } from "../useStoredOpen";
+import type { CollapsibleStore } from "../CollapsibleStore";
 import {
   reducer as configReducer,
   type Config,
@@ -34,6 +37,7 @@ type RenderExecToolOptions = {
   failed?: boolean;
   host?: Config["host"];
   subchatLog?: string[];
+  collapsibleStore?: CollapsibleStore;
 };
 
 function makeStore(toolMessage?: ToolMessage, host: Config["host"] = "web") {
@@ -101,10 +105,18 @@ function renderExecTool(options: RenderExecToolOptions = {}) {
       : undefined;
   const store = makeStore(message, options.host);
 
+  const card = <ExecToolCard toolCall={toolCall} toolName={toolName} />;
+
   return render(
     <Provider store={store}>
       <Theme>
-        <ExecToolCard toolCall={toolCall} toolName={toolName} />
+        {options.collapsibleStore ? (
+          <CollapsibleStoreProvider value={options.collapsibleStore}>
+            {card}
+          </CollapsibleStoreProvider>
+        ) : (
+          card
+        )}
       </Theme>
     </Provider>,
   );
@@ -148,6 +160,52 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("/workspace")).toBeInTheDocument();
     expect(screen.getByText("0.2s")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
+  });
+
+  test("collapses with delayed unmount and persists reopened state by tool-call id", () => {
+    vi.useFakeTimers();
+    const storedOpen = new Map<string, boolean>([["tc:tc-exec", true]]);
+    const advanceTimersByTime: (ms: number) => void =
+      vi.advanceTimersByTime.bind(vi);
+    const collapsibleStore: CollapsibleStore = {
+      get: (key) => storedOpen.get(key),
+      set: (key, open) => storedOpen.set(key, open),
+    };
+
+    try {
+      renderExecTool({
+        content: "stdout:\npersisted output\nstderr:\n<empty>\n",
+        extra: {
+          process_id: "exec_persisted_open",
+          status: "exited",
+          short_description: "Persisted card",
+          command: "npm test",
+        },
+        collapsibleStore,
+      });
+
+      expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Persisted card"));
+      expect(storedOpen.get("tc:tc-exec")).toBe(false);
+      expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
+
+      act(() => {
+        advanceTimersByTime(199);
+      });
+      expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
+
+      act(() => {
+        advanceTimersByTime(1);
+      });
+      expect(screen.queryByTestId("exec-output-view")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Persisted card"));
+      expect(storedOpen.get("tc:tc-exec")).toBe(true);
+      expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("process_start running background card uses runtime metadata", () => {
@@ -477,7 +535,7 @@ describe("ExecToolCard", () => {
     expect(screen.getByTestId("exec-output-view")).toBeInTheDocument();
     expect(screen.getByText("all tests passed")).toBeInTheDocument();
   });
-  test("running process with no chunks shows waiting preview", () => {
+  test("running process without output uses the card header instead of a duplicate waiting line", () => {
     renderExecTool({
       toolName: "process_start",
       args: { command: "npm run dev", mode: "background" },
@@ -496,9 +554,14 @@ describe("ExecToolCard", () => {
       },
     });
 
-    expect(screen.getByTestId("exec-live-preview")).toHaveTextContent(
-      "Waiting for output…",
+    expect(screen.queryByTestId("exec-live-preview")).not.toBeInTheDocument();
+    expect(document.querySelector(".rf-text-shimmer")).toHaveTextContent(
+      "Start dev server",
     );
+    expect(screen.getByText("Start dev server")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("exec-status-running_in_background"),
+    ).toHaveTextContent("background");
   });
 
   test("running process shows latest output chunk preview", () => {

@@ -1,95 +1,225 @@
 .root {
   width: 100%;
+  min-width: 0;
   overflow: hidden;
 }
 
 .stickyAlerts {
   position: sticky;
   top: 0;
-  z-index: 2;
-  margin-bottom: var(--space-2);
+  z-index: var(--rf-z-base);
+  margin-bottom: var(--rf-space-2);
+}
+
+.alert {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-color-warning);
+  background: var(--rf-surface-1);
+}
+
+.alertDanger {
+  color: var(--rf-color-danger);
+}
+
+.tabsList,
+.filters,
+.actions,
+.dialogActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  align-items: center;
+  min-width: 0;
 }
 
 .tabsList {
-  max-width: 100%;
-  overflow-x: auto;
+  padding-bottom: var(--rf-space-1);
 }
 
 .filters {
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
 }
 
-.tableWrap {
-  width: 100%;
-  overflow-x: auto;
-  composes: scrollbarThin from "../shared/scrollbar.module.css";
+.filterGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
-.table {
-  min-width: 720px;
+.filterLabel,
+.cellLabel,
+.detailLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
 }
 
-.titleCell {
-  max-width: 240px;
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: var(--rf-space-2);
+}
+
+.agentCard {
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.agentCardHeader,
+.cardTitleRow,
+.stateRow,
+.cardMetaGrid,
+.detailBlock,
+.commandPreview {
+  min-width: 0;
+}
+
+.agentCardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
+}
+
+.cardTitleRow,
+.stateRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.cardTitleRow {
+  flex-wrap: wrap;
+}
+
+.cardTitle {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
+  line-height: var(--rf-line);
+}
+
+.cardLink {
+  color: var(--rf-color-accent);
+  text-decoration: none;
+}
+
+.cardLink:hover {
+  text-decoration: underline;
+}
+
+.titleCell,
+.cellValue {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cardLink {
-  color: var(--accent-11);
-  text-decoration: none;
-}
-
-.cardLink:hover {
-  color: var(--accent-12);
-  text-decoration: underline;
+.titleCell {
+  margin-top: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
 }
 
 .stateText {
-  white-space: nowrap;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  font-weight: 650;
+  line-height: var(--rf-line);
 }
 
 .stateRunning {
-  color: var(--blue-11);
+  color: var(--rf-color-accent);
 }
 
-.stateStuck {
-  color: var(--amber-11);
+.stateStuck,
+.statePaused {
+  color: var(--rf-color-warning);
 }
 
 .stateFailed {
-  color: var(--red-11);
+  color: var(--rf-color-danger);
 }
 
 .stateDone {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
-.statePaused {
-  color: var(--orange-11);
+.cardMetaGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
+}
+
+.cellValue {
+  display: block;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
 }
 
 .actions {
-  min-width: 180px;
+  justify-content: flex-end;
+  margin-top: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
 }
 
-.detailsCell {
-  background: var(--gray-a2);
+.detailsGrid {
+  margin-top: var(--rf-space-2);
+  pointer-events: none;
+}
+
+.detailsGrid[data-open="true"] {
+  pointer-events: auto;
+}
+
+.detailsShell {
+  opacity: 0;
+  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+}
+
+.detailsGrid[data-open="true"] .detailsShell {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
 }
 
 .details {
-  padding: var(--space-2);
+  display: grid;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-2) 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
+.detailValue {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
+}
+
+.mutedValue {
+  color: var(--rf-color-muted);
+}
+
 .emptyState {
-  padding: var(--space-2) 0;
+  padding: var(--rf-space-3) 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
 }
 
 .dialogContent {
-  max-width: 520px;
+  max-width: min(520px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .dialogInput {
@@ -97,11 +227,54 @@
 }
 
 .commandPreview {
-  margin-top: var(--space-3);
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
-  font-family: var(--code-font-family);
+  margin-top: var(--rf-space-3);
+  padding: var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.dialogActions {
+  justify-content: flex-end;
+  margin-top: var(--rf-space-3);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .detailsShell {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+    will-change: opacity, transform;
+  }
+
+  .detailsGrid:not([data-open="true"]) .detailsShell {
+    will-change: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detailsShell {
+    transition: none;
+    transform: none;
+  }
+}
+
+@media (max-width: 360px) {
+  .agentCardHeader {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cardMetaGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .actions,
+  .dialogActions {
+    justify-content: flex-start;
+  }
 }

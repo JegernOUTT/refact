@@ -509,6 +509,7 @@ export const worktreesApi = createApi({
       invalidatesTags: (_result, _error, { id }) => [
         { type: "Worktrees", id },
         { type: "Worktrees", id: "LIST" },
+        { type: "Worktrees", id: "SUMMARY" },
       ],
     }),
     deleteWorktree: builder.mutation<
@@ -536,6 +537,7 @@ export const worktreesApi = createApi({
       invalidatesTags: (_result, _error, { id }) => [
         { type: "Worktrees", id },
         { type: "Worktrees", id: "LIST" },
+        { type: "Worktrees", id: "SUMMARY" },
       ],
     }),
     openWorktree: builder.mutation<OpenWorktreeResponse, OpenWorktreeRequest>({

@@ -1,15 +1,18 @@
 import React from "react";
-import { Text, Tooltip } from "@radix-ui/themes";
+import {
+  DashboardText as Text,
+  DashboardTooltip as Tooltip,
+} from "../DashboardPrimitives";
 import type { ModelStats } from "../../../StatsDashboard/types";
 import { formatTokenCount } from "../../../StatsDashboard/utils/formatters";
 import styles from "./ModelBars.module.css";
 
 const MODEL_COLORS = [
-  "var(--blue-8)",
-  "var(--green-8)",
-  "var(--amber-8)",
-  "var(--purple-8)",
-  "var(--red-8)",
+  "var(--rf-color-accent)",
+  "var(--rf-color-success)",
+  "var(--rf-color-warning)",
+  "var(--rf-color-accent-soft)",
+  "var(--rf-color-danger)",
 ];
 
 type ModelBarsProps = {
@@ -23,7 +26,7 @@ export const ModelBars: React.FC<ModelBarsProps> = ({ models }) => {
 
   if (sorted.length === 0) {
     return (
-      <Text size="1" color="gray">
+      <Text size="1" tone="muted">
         No data
       </Text>
     );

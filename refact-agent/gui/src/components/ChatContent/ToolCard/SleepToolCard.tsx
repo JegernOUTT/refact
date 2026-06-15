@@ -1,10 +1,7 @@
+import { CircleCheck, TriangleAlert, Timer } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
-import {
-  CheckCircledIcon,
-  ExclamationTriangleIcon,
-  LapTimerIcon,
-} from "@radix-ui/react-icons";
+import { Flex, Text } from "@radix-ui/themes";
+import { Button } from "../../ui";
 
 import { ToolCard } from "./ToolCard";
 import type { ToolStatus } from "./ToolCard";
@@ -222,11 +219,11 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
 
   const icon = sleepResult?.interrupted ? (
     <span className={styles.summaryInterrupted}>
-      <ExclamationTriangleIcon />
+      <TriangleAlert />
     </span>
   ) : (
     <span className={styles.summarySuccess}>
-      <CheckCircledIcon />
+      <CircleCheck />
     </span>
   );
 
@@ -243,8 +240,8 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
         className={styles.sleepCard}
       >
         {isRunning && (
-          <Flex direction="column" gap="3" className={styles.countdown}>
-            <Flex align="center" justify="between" gap="3" wrap="wrap">
+          <Flex direction="column" gap="2" className={styles.countdown}>
+            <Flex align="center" justify="between" gap="2" wrap="wrap">
               <Flex direction="column" gap="1">
                 <Text weight="bold" className={styles.countdownText}>
                   Sleeping… {formatSeconds(remainingMs)} remaining
@@ -255,13 +252,8 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
                   </Text>
                 )}
               </Flex>
-              <Button
-                type="button"
-                size="2"
-                color="amber"
-                onClick={handleWakeUp}
-              >
-                <LapTimerIcon />
+              <Button type="button" variant="soft" onClick={handleWakeUp}>
+                <Timer />
                 Wake up
               </Button>
             </Flex>

@@ -1,5 +1,6 @@
 import React from "react";
-import { Box, Button, Dialog, Flex, Text } from "@radix-ui/themes";
+import { Box, Button, Flex, Text } from "@radix-ui/themes";
+import { Dialog } from "../../ui";
 import type { PlanHistoryItem } from "../../../features/Chat/Thread/selectors";
 import { getPlanMetadata, isPlanMessage } from "../../../services/refact/types";
 import { Markdown } from "../../Markdown";
@@ -29,10 +30,10 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className={styles.modalContent}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className={styles.modalContent} maxWidth="720px">
         <Dialog.Title>Plan history</Dialog.Title>
-        <Dialog.Description size="2" color="gray">
+        <Dialog.Description>
           Base plan and append-only updates for this chat.
         </Dialog.Description>
 
@@ -58,13 +59,13 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
         </Flex>
 
         <Flex justify="end" mt="4">
-          <Dialog.Close>
+          <Dialog.Close asChild>
             <Button variant="soft" color="gray">
               Close
             </Button>
           </Dialog.Close>
         </Flex>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

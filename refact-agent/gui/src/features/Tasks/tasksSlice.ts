@@ -18,6 +18,7 @@ export interface PlannerInfo {
   createdAt: string;
   updatedAt: string;
   sessionState?: string;
+  mode?: string;
   waitingForCardIds?: string[];
 }
 
@@ -72,6 +73,23 @@ export const tasksSlice = createSlice({
     },
     closeTask: (state, action: PayloadAction<string>) => {
       state.openTasks = state.openTasks.filter((t) => t.id !== action.payload);
+      persistTasksUIState(state);
+    },
+    reorderOpenTasks: (
+      state,
+      action: PayloadAction<{ sourceId: string; targetId: string }>,
+    ) => {
+      const { sourceId, targetId } = action.payload;
+      if (sourceId === targetId) return;
+      const sourceIndex = state.openTasks.findIndex(
+        (task) => task.id === sourceId,
+      );
+      const targetIndex = state.openTasks.findIndex(
+        (task) => task.id === targetId,
+      );
+      if (sourceIndex === -1 || targetIndex === -1) return;
+      const [source] = state.openTasks.splice(sourceIndex, 1);
+      state.openTasks.splice(targetIndex, 0, source);
       persistTasksUIState(state);
     },
     updateTaskName: (
@@ -182,6 +200,7 @@ export const taskSseEventReceived = createAction<TaskEvent>(
 export const {
   openTask,
   closeTask,
+  reorderOpenTasks,
   updateTaskName,
   addPlannerChat,
   updatePlannerChat,

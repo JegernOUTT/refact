@@ -4,7 +4,7 @@ import { PluginOption, UserConfig, defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import eslint from "vite-plugin-eslint";
 
-import { coverageConfigDefaults } from "vitest/config";
+import { configDefaults, coverageConfigDefaults } from "vitest/config";
 import dts from "vite-plugin-dts";
 
 import { execSync } from "child_process";
@@ -75,12 +75,21 @@ function makeConfig(library: "browser" | "node") {
       test: {
         retry: 2,
         environment: "happy-dom",
+        exclude: [...configDefaults.exclude, "tests/e2e/**", "**/*.spec.ts"],
         coverage: {
           exclude: coverageConfigDefaults.exclude.concat(
             "**/*.stories.@(js|jsx|mjs|ts|tsx)",
           ),
         },
         setupFiles: ["./src/utils/test-setup.ts"],
+        pool: "forks",
+        poolOptions: {
+          forks: {
+            execArgv: ["--max-old-space-size=4096"],
+            maxForks: 4,
+            minForks: 1,
+          },
+        },
       },
       css: {
         modules: {},
@@ -96,7 +105,13 @@ function makeConfig(library: "browser" | "node") {
 
       CONFIG.plugins?.push([
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-        eslint() as PluginOption,
+        eslint({
+          exclude: [
+            "**/node_modules/**",
+            "**/virtual:/**",
+            "**/src/features/Buddy/**",
+          ],
+        }) as PluginOption,
       ]);
 
       CONFIG.plugins?.push([

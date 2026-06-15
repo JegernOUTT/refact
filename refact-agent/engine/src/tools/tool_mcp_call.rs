@@ -17,10 +17,19 @@ pub struct ToolMcpCall {}
 
 fn extract_proxy_args(args: &HashMap<String, Value>) -> Result<HashMap<String, Value>, String> {
     match args.get("args") {
-        Some(v) => match v.as_object() {
-            Some(obj) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-            None => Err("mcp_call: argument 'args' must be an object".to_string()),
+        Some(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        // Anthropic models sometimes emit the nested args object as a JSON-encoded
+        // string: {"args": "{\"width\": 900}"}. Parse it instead of failing the call.
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(obj)) => Ok(obj.into_iter().collect()),
+            _ => Err(
+                "mcp_call: argument 'args' must be a JSON object, got a string that is not \
+                 a JSON-encoded object. Pass args as a plain JSON object, not a quoted string."
+                    .to_string(),
+            ),
         },
+        Some(Value::Null) => Ok(HashMap::new()),
+        Some(_) => Err("mcp_call: argument 'args' must be an object".to_string()),
         None => {
             let flattened: HashMap<String, Value> = args
                 .iter()
@@ -33,6 +42,16 @@ fn extract_proxy_args(args: &HashMap<String, Value>) -> Result<HashMap<String, V
             Ok(flattened)
         }
     }
+}
+
+/// MCP tool names are registered as "{config_stem}_{tool}" (e.g. "mcp_github_create_issue").
+/// Some provider adapters strip the literal "mcp_" prefix from every piece of text the
+/// model sees (the Claude Code adapter does this for billing-detection reasons), so the
+/// model can only echo back the stripped form in `tool_name`. Accept both spellings.
+fn mcp_tool_name_matches(registered: &str, requested: &str) -> bool {
+    registered == requested
+        || registered.strip_prefix("mcp_") == Some(requested)
+        || requested.strip_prefix("mcp_") == Some(registered)
 }
 
 #[async_trait]
@@ -110,7 +129,7 @@ impl Tool for ToolMcpCall {
             if let Some(pos) = group
                 .tools
                 .iter()
-                .position(|t| t.tool_description().name == tool_name)
+                .position(|t| mcp_tool_name_matches(&t.tool_description().name, &tool_name))
             {
                 found_tool = Some(group.tools.remove(pos));
                 break 'outer;
@@ -153,7 +172,7 @@ impl Tool for ToolMcpCall {
             if let Some(pos) = group
                 .tools
                 .iter()
-                .position(|t| t.tool_description().name == tool_name)
+                .position(|t| mcp_tool_name_matches(&t.tool_description().name, &tool_name))
             {
                 found_tool = Some(group.tools.remove(pos));
                 break 'outer;
@@ -232,13 +251,98 @@ mod tests {
                 "tool_name".to_string(),
                 json!("mcp_github_get_file_contents"),
             ),
-            ("args".to_string(), json!("bad")),
+            ("args".to_string(), json!(42)),
         ]
         .into_iter()
         .collect();
 
         let err = extract_proxy_args(&args).unwrap_err();
         assert_eq!(err, "mcp_call: argument 'args' must be an object");
+    }
+
+    #[test]
+    fn test_extract_proxy_args_parses_stringified_json_object() {
+        // Anthropic models sometimes send the nested object as a JSON-encoded string.
+        let args: HashMap<String, Value> = [
+            (
+                "tool_name".to_string(),
+                json!("mcp_playwright_browser_resize"),
+            ),
+            (
+                "args".to_string(),
+                json!("{\"width\": 900, \"height\": 750}"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let out = extract_proxy_args(&args).unwrap();
+        assert_eq!(out.get("width"), Some(&json!(900)));
+        assert_eq!(out.get("height"), Some(&json!(750)));
+    }
+
+    #[test]
+    fn test_extract_proxy_args_rejects_string_that_is_not_an_object() {
+        for bad in ["bad", "[1, 2]", "\"quoted\"", "42"] {
+            let args: HashMap<String, Value> = [
+                ("tool_name".to_string(), json!("mcp_x_y")),
+                ("args".to_string(), json!(bad)),
+            ]
+            .into_iter()
+            .collect();
+            let err = extract_proxy_args(&args).unwrap_err();
+            assert!(
+                err.contains("must be a JSON object"),
+                "input {:?}: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_proxy_args_null_args_means_empty() {
+        let args: HashMap<String, Value> = [
+            (
+                "tool_name".to_string(),
+                json!("mcp_playwright_browser_snapshot"),
+            ),
+            ("args".to_string(), Value::Null),
+        ]
+        .into_iter()
+        .collect();
+
+        let out = extract_proxy_args(&args).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_tool_name_matches_exact_and_stripped_prefix() {
+        use super::mcp_tool_name_matches;
+        // Exact
+        assert!(mcp_tool_name_matches(
+            "mcp_playwright_browser_navigate",
+            "mcp_playwright_browser_navigate"
+        ));
+        // Model saw the stripped form (Claude Code wire strips "mcp_" from text)
+        assert!(mcp_tool_name_matches(
+            "mcp_playwright_browser_navigate",
+            "playwright_browser_navigate"
+        ));
+        // Model added the prefix to an unprefixed registration
+        assert!(mcp_tool_name_matches(
+            "playwright_browser_navigate",
+            "mcp_playwright_browser_navigate"
+        ));
+        // No false positives
+        assert!(!mcp_tool_name_matches(
+            "mcp_gitlab_create_issue",
+            "github_create_issue"
+        ));
+        assert!(!mcp_tool_name_matches(
+            "mcp_playwright_browser_navigate",
+            "playwright_browser_resize"
+        ));
     }
 
     #[test]

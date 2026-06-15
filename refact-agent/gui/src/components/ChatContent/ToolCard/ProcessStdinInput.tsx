@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from "react";
-import { Box, Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
+import { Button, Field, FieldText } from "../../ui";
 
 import { useAppSelector } from "../../../hooks";
 import {
@@ -56,20 +57,19 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
         }}
       >
         <Flex gap="2" align="center">
-          <Box className={styles.stdinTextField}>
-            <TextField.Root
+          <Field className={styles.stdinTextField}>
+            <FieldText
               aria-label="Process stdin"
-              size="1"
               value={chars}
               placeholder="Type stdin..."
               disabled={isSending || !hasEngineEndpoint}
-              onChange={(event) => setChars(event.target.value)}
+              onChange={setChars}
               onClick={(event) => event.stopPropagation()}
             />
-          </Box>
+          </Field>
           <Button
             type="submit"
-            size="1"
+            size="sm"
             disabled={!canSend}
             onClick={(event) => event.stopPropagation()}
           >
@@ -77,9 +77,8 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
           </Button>
           <Button
             type="button"
-            size="1"
+            size="sm"
             variant="soft"
-            color="gray"
             disabled={isSending || !hasEngineEndpoint}
             onClick={(event) => {
               event.stopPropagation();

@@ -1,17 +1,22 @@
 .bar {
+  composes: rf-stagger from global;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .card {
+  composes: rf-enter-rise from global;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  background: var(--gray-a2);
-  border: 1px solid;
-  border-radius: var(--radius-3);
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border) !important;
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .canvasWrap {
@@ -21,8 +26,8 @@
 .bubble {
   flex: 1;
   min-width: 0;
-  border-left: 2px solid;
-  padding-left: var(--space-2);
+  border-left: var(--rf-hairline) solid var(--rf-border) !important;
+  padding-left: var(--rf-space-2);
 }
 
 .title {
@@ -36,4 +41,23 @@
 
 .actions {
   flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .card {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .actions {
+    width: 100%;
+  }
 }

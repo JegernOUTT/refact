@@ -1,11 +1,15 @@
-import React, { useCallback, useState } from "react";
-import { Flex, Button } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import React, { useCallback, useEffect, useState } from "react";
+import { ArrowLeft } from "lucide-react";
+import classNames from "classnames";
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
 import type { Config } from "../Config/configSlice";
 import { useGetIntegrationsQuery } from "../../hooks/useGetIntegrationsDataQuery";
 import { IntegrationsView } from "../../components/IntegrationsView";
+import { Button } from "../../components/ui";
+import { useAppDispatch } from "../../hooks";
+import { integrationsApi } from "../../services/refact/integrations";
+import styles from "./Integrations.module.css";
 
 export type IntegrationsProps = {
   onCloseIntegrations?: () => void;
@@ -13,25 +17,8 @@ export type IntegrationsProps = {
   handlePaddingShift: (state: boolean) => void;
   host: Config["host"];
   tabbed: Config["tabbed"];
+  embedded?: boolean;
 };
-
-export type LeftRightPadding =
-  | {
-      initial: string;
-      xl: string;
-      xs?: undefined;
-      sm?: undefined;
-      md?: undefined;
-      lg?: undefined;
-    }
-  | {
-      initial: string;
-      xs: string;
-      sm: string;
-      md: string;
-      lg: string;
-      xl: string;
-    };
 
 export const Integrations: React.FC<IntegrationsProps> = ({
   onCloseIntegrations,
@@ -39,18 +26,15 @@ export const Integrations: React.FC<IntegrationsProps> = ({
   handlePaddingShift,
   host,
   tabbed,
+  embedded,
 }) => {
-  const LeftRightPadding =
-    host === "web"
-      ? { initial: "5", xl: "9" }
-      : {
-          initial: "2",
-          xs: "2",
-          sm: "4",
-          md: "8",
-          lg: "8",
-          xl: "9",
-        };
+  const dispatch = useAppDispatch();
+
+  useEffect(() => {
+    return () => {
+      dispatch(integrationsApi.util.resetApiState());
+    };
+  }, [dispatch]);
 
   const { integrations } = useGetIntegrationsQuery();
   const [isInnerIntegrationSelected, setIsInnerIntegrationSelected] =
@@ -64,29 +48,29 @@ export const Integrations: React.FC<IntegrationsProps> = ({
     [handlePaddingShift],
   );
 
-  return (
-    <PageWrapper
-      host={host}
-      style={{
-        padding: 0,
-        marginTop: isInnerIntegrationSelected ? 50 : 0,
-      }}
+  const content = (
+    <div
+      className={classNames(styles.page, {
+        [styles.pageInnerSelected]: isInnerIntegrationSelected && !embedded,
+      })}
     >
-      {!isInnerIntegrationSelected && (
+      {!embedded && !isInnerIntegrationSelected && (
         <>
           {host === "vscode" && !tabbed ? (
-            <Flex gap="2" pb="3">
-              <Button variant="surface" onClick={backFromIntegrations}>
-                <ArrowLeftIcon width="16" height="16" />
+            <div className={styles.backRow}>
+              <Button
+                variant="soft"
+                onClick={backFromIntegrations}
+                leftIcon={ArrowLeft}
+              >
                 Back
               </Button>
-            </Flex>
+            </div>
           ) : (
             <Button
-              mr="auto"
-              variant="outline"
+              className={styles.webBackButton}
+              variant="ghost"
               onClick={onCloseIntegrations}
-              mb="4"
             >
               Back
             </Button>
@@ -94,27 +78,23 @@ export const Integrations: React.FC<IntegrationsProps> = ({
         </>
       )}
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex
-          direction="column"
-          justify="between"
-          flexGrow="1"
-          mr={LeftRightPadding}
-          pr={LeftRightPadding}
-          style={{
-            width: "inherit",
-            height: "100%",
-          }}
-        >
+        <div className={styles.scrollContent}>
           <IntegrationsView
-            leftRightPadding={LeftRightPadding}
             handleIfInnerIntegrationWasSet={handleIfInnerIntegrationWasSet}
             integrationsMap={integrations.data}
-            // integrationsIcons={icons.data}
             isLoading={integrations.isLoading}
             goBack={backFromIntegrations}
+            embedded={embedded}
           />
-        </Flex>
+        </div>
       </ScrollArea>
+    </div>
+  );
+
+  if (embedded) return content;
+  return (
+    <PageWrapper host={host} noPadding>
+      {content}
     </PageWrapper>
   );
 };

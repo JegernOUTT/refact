@@ -1,6 +1,7 @@
 import React from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import type { MCPResourceInfo } from "../../../services/refact/mcpServerInfo";
+import { Flex, Text } from "../../ui";
+import styles from "./MCPServerView.module.css";
 
 type MCPResourcesListProps = {
   resources: MCPResourceInfo[];
@@ -18,15 +19,16 @@ export const MCPResourcesList: React.FC<MCPResourcesListProps> = ({
   }
 
   return (
-    <Flex direction="column" gap="2">
+    <Flex className={styles.list} direction="column" gap="2">
       {resources.map((resource) => (
-        <Flex key={resource.uri} direction="column" gap="1">
-          <Flex gap="2" align="center">
-            <Text
-              size="2"
-              weight="medium"
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
+        <Flex
+          key={resource.uri}
+          className="rf-enter-rise"
+          direction="column"
+          gap="1"
+        >
+          <Flex className={styles.listItem} gap="2" align="center" wrap="wrap">
+            <Text className={styles.resourceName} size="2" weight="medium">
               {resource.uri}
             </Text>
             {resource.mime_type && (
@@ -36,7 +38,7 @@ export const MCPResourcesList: React.FC<MCPResourcesListProps> = ({
             )}
           </Flex>
           {resource.description && (
-            <Text size="1" color="gray">
+            <Text as="p" size="1" color="gray">
               {resource.description}
             </Text>
           )}

@@ -1,9 +1,19 @@
 import React from "react";
-import { Text, Tooltip } from "@radix-ui/themes";
-import classNames from "classnames";
+import { Bug, CircleCheck, ShieldAlert } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Icon,
+  Surface,
+  Text,
+  Tooltip,
+} from "../../components/ui";
+import type { BadgeTone } from "../../components/ui";
 import type { BuddyRuntimeEvent } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
-import styles from "./BuddyHome.module.css";
+import { BuddySectionHeader } from "./BuddySectionHeader";
+import styles from "./BuddyRecentErrorsPanel.module.css";
 
 export type RecentBuddyError = BuddyRuntimeEvent & {
   occurrences?: number;
@@ -18,33 +28,47 @@ interface BuddyRecentErrorsPanelProps {
   onDismiss: (event: RecentBuddyError) => void | Promise<void>;
 }
 
+const priorityTone = (priority: RecentBuddyError["priority"]): BadgeTone => {
+  if (priority === "critical") return "danger";
+  if (priority === "high") return "warning";
+  return "muted";
+};
+
+function errorIcon(
+  event: RecentBuddyError,
+  acknowledged: boolean,
+): {
+  icon: LucideIcon;
+  tone: React.ComponentProps<typeof Icon>["tone"];
+} {
+  if (acknowledged) return { icon: CircleCheck, tone: "success" };
+  if (event.priority === "critical")
+    return { icon: ShieldAlert, tone: "danger" };
+  return { icon: Bug, tone: "warning" };
+}
+
 export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   recentErrors,
   onInvestigate,
   onDismiss,
 }) => (
-  <div
-    className={classNames(styles.panel, styles.panelScroll)}
+  <Surface
+    className={styles.panel}
     data-testid="buddy-recent-errors-panel"
+    animated="rise"
+    radius="card"
+    variant="glass"
   >
-    <div className={styles.panelHeader}>
-      <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
-        RECENT ERRORS
-      </Text>
-    </div>
-    <div className={styles.scrollList}>
+    <BuddySectionHeader icon={Bug} label="Recent errors" />
+    <div className={`${styles.scrollList} rf-stagger`}>
       {recentErrors.length === 0 && (
         <Text size="1" className={styles.emptyText}>
-          No errors recorded — all clear ✨
+          No errors recorded — all clear
         </Text>
       )}
       {recentErrors.map((e) => {
         const acknowledged = Boolean(e.dismissedAll ?? e.dismissed);
-        const icon = acknowledged
-          ? "✅"
-          : e.priority === "critical"
-            ? "🚨"
-            : "🪲";
+        const { icon, tone } = errorIcon(e, acknowledged);
         const subtitle = [
           e.source,
           e.chat_id ? `chat ${e.chat_id.slice(0, 8)}` : null,
@@ -56,56 +80,57 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
         return (
           <div
             key={e.id}
-            className={classNames(
-              styles.listRow,
-              styles.errorRow,
-              acknowledged && styles.errorRowAcknowledged,
-            )}
+            className={`${styles.listRow} rf-enter-rise`}
+            data-acknowledged={acknowledged ? "true" : undefined}
+            data-priority={e.priority}
           >
-            <span className={styles.listIcon}>{icon}</span>
+            <span className={styles.listIcon}>
+              <Icon icon={icon} size="sm" tone={tone} />
+            </span>
             <div className={styles.listContent}>
               <span className={styles.listTitle}>
                 {e.title}
                 {e.occurrences != null && e.occurrences > 1 && (
-                  <span className={styles.countBadge}>×{e.occurrences}</span>
+                  <Badge tone="accent">×{e.occurrences}</Badge>
                 )}
-                {failureLabel && (
-                  <span className={styles.ackBadge}>{failureLabel}</span>
-                )}
-                {acknowledged && (
-                  <span className={styles.ackBadge}>acknowledged</span>
+                {failureLabel && <Badge tone="warning">{failureLabel}</Badge>}
+                {acknowledged && <Badge tone="success">acknowledged</Badge>}
+                {!acknowledged && (
+                  <Badge tone={priorityTone(e.priority)}>{e.priority}</Badge>
                 )}
               </span>
               {detail && <span className={styles.listSubtitle}>{detail}</span>}
+              <span className={styles.listMeta}>
+                {formatBuddyTime(e.created_at)}
+              </span>
             </div>
             <div className={styles.errorActions}>
               <Tooltip content="Open a companion investigation and sniff the log crumbs">
-                <button
+                <Button
                   type="button"
-                  className={classNames(styles.chip, styles.chipPrimary)}
+                  size="sm"
+                  variant="primary"
                   onClick={() => void onInvestigate(e)}
                 >
                   Sniff logs
-                </button>
+                </Button>
               </Tooltip>
               {!acknowledged && (
                 <Tooltip content="Mark this gremlin as handled">
-                  <button
+                  <Button
                     type="button"
-                    className={classNames(styles.chip, styles.chipGhost)}
+                    size="sm"
+                    variant="ghost"
                     onClick={() => void onDismiss(e)}
                   >
                     Shoo
-                  </button>
+                  </Button>
                 </Tooltip>
               )}
             </div>
-            <span className={styles.listMeta}>
-              {formatBuddyTime(e.created_at)}
-            </span>
           </div>
         );
       })}
     </div>
-  </div>
+  </Surface>
 );

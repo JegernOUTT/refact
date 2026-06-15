@@ -1,30 +1,27 @@
 import React, { useCallback, useMemo, useState } from "react";
+import classNames from "classnames";
+import { Clock, Pencil, Pin, Plus, Trash2 } from "lucide-react";
+import { Markdown } from "../../../components/Markdown";
+import { Checkbox } from "../../../components/Checkbox";
 import {
   Badge,
-  Box,
   Button,
-  Callout,
-  Card,
-  Checkbox,
   Dialog,
+  ErrorState,
   Flex,
   IconButton,
   Popover,
   Select,
   Spinner,
+  Surface,
   Text,
   Tooltip,
-} from "@radix-ui/themes";
+} from "../../../components/ui";
+import type { BadgeTone } from "../../../components/ui";
 import {
-  ClockIcon,
-  DrawingPinIcon,
-  ExclamationTriangleIcon,
-  Pencil2Icon,
-  PlusIcon,
-  TrashIcon,
-} from "@radix-ui/react-icons";
-import classNames from "classnames";
-import { Markdown } from "../../../components/Markdown";
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../../components/shared/useDelayedUnmount";
 import { DocumentEditor } from "./DocumentEditor";
 import {
   type TaskDocumentSummary,
@@ -53,6 +50,14 @@ function formatUpdatedAt(value: string): string {
   });
 }
 
+function badgeTone(color: ReturnType<typeof documentKindColor>): BadgeTone {
+  if (color === "red") return "danger";
+  if (color === "amber") return "warning";
+  if (color === "gray") return "muted";
+  if (color === "green" || color === "teal") return "success";
+  return "accent";
+}
+
 type DocumentRowProps = {
   document: TaskDocumentSummary;
   isExpanded: boolean;
@@ -77,45 +82,57 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
   onDelete,
 }) => {
   const pinned = document.pinned;
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    isExpanded,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const lastExpandedContent = React.useRef<string | undefined>(expandedContent);
+  if (expandedContent !== undefined) {
+    lastExpandedContent.current = expandedContent;
+  }
+  const renderedExpandedContent =
+    expandedContent ?? (!isExpanded ? lastExpandedContent.current : undefined);
 
   return (
-    <Card
+    <Surface
+      animated="rise"
       className={classNames(styles.row, pinned && styles.rowPinned)}
       data-testid={`document-row-${document.slug}`}
       onClick={onToggleExpand}
+      radius="card"
+      variant="plain"
     >
-      <Flex justify="between" align="start" gap="2">
+      <Flex justify="between" align="start" gap="2" className={styles.rowTop}>
         <Flex align="center" gap="2" wrap="wrap" className={styles.rowHeader}>
           <Tooltip content={pinned ? "Unpin" : "Pin"}>
             <IconButton
-              size="1"
-              variant="ghost"
-              color={pinned ? "amber" : "gray"}
+              size="sm"
+              variant="plain"
               aria-label={pinned ? "Unpin" : "Pin"}
-              className={styles.rowIconButton}
+              icon={Pin}
+              className={classNames(
+                styles.rowIconButton,
+                pinned && styles.iconButtonPinned,
+              )}
               onClick={(e) => {
                 e.stopPropagation();
                 void onPin(document.slug, !pinned);
               }}
-            >
-              <DrawingPinIcon />
-            </IconButton>
+            />
           </Tooltip>
           <Badge
-            color={documentKindColor(document.kind)}
-            variant="soft"
-            size="1"
+            tone={badgeTone(documentKindColor(document.kind))}
             data-testid={`kind-badge-${document.slug}`}
           >
             {document.kind}
           </Badge>
-          <Text weight="bold" size="2">
+          <Text weight="bold" size="2" className={styles.rowTitle}>
             {document.name}
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" className={styles.mutedText}>
             v{document.version}
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" className={styles.mutedText}>
             {formatUpdatedAt(document.updated_at)}
           </Text>
         </Flex>
@@ -123,58 +140,54 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
         <Flex gap="1" align="center" className={styles.rowControls}>
           <Tooltip content="Edit">
             <IconButton
-              size="1"
-              variant="ghost"
-              color="gray"
+              size="sm"
+              variant="plain"
               aria-label="Edit"
+              icon={Pencil}
               className={styles.rowIconButton}
               onClick={(e) => {
                 e.stopPropagation();
                 onEdit(document.slug);
               }}
-            >
-              <Pencil2Icon />
-            </IconButton>
+            />
           </Tooltip>
           <Tooltip content="History">
             <IconButton
-              size="1"
-              variant="ghost"
-              color="gray"
+              size="sm"
+              variant="plain"
               aria-label="History"
+              icon={Clock}
               className={styles.rowIconButton}
               onClick={(e) => {
                 e.stopPropagation();
                 onHistory(document.slug);
               }}
-            >
-              <ClockIcon />
-            </IconButton>
+            />
           </Tooltip>
-          <Popover.Root>
+          <Popover>
             <Tooltip content="Delete">
-              <Popover.Trigger>
+              <Popover.Trigger asChild>
                 <IconButton
-                  size="1"
-                  variant="ghost"
-                  color="red"
+                  size="sm"
+                  variant="plain"
                   aria-label="Delete"
-                  className={styles.rowIconButton}
+                  icon={Trash2}
+                  className={classNames(
+                    styles.rowIconButton,
+                    styles.dangerIcon,
+                  )}
                   onClick={(e) => e.stopPropagation()}
-                >
-                  <TrashIcon />
-                </IconButton>
+                />
               </Popover.Trigger>
             </Tooltip>
-            <Popover.Content width="220px">
+            <Popover.Content className={styles.confirmPopover}>
               <Flex direction="column" gap="3">
                 <Text size="2">Delete this document?</Text>
-                <Flex gap="2">
-                  <Popover.Close>
+                <Flex gap="2" wrap="wrap">
+                  <Popover.Close asChild>
                     <Button
-                      size="1"
-                      variant="solid"
-                      color="red"
+                      size="sm"
+                      variant="danger"
                       onClick={() => {
                         void onDelete(document.slug);
                       }}
@@ -182,36 +195,42 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
                       Confirm delete
                     </Button>
                   </Popover.Close>
-                  <Popover.Close>
-                    <Button size="1" variant="soft" color="gray">
+                  <Popover.Close asChild>
+                    <Button size="sm" variant="plain">
                       Cancel
                     </Button>
                   </Popover.Close>
                 </Flex>
               </Flex>
             </Popover.Content>
-          </Popover.Root>
+          </Popover>
         </Flex>
       </Flex>
 
-      {isExpanded && (
-        <Box className={styles.content}>
-          {isExpandedLoading ? (
-            <Flex justify="center" p="2">
-              <Spinner size="1" />
-            </Flex>
-          ) : expandedContent !== undefined ? (
-            <Markdown canHaveInteractiveElements={false}>
-              {expandedContent}
-            </Markdown>
-          ) : (
-            <Text size="2" color="gray">
-              Document content is unavailable.
-            </Text>
-          )}
-        </Box>
+      {shouldRender && (
+        <div
+          className="rf-expand-grid"
+          data-open={isAnimatingOpen}
+          data-state={isAnimatingOpen ? "open" : "closed"}
+        >
+          <div className={styles.content}>
+            {isExpandedLoading ? (
+              <div className={styles.inlineLoading}>
+                <Spinner size="sm" />
+              </div>
+            ) : renderedExpandedContent !== undefined ? (
+              <Markdown canHaveInteractiveElements={false}>
+                {renderedExpandedContent}
+              </Markdown>
+            ) : (
+              <Text size="2" className={styles.mutedText}>
+                Document content is unavailable.
+              </Text>
+            )}
+          </div>
+        </div>
       )}
-    </Card>
+    </Surface>
   );
 };
 
@@ -354,59 +373,65 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
   }, []);
 
   return (
-    <Box className={styles.root}>
+    <div className={`${styles.root} rf-enter`}>
       <Flex justify="between" align="center" gap="2" className={styles.header}>
         <Text weight="bold" size="3">
           {data?.documents.length ?? 0} documents
         </Text>
-        <Button size="1" variant="soft" onClick={handleNewDocument}>
-          <PlusIcon />
+        <Button
+          size="sm"
+          variant="soft"
+          leftIcon={Plus}
+          onClick={handleNewDocument}
+        >
           New
         </Button>
       </Flex>
 
-      <Flex gap="2" align="center" className={styles.filters} wrap="wrap">
-        <Select.Root value={kindFilter} onValueChange={setKindFilter} size="1">
-          <Select.Trigger
-            aria-label="Kind filter"
-            className={styles.filterControl}
-          />
-          <Select.Content>
-            <Select.Item value={ALL_VALUE}>All kinds</Select.Item>
-            {DOCUMENT_KINDS.map((k) => (
-              <Select.Item key={k} value={k}>
-                {k}
-              </Select.Item>
-            ))}
-          </Select.Content>
-        </Select.Root>
-        <Text as="label" size="2">
-          <Flex align="center" gap="1">
-            <Checkbox
-              size="1"
-              checked={pinnedOnly}
-              onCheckedChange={(v) => setPinnedOnly(v === true)}
+      <Surface
+        animated="rise"
+        className={styles.filters}
+        radius="card"
+        variant="glass"
+      >
+        <Flex gap="2" align="center" className={styles.filterRow} wrap="wrap">
+          <Select value={kindFilter} onValueChange={setKindFilter}>
+            <Select.Trigger
+              aria-label="Kind filter"
+              className={styles.filterControl}
             />
+            <Select.Content>
+              <Select.Item value={ALL_VALUE}>All kinds</Select.Item>
+              {DOCUMENT_KINDS.map((k) => (
+                <Select.Item key={k} value={k}>
+                  {k}
+                </Select.Item>
+              ))}
+            </Select.Content>
+          </Select>
+          <Checkbox
+            checked={pinnedOnly}
+            onCheckedChange={(v) => setPinnedOnly(v === true)}
+          >
             Pinned only
-          </Flex>
-        </Text>
-        {isFetching && <Spinner size="1" />}
-      </Flex>
+          </Checkbox>
+          {isFetching && <Spinner size="sm" />}
+        </Flex>
+      </Surface>
 
       {error && (
-        <Callout.Root color="red" size="1">
-          <Callout.Icon>
-            <ExclamationTriangleIcon />
-          </Callout.Icon>
-          <Callout.Text>Failed to load documents.</Callout.Text>
-        </Callout.Root>
+        <ErrorState
+          title="Failed to load documents."
+          variant="compact"
+          className={styles.errorState}
+        />
       )}
 
-      <Flex direction="column" gap="2" className={styles.list}>
+      <Flex direction="column" gap="2" className={`${styles.list} rf-stagger`}>
         {isFetching && !data ? (
-          <Flex justify="center" p="4">
+          <div className={styles.loadingState}>
             <Spinner />
-          </Flex>
+          </div>
         ) : visible.length > 0 ? (
           visible.map((doc) => (
             <DocumentRow
@@ -431,7 +456,7 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
             />
           ))
         ) : (
-          <Text color="gray" size="2" className={styles.emptyState}>
+          <Text as="div" className={styles.emptyState}>
             No documents yet. Click + New to create a plan or design doc.
           </Text>
         )}
@@ -445,15 +470,19 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
         onOpenChange={setEditorOpen}
       />
 
-      <Dialog.Root open={historyOpen} onOpenChange={handleHistoryOpenChange}>
-        <Dialog.Content className={styles.historyDialog}>
+      <Dialog open={historyOpen} onOpenChange={handleHistoryOpenChange}>
+        <Dialog.Content
+          className={styles.historyDialog}
+          maxHeight="calc(100dvh - var(--rf-space-5))"
+          maxWidth="760px"
+        >
           <Dialog.Title>History: {historySlug}</Dialog.Title>
           <Flex gap="3" className={styles.historyBody}>
             <Flex direction="column" gap="2" className={styles.historyList}>
               {isHistoryFetching && historyRows === undefined ? (
-                <Flex justify="center" p="3">
-                  <Spinner size="1" />
-                </Flex>
+                <div className={styles.inlineLoading}>
+                  <Spinner size="sm" />
+                </div>
               ) : historyRows?.length ? (
                 historyRows.map((entry) => (
                   <button
@@ -461,6 +490,7 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
                     type="button"
                     className={classNames(
                       styles.historyVersionButton,
+                      "rf-pressable",
                       selectedHistoryVersion === entry.version &&
                         styles.historyVersionButtonActive,
                     )}
@@ -469,47 +499,51 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
                     <Text size="2" weight="medium" as="span">
                       v{entry.version}
                     </Text>
-                    <Text size="1" color="gray" as="span">
+                    <Text size="1" as="span" className={styles.mutedText}>
                       {formatUpdatedAt(entry.updated_at)}
                     </Text>
                   </button>
                 ))
               ) : (
-                <Text size="2" color="gray">
+                <Text size="2" className={styles.mutedText}>
                   No history available.
                 </Text>
               )}
             </Flex>
-            <Box className={styles.historyContent}>
+            <Surface
+              className={styles.historyContent}
+              radius="card"
+              variant="glass"
+            >
               {selectedHistoryVersion === null ? (
-                <Text size="2" color="gray">
+                <Text size="2" className={styles.mutedText}>
                   Select a version to view its content.
                 </Text>
               ) : isHistoryContentLoading ? (
-                <Flex justify="center" p="3">
-                  <Spinner size="1" />
-                </Flex>
+                <div className={styles.inlineLoading}>
+                  <Spinner size="sm" />
+                </div>
               ) : currentHistoryDoc ? (
                 <Markdown canHaveInteractiveElements={false}>
                   {currentHistoryDoc.content}
                 </Markdown>
               ) : (
-                <Text size="2" color="gray">
+                <Text size="2" className={styles.mutedText}>
                   Historical content is unavailable.
                 </Text>
               )}
-            </Box>
+            </Surface>
           </Flex>
-          <Flex justify="end" mt="3">
-            <Dialog.Close>
-              <Button size="1" variant="soft">
+          <Flex justify="end">
+            <Dialog.Close asChild>
+              <Button size="sm" variant="soft">
                 Close
               </Button>
             </Dialog.Close>
           </Flex>
         </Dialog.Content>
-      </Dialog.Root>
-    </Box>
+      </Dialog>
+    </div>
   );
 };
 

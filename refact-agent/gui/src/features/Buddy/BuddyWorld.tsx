@@ -10,6 +10,7 @@ import { BuddyCharacter } from "./BuddyCharacter";
 import type {
   BuddyCareAction,
   BuddyControl,
+  BuddyCursorBridge,
   BuddyEvent,
   BuddyPage,
   BuddyPetState,
@@ -36,11 +37,45 @@ import {
 } from "./buddyShowcase";
 import { drawShowcaseEvent } from "./buddyShowcaseDraw";
 import { drawBuddyWorld } from "./buddyWorldDraw";
+import type {
+  BuddyWorldActorTravel,
+  BuddyWorldTokenPalette,
+} from "./buddyWorldDrawHelpers";
+import { useTokens } from "../../components/ui";
 import {
   chooseBuddyWorldIntent,
   type BuddyWorldIntent,
   type BuddyWorldIntentKind,
 } from "./buddyWorldDirector";
+import {
+  BUDDY_CARE_ACTIVITY_DEFS,
+  careActivityTotalMs,
+  careActorIntentKind,
+  type BuddyCareActivity,
+} from "./buddyWorldCareActivities";
+import {
+  BUDDY_WORLD_SPEECH_PRIORITY,
+  DIRECTOR_SPEECH_BEATS,
+  DIRECTOR_SPEECH_POOLS,
+  SHOWCASE_SPEECH_POOLS,
+  careMidBeatAtMs,
+  createBuddySpeechMemory,
+  pickBuddySpeechLine,
+  resolveBuddyWorldSpeech,
+  styleForBuddySpeechIntent,
+  type BuddyWorldSpeechCandidate,
+} from "./buddySpeech";
+import { useBuddyWorldArcs } from "./hooks/useBuddyWorldArcs";
+import { useBuddyCompanions } from "./hooks/useBuddyCompanions";
+import { useBuddyPlaySession } from "./hooks/useBuddyPlaySession";
+import { playSessionBodyTarget } from "./buddyPlaySessions";
+import {
+  buildBuddyPlayDrawState,
+  drawBuddyPlayEffects,
+} from "./buddyWorldDrawPlay";
+import { drawBuddyWorldForeground } from "./buddyWorldDrawForeground";
+import { pickBuddyDream } from "./buddyDreams";
+import { BuddyDreamCanvas } from "./BuddyDreamCanvas";
 import { bubblePositionForSceneX } from "./buddyWorldUtils";
 import styles from "./BuddyWorld.module.css";
 
@@ -102,6 +137,51 @@ const RANDOM_POSES = [
   "look",
 ] as const satisfies readonly BuddyScenePose[];
 
+const TRAVEL_DURATION_MS = 3_800;
+const ARRIVAL_SETTLE_MS = 620;
+const DEFAULT_SCENE_Y = 86;
+
+interface ScenePoint {
+  x: number;
+  y: number;
+}
+
+function easeTravelProgress(progress: number): number {
+  const t = Math.max(0, Math.min(1, progress));
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+function interpolateScenePosition(
+  travel: BuddyWorldActorTravel | null,
+  target: ScenePoint,
+  nowMs: number,
+): ScenePoint {
+  if (!travel) return target;
+  const progress = easeTravelProgress(
+    (nowMs - travel.startedAtMs) / Math.max(1, travel.durationMs),
+  );
+  return {
+    x: travel.fromXPercent + (target.x - travel.fromXPercent) * progress,
+    y: travel.fromYPercent + (target.y - travel.fromYPercent) * progress,
+  };
+}
+
+const WORLD_TOKEN_NAMES = [
+  "--rf-color-accent",
+  "--rf-color-accent-soft",
+  "--rf-color-success",
+  "--rf-color-warning",
+  "--rf-color-danger",
+  "--rf-color-fg",
+  "--rf-color-muted",
+  "--rf-surface-1",
+  "--rf-surface-2",
+  "--rf-surface-3",
+  "--rf-surface-overlay",
+  "--rf-border",
+  "--rf-border-strong",
+] as const;
+
 type BuddyRandomPose = (typeof RANDOM_POSES)[number];
 
 interface BuddyWaypoint {
@@ -121,16 +201,27 @@ function clampBuddySceneX(x: number): number {
   return Math.max(BUDDY_MIN_X, Math.min(BUDDY_MAX_X, x));
 }
 
+const SHOWCASE_FIXTURE_TARGETS: readonly BuddyShowcaseTargetCandidate[] = [
+  { id: "home", x: 33, y: 76, label: "home" },
+  { id: "pond", x: 36, y: 82, label: "pond" },
+  { id: "campfire", x: 58, y: 81, label: "campfire" },
+  { id: "meadow", x: 47, y: 80, label: "meadow" },
+  { id: "great_tree", x: 34, y: 78, label: "great tree" },
+];
+
 function buildBuddyShowcaseTargets(
   world: BuddyWorldState,
 ): BuddyShowcaseTargetCandidate[] {
-  return world.objects.map((item) => ({
-    id: item.id,
-    x: item.x,
-    y: item.y,
-    label: item.label,
-    sprite: item.sprite,
-  }));
+  return [
+    ...world.objects.map((item) => ({
+      id: item.id,
+      x: item.x,
+      y: item.y,
+      label: item.label,
+      sprite: item.sprite,
+    })),
+    ...SHOWCASE_FIXTURE_TARGETS,
+  ];
 }
 
 function buildBuddyWaypoints(
@@ -232,17 +323,61 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-function resolveBuddyWorldSpeechOverride(args: {
-  activeSpeechText: string | null;
-  showcaseActive: boolean;
-  showcaseSpeech: string | null;
-  directorSpeech: string | null;
-  reaction: string | null;
-}): string | null {
-  if (args.activeSpeechText !== null) return args.activeSpeechText;
-  if (args.showcaseActive) return args.showcaseSpeech;
-  if (args.directorSpeech !== null) return args.directorSpeech;
-  return args.reaction;
+function tokenValue(
+  tokens: Record<string, string>,
+  name: (typeof WORLD_TOKEN_NAMES)[number],
+  fallback: string,
+): string {
+  return tokens[name] || fallback;
+}
+
+function buildWorldTokenPalette(
+  tokens: Record<string, string>,
+): BuddyWorldTokenPalette {
+  return {
+    accent: tokenValue(tokens, "--rf-color-accent", "#6f8bff"),
+    accentSoft: tokenValue(
+      tokens,
+      "--rf-color-accent-soft",
+      "rgba(111, 139, 255, 0.16)",
+    ),
+    success: tokenValue(tokens, "--rf-color-success", "#5fae8b"),
+    warning: tokenValue(tokens, "--rf-color-warning", "#cda04e"),
+    danger: tokenValue(tokens, "--rf-color-danger", "#d8736d"),
+    foreground: tokenValue(tokens, "--rf-color-fg", "#f7f7fb"),
+    muted: tokenValue(tokens, "--rf-color-muted", "rgba(255, 255, 255, 0.54)"),
+    surface1: tokenValue(
+      tokens,
+      "--rf-surface-1",
+      "rgba(255, 255, 255, 0.035)",
+    ),
+    surface2: tokenValue(tokens, "--rf-surface-2", "rgba(255, 255, 255, 0.06)"),
+    surface3: tokenValue(tokens, "--rf-surface-3", "rgba(255, 255, 255, 0.09)"),
+    overlay: tokenValue(
+      tokens,
+      "--rf-surface-overlay",
+      "rgba(18, 20, 25, 0.82)",
+    ),
+    border: tokenValue(tokens, "--rf-border", "rgba(255, 255, 255, 0.08)"),
+    borderStrong: tokenValue(
+      tokens,
+      "--rf-border-strong",
+      "rgba(255, 255, 255, 0.14)",
+    ),
+  };
+}
+
+function backendSpeechCandidate(
+  activeSpeech: {
+    text: string;
+    speech_intent?: string;
+  } | null,
+): BuddyWorldSpeechCandidate | null {
+  if (activeSpeech === null) return null;
+  return {
+    text: activeSpeech.text,
+    style: styleForBuddySpeechIntent(activeSpeech.speech_intent),
+  };
 }
 
 export const BuddyWorld: React.FC<BuddyWorldProps> = ({
@@ -266,13 +401,23 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   now,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const foregroundCanvasRef = useRef<HTMLCanvasElement>(null);
   const animationStartMsRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(() => now ?? new Date());
   const [reaction, setReaction] = useState<string | null>(null);
+  const [careLine, setCareLine] = useState<BuddyWorldSpeechCandidate | null>(
+    null,
+  );
+  const [directorLine, setDirectorLine] =
+    useState<BuddyWorldSpeechCandidate | null>(null);
+  const [showcaseLine, setShowcaseLine] =
+    useState<BuddyWorldSpeechCandidate | null>(null);
+  const speechMemoryRef = useRef(createBuddySpeechMemory());
   const [activeWaypointIndex, setActiveWaypointIndex] = useState(0);
   const [lastWaypoint, setLastWaypoint] = useState<BuddyWaypoint | null>(null);
   const [randomPose, setRandomPose] = useState<BuddyRandomPose>("idle");
   const [showcaseRun, setShowcaseRun] = useState<BuddyShowcaseRun | null>(null);
+  const [showcaseIsRuntime, setShowcaseIsRuntime] = useState(false);
   const [lastShowcaseKind, setLastShowcaseKind] =
     useState<BuddyShowcaseKind | null>(null);
   const [runtimeShowcaseEventIds, setRuntimeShowcaseEventIds] = useState<
@@ -293,6 +438,26 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     RecentDirectorIntent[]
   >([]);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+  const [careActivity, setCareActivity] = useState<BuddyCareActivity | null>(
+    null,
+  );
+  const [travelState, setTravelState] = useState<BuddyWorldActorTravel | null>(
+    null,
+  );
+  const [travelPhase, setTravelPhase] = useState<
+    "idle" | "traveling" | "arrived"
+  >("idle");
+  const [travelDirection, setTravelDirection] = useState<"left" | "right">(
+    "right",
+  );
+  const sceneTargetRef = useRef<ScenePoint | null>(null);
+  const travelStateRef = useRef<BuddyWorldActorTravel | null>(null);
+  const cursorBridgeRef = useRef<BuddyCursorBridge | null>(null);
+  const tokenValues = useTokens([...WORLD_TOKEN_NAMES]);
+  const tokenPalette = useMemo(
+    () => buildWorldTokenPalette(tokenValues),
+    [tokenValues],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -383,60 +548,337 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     [world],
   );
   const activeWaypoint = waypoints[activeWaypointIndex % waypoints.length];
-  const effectiveDirectorIntent =
-    activeSpeech !== null || showcaseRun !== null ? null : directorIntent;
-  const characterSceneX = clampBuddySceneX(
-    showcaseRun
-      ? showcaseRun.target.x
-      : effectiveDirectorIntent
-        ? effectiveDirectorIntent.targetX
-        : activeWaypoint.x,
-  );
-  const characterSceneY = showcaseRun
-    ? showcaseRun.target.y
-    : effectiveDirectorIntent?.targetY;
-  const characterDepthScale = showcaseRun
-    ? 1
-    : effectiveDirectorIntent?.depthScale;
-  const directorSpeech = effectiveDirectorIntent?.speech ?? null;
-  const speechOverride = resolveBuddyWorldSpeechOverride({
-    activeSpeechText: activeSpeech?.text ?? null,
-    showcaseActive: showcaseRun !== null,
-    showcaseSpeech: showcaseRun?.speech ?? null,
-    directorSpeech,
-    reaction,
+  const careDef = careActivity
+    ? BUDDY_CARE_ACTIVITY_DEFS[careActivity.action]
+    : null;
+  const handleArcStarted = useCallback(() => {
+    setShowcaseRun(null);
+    setShowcaseLine(null);
+    setShowcaseIsRuntime(false);
+    setLastWaypoint(null);
+  }, []);
+  const arcRunningRef = useRef(false);
+  const {
+    session: playSession,
+    sessionLine: playSessionLine,
+    gift: playGift,
+    requestPrompt,
+    startFetch,
+    startFirefly,
+    handleSceneClick,
+    handleLocalControl,
+    cancelPlay,
+  } = useBuddyPlaySession({
+    name: state.name,
+    pet,
+    busy: careActivity !== null || activeSpeech !== null,
+    offerBusy:
+      careActivity !== null ||
+      activeSpeech !== null ||
+      showcaseRun !== null ||
+      arcRunningRef.current ||
+      reaction !== null,
+    buddyX: BUDDY_CENTER_X,
+    directorIntentKind: directorIntent?.kind ?? null,
+    directorIntentStartedAtMs,
+    speechMemory: speechMemoryRef.current,
   });
-  const speechSource = activeSpeech
-    ? "active"
-    : showcaseRun
-      ? "showcase"
-      : directorSpeech
-        ? "director"
-        : reaction
-          ? "reaction"
-          : "none";
+  const { arcRun, arcStep, arcLine, arcLanternLitCount, cancelArc } =
+    useBuddyWorldArcs({
+      world,
+      name: state.name,
+      busy:
+        careActivity !== null || activeSpeech !== null || playSession !== null,
+      showcaseActive: showcaseRun !== null,
+      showcaseIsRuntime,
+      reducedMotion,
+      speechMemory: speechMemoryRef.current,
+      onArcStarted: handleArcStarted,
+    });
+  arcRunningRef.current = arcRun !== null;
+  const playBody = playSessionBodyTarget(playSession);
+  const giftBody = playGift !== null && playBody === null;
+  const effectiveDirectorIntent =
+    activeSpeech !== null ||
+    showcaseRun !== null ||
+    careActivity !== null ||
+    arcRun !== null ||
+    playSession !== null ||
+    playGift !== null
+      ? null
+      : directorIntent;
+  const characterSceneX = clampBuddySceneX(
+    careDef
+      ? careDef.spot.x
+      : playBody
+        ? playBody.x
+        : giftBody
+          ? 52
+          : arcStep
+            ? arcStep.targetX
+            : showcaseRun
+              ? showcaseRun.target.x
+              : effectiveDirectorIntent
+                ? effectiveDirectorIntent.targetX
+                : activeWaypoint.x,
+  );
+  const characterSceneY = careDef
+    ? careDef.spot.y
+    : playBody
+      ? playBody.y
+      : giftBody
+        ? 82
+        : arcStep
+          ? arcStep.targetY
+          : showcaseRun
+            ? showcaseRun.target.y
+            : effectiveDirectorIntent?.targetY;
+  const characterDepthScale = careDef
+    ? careDef.depthScale
+    : playBody
+      ? 1.02
+      : giftBody
+        ? 1.12
+        : arcStep
+          ? arcStep.depthScale
+          : showcaseRun
+            ? 1
+            : effectiveDirectorIntent?.depthScale;
+  const characterSceneYEffective = characterSceneY ?? DEFAULT_SCENE_Y;
+  const carePose =
+    careDef !== null && travelPhase !== "traveling" ? careDef.pose : null;
+  const playPose =
+    travelPhase !== "traveling"
+      ? playBody
+        ? playBody.pose
+        : giftBody
+          ? "carry"
+          : null
+      : null;
+  const arcPose =
+    arcStep !== null && travelPhase !== "traveling" ? arcStep.pose : null;
+  const showcasePose =
+    showcaseRun !== null && showcaseRun.phase !== "travel"
+      ? showcaseRun.pose
+      : null;
+  const directorPose = effectiveDirectorIntent?.pose ?? null;
+  const characterPose: BuddyScenePose =
+    carePose ??
+    playPose ??
+    arcPose ??
+    showcasePose ??
+    directorPose ??
+    randomPose;
+  const handleSpeechControlAll = useCallback(
+    (control: BuddyControl) => {
+      if (handleLocalControl(control)) return;
+      onSpeechControl(control);
+    },
+    [handleLocalControl, onSpeechControl],
+  );
+  const handleStartFetch = useCallback(() => {
+    setShowcaseRun(null);
+    setDirectorIntent(null);
+    setLastWaypoint(null);
+    setReaction(null);
+    cancelArc();
+    startFetch();
+  }, [cancelArc, startFetch]);
+  const handleStartFirefly = useCallback(() => {
+    setShowcaseRun(null);
+    setDirectorIntent(null);
+    setLastWaypoint(null);
+    setReaction(null);
+    cancelArc();
+    startFirefly();
+  }, [cancelArc, startFirefly]);
+  const handleCatcherClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      handleSceneClick(
+        ((event.clientX - rect.left) / rect.width) * 100,
+        ((event.clientY - rect.top) / rect.height) * 100,
+      );
+    },
+    [handleSceneClick],
+  );
+  const handleShiroIntro = useCallback((line: string) => {
+    setReaction(line);
+  }, []);
+  const handleKuroFlee = useCallback((line: string) => {
+    setReaction(line);
+  }, []);
+  const { companions } = useBuddyCompanions({
+    world,
+    stageNumber: state.progress.stage,
+    name: state.name,
+    buddyX: characterSceneX,
+    buddyY: characterSceneYEffective,
+    buddyPose: characterPose,
+    longActionActive:
+      careActivity !== null ||
+      arcRun !== null ||
+      showcaseRun !== null ||
+      (effectiveDirectorIntent !== null &&
+        effectiveDirectorIntent.durationMs >= 12_000),
+    sleeping:
+      careActivity?.action === "sleep" || pet?.condition.sleeping === true,
+    gatherActive: effectiveDirectorIntent?.kind === "gather_acorns",
+    reducedMotion,
+    onShiroIntro: handleShiroIntro,
+    onKuroFlee: handleKuroFlee,
+  });
+  const directorSpeech = effectiveDirectorIntent?.speech ?? null;
+  const directorCandidate = effectiveDirectorIntent
+    ? directorLine ??
+      (directorSpeech !== null ? { text: directorSpeech, style: "say" } : null)
+    : null;
+  const speechResolution = resolveBuddyWorldSpeech({
+    backend: backendSpeechCandidate(activeSpeech),
+    care: careActivity ? careLine : null,
+    session:
+      playSessionLine ??
+      (requestPrompt ? { text: requestPrompt.text, style: "say" } : null),
+    arc: arcLine,
+    showcase: showcaseRun
+      ? showcaseLine ?? { text: showcaseRun.speech, style: "say" }
+      : null,
+    director: directorCandidate,
+    reaction: reaction !== null ? { text: reaction, style: "say" } : null,
+  });
+  const speechOverride = speechResolution.text;
+  const speechSource = speechResolution.source;
+  const speechStyle = speechResolution.style;
+  const dreamKind =
+    careActivity?.action === "sleep"
+      ? pickBuddyDream(careActivity.startedAtMs)
+      : pet?.condition.sleeping === true
+        ? pickBuddyDream(state.born)
+        : null;
   const bubblePosition = bubblePositionForSceneX(
     characterSceneX,
     compact,
     speechOverride,
+    characterSceneYEffective,
   );
+  const actorIntentKind = careActivity
+    ? careActorIntentKind(careActivity.action)
+    : arcRun
+      ? arcStep?.accentIntent ?? null
+      : showcaseRun
+        ? null
+        : effectiveDirectorIntent?.kind ?? null;
+  const actorIntentStartedAtMs = careActivity
+    ? careActivity.startedAtMs + careActivity.travelMs
+    : arcRun
+      ? arcRun.stepStartedAtMs
+      : effectiveDirectorIntent
+        ? directorIntentStartedAtMs
+        : null;
   const renderStateRef = useRef({
+    actorIntentKind,
+    actorIntentStartedAtMs,
+    actorX: characterSceneX,
+    actorY: characterSceneYEffective,
+    companions,
     compact,
+    lanternLitCount: arcLanternLitCount,
     palette,
+    playGift,
+    playSession,
     reducedMotion,
     showcaseRun,
+    tokenPalette,
+    travel: travelState,
     world,
   });
 
   useEffect(() => {
     renderStateRef.current = {
+      actorIntentKind,
+      actorIntentStartedAtMs,
+      actorX: characterSceneX,
+      actorY: characterSceneYEffective,
+      companions,
       compact,
+      lanternLitCount: arcLanternLitCount,
       palette,
+      playGift,
+      playSession,
       reducedMotion,
       showcaseRun,
+      tokenPalette,
+      travel: travelState,
       world,
     };
-  }, [compact, palette, reducedMotion, showcaseRun, world]);
+  }, [
+    actorIntentKind,
+    actorIntentStartedAtMs,
+    arcLanternLitCount,
+    characterSceneX,
+    characterSceneYEffective,
+    companions,
+    compact,
+    palette,
+    playGift,
+    playSession,
+    reducedMotion,
+    showcaseRun,
+    tokenPalette,
+    travelState,
+    world,
+  ]);
+
+  useEffect(() => {
+    travelStateRef.current = travelState;
+  }, [travelState]);
+
+  useEffect(() => {
+    const target = { x: characterSceneX, y: characterSceneYEffective };
+    const previousTarget = sceneTargetRef.current;
+    sceneTargetRef.current = target;
+    if (!previousTarget) return;
+    if (
+      Math.abs(previousTarget.x - target.x) < 0.5 &&
+      Math.abs(previousTarget.y - target.y) < 0.5
+    ) {
+      return;
+    }
+    if (reducedMotion) {
+      setTravelState(null);
+      setTravelPhase("idle");
+      return;
+    }
+    const nowMs = Date.now();
+    const from = interpolateScenePosition(
+      travelStateRef.current,
+      previousTarget,
+      nowMs,
+    );
+    setTravelDirection(target.x >= from.x ? "right" : "left");
+    setTravelState({
+      fromXPercent: from.x,
+      fromYPercent: from.y,
+      startedAtMs: nowMs,
+      durationMs: TRAVEL_DURATION_MS,
+    });
+    setTravelPhase("traveling");
+    const arriveTimer = window.setTimeout(() => {
+      setTravelState(null);
+      setTravelPhase("arrived");
+    }, TRAVEL_DURATION_MS);
+    return () => window.clearTimeout(arriveTimer);
+  }, [characterSceneX, characterSceneYEffective, reducedMotion]);
+
+  useEffect(() => {
+    if (travelPhase !== "arrived") return;
+    const timer = window.setTimeout(
+      () => setTravelPhase("idle"),
+      ARRIVAL_SETTLE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [travelPhase]);
 
   useEffect(() => {
     setActiveWaypointIndex(0);
@@ -446,12 +888,144 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   useEffect(() => {
     if (showcaseRun) {
       setDirectorIntent(null);
+    } else {
+      setShowcaseLine(null);
+      setShowcaseIsRuntime(false);
     }
   }, [showcaseRun]);
+
+  useEffect(() => {
+    if (!directorIntent || directorIntent.speech === null) {
+      setDirectorLine(null);
+      return;
+    }
+    const pool = DIRECTOR_SPEECH_POOLS[directorIntent.kind];
+    setDirectorLine(
+      pool
+        ? {
+            text: pickBuddySpeechLine(
+              speechMemoryRef.current,
+              `director:${directorIntent.kind}`,
+              pool.lines,
+              state.name,
+            ),
+            style: pool.style,
+          }
+        : { text: directorIntent.speech, style: "say" },
+    );
+  }, [directorIntent, state.name]);
+
+  useEffect(() => {
+    if (!directorIntent) return;
+    const beats = DIRECTOR_SPEECH_BEATS[directorIntent.kind];
+    if (!beats || beats.length === 0) return;
+    const timers = beats.map((beat) =>
+      window.setTimeout(
+        () => {
+          setDirectorLine({
+            text: pickBuddySpeechLine(
+              speechMemoryRef.current,
+              beat.poolKey,
+              beat.lines,
+              state.name,
+            ),
+            style: beat.style,
+          });
+        },
+        Math.max(0, directorIntentStartedAtMs + beat.atMs - Date.now()),
+      ),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [directorIntent, directorIntentStartedAtMs, state.name]);
+
+  const runCareActivity = useCallback(
+    (action: BuddyCareActivity["action"], toy?: string, line?: string) => {
+      const def = BUDDY_CARE_ACTIVITY_DEFS[action];
+      const nowMs = Date.now();
+      setShowcaseRun(null);
+      setDirectorIntent(null);
+      setLastWaypoint(null);
+      cancelArc();
+      cancelPlay();
+      setCareActivity({
+        action,
+        toy,
+        startedAtMs: nowMs,
+        travelMs: reducedMotion ? 0 : TRAVEL_DURATION_MS,
+        performMs: def.performMs,
+      });
+      setReaction(null);
+      setCareLine({
+        text:
+          line ??
+          pickBuddySpeechLine(
+            speechMemoryRef.current,
+            `care:${action}:start`,
+            def.startLines,
+            state.name,
+          ),
+        style: "say",
+      });
+      onCare(action, toy);
+    },
+    [cancelArc, cancelPlay, onCare, reducedMotion, state.name],
+  );
+
+  useEffect(() => {
+    if (!careActivity) return;
+    const def = BUDDY_CARE_ACTIVITY_DEFS[careActivity.action];
+    const midAtMs =
+      careActivity.startedAtMs +
+      careMidBeatAtMs(careActivity.travelMs, careActivity.performMs);
+    const timer = window.setTimeout(
+      () => {
+        setCareLine({
+          text: pickBuddySpeechLine(
+            speechMemoryRef.current,
+            `care:${careActivity.action}:mid`,
+            def.midLines,
+            state.name,
+          ),
+          style: def.midStyle,
+        });
+      },
+      Math.max(0, midAtMs - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [careActivity, state.name]);
+
+  useEffect(() => {
+    if (!careActivity) return;
+    const def = BUDDY_CARE_ACTIVITY_DEFS[careActivity.action];
+    const endAtMs =
+      careActivity.startedAtMs + careActivityTotalMs(careActivity);
+    const timer = window.setTimeout(
+      () => {
+        setCareActivity(null);
+        setCareLine(null);
+        setReaction(
+          pickBuddySpeechLine(
+            speechMemoryRef.current,
+            `care:${careActivity.action}:finish`,
+            def.finishLines,
+            state.name,
+          ),
+        );
+        setNextDirectorSpeechAtMs(Date.now() + 6_000);
+      },
+      Math.max(0, endAtMs - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [careActivity, state.name]);
 
   const startShowcase = useCallback(
     (strongRuntimeTrigger: boolean) => {
       if (showcaseRun) return false;
+      if (careActivity) return false;
+      if (playSession || playGift || requestPrompt) return false;
+      if (!strongRuntimeTrigger && arcRun) return false;
       const nowMs = Date.now();
       const run = createBuddyShowcaseRun({
         targets: showcaseTargets,
@@ -468,12 +1042,25 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         world: {
           phase: world.phase,
           weather: world.weather,
+          layers: world.atmosphere.layers,
+          season: world.season,
         },
         pulse,
         identityName: state.name,
       });
       if (!run) return false;
       setShowcaseRun(run);
+      setShowcaseIsRuntime(strongRuntimeTrigger);
+      const pool = SHOWCASE_SPEECH_POOLS[run.kind];
+      setShowcaseLine({
+        text: pickBuddySpeechLine(
+          speechMemoryRef.current,
+          `showcase:${run.kind}`,
+          pool.lines,
+          state.name,
+        ),
+        style: pool.style,
+      });
       setLastWaypoint(null);
       setLastShowcaseKind(run.kind);
       if (strongRuntimeTrigger && nowPlaying?.id) {
@@ -493,6 +1080,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     },
     [
       activeSpeech,
+      arcRun,
+      careActivity,
+      playGift,
+      playSession,
+      requestPrompt,
       idleGraceUntilMs,
       lastShowcaseKind,
       runtimeShowcaseEventIds,
@@ -512,6 +1104,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
+    if (careActivity || arcRun || playSession || playGift || requestPrompt) {
+      return;
+    }
     const delay = 4200 + Math.random() * 7200;
     const timer = window.setTimeout(() => {
       const roll = Math.random();
@@ -535,9 +1130,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     return () => window.clearTimeout(timer);
   }, [
     activeSpeech,
+    arcRun,
+    careActivity,
     directorIntent,
     idleTick,
+    playGift,
+    playSession,
     reaction,
+    requestPrompt,
     showcaseRun,
     startShowcase,
     state.name,
@@ -546,6 +1146,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
+    if (careActivity || arcRun || playSession || playGift || requestPrompt) {
+      return;
+    }
     if (lastWaypoint?.id === activeWaypoint.id) return;
     const timer = window.setTimeout(() => {
       setLastWaypoint(activeWaypoint);
@@ -557,9 +1160,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   }, [
     activeSpeech,
     activeWaypoint,
+    arcRun,
+    careActivity,
     directorIntent,
     lastWaypoint,
+    playGift,
+    playSession,
     reaction,
+    requestPrompt,
     showcaseRun,
   ]);
 
@@ -568,6 +1176,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       activeSpeech !== null ||
       reaction !== null ||
       showcaseRun !== null ||
+      careActivity !== null ||
+      playSession !== null ||
+      playGift !== null ||
+      requestPrompt !== null ||
       nowPlaying === null ||
       !hasBuddyShowcaseRuntimeTrigger(nowPlaying)
     ) {
@@ -589,6 +1201,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     startShowcase(true);
   }, [
     activeSpeech,
+    careActivity,
+    playGift,
+    playSession,
+    requestPrompt,
     runtimeShowcaseEventIds,
     nextRuntimeShowcaseAtMs,
     nowPlaying,
@@ -635,7 +1251,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           : activeIntents;
       });
 
-      if (showcaseRun !== null || activeSpeech !== null) {
+      if (
+        showcaseRun !== null ||
+        activeSpeech !== null ||
+        careActivity !== null ||
+        arcRun !== null ||
+        playSession !== null ||
+        playGift !== null
+      ) {
         setDirectorIntent(null);
         return;
       }
@@ -693,9 +1316,13 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     return () => window.clearInterval(timer);
   }, [
     activeSpeech,
+    arcRun,
+    careActivity,
     directorIntent,
     directorIntentStartedAtMs,
     nextDirectorSpeechAtMs,
+    playGift,
+    playSession,
     reaction,
     recentDirectorIntents,
     reducedMotion,
@@ -713,8 +1340,23 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
       animationStartMsRef.current ??= timestampMs;
       const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
-      const { compact, palette, reducedMotion, showcaseRun, world } =
-        renderStateRef.current;
+      const {
+        actorIntentKind,
+        actorIntentStartedAtMs,
+        actorX,
+        actorY,
+        companions,
+        compact,
+        lanternLitCount,
+        palette,
+        playGift,
+        playSession,
+        reducedMotion,
+        showcaseRun,
+        tokenPalette,
+        travel,
+        world,
+      } = renderStateRef.current;
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (canvas && ctx) {
@@ -736,12 +1378,64 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           ctx,
           world,
           palette,
+          tokenPalette,
           frame,
           width: cssWidth,
           height: cssHeight,
           compact,
           reducedMotion,
+          actor: {
+            xPercent: actorX,
+            yPercent: actorY,
+            intentKind: actorIntentKind,
+            travel,
+            nowMs: Date.now(),
+            intentStartedAtMs: actorIntentStartedAtMs,
+          },
+          worldOverrides: lanternLitCount === null ? null : { lanternLitCount },
+          companions,
         });
+        if (playSession || playGift) {
+          drawBuddyPlayEffects(
+            {
+              ctx,
+              world,
+              palette,
+              tokenPalette,
+              frame,
+              width: cssWidth,
+              height: cssHeight,
+              compact,
+              reducedMotion,
+            },
+            buildBuddyPlayDrawState(playSession, playGift, Date.now()),
+            actorX,
+            actorY,
+          );
+        }
+        const foregroundCanvas = foregroundCanvasRef.current;
+        const foregroundCtx = foregroundCanvas?.getContext("2d");
+        if (foregroundCanvas && foregroundCtx) {
+          if (
+            foregroundCanvas.width !== targetWidth ||
+            foregroundCanvas.height !== targetHeight
+          ) {
+            foregroundCanvas.width = targetWidth;
+            foregroundCanvas.height = targetHeight;
+          }
+          foregroundCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+          drawBuddyWorldForeground({
+            ctx: foregroundCtx,
+            world,
+            palette,
+            tokenPalette,
+            frame,
+            width: cssWidth,
+            height: cssHeight,
+            compact,
+            reducedMotion,
+          });
+        }
         if (showcaseRun) {
           drawShowcaseEvent({
             ctx,
@@ -775,18 +1469,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       );
     }
     if (world.phase === "night") {
-      onCare("sleep");
-      if (!showcaseRun) {
-        setReaction(`${state.name} curls up under the moon and saves energy.`);
-      }
+      runCareActivity(
+        "sleep",
+        undefined,
+        `${state.name} curls up under the moon and saves energy.`,
+      );
       return;
     }
-    onCare("play", "scroll");
-    if (!showcaseRun) {
-      setReaction(
-        `${state.name} catches a warm sunbeam and opens the focus scroll.`,
-      );
-    }
+    runCareActivity(
+      "play",
+      "scroll",
+      `${state.name} catches a warm sunbeam and opens the focus scroll.`,
+    );
   };
 
   const handleWeatherClick = () => {
@@ -812,10 +1506,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       }
       return;
     }
-    onCare("pet");
-    if (!showcaseRun) {
-      setReaction(`${state.name} chirps back at the sky.`);
-    }
+    runCareActivity("pet", undefined, `${state.name} chirps back at the sky.`);
   };
 
   const handleHomeClick = () => {
@@ -839,14 +1530,6 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     }
   };
 
-  const showcasePose =
-    showcaseRun !== null && showcaseRun.phase !== "travel"
-      ? showcaseRun.pose
-      : null;
-  const directorPose = effectiveDirectorIntent?.pose ?? null;
-  const characterPose: BuddyScenePose =
-    showcasePose ?? directorPose ?? randomPose;
-
   return (
     <section
       className={classNames(styles.scene, { [styles.compact]: compact })}
@@ -859,11 +1542,24 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-showcase={showcaseRun?.kind ?? "none"}
       data-showcase-phase={showcaseRun?.phase ?? "idle"}
       data-buddy-intent={effectiveDirectorIntent?.kind ?? "none"}
-      data-speech-priority="backend-showcase-director-local"
+      data-care-activity={careActivity?.action ?? "none"}
+      data-arc={arcRun?.kind ?? "none"}
+      data-arc-step={arcStep?.id ?? "none"}
+      data-play={
+        playSession ? `${playSession.kind}:${playSession.phase}` : "none"
+      }
+      data-gift={playGift?.item ?? "none"}
+      data-request={requestPrompt ? "fetch" : "none"}
+      data-speech-priority={BUDDY_WORLD_SPEECH_PRIORITY}
       data-speech-source={speechSource}
+      data-speech-style={speechStyle}
       data-speech-text={speechOverride ?? undefined}
       data-testid="buddy-world"
       aria-label={`${state.name} virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
+      onMouseMove={(event) =>
+        cursorBridgeRef.current?.move(event.clientX, event.clientY)
+      }
+      onMouseLeave={() => cursorBridgeRef.current?.leave()}
     >
       <canvas
         ref={canvasRef}
@@ -878,7 +1574,12 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         onClick={handleCelestialClick}
         aria-label={`${world.celestialAction} with ${world.celestialLabel}`}
         title={`${world.celestialAction} with ${world.celestialLabel}`}
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{world.celestialLabel}</span>
+          <span className={styles.objectValue}>{world.celestialAction}</span>
+        </span>
+      </button>
 
       <button
         type="button"
@@ -887,7 +1588,18 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         onClick={handleWeatherClick}
         aria-label={`Interact with ${world.weatherLabel}`}
         title={world.weatherLabel}
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{world.weatherLabel}</span>
+          <span className={styles.objectValue}>
+            {world.weather === "storm"
+              ? "inspect the storm"
+              : world.weather === "rain"
+                ? "follow the rain"
+                : `cheer up ${state.name}`}
+          </span>
+        </span>
+      </button>
 
       <button
         type="button"
@@ -902,7 +1614,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         title={
           homeDoorDisabled ? `${state.name} is home` : `Open ${state.name} home`
         }
-      />
+      >
+        <span className={styles.objectTooltip}>
+          <span className={styles.objectLabel}>{`${state.name}'s den`}</span>
+          <span className={styles.objectValue}>
+            {homeDoorDisabled ? "already home" : "open home"}
+          </span>
+        </span>
+      </button>
 
       {world.objects.map((item) => (
         <button
@@ -956,11 +1675,37 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         sceneYPercent={characterSceneY}
         sceneDepthScale={characterDepthScale}
         scenePose={characterPose}
+        traveling={travelPhase === "traveling"}
+        arrived={travelPhase === "arrived"}
+        travelDirection={travelDirection}
+        spritePointer
+        cursorBridgeRef={cursorBridgeRef}
+        envContext={{
+          phase: world.phase,
+          weather: world.weather,
+          season: world.season,
+        }}
         speechText={speechOverride}
-        speechControls={activeSpeech ? activeSpeech.controls : undefined}
+        speechStyle={speechStyle}
+        speechMedia={
+          dreamKind !== null && speechStyle === "think" ? (
+            <BuddyDreamCanvas kind={dreamKind} reducedMotion={reducedMotion} />
+          ) : undefined
+        }
+        speechControls={
+          activeSpeech ? activeSpeech.controls : requestPrompt?.controls
+        }
         speechIntent={activeSpeech?.speech_intent}
         onCanvasEvent={onCanvasEvent}
-        onSpeechControl={activeSpeech ? onSpeechControl : undefined}
+        onSpeechControl={
+          activeSpeech || requestPrompt ? handleSpeechControlAll : undefined
+        }
+      />
+
+      <canvas
+        ref={foregroundCanvasRef}
+        className={styles.foregroundCanvas}
+        data-testid="buddy-world-foreground"
       />
 
       {setupNeeded && (
@@ -985,6 +1730,19 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         </div>
       )}
 
+      {playSession?.phase === "armed" && (
+        <div
+          className={styles.playCatcher}
+          data-testid="buddy-play-catcher"
+          aria-label={
+            playSession.kind === "fetch"
+              ? "Click the meadow to throw the ball"
+              : "Click a glow to pounce"
+          }
+          onClick={handleCatcherClick}
+        />
+      )}
+
       <div
         className={styles.careDock}
         aria-label={`${state.name} scene care actions`}
@@ -992,8 +1750,26 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         <button
           type="button"
           className={styles.sceneButton}
+          aria-label={`Play fetch with ${state.name}`}
+          onClick={handleStartFetch}
+        >
+          🎾
+        </button>
+        {world.atmosphere.layers.includes("fireflies") && (
+          <button
+            type="button"
+            className={styles.sceneButton}
+            aria-label={`Catch fireflies with ${state.name}`}
+            onClick={handleStartFirefly}
+          >
+            🏮
+          </button>
+        )}
+        <button
+          type="button"
+          className={styles.sceneButton}
           aria-label={`Water ${state.name}'s garden`}
-          onClick={() => onCare("feed")}
+          onClick={() => runCareActivity("feed")}
         >
           🍜
         </button>
@@ -1001,7 +1777,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Hunt bugs with ${state.name}`}
-          onClick={() => onCare("play", "bug")}
+          onClick={() => runCareActivity("play", "bug")}
         >
           🐛
         </button>
@@ -1009,7 +1785,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Clean ${state.name}`}
-          onClick={() => onCare("clean")}
+          onClick={() => runCareActivity("clean")}
         >
           🧼
         </button>
@@ -1017,7 +1793,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           type="button"
           className={styles.sceneButton}
           aria-label={`Let ${state.name} rest`}
-          onClick={() => onCare("sleep")}
+          onClick={() => runCareActivity("sleep")}
         >
           😴
         </button>

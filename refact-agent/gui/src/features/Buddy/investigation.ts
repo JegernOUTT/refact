@@ -11,7 +11,7 @@ const MAX_SUMMARY_LEN = 180;
 const MAX_TURN_LEN = 220;
 const MAX_CONTEXT_BLOCK_LEN = 3000;
 const MAX_DIAGNOSTIC_METADATA_LEN = 180;
-const DEFAULT_REPO_OWNER = "smallcloudai";
+const DEFAULT_REPO_OWNER = "JegernOUTT";
 const DEFAULT_REPO_NAME = "refact";
 const GITHUB_SLUG_FRAGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 

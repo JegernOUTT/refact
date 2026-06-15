@@ -3,7 +3,7 @@ import * as path from "path";
 import {
     createCurrentProjectInfo,
     resolveFilePathWithinWorkspace,
-} from "./sidebar";
+} from "./sidebarPaths";
 
 export function runSidebarPathBoundaryTests() {
     const workspaceRoot = path.resolve("/workspace/repo");

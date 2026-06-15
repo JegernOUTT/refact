@@ -12,12 +12,14 @@ type CommandsMarketplaceProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
   backFromMarketplace: () => void;
+  embedded?: boolean;
 };
 
 export const CommandsMarketplace: React.FC<CommandsMarketplaceProps> = ({
   host,
   tabbed,
   backFromMarketplace,
+  embedded = false,
 }) => {
   const { data: registry } = useGetExtRegistryQuery(undefined);
   const { data, isLoading, error } = useGetCommandsMarketplaceQuery(undefined);
@@ -33,6 +35,7 @@ export const CommandsMarketplace: React.FC<CommandsMarketplaceProps> = ({
       title="Commands Marketplace"
       kind="command"
       back={backFromMarketplace}
+      embedded={embedded}
       items={data?.items ?? []}
       sources={data?.sources ?? []}
       isLoading={isLoading}

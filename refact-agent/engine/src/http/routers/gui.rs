@@ -11,11 +11,13 @@ use crate::http::GuiPublicOriginCandidates;
 
 #[derive(RustEmbed)]
 #[folder = "assets/chat/"]
-struct ChatGuiAsset;
+pub(crate) struct ChatGuiAsset;
 
-const INDEX_PATH: &str = "index.html";
-const ASSET_PREFIX: &str = "dist/chat/";
+pub(crate) const INDEX_PATH: &str = "index.html";
+pub(crate) const ASSET_PREFIX: &str = "dist/chat/";
 const CACHE_CONTROL: &str = "no-cache";
+const ORIGIN_CANDIDATES_PLACEHOLDER: &str =
+    "/*__REFACT_ORIGIN_CANDIDATES__*/ window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || []";
 
 pub async fn handle_gui_index(
     Extension(candidates): Extension<GuiPublicOriginCandidates>,
@@ -32,7 +34,7 @@ pub async fn handle_gui_index(
     }
 }
 
-fn inject_gui_origin_candidates(
+pub(crate) fn inject_gui_origin_candidates(
     body: Cow<'static, [u8]>,
     candidates: &GuiPublicOriginCandidates,
 ) -> Cow<'static, [u8]> {
@@ -42,11 +44,13 @@ fn inject_gui_origin_candidates(
     let Ok(json) = serde_json::to_string(&candidates.origins) else {
         return body;
     };
-    let marker = "__REFACT_ENGINE_ORIGIN_CANDIDATES__ = []";
-    let replacement = format!("__REFACT_ENGINE_ORIGIN_CANDIDATES__ = {json}");
-    if html.contains(marker) {
-        Cow::Owned(html.replace(marker, &replacement).into_bytes())
+    if html.contains(ORIGIN_CANDIDATES_PLACEHOLDER) {
+        Cow::Owned(
+            html.replace(ORIGIN_CANDIDATES_PLACEHOLDER, &json)
+                .into_bytes(),
+        )
     } else {
+        tracing::warn!("GUI origin candidates placeholder missing; serving index.html unchanged");
         body
     }
 }
@@ -88,15 +92,19 @@ pub(crate) fn content_type_for_path(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, body: Cow<'static, [u8]>, status: StatusCode) -> Response<BoxBody> {
+pub(crate) fn asset_response(
+    path: &str,
+    body: Cow<'static, [u8]>,
+    status: StatusCode,
+) -> Response<BoxBody> {
     response_with_body(status, content_type_for_path(path), body)
 }
 
-fn html_response(status: StatusCode, body: Cow<'static, [u8]>) -> Response<BoxBody> {
+pub(crate) fn html_response(status: StatusCode, body: Cow<'static, [u8]>) -> Response<BoxBody> {
     response_with_body(status, "text/html; charset=utf-8", body)
 }
 
-fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
+pub(crate) fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
     response_with_body(
         status,
         "text/plain; charset=utf-8",
@@ -104,7 +112,7 @@ fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
     )
 }
 
-type BoxBody = axum::body::BoxBody;
+pub(crate) type BoxBody = axum::body::BoxBody;
 
 fn response_with_body(
     status: StatusCode,
@@ -123,7 +131,7 @@ fn response_with_body(
     response
 }
 
-fn missing_gui_index_html() -> &'static str {
+pub(crate) fn missing_gui_index_html() -> &'static str {
     r#"<!doctype html>
 <html lang="en">
   <head>
@@ -142,6 +150,10 @@ fn missing_gui_index_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
 
     #[test]
     fn content_type_maps_common_gui_assets() {
@@ -162,5 +174,73 @@ mod tests {
             "application/json; charset=utf-8"
         );
         assert_eq!(content_type_for_path("font.woff2"), "font/woff2");
+    }
+
+    #[test]
+    fn origin_candidates_inject_into_real_embedded_index() {
+        let asset = ChatGuiAsset::get(INDEX_PATH).expect("embedded index.html");
+        let candidates = GuiPublicOriginCandidates {
+            origins: vec![
+                "http://127.0.0.1:8001".to_string(),
+                "http://workstation.local:8001".to_string(),
+            ],
+        };
+
+        let injected = inject_gui_origin_candidates(asset.data, &candidates);
+        let html = std::str::from_utf8(injected.as_ref()).unwrap();
+
+        assert!(html.contains("http://127.0.0.1:8001"));
+        assert!(html.contains("http://workstation.local:8001"));
+        assert!(!html.contains(ORIGIN_CANDIDATES_PLACEHOLDER));
+        assert!(!html.contains("window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || []"));
+
+        let reinjected = inject_gui_origin_candidates(injected.clone(), &candidates);
+        assert_eq!(reinjected.as_ref(), injected.as_ref());
+    }
+
+    #[test]
+    fn origin_candidates_missing_marker_warns_and_returns_unchanged() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let candidates = GuiPublicOriginCandidates {
+            origins: vec!["http://127.0.0.1:8001".to_string()],
+        };
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(SharedWriter(logs.clone()))
+            .with_ansi(false)
+            .finish();
+
+        let injected = tracing::subscriber::with_default(subscriber, || {
+            inject_gui_origin_candidates(Cow::Borrowed(html.as_bytes()), &candidates)
+        });
+
+        assert_eq!(injected.as_ref(), html.as_bytes());
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("GUI origin candidates placeholder missing"));
+    }
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard(self.0.clone())
+        }
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

@@ -1,26 +1,21 @@
 import React, { useCallback } from "react";
-import {
-  Flex,
-  Box,
-  Text,
-  Card,
-  Badge,
-  Heading,
-  Tooltip,
-} from "@radix-ui/themes";
+import classNames from "classnames";
+import { FileText, Link2, User } from "lucide-react";
+import { Badge, Card, Icon } from "../../components/ui";
 import type {
   TaskBoard,
   BoardCard,
   BoardColumn,
 } from "../../services/refact/tasks";
-import { FileTextIcon, Link2Icon, PersonIcon } from "@radix-ui/react-icons";
 import { BranchIcon } from "../Worktrees/BranchIcon";
 import styles from "./Tasks.module.css";
 
-const getPriorityColor = (priority: string): "red" | "orange" | "gray" => {
-  if (priority === "P0") return "red";
-  if (priority === "P1") return "orange";
-  return "gray";
+type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
+
+const priorityTone = (priority: string): BadgeTone => {
+  if (priority === "P0") return "danger";
+  if (priority === "P1") return "warning";
+  return "muted";
 };
 
 function compactWorktreeLabel(label: string): string {
@@ -36,12 +31,12 @@ function cardWorktreeLabel(card: BoardCard): string | null {
   return label ? compactWorktreeLabel(label) : null;
 }
 
-const columnColors: Record<string, string> = {
-  planned: "var(--gray-5)",
-  doing: "var(--blue-5)",
-  done: "var(--green-5)",
-  failed: "var(--red-5)",
-};
+function columnToneClass(columnId: string): string {
+  if (columnId === "doing") return styles.kanbanColumnDoing;
+  if (columnId === "done") return styles.kanbanColumnDone;
+  if (columnId === "failed") return styles.kanbanColumnFailed;
+  return styles.kanbanColumnPlanned;
+}
 
 interface KanbanCardProps {
   card: BoardCard;
@@ -74,74 +69,61 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 
   return (
     <Card
-      className={styles.kanbanCard}
+      animated="rise"
+      className={classNames(
+        styles.kanbanCard,
+        onClick && styles.kanbanCardClickable,
+        onClick && "rf-pressable",
+      )}
+      interactive={Boolean(onClick)}
       onClick={handleClick}
-      style={{ cursor: onClick ? "pointer" : "default" }}
     >
-      <Flex direction="column" gap="2">
-        <Flex
-          justify="between"
-          align="center"
-          className={styles.kanbanCardTopRow}
-        >
-          <Badge size="1" color="gray" variant="soft">
-            {card.id}
-          </Badge>
-          <Badge color={getPriorityColor(card.priority)} size="1">
-            {card.priority}
-          </Badge>
-        </Flex>
+      <div className={styles.kanbanCardFrame}>
+        <div className={styles.kanbanCardTopRow}>
+          <Badge tone="muted">{card.id}</Badge>
+          <Badge tone={priorityTone(card.priority)}>{card.priority}</Badge>
+        </div>
 
-        <Text size="2" weight="medium" className={styles.kanbanCardTitle}>
-          {card.title}
-        </Text>
+        <span className={styles.kanbanCardTitle}>{card.title}</span>
 
-        <Flex gap="1" wrap="wrap" className={styles.kanbanCardBadges}>
-          {hasAgent && (
-            <Tooltip content={`Agent: ${card.assignee}`}>
-              <Badge
-                size="1"
-                color="blue"
-                variant="soft"
-                asChild={Boolean(card.agent_chat_id)}
+        <div className={styles.kanbanCardBadges}>
+          {hasAgent &&
+            (card.agent_chat_id ? (
+              <button
+                type="button"
+                className={styles.agentBadgeAction}
+                title={`Agent: ${card.assignee}`}
+                onClick={handleAgentClick}
               >
-                {card.agent_chat_id ? (
-                  <button
-                    type="button"
-                    className={styles.agentBadgeButton}
-                    onClick={handleAgentClick}
-                  >
-                    <PersonIcon /> Agent
-                  </button>
-                ) : (
-                  <span>
-                    <PersonIcon /> Agent
-                  </span>
-                )}
+                <Icon icon={User} size="sm" tone="accent" /> Agent
+              </button>
+            ) : (
+              <Badge tone="accent" title={`Agent: ${card.assignee}`}>
+                <Icon icon={User} size="sm" tone="accent" /> Agent
               </Badge>
-            </Tooltip>
-          )}
+            ))}
           {worktree && (
-            <Tooltip content={`Worktree: ${worktree}`}>
-              <Badge size="1" color="green" variant="soft">
-                <BranchIcon /> {worktree}
-              </Badge>
-            </Tooltip>
-          )}
-          {hasDeps && (
-            <Tooltip content={`Depends on: ${card.depends_on.join(", ")}`}>
-              <Badge size="1" color="gray" variant="soft">
-                <Link2Icon /> {card.depends_on.length}
-              </Badge>
-            </Tooltip>
-          )}
-          {card.status_updates.length > 0 && (
-            <Badge size="1" color="gray" variant="soft">
-              <FileTextIcon /> {card.status_updates.length}
+            <Badge tone="success" title={`Worktree: ${worktree}`}>
+              <BranchIcon /> {worktree}
             </Badge>
           )}
-        </Flex>
-      </Flex>
+          {hasDeps && (
+            <Badge
+              tone="muted"
+              title={`Depends on: ${card.depends_on.join(", ")}`}
+            >
+              <Icon icon={Link2} size="sm" tone="muted" />
+              {card.depends_on.length}
+            </Badge>
+          )}
+          {card.status_updates.length > 0 && (
+            <Badge tone="muted">
+              <Icon icon={FileText} size="sm" tone="muted" />
+              {card.status_updates.length}
+            </Badge>
+          )}
+        </div>
+      </div>
     </Card>
   );
 };
@@ -160,34 +142,28 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
   onAgentClick,
 }) => {
   return (
-    <Flex
-      direction="column"
-      className={styles.kanbanColumn}
-      style={{ borderTopColor: columnColors[column.id] || "var(--gray-5)" }}
+    <section
+      className={classNames(
+        styles.kanbanColumn,
+        columnToneClass(column.id),
+        "rf-enter-rise",
+      )}
     >
-      <Flex
-        justify="between"
-        align="center"
-        className={styles.kanbanColumnHeader}
-      >
-        <Heading size="1">{column.title}</Heading>
-        <Badge size="1" color="gray">
-          {cards.length}
-        </Badge>
-      </Flex>
-      <Box className={styles.kanbanColumnContent}>
-        <Flex direction="column" gap="1">
-          {cards.map((card) => (
-            <KanbanCard
-              key={card.id}
-              card={card}
-              onClick={onCardClick}
-              onAgentClick={onAgentClick}
-            />
-          ))}
-        </Flex>
-      </Box>
-    </Flex>
+      <header className={styles.kanbanColumnHeader}>
+        <h3 className={styles.kanbanColumnTitle}>{column.title}</h3>
+        <Badge tone="muted">{cards.length}</Badge>
+      </header>
+      <div className={classNames(styles.kanbanColumnContent, "rf-stagger")}>
+        {cards.map((card) => (
+          <KanbanCard
+            key={card.id}
+            card={card}
+            onClick={onCardClick}
+            onAgentClick={onAgentClick}
+          />
+        ))}
+      </div>
+    </section>
   );
 };
 
@@ -210,7 +186,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   );
 
   return (
-    <Flex className={styles.kanbanBoard}>
+    <div className={classNames(styles.kanbanBoard, "rf-enter")}>
       {board.columns.map((column) => (
         <KanbanColumn
           key={column.id}
@@ -220,6 +196,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           onAgentClick={onAgentClick}
         />
       ))}
-    </Flex>
+    </div>
   );
 };

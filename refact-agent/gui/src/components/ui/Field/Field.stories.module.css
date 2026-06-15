@@ -1,0 +1,68 @@
+.storyShell {
+  display: grid;
+  gap: var(--rf-space-5);
+  min-height: 620px;
+  padding: var(--rf-space-5);
+  color: var(--rf-color-fg);
+  background: var(--rf-bg);
+  font-family: var(--rf-font-ui);
+}
+
+.panel {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-4);
+  padding: var(--rf-space-4);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.narrowPanel {
+  max-width: 360px;
+}
+
+.sectionStack {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.cardStack {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.title,
+.description,
+.statusLine {
+  margin: 0;
+}
+
+.title {
+  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description,
+.statusLine {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  align-items: center;
+}
+
+.divider {
+  height: var(--rf-hairline);
+  background: var(--rf-border);
+}

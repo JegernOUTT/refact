@@ -1,0 +1,5 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"stream_started","message_id":"assistant-1"}
+{"chat_id":"chat-fixture","seq":"2","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"append_content","text":"hello once"}]}
+{"chat_id":"chat-fixture","seq":"3","type":"stream_finished","message_id":"assistant-1"}
+{"chat_id":"chat-fixture","seq":"4","type":"message_added","message":{"message_id":"assistant-1","role":"assistant","content":"hello once"},"index":0}

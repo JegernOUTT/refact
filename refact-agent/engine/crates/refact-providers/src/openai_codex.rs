@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
 use refact_core::model_caps::ModelCapabilities;
@@ -23,6 +23,8 @@ const CODEX_ORIGINATOR: &str = "refact-lsp";
 const CHATGPT_CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=999.999.999";
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
+const CHATGPT_CODEX_RESET_REDEEM_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
 #[allow(dead_code)]
@@ -183,14 +185,34 @@ impl Default for OpenAICodexProvider {
 pub struct OpenAICodexUsageWindow {
     pub used_percent: f64,
     pub reset_at: Option<String>,
+    pub reset_after_seconds: Option<u64>,
     pub limit_window_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenAICodexRateLimit {
+    pub allowed: Option<bool>,
     pub limit_reached: bool,
     pub primary_window: Option<OpenAICodexUsageWindow>,
     pub secondary_window: Option<OpenAICodexUsageWindow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexAdditionalRateLimit {
+    pub limit_name: Option<String>,
+    pub metered_feature: Option<String>,
+    pub rate_limit: Option<OpenAICodexRateLimit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexResetCredits {
+    pub available_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexResetRedeem {
+    pub code: String,
+    pub windows_reset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,14 +223,33 @@ pub struct OpenAICodexCredits {
     pub granted: Option<f64>,
     pub used: Option<f64>,
     pub reset_at: Option<String>,
+    pub overage_limit_reached: Option<bool>,
+    pub approx_cloud_messages: Option<Vec<f64>>,
+    pub approx_local_messages: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenAICodexSpendControl {
+    pub individual_limit: Option<f64>,
+    pub reached: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenAICodexUsage {
+    pub account_id: Option<String>,
+    pub user_id: Option<String>,
+    pub email: Option<String>,
     pub plan_type: Option<String>,
     pub rate_limit: Option<OpenAICodexRateLimit>,
+    pub additional_rate_limits: Option<Vec<OpenAICodexAdditionalRateLimit>>,
     pub code_review_rate_limit: Option<OpenAICodexRateLimit>,
+    pub rate_limit_reached_type: Option<String>,
+    pub rate_limit_reset_credits: Option<OpenAICodexResetCredits>,
     pub credits: Option<OpenAICodexCredits>,
+    pub spend_control: Option<OpenAICodexSpendControl>,
+    pub promo: Option<Value>,
+    pub referral_beacon: Option<Value>,
+    pub raw_extra: Map<String, Value>,
 }
 
 pub enum UsageRequestError {
@@ -415,15 +456,104 @@ impl OpenAICodexProvider {
         .map_err(|error| Self::usage_request_error_to_string(error, context.source))
     }
 
+    pub async fn redeem_reset_credit_once(
+        &self,
+        http_client: &reqwest::Client,
+        token: &str,
+        chatgpt_account_id: &str,
+        redeem_request_id: &str,
+    ) -> Result<OpenAICodexResetRedeem, UsageRequestError> {
+        let mut req = http_client
+            .post(CHATGPT_CODEX_RESET_REDEEM_URL)
+            .timeout(CODEX_USAGE_TIMEOUT)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({ "redeem_request_id": redeem_request_id }));
+        for (key, value) in self.chatgpt_backend_metadata_headers(chatgpt_account_id) {
+            req = req.header(key, value);
+        }
+        let resp = req.send().await.map_err(|e| {
+            UsageRequestError::Other(format!("OpenAI Codex reset redeem request failed: {}", e))
+        })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(UsageRequestError::Status(status, body));
+        }
+
+        let root: Value = resp.json().await.map_err(|e| {
+            UsageRequestError::Other(format!(
+                "Failed to parse OpenAI Codex reset redeem response: {}",
+                e
+            ))
+        })?;
+
+        Ok(Self::parse_redeem_payload(&root))
+    }
+
+    pub async fn redeem_reset_credit(
+        &self,
+        http_client: &reqwest::Client,
+        redeem_request_id: &str,
+    ) -> Result<OpenAICodexResetRedeem, String> {
+        let context = self.resolve_wham_context()?;
+        self.redeem_reset_credit_once(
+            http_client,
+            &context.access_token,
+            &context.chatgpt_account_id,
+            redeem_request_id,
+        )
+        .await
+        .map_err(|error| Self::usage_request_error_to_string(error, context.source))
+    }
+
     fn parse_usage_payload(root: &Value) -> OpenAICodexUsage {
         let data = root.get("data").unwrap_or(root);
+        let raw_extra = Self::collect_raw_extra(
+            data,
+            &[
+                "account_id",
+                "accountId",
+                "user_id",
+                "userId",
+                "email",
+                "plan_type",
+                "planType",
+                "codex_plan_type",
+                "plan",
+                "rate_limit",
+                "rateLimit",
+                "additional_rate_limits",
+                "additionalRateLimits",
+                "code_review_rate_limit",
+                "codeReviewRateLimit",
+                "code_review",
+                "rate_limit_reached_type",
+                "rateLimitReachedType",
+                "rate_limit_reset_credits",
+                "rateLimitResetCredits",
+                "credits",
+                "credit_balance",
+                "spend_control",
+                "spendControl",
+                "promo",
+                "referral_beacon",
+                "referralBeacon",
+            ],
+        );
+        let account_id = Self::string_field(data, &["account_id", "accountId"]);
+        let user_id = Self::string_field(data, &["user_id", "userId"]);
+        let email = Self::string_field(data, &["email"]);
         let plan_type = Self::string_field(data, &["plan_type", "planType", "codex_plan_type"])
             .or_else(|| {
                 data.get("plan")
                     .and_then(|plan| Self::string_field(plan, &["type", "name"]))
             });
         let rate_limit =
-            Self::field(data, &["rate_limit", "rateLimit"]).map(Self::parse_rate_limit);
+            Self::field(data, &["rate_limit", "rateLimit"]).and_then(Self::parse_rate_limit);
+        let additional_rate_limits =
+            Self::field(data, &["additional_rate_limits", "additionalRateLimits"])
+                .and_then(Self::parse_additional_rate_limits);
         let code_review_rate_limit = Self::field(
             data,
             &[
@@ -432,21 +562,55 @@ impl OpenAICodexProvider {
                 "code_review",
             ],
         )
-        .map(Self::parse_rate_limit);
+        .and_then(Self::parse_rate_limit);
+        let rate_limit_reached_type =
+            Self::string_field(data, &["rate_limit_reached_type", "rateLimitReachedType"]);
+        let rate_limit_reset_credits =
+            Self::field(data, &["rate_limit_reset_credits", "rateLimitResetCredits"])
+                .and_then(Self::parse_reset_credits);
         let credits = Self::field(data, &["credits", "credit_balance"]).map(Self::parse_credits);
+        let spend_control = Self::field(data, &["spend_control", "spendControl"])
+            .and_then(Self::parse_spend_control);
         OpenAICodexUsage {
+            account_id,
+            user_id,
+            email,
             plan_type,
             rate_limit,
+            additional_rate_limits,
             code_review_rate_limit,
+            rate_limit_reached_type,
+            rate_limit_reset_credits,
             credits,
+            spend_control,
+            promo: data.get("promo").filter(|value| !value.is_null()).cloned(),
+            referral_beacon: Self::field(data, &["referral_beacon", "referralBeacon"])
+                .filter(|value| !value.is_null())
+                .cloned(),
+            raw_extra,
         }
     }
 
-    fn parse_rate_limit(rl: &Value) -> OpenAICodexRateLimit {
+    fn collect_raw_extra(data: &Value, known_keys: &[&str]) -> Map<String, Value> {
+        let Some(obj) = data.as_object() else {
+            return Map::new();
+        };
+        obj.iter()
+            .filter(|(key, _)| !known_keys.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn parse_rate_limit(rl: &Value) -> Option<OpenAICodexRateLimit> {
+        if !rl.is_object() {
+            return None;
+        }
         let primary_window =
             Self::field(rl, &["primary_window", "primary"]).and_then(Self::parse_usage_window);
         let secondary_window =
             Self::field(rl, &["secondary_window", "secondary"]).and_then(Self::parse_usage_window);
+        let allowed =
+            Self::field(rl, &["allowed", "is_allowed", "isAllowed"]).and_then(Value::as_bool);
         let limit_reached = Self::field(rl, &["limit_reached", "limitReached"])
             .and_then(Value::as_bool)
             .unwrap_or_else(|| {
@@ -459,11 +623,33 @@ impl OpenAICodexProvider {
                         .map(|window| window.used_percent >= 100.0)
                         .unwrap_or(false)
             });
-        OpenAICodexRateLimit {
+        Some(OpenAICodexRateLimit {
+            allowed,
             limit_reached,
             primary_window,
             secondary_window,
-        }
+        })
+    }
+
+    fn parse_additional_rate_limits(value: &Value) -> Option<Vec<OpenAICodexAdditionalRateLimit>> {
+        let limits = value.as_array()?;
+        Some(
+            limits
+                .iter()
+                .filter_map(|limit| {
+                    limit.as_object()?;
+                    Some(OpenAICodexAdditionalRateLimit {
+                        limit_name: Self::string_field(limit, &["limit_name", "limitName", "name"]),
+                        metered_feature: Self::string_field(
+                            limit,
+                            &["metered_feature", "meteredFeature"],
+                        ),
+                        rate_limit: Self::field(limit, &["rate_limit", "rateLimit"])
+                            .and_then(Self::parse_rate_limit),
+                    })
+                })
+                .collect(),
+        )
     }
 
     fn parse_usage_window(obj: &Value) -> Option<OpenAICodexUsageWindow> {
@@ -478,6 +664,16 @@ impl OpenAICodexProvider {
             })?;
         let reset_at = Self::field(obj, &["reset_at", "resets_at", "resetsAt"])
             .and_then(Self::timestamp_or_string);
+        let reset_after_seconds = Self::field(
+            obj,
+            &[
+                "reset_after_seconds",
+                "resetAfterSeconds",
+                "resets_after_seconds",
+                "resetsAfterSeconds",
+            ],
+        )
+        .and_then(Self::as_u64_loose);
         let limit_window_seconds = Self::field(
             obj,
             &[
@@ -490,8 +686,28 @@ impl OpenAICodexProvider {
         Some(OpenAICodexUsageWindow {
             used_percent,
             reset_at,
+            reset_after_seconds,
             limit_window_seconds,
         })
+    }
+
+    fn parse_reset_credits(value: &Value) -> Option<OpenAICodexResetCredits> {
+        if !value.is_object() {
+            return None;
+        }
+        Some(OpenAICodexResetCredits {
+            available_count: Self::field(value, &["available_count", "availableCount"])
+                .and_then(Self::as_u64_loose),
+        })
+    }
+
+    fn parse_redeem_payload(root: &Value) -> OpenAICodexResetRedeem {
+        let data = root.get("data").unwrap_or(root);
+        OpenAICodexResetRedeem {
+            code: Self::string_field(data, &["code", "status"]).unwrap_or_default(),
+            windows_reset: Self::field(data, &["windows_reset", "windowsReset"])
+                .and_then(Self::as_u64_loose),
+        }
     }
 
     fn parse_credits(c: &Value) -> OpenAICodexCredits {
@@ -511,7 +727,39 @@ impl OpenAICodexProvider {
             used: Self::field(c, &["used", "total_used"]).and_then(Self::as_f64_loose),
             reset_at: Self::field(c, &["reset_at", "expires_at", "expiresAt"])
                 .and_then(Self::timestamp_or_string),
+            overage_limit_reached: Self::field(
+                c,
+                &["overage_limit_reached", "overageLimitReached"],
+            )
+            .and_then(Value::as_bool),
+            approx_cloud_messages: Self::field(
+                c,
+                &["approx_cloud_messages", "approxCloudMessages"],
+            )
+            .and_then(Self::number_array),
+            approx_local_messages: Self::field(
+                c,
+                &["approx_local_messages", "approxLocalMessages"],
+            )
+            .and_then(Self::number_array),
         }
+    }
+
+    fn parse_spend_control(value: &Value) -> Option<OpenAICodexSpendControl> {
+        if !value.is_object() {
+            return None;
+        }
+        Some(OpenAICodexSpendControl {
+            individual_limit: Self::field(value, &["individual_limit", "individualLimit"])
+                .and_then(Self::as_f64_loose),
+            reached: Self::field(value, &["reached", "limit_reached", "limitReached"])
+                .and_then(Value::as_bool),
+        })
+    }
+
+    fn number_array(value: &Value) -> Option<Vec<f64>> {
+        let values = value.as_array()?;
+        Some(values.iter().filter_map(Self::as_f64_loose).collect())
     }
 
     fn field<'a>(obj: &'a Value, keys: &[&str]) -> Option<&'a Value> {
@@ -1148,7 +1396,7 @@ impl OpenAICodexProvider {
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
             supports_cache_control: true,
-            tokenizer: None,
+            tokenizer: Some(refact_core::model_caps::OPENAI_CLOUD_TOKENIZER.to_string()),
             enabled,
             is_custom: false,
             pricing,
@@ -1702,6 +1950,162 @@ http_response_header_retry_max_attempts: 12
         assert!(!obj.contains_key("cli_refresh_managed"));
         assert_eq!(obj["auth_source"], json!("in_app_oauth"));
         assert_eq!(obj["oauth_connected"], json!(true));
+    }
+
+    #[test]
+    fn openai_codex_usage_parser_preserves_wham_quota_fields() {
+        let usage = OpenAICodexProvider::parse_usage_payload(&json!({
+            "account_id": "acct-redacted",
+            "user_id": "user-redacted",
+            "email": "user@example.com",
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 1234,
+                    "reset_at": 1781096163,
+                    "used_percent": 38
+                },
+                "secondary_window": {
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": "5678",
+                    "reset_at": "2026-06-11T00:27:25+00:00",
+                    "used_percent": "77.5"
+                }
+            },
+            "additional_rate_limits": [
+                {
+                    "limit_name": "GPT-5.3-Codex-Spark",
+                    "metered_feature": "codex_bengalfox",
+                    "rate_limit": {
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": {
+                            "limit_window_seconds": 18000,
+                            "reset_after_seconds": 18000,
+                            "reset_at": 1781096289,
+                            "used_percent": 0
+                        },
+                        "secondary_window": {
+                            "limit_window_seconds": 604800,
+                            "reset_after_seconds": 604800,
+                            "reset_at": 1781683089,
+                            "used_percent": 0
+                        }
+                    }
+                }
+            ],
+            "code_review_rate_limit": null,
+            "rate_limit_reached_type": "weekly",
+            "rate_limit_reset_credits": { "available_count": "2" },
+            "credits": {
+                "balance": "0",
+                "has_credits": false,
+                "unlimited": false,
+                "overage_limit_reached": true,
+                "approx_cloud_messages": [1, "2.5"],
+                "approx_local_messages": [3, 4]
+            },
+            "spend_control": {
+                "individual_limit": "10.5",
+                "reached": false
+            },
+            "promo": { "kind": "test" },
+            "referral_beacon": { "seen": true },
+            "future_quota": { "provider_added": true }
+        }));
+
+        assert_eq!(usage.account_id.as_deref(), Some("acct-redacted"));
+        assert_eq!(usage.user_id.as_deref(), Some("user-redacted"));
+        assert_eq!(usage.email.as_deref(), Some("user@example.com"));
+        assert_eq!(usage.plan_type.as_deref(), Some("pro"));
+
+        let rate_limit = usage.rate_limit.unwrap();
+        assert_eq!(rate_limit.allowed, Some(true));
+        assert!(!rate_limit.limit_reached);
+        let primary = rate_limit.primary_window.unwrap();
+        assert_eq!(primary.used_percent, 38.0);
+        assert_eq!(primary.limit_window_seconds, Some(18_000));
+        assert_eq!(primary.reset_after_seconds, Some(1_234));
+        assert_eq!(
+            primary.reset_at.as_deref(),
+            Some("2026-06-10T12:56:03+00:00")
+        );
+        let secondary = rate_limit.secondary_window.unwrap();
+        assert_eq!(secondary.used_percent, 77.5);
+        assert_eq!(secondary.reset_after_seconds, Some(5_678));
+        assert_eq!(
+            secondary.reset_at.as_deref(),
+            Some("2026-06-11T00:27:25+00:00")
+        );
+
+        let additional = usage.additional_rate_limits.unwrap();
+        assert_eq!(additional.len(), 1);
+        assert_eq!(
+            additional[0].limit_name.as_deref(),
+            Some("GPT-5.3-Codex-Spark")
+        );
+        assert_eq!(
+            additional[0].metered_feature.as_deref(),
+            Some("codex_bengalfox")
+        );
+        assert_eq!(
+            additional[0]
+                .rate_limit
+                .as_ref()
+                .and_then(|rl| rl.primary_window.as_ref())
+                .and_then(|window| window.limit_window_seconds),
+            Some(18_000)
+        );
+
+        assert!(usage.code_review_rate_limit.is_none());
+        assert_eq!(usage.rate_limit_reached_type.as_deref(), Some("weekly"));
+        assert_eq!(
+            usage.rate_limit_reset_credits.unwrap().available_count,
+            Some(2)
+        );
+
+        let credits = usage.credits.unwrap();
+        assert_eq!(credits.balance, 0.0);
+        assert!(!credits.has_credits);
+        assert!(!credits.unlimited);
+        assert_eq!(credits.overage_limit_reached, Some(true));
+        assert_eq!(credits.approx_cloud_messages, Some(vec![1.0, 2.5]));
+        assert_eq!(credits.approx_local_messages, Some(vec![3.0, 4.0]));
+
+        let spend_control = usage.spend_control.unwrap();
+        assert_eq!(spend_control.individual_limit, Some(10.5));
+        assert_eq!(spend_control.reached, Some(false));
+        assert_eq!(usage.promo.unwrap()["kind"], json!("test"));
+        assert_eq!(usage.referral_beacon.unwrap()["seen"], json!(true));
+        assert_eq!(
+            usage.raw_extra["future_quota"]["provider_added"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn openai_codex_redeem_payload_parses_code_and_windows() {
+        let redeem = OpenAICodexProvider::parse_redeem_payload(&json!({
+            "code": "reset",
+            "windows_reset": 2
+        }));
+        assert_eq!(redeem.code, "reset");
+        assert_eq!(redeem.windows_reset, Some(2));
+
+        // Tolerates a `data` wrapper, camelCase key, and string-encoded number.
+        let wrapped = OpenAICodexProvider::parse_redeem_payload(&json!({
+            "data": { "code": "already_redeemed", "windowsReset": "1" }
+        }));
+        assert_eq!(wrapped.code, "already_redeemed");
+        assert_eq!(wrapped.windows_reset, Some(1));
+
+        // Missing fields degrade gracefully.
+        let empty = OpenAICodexProvider::parse_redeem_payload(&json!({}));
+        assert_eq!(empty.code, "");
+        assert_eq!(empty.windows_reset, None);
     }
 
     #[test]

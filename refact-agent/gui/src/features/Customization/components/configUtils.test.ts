@@ -100,6 +100,51 @@ describe("applyPatches", () => {
   });
 });
 
+describe("representative customization config patches", () => {
+  it("patches a mode message template field", () => {
+    const modeConfig = {
+      id: "agent",
+      messages: [{ role: "system", content: "old prompt" }],
+    };
+
+    expect(
+      applyPatch(modeConfig, {
+        path: ["messages", 0, "content"],
+        value: "new prompt",
+      }),
+    ).toEqual({
+      id: "agent",
+      messages: [{ role: "system", content: "new prompt" }],
+    });
+  });
+
+  it("patches subagent tool confirmation rules without changing siblings", () => {
+    const subagentConfig = {
+      id: "reviewer",
+      title: "Reviewer",
+      subchat: {
+        tool_confirmation: [{ match: "cat", action: "auto" }],
+      },
+    };
+
+    expect(
+      applyPatch(subagentConfig, {
+        path: ["subchat", "tool_confirmation", 1],
+        value: { match: "shell", action: "ask" },
+      }),
+    ).toEqual({
+      id: "reviewer",
+      title: "Reviewer",
+      subchat: {
+        tool_confirmation: [
+          { match: "cat", action: "auto" },
+          { match: "shell", action: "ask" },
+        ],
+      },
+    });
+  });
+});
+
 describe("sanitizeObject", () => {
   it("removes dangerous keys", () => {
     const obj = { a: 1, __proto__: "bad", constructor: "bad" };

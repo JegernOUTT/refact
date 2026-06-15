@@ -8,7 +8,7 @@ use crate::http::GuiPublicOriginCandidates;
 use crate::http::handler_404;
 use crate::providers::http::handle_openai_codex_auth_callback;
 
-mod gui;
+pub(crate) mod gui;
 pub mod info;
 pub mod v1;
 

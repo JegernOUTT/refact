@@ -1,10 +1,6 @@
 import React, { useState, useCallback } from "react";
-import { Flex, HoverCard, Spinner, Text } from "@radix-ui/themes";
-import {
-  CheckCircledIcon,
-  CrossCircledIcon,
-  UpdateIcon,
-} from "@radix-ui/react-icons";
+import { CheckCircle, LoaderCircle, RefreshCw, XCircle } from "lucide-react";
+import { Icon, Tooltip } from "../ui";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import {
@@ -78,35 +74,41 @@ export const ConnectionStatusIndicator: React.FC = () => {
 
   if (isConnected) {
     return (
-      <HoverCard.Root>
-        <HoverCard.Trigger>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
           <button
             type="button"
             onClick={() => void handleRefresh()}
             disabled={isRefreshing}
             className={`${styles.statusButton} ${getStatusClass()}`}
           >
-            <Flex align="center" gap="1" className={styles.indicator}>
+            <span className={styles.indicator}>
               {isRefreshing ? (
-                <Spinner size="1" />
+                <Icon
+                  icon={LoaderCircle}
+                  size="sm"
+                  className={styles.iconRefreshing}
+                />
               ) : (
-                <CheckCircledIcon className={styles.iconConnected} />
+                <Icon
+                  icon={CheckCircle}
+                  size="sm"
+                  className={styles.iconConnected}
+                />
               )}
-            </Flex>
+            </span>
           </button>
-        </HoverCard.Trigger>
-        <HoverCard.Content size="1" side="bottom">
-          <Text as="p" size="2">
-            Connected - Click to refresh
-          </Text>
-        </HoverCard.Content>
-      </HoverCard.Root>
+        </Tooltip.Trigger>
+        <Tooltip.Content side="bottom">
+          Connected - Click to refresh
+        </Tooltip.Content>
+      </Tooltip>
     );
   }
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <Tooltip>
+      <Tooltip.Trigger asChild>
         <button
           type="button"
           onClick={() => void handleRefresh()}
@@ -115,25 +117,35 @@ export const ConnectionStatusIndicator: React.FC = () => {
             isReconnecting ? styles.reconnectingPulse : ""
           }`}
         >
-          <Flex align="center" className={styles.indicator}>
+          <span className={styles.indicator}>
             {isRefreshing ? (
-              <Spinner size="1" />
+              <Icon
+                icon={LoaderCircle}
+                size="sm"
+                className={styles.iconRefreshing}
+              />
             ) : isReconnecting ? (
-              <UpdateIcon className={styles.iconReconnecting} />
+              <Icon
+                icon={RefreshCw}
+                size="sm"
+                className={styles.iconReconnecting}
+              />
             ) : (
-              <CrossCircledIcon className={styles.iconDisconnected} />
+              <Icon
+                icon={XCircle}
+                size="sm"
+                className={styles.iconDisconnected}
+              />
             )}
-          </Flex>
+          </span>
         </button>
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="bottom">
-        <Text as="p" size="2">
-          {isReconnecting
-            ? "Reconnecting..."
-            : `${problem ?? "Disconnected"} - Click to retry`}
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="bottom">
+        {isReconnecting
+          ? "Reconnecting..."
+          : `${problem ?? "Disconnected"} - Click to retry`}
+      </Tooltip.Content>
+    </Tooltip>
   );
 };
 

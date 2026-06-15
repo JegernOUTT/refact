@@ -13,6 +13,7 @@ function assertBuddyPage(page: BuddyPage): string {
   switch (page.type) {
     case "buddy":
     case "stats":
+    case "settings":
     case "customization":
     case "providers":
     case "default_models":
@@ -73,6 +74,7 @@ describe("Buddy schema contract", () => {
     const pages: BuddyPage[] = [
       { type: "buddy" },
       { type: "stats" },
+      { type: "settings" },
       { type: "customization" },
       { type: "providers" },
       { type: "default_models" },

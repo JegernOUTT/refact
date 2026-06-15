@@ -1,21 +1,15 @@
 import React, { useState } from "react";
-import {
-  Button,
-  Dialog,
-  Flex,
-  Switch,
-  Text,
-  TextField,
-  Callout,
-} from "@radix-ui/themes";
-import { TrashIcon, InfoCircledIcon } from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { Info, Trash } from "lucide-react";
 import type { MarketplaceSource } from "../../services/refact/mcpMarketplace";
 import {
   useDeleteMarketplaceSourceMutation,
   useConfigureMarketplaceSourceMutation,
   useSaveMarketplaceSourceMutation,
 } from "../../services/refact/mcpMarketplace";
+import { Button, Dialog, FieldText, Icon, Switch } from "../../components/ui";
 import styles from "./SourceSettings.module.css";
+import sharedStyles from "./MCPMarketplace.module.css";
 
 type SourceSettingsProps = {
   open: boolean;
@@ -43,47 +37,44 @@ const SmitheryKeyForm: React.FC<SmitheryKeyFormProps> = ({ source }) => {
 
   if (source.has_api_key) {
     return (
-      <Flex direction="column" gap="1" className={styles.apiKeySection}>
-        <Text size="1" color="gray">
-          API Key: configured
-        </Text>
+      <div className={styles.apiKeySection}>
+        <p className={sharedStyles.smallText}>API Key: configured</p>
         <Button
-          size="1"
-          variant="ghost"
-          color="red"
+          size="sm"
+          variant="danger"
           onClick={() =>
             void configureSource({ id: source.id, api_key: "", enabled: false })
           }
         >
           Remove API Key
         </Button>
-      </Flex>
+      </div>
     );
   }
 
   return (
-    <Flex direction="column" gap="1" className={styles.apiKeySection}>
-      <Text size="1" color="gray">
+    <div className={styles.apiKeySection}>
+      <p className={sharedStyles.smallText}>
         API Key required — get one at smithery.ai/account/api-keys
-      </Text>
-      <Flex gap="2">
-        <TextField.Root
-          size="1"
+      </p>
+      <div className={sharedStyles.searchRow}>
+        <FieldText
           type="password"
           placeholder="Enter API Key…"
           value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          style={{ flex: 1 }}
+          onChange={setApiKey}
+          className={styles.grow}
         />
         <Button
-          size="1"
+          size="sm"
+          variant="primary"
           onClick={() => void handleSave()}
           disabled={!apiKey.trim()}
         >
           Save
         </Button>
-      </Flex>
-    </Flex>
+      </div>
+    </div>
   );
 };
 
@@ -123,48 +114,41 @@ const AddCustomSourceForm: React.FC<AddCustomSourceFormProps> = ({
   };
 
   return (
-    <Flex direction="column" gap="2" className={styles.addSourceSection}>
-      <Text size="2" weight="bold">
-        Add Custom Source
-      </Text>
+    <div className={styles.addSourceSection}>
+      <p className={sharedStyles.text}>Add Custom Source</p>
       {error && (
-        <Callout.Root color="red" size="1">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>{error}</Callout.Text>
-        </Callout.Root>
+        <div
+          className={classNames(sharedStyles.notice, sharedStyles.noticeDanger)}
+        >
+          <Icon icon={Info} tone="danger" />
+          <p className={sharedStyles.smallText}>{error}</p>
+        </div>
       )}
-      <Flex direction="column" gap="1">
-        <Text size="1" color="gray">
-          Label
-        </Text>
-        <TextField.Root
-          size="1"
+      <label className={sharedStyles.configField}>
+        <span className={sharedStyles.smallText}>Label</span>
+        <FieldText
           placeholder="My Registry"
           value={label}
-          onChange={(e) => setLabel(e.target.value)}
+          onChange={setLabel}
         />
-      </Flex>
-      <Flex direction="column" gap="1">
-        <Text size="1" color="gray">
-          URL
-        </Text>
-        <TextField.Root
-          size="1"
+      </label>
+      <label className={sharedStyles.configField}>
+        <span className={sharedStyles.smallText}>URL</span>
+        <FieldText
           placeholder="https://example.com/mcp-index.json"
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          onChange={setUrl}
         />
-      </Flex>
+      </label>
       <Button
-        size="1"
+        size="sm"
+        variant="primary"
         onClick={() => void handleAdd()}
         disabled={!label.trim() || !url.trim()}
       >
         Add Source
       </Button>
-    </Flex>
+    </div>
   );
 };
 
@@ -177,59 +161,54 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
   const [configureSource] = useConfigureMarketplaceSourceMutation();
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 480 }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className={styles.dialogContent}>
         <Dialog.Title>Marketplace Sources</Dialog.Title>
-        <Flex direction="column" gap="1">
+        <div className={sharedStyles.configStack}>
           {sources.map((source) => (
-            <Flex key={source.id} direction="column">
+            <div key={source.id}>
               <div className={styles.sourceRow}>
                 <Switch
-                  size="1"
                   checked={source.enabled}
                   disabled={!source.removable}
                   onCheckedChange={(checked) =>
                     void configureSource({ id: source.id, enabled: checked })
                   }
                 />
-                <Flex direction="column" gap="0" className={styles.sourceLabel}>
-                  <Text size="2">{source.label}</Text>
+                <div className={styles.sourceLabel}>
+                  <p className={sharedStyles.text}>{source.label}</p>
                   {source.status === "error" && source.error && (
-                    <Text size="1" color="red">
-                      {source.error}
-                    </Text>
+                    <p className={sharedStyles.dangerText}>{source.error}</p>
                   )}
                   {!source.removable && (
-                    <Text size="1" color="gray">
-                      Built-in
-                    </Text>
+                    <p className={sharedStyles.smallText}>Built-in</p>
                   )}
-                </Flex>
+                </div>
                 {source.removable && (
                   <Button
-                    size="1"
-                    variant="ghost"
-                    color="red"
+                    size="sm"
+                    variant="danger"
+                    leftIcon={Trash}
                     onClick={() => void deleteSource({ id: source.id })}
                   >
-                    <TrashIcon />
+                    Remove
                   </Button>
                 )}
               </div>
               {source.type === "smithery" && source.enabled && (
                 <SmitheryKeyForm source={source} />
               )}
-            </Flex>
+            </div>
           ))}
-        </Flex>
+        </div>
         <hr className={styles.divider} />
         <AddCustomSourceForm onAdded={() => undefined} />
-        <Flex justify="end" mt="4">
-          <Dialog.Close>
+        <div className={sharedStyles.cardActionRow}>
+          <Dialog.Close asChild>
             <Button variant="soft">Close</Button>
           </Dialog.Close>
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

@@ -1,13 +1,29 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 use crate::app_state::AppState;
 use crate::ext::config_dirs::{get_ext_dirs, CommandSource, ExtDirs};
 use crate::ext::hooks::{load_hooks, HookConfig, HookEvent};
+use crate::files_correction::canonical_path;
+/// Engine-level hooks configuration, loaded from the global `privacy.yaml`.
+///
+/// Project-local hooks are NOT executed by default: a cloned repository could
+/// otherwise ship a `.refact/hooks.yaml` that runs arbitrary shell commands on
+/// session start. Global hooks (`~/.config/refact/hooks.yaml`) always run.
+///
+/// To run project hooks, the user lists the trusted project roots in
+/// `hooks.trusted_projects`. Only hooks whose project root matches an entry are
+/// executed, so trusting one repository never trusts another.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub trusted_projects: Vec<String>,
+}
 
 const HOOK_MAX_OUTPUT_BYTES: usize = 10 * 1024;
 const HOOK_DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -129,16 +145,47 @@ pub fn is_global_source(source: &CommandSource) -> bool {
     )
 }
 
+pub fn is_project_source(source: &CommandSource) -> bool {
+    matches!(
+        source,
+        CommandSource::ProjectClaude(_) | CommandSource::ProjectRefact(_)
+    )
+}
+
+/// Whether a hook from `source` is allowed to run. Global hooks always run.
+/// Project hooks run only when their project root is listed in
+/// `hooks.trusted_projects`, so trusting one repository never trusts another.
+/// Installed-plugin hooks are not executed.
+pub fn hook_source_allowed(source: &CommandSource, trusted_projects: &[String]) -> bool {
+    match source {
+        CommandSource::GlobalClaude | CommandSource::GlobalRefact => true,
+        CommandSource::ProjectClaude(root) | CommandSource::ProjectRefact(root) => {
+            project_root_trusted(root, trusted_projects)
+        }
+        CommandSource::InstalledPlugin(_) => false,
+    }
+}
+
+fn project_root_trusted(root: &Path, trusted_projects: &[String]) -> bool {
+    let canon_root = canonical_path(root.to_string_lossy().into_owned());
+    trusted_projects
+        .iter()
+        .any(|trusted| canonical_path(trusted.clone()) == canon_root)
+}
+
 pub async fn get_hooks_for_event(
     app: AppState,
     event: HookEvent,
     tool_name: Option<&str>,
 ) -> Vec<HookConfig> {
+    let trusted_projects = app.gcx.hooks_config.trusted_projects.clone();
     let ext_dirs = get_ext_dirs(app).await;
     let compiled_hooks = get_compiled_hooks_from_ext_dirs(&ext_dirs).await;
     compiled_hooks
         .into_iter()
-        .filter(|h| is_global_source(&h.config.source)) // Trust gating: only global hooks
+        // Trust gating: global hooks always run; project hooks run only when the
+        // project root is listed in hooks.trusted_projects
+        .filter(|h| hook_source_allowed(&h.config.source, &trusted_projects))
         .filter(|h| h.config.event == event)
         .filter(|h| compiled_matcher_matches(h.compiled_matcher.as_ref(), tool_name))
         .map(|h| h.config)
@@ -617,6 +664,66 @@ mod tests {
     fn test_global_hooks_still_run() {
         let source = crate::ext::config_dirs::CommandSource::GlobalRefact;
         assert!(is_global_source(&source));
+    }
+    #[test]
+    fn test_is_project_source() {
+        use std::path::PathBuf;
+        assert!(is_project_source(
+            &crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/p"))
+        ));
+        assert!(is_project_source(
+            &crate::ext::config_dirs::CommandSource::ProjectClaude(PathBuf::from("/p"))
+        ));
+        assert!(!is_project_source(
+            &crate::ext::config_dirs::CommandSource::GlobalRefact
+        ));
+        assert!(!is_project_source(
+            &crate::ext::config_dirs::CommandSource::GlobalClaude
+        ));
+    }
+
+    #[test]
+    fn test_hooks_config_default_trusts_no_projects() {
+        assert!(HooksConfig::default().trusted_projects.is_empty());
+    }
+
+    #[test]
+    fn test_hook_source_allowed_global_always_runs() {
+        // Global hooks run regardless of the trusted-project list.
+        let none: Vec<String> = vec![];
+        assert!(hook_source_allowed(
+            &crate::ext::config_dirs::CommandSource::GlobalRefact,
+            &none
+        ));
+        assert!(hook_source_allowed(
+            &crate::ext::config_dirs::CommandSource::GlobalClaude,
+            &none
+        ));
+    }
+
+    #[test]
+    fn test_hook_source_allowed_project_requires_trust_entry() {
+        use std::path::PathBuf;
+        let refact =
+            crate::ext::config_dirs::CommandSource::ProjectRefact(PathBuf::from("/myproject"));
+        let claude =
+            crate::ext::config_dirs::CommandSource::ProjectClaude(PathBuf::from("/myproject"));
+        // No trusted projects -> project hooks never run.
+        assert!(!hook_source_allowed(&refact, &[]));
+        assert!(!hook_source_allowed(&claude, &[]));
+        // A different trusted project does not enable this one.
+        assert!(!hook_source_allowed(&refact, &["/other".to_string()]));
+        // Only the matching project root enables it.
+        let trusted = vec!["/myproject".to_string()];
+        assert!(hook_source_allowed(&refact, &trusted));
+        assert!(hook_source_allowed(&claude, &trusted));
+    }
+
+    #[test]
+    fn test_hook_source_allowed_installed_plugin_not_executed() {
+        let plugin = crate::ext::config_dirs::CommandSource::InstalledPlugin("p".to_string());
+        assert!(!hook_source_allowed(&plugin, &[]));
+        assert!(!hook_source_allowed(&plugin, &["/anything".to_string()]));
     }
 
     #[tokio::test]

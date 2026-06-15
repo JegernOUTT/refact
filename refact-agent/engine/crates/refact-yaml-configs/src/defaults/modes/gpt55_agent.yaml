@@ -180,7 +180,7 @@ override:
 
     **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
 
-    **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
+    **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_update`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
 
     %COMPRESS_HANDOFF_INSTRUCTIONS%
 

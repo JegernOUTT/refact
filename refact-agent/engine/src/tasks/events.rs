@@ -12,3 +12,39 @@ pub async fn emit_task_event(gcx: Arc<GlobalContext>, event: TaskEvent) {
         let _ = tx.send(envelope);
     }
 }
+
+pub async fn emit_task_comments_changed(gcx: Arc<GlobalContext>, task_id: &str, card_id: &str) {
+    emit_task_event(
+        gcx,
+        TaskEvent::TaskCommentsChanged {
+            task_id: task_id.to_string(),
+            card_id: card_id.to_string(),
+        },
+    )
+    .await;
+}
+
+pub async fn emit_task_document_changed(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    slug: Option<&str>,
+) {
+    emit_task_event(
+        gcx,
+        TaskEvent::TaskDocumentChanged {
+            task_id: task_id.to_string(),
+            slug: slug.map(str::to_string),
+        },
+    )
+    .await;
+}
+
+pub async fn emit_task_memories_changed(gcx: Arc<GlobalContext>, task_id: &str) {
+    emit_task_event(
+        gcx,
+        TaskEvent::TaskMemoriesChanged {
+            task_id: task_id.to_string(),
+        },
+    )
+    .await;
+}

@@ -1,5 +1,12 @@
 import React, { useState } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
+import { Card, Icon, Surface, useTokens } from "../../../components/ui";
+import {
+  BarChart3,
+  CircleDollarSign,
+  Database,
+  PieChart as PieChartIcon,
+  Table2,
+} from "lucide-react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import * as echarts from "echarts/core";
 import { BarChart, PieChart } from "echarts/charts";
@@ -13,7 +20,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
-import { useAppearance } from "../../../hooks";
+
 import {
   formatTokenCount,
   formatCostDisplay,
@@ -69,43 +76,38 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
     dateRangeToApiArgs(dateRange),
   );
-  const { isDarkMode } = useAppearance();
-
-  const theme = isDarkMode
-    ? {
-        text: "#ededef",
-        textMuted: "#a0a0a3",
-        axisLine: "#a0a0a3",
-        splitLine: "#2e2e32",
-        tooltip: { bg: "#1c1c1e", border: "#3a3a3c", text: "#ededef" },
-        palette: [
-          "#3e63dd",
-          "#7c66dc",
-          "#e5c07b",
-          "#e06c75",
-          "#56b6c2",
-          "#d19a66",
-          "#98c379",
-          "#c678dd",
-        ],
-      }
-    : {
-        text: "#1c2024",
-        textMuted: "#60646c",
-        axisLine: "#60646c",
-        splitLine: "#e0e0e2",
-        tooltip: { bg: "#ffffff", border: "#d0d0d2", text: "#1c2024" },
-        palette: [
-          "#3e63dd",
-          "#7c66dc",
-          "#e5c07b",
-          "#e06c75",
-          "#56b6c2",
-          "#d19a66",
-          "#98c379",
-          "#c678dd",
-        ],
-      };
+  const chartTokens = useTokens([
+    "--rf-color-fg",
+    "--rf-color-muted",
+    "--rf-color-faint",
+    "--rf-border-strong",
+    "--rf-surface-overlay",
+    "--rf-color-accent",
+    "--rf-color-info",
+    "--rf-color-warning",
+    "--rf-color-danger",
+    "--rf-color-success",
+  ]);
+  const theme = {
+    text: chartTokens["--rf-color-fg"] || "currentColor",
+    textMuted: chartTokens["--rf-color-muted"] || "currentColor",
+    axisLine: chartTokens["--rf-color-faint"] || "currentColor",
+    splitLine: chartTokens["--rf-border-strong"] || "currentColor",
+    tooltip: {
+      bg: chartTokens["--rf-surface-overlay"] || "Canvas",
+      border: chartTokens["--rf-border-strong"] || "currentColor",
+      text: chartTokens["--rf-color-fg"] || "CanvasText",
+    },
+    palette: [
+      chartTokens["--rf-color-accent"] || "currentColor",
+      chartTokens["--rf-color-info"] || "currentColor",
+      chartTokens["--rf-color-warning"] || "currentColor",
+      chartTokens["--rf-color-danger"] || "currentColor",
+      chartTokens["--rf-color-success"] || "currentColor",
+      chartTokens["--rf-color-muted"] || "currentColor",
+      chartTokens["--rf-color-faint"] || "currentColor",
+    ],
+  };
 
   const [modelSort, setModelSort] = useState<{ key: SortKey; asc: boolean }>({
     key: "total_tokens",
@@ -124,9 +126,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
 
   if (!data || data.totals.total_calls === 0) {
     return (
-      <Text className={styles.emptyText}>
+      <p className={styles.emptyText}>
         No usage data yet. Start chatting to see stats!
-      </Text>
+      </p>
     );
   }
 
@@ -424,81 +426,85 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   };
 
   return (
-    <Flex direction="column" gap="5">
-      <Flex className={styles.chartsRow}>
-        <Box className={styles.chartBox}>
-          <Text size="2" weight="medium" className={styles.sectionTitle}>
+    <div className={styles.root}>
+      <div className={`${styles.chartsRow} rf-stagger`}>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={BarChart3} size="md" tone="accent" />
             Tokens Per Day
-          </Text>
+          </h3>
           <ReactEChartsCore
             echarts={echarts}
             option={barOption}
-            style={{ width: "100%", height: "220px" }}
+            className={styles.chartCanvas}
           />
-        </Box>
-        <Box className={styles.chartBox}>
-          <Text size="2" weight="medium" className={styles.sectionTitle}>
+        </Card>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={PieChartIcon} size="md" tone="accent" />
             By Model
-          </Text>
+          </h3>
           <ReactEChartsCore
             echarts={echarts}
             option={pieOption}
-            style={{ width: "100%", height: "280px" }}
+            className={styles.chartCanvasTall}
           />
-        </Box>
-      </Flex>
+        </Card>
+      </div>
 
-      <Flex className={styles.chartsRow}>
-        <Box className={styles.chartBox}>
-          <Text size="2" weight="medium" className={styles.sectionTitle}>
+      <div className={`${styles.chartsRow} rf-stagger`}>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={BarChart3} size="md" tone="accent" />
             Calls Per Day
-          </Text>
+          </h3>
           <ReactEChartsCore
             echarts={echarts}
             option={callsBarOption}
-            style={{ width: "100%", height: "220px" }}
+            className={styles.chartCanvas}
           />
-        </Box>
+        </Card>
         {hasCostData && (
-          <Box className={styles.chartBox}>
-            <Text size="2" weight="medium" className={styles.sectionTitle}>
+          <Card animated="rise" className={styles.chartBox} interactive>
+            <h3 className={styles.sectionTitle}>
+              <Icon icon={CircleDollarSign} size="md" tone="warning" />
               Cost Per Day
-            </Text>
+            </h3>
             <ReactEChartsCore
               echarts={echarts}
               option={costBarOption}
-              style={{ width: "100%", height: "220px" }}
+              className={styles.chartCanvas}
             />
-          </Box>
+          </Card>
         )}
-      </Flex>
+      </div>
 
       {hasCacheData && (
-        <Flex className={styles.chartsRow}>
-          <Box className={styles.chartBox}>
-            <Text size="2" weight="medium" className={styles.sectionTitle}>
+        <div className={`${styles.chartsRow} rf-stagger`}>
+          <Card animated="rise" className={styles.chartBox} interactive>
+            <h3 className={styles.sectionTitle}>
+              <Icon icon={Database} size="md" tone="success" />
               Cache Tokens Per Day
-            </Text>
+            </h3>
             <ReactEChartsCore
               echarts={echarts}
               option={cacheBarOption}
-              style={{ width: "100%", height: "220px" }}
+              className={styles.chartCanvas}
             />
-          </Box>
-        </Flex>
+          </Card>
+        </div>
       )}
 
-      <Box>
-        <Text
-          size="3"
-          weight="medium"
-          className={styles.sectionTitle}
-          mb="2"
-          as="p"
-        >
+      <section className={styles.root}>
+        <h3 className={styles.sectionTitle}>
+          <Icon icon={Table2} size="md" tone="accent" />
           By Provider
-        </Text>
-        <Box className={styles.tableWrapper}>
+        </h3>
+        <Surface
+          animated="rise"
+          className={styles.tableWrapper}
+          variant="glass"
+        >
           <table className={styles.table}>
             <thead>
               <tr>
@@ -506,7 +512,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_calls")}
                   >
                     Calls{" "}
@@ -520,7 +526,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_tokens")}
                   >
                     Tokens{" "}
@@ -536,7 +542,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_cost_usd")}
                   >
                     Cost{" "}
@@ -549,9 +555,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="rf-stagger">
               {sortedProviders.map((p) => (
-                <tr key={p.provider}>
+                <tr key={p.provider} className="rf-enter-rise">
                   <td className={styles.td}>{p.provider}</td>
                   <td className={styles.td}>{p.total_calls}</td>
                   <td className={styles.td}>
@@ -570,20 +576,19 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
               ))}
             </tbody>
           </table>
-        </Box>
-      </Box>
+        </Surface>
+      </section>
 
-      <Box>
-        <Text
-          size="3"
-          weight="medium"
-          className={styles.sectionTitle}
-          mb="2"
-          as="p"
-        >
+      <section className={styles.root}>
+        <h3 className={styles.sectionTitle}>
+          <Icon icon={Table2} size="md" tone="accent" />
           By Model
-        </Text>
-        <Box className={styles.tableWrapper}>
+        </h3>
+        <Surface
+          animated="rise"
+          className={styles.tableWrapper}
+          variant="glass"
+        >
           <table className={styles.table}>
             <thead>
               <tr>
@@ -591,7 +596,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("total_calls")}
                   >
                     Calls{" "}
@@ -609,7 +614,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("total_cost_usd")}
                   >
                     Cost{" "}
@@ -623,7 +628,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("avg_duration_ms")}
                   >
                     Avg Duration{" "}
@@ -636,9 +641,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="rf-stagger">
               {sortedModels.map((m) => (
-                <tr key={`${m.provider}/${m.model}`}>
+                <tr key={`${m.provider}/${m.model}`} className="rf-enter-rise">
                   <td className={styles.td}>{m.model}</td>
                   <td className={styles.td}>{m.total_calls}</td>
                   <td className={styles.td}>
@@ -663,8 +668,8 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
               ))}
             </tbody>
           </table>
-        </Box>
-      </Box>
-    </Flex>
+        </Surface>
+      </section>
+    </div>
   );
 };

@@ -51,13 +51,15 @@ use crate::providers::http::{
     handle_v1_provider_oauth_exchange, handle_v1_provider_oauth_logout,
     handle_v1_provider_oauth_start, handle_v1_provider_remove_custom_model,
     handle_v1_provider_remove_custom_model_post, handle_v1_provider_schema,
-    handle_v1_provider_update, handle_v1_provider_usage, handle_v1_providers_list,
+    handle_v1_provider_update, handle_v1_provider_usage, handle_v1_provider_usage_redeem,
+    handle_v1_providers_list,
 };
 
 use crate::http::routers::v1::vecdb::{handle_v1_vecdb_search, handle_v1_vecdb_status};
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::{
     handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
+    handle_v1_knowledge_relink_memories,
 };
 use crate::http::routers::v1::v1_integrations::{
     handle_v1_integration_get, handle_v1_integration_icon, handle_v1_integration_save,
@@ -79,14 +81,14 @@ use crate::http::routers::v1::voice::{
 };
 use crate::http::routers::v1::tasks::{
     handle_list_tasks, handle_create_task, handle_get_task, handle_delete_task, handle_get_board,
-    handle_patch_board, handle_get_planner_instructions, handle_set_planner_instructions,
-    handle_get_ready_cards, handle_update_task_status, handle_update_task_meta,
-    handle_list_task_trajectories, handle_create_planner_chat, handle_delete_planner_chat,
-    handle_tasks_subscribe, handle_list_task_memories, handle_pin_task_memory,
-    handle_archive_task_memory, handle_task_memories_triage_done, handle_task_memory_facets,
-    handle_list_task_documents, handle_get_task_document, handle_create_task_document,
-    handle_update_task_document, handle_append_task_document, handle_delete_task_document,
-    handle_pin_task_document, handle_history_task_document,
+    handle_create_card_comment, handle_patch_board, handle_get_planner_instructions,
+    handle_set_planner_instructions, handle_get_ready_cards, handle_update_task_status,
+    handle_update_task_meta, handle_list_task_trajectories, handle_create_planner_chat,
+    handle_delete_planner_chat, handle_tasks_subscribe, handle_list_task_memories,
+    handle_pin_task_memory, handle_archive_task_memory, handle_task_memories_triage_done,
+    handle_task_memory_facets, handle_list_task_documents, handle_get_task_document,
+    handle_create_task_document, handle_update_task_document, handle_append_task_document,
+    handle_delete_task_document, handle_pin_task_document, handle_history_task_document,
 };
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
@@ -97,7 +99,8 @@ use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_bootstrap,
 };
 use crate::http::routers::v1::scheduler::{
-    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_post,
+    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_patch,
+    handle_v1_scheduler_cron_post, handle_v1_scheduler_cron_run,
 };
 use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run, handle_v1_worktrees_create,
@@ -167,6 +170,7 @@ use crate::http::routers::v1::ext_management::{
     handle_v1_ext_skill_post, handle_v1_ext_skill_delete, handle_v1_ext_command_get,
     handle_v1_ext_command_put, handle_v1_ext_command_post, handle_v1_ext_command_delete,
     handle_v1_ext_hooks_get, handle_v1_ext_hooks_put, handle_v1_ext_hooks_delete_by_index,
+    handle_v1_ext_competitor_import_get, handle_v1_ext_competitor_import_post,
 };
 use crate::http::routers::v1::chat_modes::handle_v1_chat_modes;
 use crate::http::routers::v1::customization_editor::{
@@ -231,10 +235,14 @@ use crate::http::routers::v1::v1_browser::{
 pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
         .route("/ping", get(handle_v1_ping))
-        .route("/graceful-shutdown", get(handle_v1_graceful_shutdown))
+        .route(
+            "/graceful-shutdown",
+            get(handle_v1_graceful_shutdown).post(handle_v1_graceful_shutdown),
+        )
         .route("/code-completion", post(handle_v1_code_completion_web))
         .route("/code-lens", post(handle_v1_code_lens))
         .route("/caps", get(handle_v1_caps))
+        .route("/build_info", get(crate::http::routers::info::handle_info))
         .route("/model-capabilities", get(handle_v1_model_capabilities))
         .route("/model-supported", get(handle_v1_model_supported))
         .route("/tools", get(handle_v1_get_tools))
@@ -380,6 +388,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/providers/:name/health", get(handle_v1_provider_health))
         .route("/providers/:name/usage", get(handle_v1_provider_usage))
         .route(
+            "/providers/:name/usage/redeem",
+            post(handle_v1_provider_usage_redeem),
+        )
+        .route(
             "/providers/:name/oauth/start",
             post(handle_v1_provider_oauth_start),
         )
@@ -423,6 +435,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/knowledge/delete-memory",
             post(handle_v1_knowledge_delete_memory),
+        )
+        .route(
+            "/knowledge/relink-memories",
+            post(handle_v1_knowledge_relink_memories),
         )
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
         .route("/trajectories", get(handle_v1_trajectories_list))
@@ -516,6 +532,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/tasks/:task_id/board", get(handle_get_board))
         .route("/tasks/:task_id/board", post(handle_patch_board))
+        .route(
+            "/tasks/:task_id/cards/:card_id/comments",
+            post(handle_create_card_comment),
+        )
         .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
         .route(
             "/tasks/:task_id/planner-instructions",
@@ -580,7 +600,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/scheduler/cron/:id",
-            delete(handle_v1_scheduler_cron_delete),
+            delete(handle_v1_scheduler_cron_delete).patch(handle_v1_scheduler_cron_patch),
+        )
+        .route(
+            "/scheduler/cron/:id/run",
+            post(handle_v1_scheduler_cron_run),
         )
         .route("/setup/status", get(handle_v1_setup_status))
         .route("/browser/start", post(handle_browser_start))
@@ -634,6 +658,14 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/ext/commands/:name", delete(handle_v1_ext_command_delete))
         .route("/ext/hooks", get(handle_v1_ext_hooks_get))
         .route("/ext/hooks", put(handle_v1_ext_hooks_put))
+        .route(
+            "/ext/competitor-import",
+            get(handle_v1_ext_competitor_import_get),
+        )
+        .route(
+            "/ext/competitor-import",
+            post(handle_v1_ext_competitor_import_post),
+        )
         .route(
             "/ext/hooks/:index",
             delete(handle_v1_ext_hooks_delete_by_index),

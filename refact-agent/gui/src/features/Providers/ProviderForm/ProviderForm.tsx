@@ -1,21 +1,23 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, Flex, Separator, Text } from "@radix-ui/themes";
+import React from "react";
+import { v4 as uuidv4 } from "uuid";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
 import { RoleSeparatedModelConfig } from "./RoleSeparatedModelConfig";
-import { normalizeProviderDefaults } from "./providerDefaults";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
 import type {
+  ClaudeCodeUsageData,
   ProviderListItem,
   ProviderStatus,
   ClaudeCodeUsageWindow,
+  OpenAICodexAdditionalRateLimit,
+  OpenAICodexRateLimit,
+  OpenAICodexUsageData,
   OpenAICodexUsageWindow,
-  ProviderDefaults,
 } from "../../../services/refact";
-import { ModelSelector } from "../../../components/Chat/ModelSelector";
+import { Badge, Button, Surface } from "../../../components/ui";
 
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
@@ -23,10 +25,22 @@ import {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
-  useGetDefaultsQuery,
-  useGetCapsQuery,
-  useUpdateDefaultsMutation,
+  useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
+import {
+  clampPercent,
+  formatClaudeExtraUsage,
+  formatCodexCreditsDetails,
+  formatCodexCreditsSummary,
+  formatCodexSpendControl,
+  formatLimitWindowSeconds,
+  formatNullableBool,
+  formatQuotaMeta,
+  formatResetAfterSeconds,
+  formatResetAt,
+  formatUsagePercent,
+  formatWindowLabel,
+} from "../../../utils/providerQuota";
 
 export type ProviderFormProps = {
   currentProvider: ProviderListItem;
@@ -37,85 +51,42 @@ export type { ProviderListItem };
 const StatusBadge: React.FC<{ status: ProviderStatus }> = ({ status }) => {
   switch (status) {
     case "active":
-      return (
-        <Badge color="green" size="1">
-          Active
-        </Badge>
-      );
+      return <Badge tone="success">Active</Badge>;
     case "configured":
-      return (
-        <Badge color="orange" size="1">
-          Configured
-        </Badge>
-      );
+      return <Badge tone="warning">Configured</Badge>;
     case "not_configured":
-      return (
-        <Badge color="gray" size="1">
-          Not configured
-        </Badge>
-      );
+      return <Badge tone="muted">Not configured</Badge>;
     default:
       return null;
   }
 };
 
-const UsageBar: React.FC<{ pct: number }> = ({ pct }) => {
-  const color =
-    pct >= 90
-      ? "var(--red-9)"
-      : pct >= 70
-        ? "var(--orange-9)"
-        : "var(--green-9)";
-  return (
-    <div
-      style={{
-        height: "4px",
-        width: "100%",
-        borderRadius: "2px",
-        background: "var(--gray-a4)",
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          height: "100%",
-          width: `${pct}%`,
-          borderRadius: "2px",
-          background: color,
-          transition: "width 0.3s ease",
-        }}
-      />
-    </div>
-  );
-};
+const UsageBar: React.FC<{ pct: number }> = ({ pct }) => (
+  <progress
+    className={styles.usageBar}
+    max={100}
+    value={pct}
+    aria-label={`${Math.round(pct)}% used`}
+  />
+);
 
 const ClaudeWindowRow: React.FC<{
   label: string;
   w: ClaudeCodeUsageWindow;
 }> = ({ label, w }) => {
-  const pct = Math.max(0, Math.min(w.percent_used, 100));
-  const d = w.resets_at ? new Date(w.resets_at) : null;
-  const resetText =
-    d && !isNaN(d.getTime())
-      ? `Resets ${d.toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`
-      : null;
+  const pct = clampPercent(w.percent_used);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(pct),
+    formatResetAt(w.resets_at),
+  ]);
   return (
-    <Flex direction="column" gap="1">
-      <Flex justify="between">
-        <Text size="1" color="gray">
-          {label}
-        </Text>
-        <Text size="1" color="gray">
-          {Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}
-        </Text>
-      </Flex>
+    <div className={styles.usageRow}>
+      <div className={styles.usageRowHeader}>
+        <span>{label}</span>
+        <span>{meta}</span>
+      </div>
       <UsageBar pct={pct} />
-    </Flex>
+    </div>
   );
 };
 
@@ -124,238 +95,304 @@ const CodexWindowRow: React.FC<{
   w: OpenAICodexUsageWindow;
   limitReached?: boolean;
 }> = ({ label, w, limitReached }) => {
-  const pct = Math.max(0, Math.min(w.used_percent, 100));
-  const d = w.reset_at ? new Date(w.reset_at) : null;
-  const resetText =
-    d && !isNaN(d.getTime())
-      ? `Resets ${d.toLocaleString(undefined, {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`
-      : null;
+  const pct = clampPercent(w.used_percent);
+  const windowText = formatLimitWindowSeconds(w.limit_window_seconds);
+  const meta = formatQuotaMeta([
+    formatUsagePercent(pct),
+    windowText ? `Window ${windowText}` : null,
+    formatResetAfterSeconds(w.reset_after_seconds),
+    formatResetAt(w.reset_at),
+  ]);
   return (
-    <Flex direction="column" gap="1">
-      <Flex justify="between" align="center">
-        <Flex align="center" gap="1">
-          <Text size="1" color="gray">
-            {label}
-          </Text>
-          {limitReached && (
-            <Badge color="red" size="1">
-              Limit reached
-            </Badge>
-          )}
-        </Flex>
-        <Text size="1" color="gray">
-          {Math.round(pct)}% used{resetText ? ` · ${resetText}` : ""}
-        </Text>
-      </Flex>
+    <div className={styles.usageRow}>
+      <div className={styles.usageRowHeader}>
+        <span className={styles.usageLabelGroup}>
+          {label}
+          {limitReached ? <Badge tone="danger">Limit reached</Badge> : null}
+        </span>
+        <span>{meta}</span>
+      </div>
       <UsageBar pct={pct} />
-    </Flex>
+    </div>
   );
 };
 
-type DefaultModelKey =
-  | "chat"
-  | "chat_model_2"
-  | "task_planner_agent_model"
-  | "chat_light"
-  | "chat_thinking"
-  | "chat_buddy"
-  | "completion_model"
-  | "embedding_model";
+type ClaudeUsageWindowKey = keyof Pick<
+  ClaudeCodeUsageData,
+  | "five_hour"
+  | "seven_day"
+  | "seven_day_sonnet"
+  | "seven_day_oauth_apps"
+  | "seven_day_opus"
+  | "seven_day_cowork"
+  | "seven_day_omelette"
+>;
 
-const DEFAULT_MODEL_FIELDS: {
-  key: DefaultModelKey;
+const CLAUDE_USAGE_WINDOWS: {
+  key: ClaudeUsageWindowKey;
   label: string;
-  description: string;
 }[] = [
-  {
-    key: "chat",
-    label: "Default chat",
-    description: "Primary model for normal conversations.",
-  },
-  {
-    key: "chat_model_2",
-    label: "Chat model 2",
-    description: "Secondary chat model slot for future chat workflows.",
-  },
-  {
-    key: "task_planner_agent_model",
-    label: "Task planner agent",
-    description: "Model used by task management when spawning task agents.",
-  },
-  {
-    key: "chat_light",
-    label: "Light",
-    description: "Fast model used by quick subagents and gathering steps.",
-  },
-  {
-    key: "chat_thinking",
-    label: "Thinking",
-    description: "Reasoning model used by planning, review, and research.",
-  },
-  {
-    key: "chat_buddy",
-    label: "Companion",
-    description: "Background companion model.",
-  },
-  {
-    key: "completion_model",
-    label: "Completion",
-    description: "Default model for code completion.",
-  },
-  {
-    key: "embedding_model",
-    label: "Embedding",
-    description: "Default model for semantic embeddings.",
-  },
+  { key: "five_hour", label: "Current session" },
+  { key: "seven_day", label: "Current week — all models" },
+  { key: "seven_day_sonnet", label: "Current week — Sonnet" },
+  { key: "seven_day_opus", label: "Current week — Opus" },
+  { key: "seven_day_oauth_apps", label: "Current week — OAuth apps" },
+  { key: "seven_day_cowork", label: "Current week — cowork" },
+  { key: "seven_day_omelette", label: "Current week — Omelette" },
 ];
 
-function getModelCapability(key: DefaultModelKey) {
-  if (key === "completion_model") return "completion";
-  if (key === "embedding_model") return "embedding";
-  return "chat";
-}
+const InfoRow: React.FC<{ label: string; value: string }> = ({
+  label,
+  value,
+}) => (
+  <div className={styles.usageRowHeader}>
+    <span>{label}</span>
+    <span>{value}</span>
+  </div>
+);
 
-function getDefaultModelValue(
-  defaults: ProviderDefaults,
-  key: DefaultModelKey,
-): string | undefined {
-  const value = defaults[key];
-  if (typeof value === "string") return value;
-  return value?.model;
-}
-
-function updateDefaultModelValue(
-  defaults: ProviderDefaults,
-  key: DefaultModelKey,
-  model: string,
-): ProviderDefaults {
-  if (key === "completion_model" || key === "embedding_model") {
-    return { ...defaults, [key]: model };
-  }
-  return { ...defaults, [key]: { ...(defaults[key] ?? {}), model } };
-}
-
-const ProviderDefaultModelsSetup: React.FC = () => {
-  const {
-    data: defaults,
-    isLoading,
-    isError,
-    refetch,
-  } = useGetDefaultsQuery(undefined);
-  const { data: caps, refetch: refetchCaps } = useGetCapsQuery(undefined);
-  const [updateDefaults, { isLoading: isSaving }] = useUpdateDefaultsMutation();
-  const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>(() =>
-    normalizeProviderDefaults(undefined),
+const ClaudeUsagePanel: React.FC<{ data: ClaudeCodeUsageData }> = ({
+  data,
+}) => {
+  const windowRows = CLAUDE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: ClaudeUsageWindowKey;
+      label: string;
+      window: ClaudeCodeUsageWindow;
+    } => Boolean(row.window),
   );
-  const [hasChanges, setHasChanges] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!defaults) return;
-    setLocalDefaults(normalizeProviderDefaults(defaults));
-    setHasChanges(false);
-    setSaveError(null);
-  }, [defaults]);
-
-  const capsDefaults = useMemo(
-    () => ({
-      chat: caps?.chat_default_model ?? "",
-      chat_model_2: caps?.chat_model_2 ?? "",
-      task_planner_agent_model: caps?.task_planner_agent_model ?? "",
-      chat_light: caps?.chat_light_model ?? "",
-      chat_thinking: caps?.chat_thinking_model ?? "",
-      chat_buddy: caps?.chat_buddy_model ?? "",
-      completion_model: caps?.completion_default_model ?? "",
-      embedding_model: caps?.embedding_model?.id ?? "",
-    }),
-    [caps],
-  );
-
-  const handleModelChange = useCallback(
-    (key: DefaultModelKey, model: string) => {
-      setLocalDefaults((prev) => updateDefaultModelValue(prev, key, model));
-      setHasChanges(true);
-      setSaveError(null);
-    },
-    [],
-  );
-
-  const handleSave = useCallback(async () => {
-    try {
-      await updateDefaults(localDefaults).unwrap();
-      setHasChanges(false);
-      setSaveError(null);
-      void refetch();
-      void refetchCaps();
-    } catch {
-      setSaveError("Failed to save default models.");
-    }
-  }, [localDefaults, refetch, refetchCaps, updateDefaults]);
-
-  if (isError) return null;
 
   return (
-    <Card size="2" className={styles.defaultsCard}>
-      <Flex direction="column" gap="3">
-        <Flex justify="between" align="center" gap="3">
-          <Flex direction="column" gap="1">
-            <Text size="2" weight="medium">
-              Global default models
-            </Text>
-            <Text size="1" color="gray">
-              These defaults apply across all providers. Enable provider models
-              above, then choose which model type each feature should use. Empty
-              slots stay unset.
-            </Text>
-          </Flex>
-          <Button
-            size="1"
-            variant="solid"
-            onClick={() => void handleSave()}
-            disabled={!hasChanges || isSaving || isLoading}
-          >
-            {isSaving ? "Saving..." : "Save"}
-          </Button>
-        </Flex>
-
-        {saveError && (
-          <Text size="1" color="red">
-            {saveError}
-          </Text>
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageTitle}>Usage</div>
+      <div className={styles.usageRows}>
+        {windowRows.length > 0 ? (
+          windowRows.map(({ key, label, window }) => (
+            <ClaudeWindowRow key={key} label={label} w={window} />
+          ))
+        ) : (
+          <div className={styles.usageMeta}>Quota windows not reported.</div>
         )}
+        {data.extra_usage ? (
+          <div className={styles.usageRow}>
+            <div className={styles.usageRowHeader}>
+              <span>Extra usage</span>
+              <span>{formatClaudeExtraUsage(data.extra_usage)}</span>
+            </div>
+            {typeof data.extra_usage.utilization === "number" ? (
+              <UsageBar pct={clampPercent(data.extra_usage.utilization)} />
+            ) : null}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>Extra usage not reported.</div>
+        )}
+      </div>
+    </Surface>
+  );
+};
 
-        <Flex direction="column" gap="3">
-          {DEFAULT_MODEL_FIELDS.map(({ key, label, description }) => (
-            <Flex key={key} direction="column" gap="1">
-              <Flex justify="between" align="baseline" gap="3">
-                <Text size="1" weight="medium">
-                  {label}
-                </Text>
-                <Text size="1" color="gray">
-                  {description}
-                </Text>
-              </Flex>
-              <ModelSelector
-                value={getDefaultModelValue(localDefaults, key)}
-                onValueChange={(model) => handleModelChange(key, model)}
-                defaultValue={capsDefaults[key]}
-                showLabel={false}
-                compact={false}
-                allowUnset
-                unsetLabel="None"
-                capability={getModelCapability(key)}
-                disabled={isLoading || isSaving}
+const RateLimitSection: React.FC<{
+  title: string;
+  rl: OpenAICodexRateLimit | null | undefined;
+}> = ({ title, rl }) => {
+  if (!rl) {
+    return <div className={styles.usageMeta}>{title}: not reported.</div>;
+  }
+
+  const hasWindows = Boolean(rl.primary_window ?? rl.secondary_window);
+
+  return (
+    <div className={styles.usageRow}>
+      <div className={styles.usageRowHeader}>
+        <span className={styles.usageLabelGroup}>
+          {title}
+          {rl.limit_reached ? <Badge tone="danger">Limit reached</Badge> : null}
+        </span>
+        <span>
+          {formatQuotaMeta([
+            `allowed ${formatNullableBool(rl.allowed)}`,
+            `limit reached ${formatNullableBool(rl.limit_reached)}`,
+          ])}
+        </span>
+      </div>
+      {rl.primary_window ? (
+        <CodexWindowRow
+          label={formatWindowLabel(
+            "Primary",
+            rl.primary_window.limit_window_seconds,
+          )}
+          w={rl.primary_window}
+          limitReached={rl.limit_reached}
+        />
+      ) : null}
+      {rl.secondary_window ? (
+        <CodexWindowRow
+          label={formatWindowLabel(
+            "Secondary",
+            rl.secondary_window.limit_window_seconds,
+          )}
+          w={rl.secondary_window}
+        />
+      ) : null}
+      {!hasWindows ? (
+        <div className={styles.usageMeta}>No active windows reported.</div>
+      ) : null}
+    </div>
+  );
+};
+
+const AdditionalRateLimitRow: React.FC<{
+  limit: OpenAICodexAdditionalRateLimit;
+}> = ({ limit }) => (
+  <div className={styles.usageRow}>
+    <div className={styles.usageRowHeader}>
+      <span>{limit.limit_name ?? "Additional quota"}</span>
+      {limit.metered_feature ? <span>{limit.metered_feature}</span> : null}
+    </div>
+    <RateLimitSection title="Quota" rl={limit.rate_limit} />
+  </div>
+);
+
+const formatRedeemCode = (code: string): string => {
+  switch (code) {
+    case "reset":
+      return "Usage reset.";
+    case "already_redeemed":
+      return "Already redeemed.";
+    case "nothing_to_reset":
+      return "Your usage does not need a reset right now.";
+    case "no_credit":
+      return "No rate-limit resets are available.";
+    default:
+      return "Reset request completed.";
+  }
+};
+
+const CodexUsagePanel: React.FC<{
+  data: OpenAICodexUsageData;
+  providerName: string;
+  onRedeemed: () => void;
+}> = ({ data, providerName, onRedeemed }) => {
+  const [redeem, { isLoading: isRedeeming }] =
+    useRedeemOpenAICodexResetCreditMutation();
+  const [redeemMessage, setRedeemMessage] = React.useState<string | null>(null);
+  const redeemRequestIdRef = React.useRef<string | null>(null);
+  const availableResets = data.rate_limit_reset_credits?.available_count;
+  const showResetCredits = typeof availableResets === "number";
+
+  const handleRedeem = async () => {
+    if (!redeemRequestIdRef.current) {
+      redeemRequestIdRef.current = uuidv4();
+    }
+    setRedeemMessage(null);
+    const response = await redeem({
+      providerName,
+      redeemRequestId: redeemRequestIdRef.current,
+      useInstanceRoute: true,
+    });
+    if ("error" in response) {
+      setRedeemMessage("Couldn't redeem reset. Please try again.");
+      return;
+    }
+    const payload = response.data;
+    if (payload.error != null || !payload.data) {
+      setRedeemMessage(
+        payload.error ?? "Couldn't redeem reset. Please try again.",
+      );
+      return;
+    }
+    // Idempotency key is reused on retry and only cleared after success.
+    redeemRequestIdRef.current = null;
+    setRedeemMessage(formatRedeemCode(payload.data.code));
+    onRedeemed();
+  };
+
+  return (
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageHeader}>
+        <div>
+          <div className={styles.usageTitle}>Usage</div>
+          {data.email ? (
+            <div className={styles.usageMeta}>{data.email}</div>
+          ) : null}
+        </div>
+        {data.plan_type ? <Badge tone="accent">{data.plan_type}</Badge> : null}
+      </div>
+      <div className={styles.usageRows}>
+        <RateLimitSection title="Main quota" rl={data.rate_limit} />
+        {data.rate_limit_reached_type ? (
+          <InfoRow label="Reached type" value={data.rate_limit_reached_type} />
+        ) : null}
+        {data.additional_rate_limits?.length ? (
+          <div className={styles.usageRow}>
+            <div className={styles.usageTitle}>Additional quotas</div>
+            {data.additional_rate_limits.map((limit, index) => (
+              <AdditionalRateLimitRow
+                key={`${limit.limit_name ?? "quota"}-${index}`}
+                limit={limit}
               />
-            </Flex>
-          ))}
-        </Flex>
-      </Flex>
-    </Card>
+            ))}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>
+            Additional quotas not reported.
+          </div>
+        )}
+        <RateLimitSection
+          title="Code review quota"
+          rl={data.code_review_rate_limit}
+        />
+        {data.credits ? (
+          <div className={styles.usageRow}>
+            <InfoRow
+              label="Credits"
+              value={formatCodexCreditsSummary(data.credits)}
+            />
+            {formatCodexCreditsDetails(data.credits) ? (
+              <div className={styles.usageMeta}>
+                {formatCodexCreditsDetails(data.credits)}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className={styles.usageMeta}>Credits not reported.</div>
+        )}
+        {showResetCredits ? (
+          <div className={styles.usageRow}>
+            <div className={styles.resetCreditsRow}>
+              <InfoRow
+                label="Reset credits"
+                value={`${availableResets} available`}
+              />
+              <Button
+                size="1"
+                variant="soft"
+                loading={isRedeeming}
+                disabled={isRedeeming || availableResets <= 0}
+                onClick={() => void handleRedeem()}
+              >
+                Redeem reset
+              </Button>
+            </div>
+            {redeemMessage ? (
+              <div className={styles.usageMeta}>{redeemMessage}</div>
+            ) : null}
+          </div>
+        ) : null}
+        {data.spend_control ? (
+          <InfoRow
+            label="Spend control"
+            value={formatCodexSpendControl(data.spend_control)}
+          />
+        ) : null}
+      </div>
+    </Surface>
   );
 };
 
@@ -365,26 +402,21 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
   const baseProvider = currentProvider.base_provider;
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
     { providerName: currentProvider.name, useInstanceRoute: true },
-    {
-      skip: baseProvider !== "openrouter",
-    },
+    { skip: baseProvider !== "openrouter" },
   );
   const { data: claudeUsage, isError: claudeUsageError } =
     useGetClaudeCodeUsageQuery(
       { providerName: currentProvider.name, useInstanceRoute: true },
-      {
-        skip: baseProvider !== "claude_code",
-        pollingInterval: 60_000,
-      },
+      { skip: baseProvider !== "claude_code", pollingInterval: 60_000 },
     );
-  const { data: codexUsage, isError: codexUsageError } =
-    useGetOpenAICodexUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      {
-        skip: baseProvider !== "openai_codex",
-        pollingInterval: 60_000,
-      },
-    );
+  const {
+    data: codexUsage,
+    isError: codexUsageError,
+    refetch: refetchCodexUsage,
+  } = useGetOpenAICodexUsageQuery(
+    { providerName: currentProvider.name, useInstanceRoute: true },
+    { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
+  );
   const {
     areShowingExtraFields,
     formValues,
@@ -409,205 +441,114 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
   const isReadonly = formValues.readonly;
 
   return (
-    <Flex
-      direction="column"
-      width="100%"
-      minHeight="100%"
-      mt="2"
-      pb="4"
-      gap="3"
-    >
-      <Flex align="center" gap="2">
-        <StatusBadge status={status} />
-        {baseProvider === "openrouter" && openRouterHealth && (
-          <Badge color={openRouterHealth.ok ? "green" : "red"} size="1">
-            {openRouterHealth.ok ? "Key OK" : "Key Error"}
-          </Badge>
-        )}
-        {parsedSchema.description && (
-          <Text size="1" color="gray" style={{ flex: 1 }}>
-            {parsedSchema.description.trim().split("\n")[0]}
-          </Text>
-        )}
-      </Flex>
+    <div className={styles.providerForm}>
+      <div className={styles.formSection}>
+        <div className={styles.statusRow}>
+          <StatusBadge status={status} />
+          {baseProvider === "openrouter" && openRouterHealth ? (
+            <Badge tone={openRouterHealth.ok ? "success" : "danger"}>
+              {openRouterHealth.ok ? "Key OK" : "Key Error"}
+            </Badge>
+          ) : null}
+          {parsedSchema.description ? (
+            <div className={styles.providerDescription}>
+              {parsedSchema.description.trim().split("\n")[0]}
+            </div>
+          ) : null}
+        </div>
 
-      {claudeUsage?.data && !claudeUsage.error && (
-        <Flex direction="column" gap="2">
-          <Text size="2" weight="medium">
-            Usage
-          </Text>
-          {claudeUsage.data.five_hour && (
-            <ClaudeWindowRow
-              label="Session (5 hour)"
-              w={claudeUsage.data.five_hour}
-            />
-          )}
-          {claudeUsage.data.seven_day && (
-            <ClaudeWindowRow label="Weekly" w={claudeUsage.data.seven_day} />
-          )}
-          {claudeUsage.data.extra_usage && (
-            <Flex direction="column" gap="1">
-              <Flex justify="between">
-                <Text size="1" color="gray">
-                  Extra usage
-                </Text>
-                <Text size="1" color="gray">
-                  {claudeUsage.data.extra_usage.is_enabled
-                    ? "enabled"
-                    : "disabled"}
-                  {" · "}${claudeUsage.data.extra_usage.used_credits.toFixed(2)}{" "}
-                  spent
-                  {typeof claudeUsage.data.extra_usage.monthly_limit ===
-                  "number"
-                    ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(
-                        0,
-                      )} limit`
-                    : " / unlimited"}
-                </Text>
-              </Flex>
-              {typeof claudeUsage.data.extra_usage.utilization === "number" && (
-                <UsageBar
-                  pct={Math.max(
-                    0,
-                    Math.min(claudeUsage.data.extra_usage.utilization, 100),
-                  )}
-                />
-              )}
-            </Flex>
-          )}
-        </Flex>
-      )}
-      {(claudeUsage?.error != null || claudeUsageError) && (
-        <Text size="1" color="gray">
-          Usage: {claudeUsage?.error ?? "Failed to load"}
-        </Text>
-      )}
+        {claudeUsage?.data && !claudeUsage.error ? (
+          <ClaudeUsagePanel data={claudeUsage.data} />
+        ) : null}
+        {claudeUsage?.error != null || claudeUsageError ? (
+          <div className={styles.defaultDescription}>
+            Usage: {claudeUsage?.error ?? "Failed to load"}
+          </div>
+        ) : null}
 
-      {codexUsage?.data && !codexUsage.error && (
-        <Flex direction="column" gap="2">
-          <Flex align="center" gap="2">
-            <Text size="2" weight="medium">
-              Usage
-            </Text>
-            {codexUsage.data.plan_type && (
-              <Badge color="blue" size="1">
-                {codexUsage.data.plan_type}
-              </Badge>
-            )}
-          </Flex>
-          {codexUsage.data.rate_limit && (
+        {codexUsage?.data && !codexUsage.error ? (
+          <CodexUsagePanel
+            data={codexUsage.data}
+            providerName={currentProvider.name}
+            onRedeemed={() => void refetchCodexUsage()}
+          />
+        ) : null}
+        {codexUsage?.error != null || codexUsageError ? (
+          <div className={styles.defaultDescription}>
+            Usage: {codexUsage?.error ?? "Failed to load"}
+          </div>
+        ) : null}
+
+        <div className={styles.formSection}>
+          {hasOAuth ? (
             <>
-              {codexUsage.data.rate_limit.primary_window && (
-                <CodexWindowRow
-                  label="Session (5 hour)"
-                  w={codexUsage.data.rate_limit.primary_window}
-                  limitReached={codexUsage.data.rate_limit.limit_reached}
-                />
-              )}
-              {codexUsage.data.rate_limit.secondary_window && (
-                <CodexWindowRow
-                  label="Weekly"
-                  w={codexUsage.data.rate_limit.secondary_window}
-                />
-              )}
+              <ProviderOAuth
+                providerName={currentProvider.name}
+                baseProvider={baseProvider}
+                oauthConnected={Boolean(
+                  "oauth_connected" in formValues && formValues.oauth_connected,
+                )}
+                authStatus={
+                  "auth_status" in formValues
+                    ? String(formValues.auth_status)
+                    : ""
+                }
+              />
             </>
-          )}
-          {codexUsage.data.code_review_rate_limit?.primary_window && (
-            <CodexWindowRow
-              label="Code review (weekly)"
-              w={codexUsage.data.code_review_rate_limit.primary_window}
-              limitReached={
-                codexUsage.data.code_review_rate_limit.limit_reached
-              }
-            />
-          )}
-          {codexUsage.data.credits && (
-            <Text size="1" color="gray">
-              Credits:{" "}
-              {codexUsage.data.credits.unlimited
-                ? "unlimited"
-                : codexUsage.data.credits.has_credits
-                  ? `${codexUsage.data.credits.balance} remaining`
-                  : "none"}
-            </Text>
-          )}
-        </Flex>
-      )}
-      {(codexUsage?.error != null || codexUsageError) && (
-        <Text size="1" color="gray">
-          Usage: {codexUsage?.error ?? "Failed to load"}
-        </Text>
-      )}
+          ) : null}
 
-      <Flex direction="column" width="100%" gap="3">
-        {hasOAuth && (
-          <>
-            <ProviderOAuth
-              providerName={currentProvider.name}
-              baseProvider={baseProvider}
-              oauthConnected={Boolean(
-                "oauth_connected" in formValues && formValues.oauth_connected,
-              )}
-              authStatus={
-                "auth_status" in formValues
-                  ? String(formValues.auth_status)
-                  : ""
-              }
-            />
-            {importantFields.length > 0 && <Separator size="4" />}
-          </>
-        )}
+          <div className={`${styles.formFields} rf-stagger`}>
+            {importantFields.map((field) => (
+              <div key={field.key} className="rf-enter-rise">
+                <SchemaField
+                  field={field}
+                  value={formValues[field.key]}
+                  disabled={isReadonly}
+                  onSave={handleFieldSave}
+                />
+              </div>
+            ))}
+          </div>
 
-        <Flex direction="column" gap="3">
-          {importantFields.map((field) => (
-            <SchemaField
-              key={field.key}
-              field={field}
-              value={formValues[field.key]}
-              disabled={isReadonly}
-              onSave={handleFieldSave}
-            />
-          ))}
-        </Flex>
+          {extraFields.length > 0 ? (
+            <>
+              <div className={styles.advancedToggleWrap}>
+                <Button
+                  className={styles.extraButton}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setAreShowingExtraFields((prev) => !prev)}
+                >
+                  {areShowingExtraFields ? "Hide" : "Show"} advanced fields
+                </Button>
+              </div>
 
-        {extraFields.length > 0 && (
-          <>
-            <Flex align="center" justify="center">
-              <Button
-                className={styles.extraButton}
-                variant="ghost"
-                color="gray"
-                size="1"
-                onClick={() => setAreShowingExtraFields((prev) => !prev)}
-              >
-                {areShowingExtraFields ? "Hide" : "Show"} advanced fields
-              </Button>
-            </Flex>
+              {areShowingExtraFields ? (
+                <div className={`${styles.formFields} rf-stagger`}>
+                  {extraFields.map((field) => (
+                    <div key={field.key} className="rf-enter-rise">
+                      <SchemaField
+                        field={field}
+                        value={formValues[field.key]}
+                        disabled={isReadonly}
+                        onSave={handleFieldSave}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
 
-            {areShowingExtraFields && (
-              <Flex direction="column" gap="3">
-                {extraFields.map((field) => (
-                  <SchemaField
-                    key={field.key}
-                    field={field}
-                    value={formValues[field.key]}
-                    disabled={isReadonly}
-                    onSave={handleFieldSave}
-                  />
-                ))}
-              </Flex>
-            )}
-          </>
-        )}
-      </Flex>
+        {hasCredentials ? (
+          <ProviderModelsList provider={currentProvider} />
+        ) : null}
 
-      {hasCredentials && <ProviderModelsList provider={currentProvider} />}
-
-      {hasCredentials && baseProvider === "custom" && detailedProvider && (
-        <RoleSeparatedModelConfig provider={detailedProvider} />
-      )}
-
-      {hasCredentials && <ProviderDefaultModelsSetup />}
-    </Flex>
+        {hasCredentials && baseProvider === "custom" && detailedProvider ? (
+          <RoleSeparatedModelConfig provider={detailedProvider} />
+        ) : null}
+      </div>
+    </div>
   );
 };

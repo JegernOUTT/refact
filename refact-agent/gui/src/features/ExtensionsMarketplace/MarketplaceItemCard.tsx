@@ -1,6 +1,7 @@
 import React from "react";
-import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
-import { CheckIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { Check, ExternalLink } from "lucide-react";
+import { Badge, Button, Card as KitCard, Icon } from "../../components/ui";
 import type { ExtensionMarketplaceItem } from "../../services/refact/extensionsMarketplace";
 import styles from "./ExtensionsMarketplace.module.css";
 
@@ -16,83 +17,92 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
   onInstall,
 }) => {
   return (
-    <Box className={styles.card}>
-      <Flex direction="column" gap="2" height="100%">
-        <Flex align="center" gap="2">
-          <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
-            <Text size="2" weight="bold" truncate>
-              {item.name}
-            </Text>
-            <Text size="1" color="gray" truncate>
-              {item.publisher}
-            </Text>
-          </Flex>
-          <Badge color="blue" variant="soft" size="1">
-            {item.kind}
-          </Badge>
-        </Flex>
+    <KitCard
+      interactive
+      className={classNames(
+        styles.card,
+        "rf-glass-panel",
+        isInstalling && styles.cardInstalling,
+      )}
+    >
+      <div className={styles.cardColumn}>
+        <div className={styles.cardBody}>
+          <div className={styles.cardMeta}>
+            <div className={styles.cardTitle}>
+              <p className={classNames(styles.text, styles.truncate)}>
+                {item.name}
+              </p>
+              <p className={classNames(styles.smallText, styles.truncate)}>
+                {item.publisher}
+              </p>
+            </div>
+            <Badge tone="accent" className={styles.neutralBadge}>
+              {item.kind}
+            </Badge>
+          </div>
 
-        <Text size="1" color="gray" className={styles.description}>
-          {item.description || "No description"}
-        </Text>
+          <p className={styles.description}>
+            {item.description || "No description"}
+          </p>
 
-        {item.body_preview && (
-          <Text size="1" color="gray" className={styles.bodyPreview}>
-            {item.body_preview}
-          </Text>
-        )}
-
-        {item.tags.length > 0 && (
-          <Flex gap="1" wrap="wrap">
-            {item.tags.slice(0, 4).map((tag) => (
-              <Badge key={tag} variant="soft" color="gray" size="1">
-                {tag}
-              </Badge>
-            ))}
-          </Flex>
-        )}
-
-        <Flex gap="2" mt="auto" align="center" wrap="wrap">
-          <Badge
-            color="gray"
-            variant="soft"
-            size="1"
-            className={styles.sourceBadge}
-          >
-            {item.source_label}
-          </Badge>
-          {item.installed_scopes.length > 0 && (
-            <Flex align="center" gap="1">
-              <CheckIcon color="var(--green-9)" />
-              <Text size="1" color="green">
-                Installed: {item.installed_scopes.join(", ")}
-              </Text>
-            </Flex>
+          {item.body_preview && (
+            <p className={styles.bodyPreview}>{item.body_preview}</p>
           )}
-        </Flex>
 
-        <Flex gap="2" mt="2" align="center">
-          <Button
-            size="1"
-            onClick={() => onInstall(item)}
-            disabled={isInstalling}
-            style={{ flex: 1 }}
-          >
-            {isInstalling ? "Installing…" : "Install"}
-          </Button>
-          {item.homepage && (
+          {item.tags.length > 0 && (
+            <div className={styles.filterRow}>
+              {item.tags.slice(0, 4).map((tag) => (
+                <Badge key={tag} tone="muted">
+                  {tag}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className={styles.cardFooterGroup}>
+          <div className={styles.cardFooter}>
+            <Badge tone="muted" className={styles.sourceBadge}>
+              {item.source_label}
+            </Badge>
+            {item.installed_scopes.length > 0 && (
+              <span
+                className={classNames(styles.cardActionRow, styles.successText)}
+              >
+                <Icon icon={Check} size="sm" tone="success" />
+                <span className={styles.smallText}>
+                  Installed: {item.installed_scopes.join(", ")}
+                </span>
+              </span>
+            )}
+          </div>
+
+          <div className={styles.cardActionRow}>
             <Button
-              size="1"
-              variant="ghost"
-              onClick={() =>
-                window.open(item.homepage, "_blank", "noopener,noreferrer")
-              }
+              size="sm"
+              variant="primary"
+              onClick={() => onInstall(item)}
+              disabled={isInstalling}
+              loading={isInstalling}
+              className={styles.grow}
             >
-              <ExternalLinkIcon />
+              {isInstalling ? "Installing…" : "Install"}
             </Button>
-          )}
-        </Flex>
-      </Flex>
-    </Box>
+            {item.homepage && (
+              <Button
+                size="sm"
+                variant="ghost"
+                rightIcon={ExternalLink}
+                onClick={() =>
+                  window.open(item.homepage, "_blank", "noopener,noreferrer")
+                }
+              >
+                Source
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </KitCard>
   );
 };

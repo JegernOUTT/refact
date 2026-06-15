@@ -1,5 +1,5 @@
+import { BookOpen, MessageCircle, Pencil } from "lucide-react";
 import React, { useMemo } from "react";
-import { ReaderIcon, ChatBubbleIcon, Pencil2Icon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -32,6 +32,14 @@ interface KnowledgeToolProps {
   toolCall: ToolCall;
   toolType: KnowledgeToolType;
   contextFiles?: ChatContextFile[];
+}
+
+const MAX_TITLE_PREVIEW_CHARS = 80;
+
+function titlePreview(text: string): string {
+  const firstLine = text.split("\n", 1)[0].trim();
+  if (firstLine.length <= MAX_TITLE_PREVIEW_CHARS) return firstLine;
+  return `${firstLine.slice(0, MAX_TITLE_PREVIEW_CHARS)}…`;
 }
 
 export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
@@ -90,7 +98,7 @@ export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
 
     if (toolType === "create_knowledge") {
       const createArgs = args as CreateKnowledgeArgs;
-      const preview = createArgs.content ?? "memory";
+      const preview = titlePreview(createArgs.content ?? "memory");
       return (
         <>
           Remember <span className={styles.query}>&quot;{preview}&quot;</span>
@@ -110,11 +118,11 @@ export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
 
   const icon =
     toolType === "create_knowledge" ? (
-      <Pencil2Icon />
+      <Pencil />
     ) : toolType === "knowledge" ? (
-      <ReaderIcon />
+      <BookOpen />
     ) : (
-      <ChatBubbleIcon />
+      <MessageCircle />
     );
 
   return (

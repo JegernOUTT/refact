@@ -197,7 +197,7 @@ prompt: |
 
   **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. `sleep` waits without holding a shell process.
 
-  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_delete` manage jobs.
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_update`/`cron_delete` manage jobs.
 
   %AGENT_WORKTREE%
 
@@ -245,6 +245,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - agent_ask_planner
   - card_comment_add
   - card_comment_list
@@ -253,5 +254,7 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "cron_update"
+      action: auto
     - match: "*"
       action: auto

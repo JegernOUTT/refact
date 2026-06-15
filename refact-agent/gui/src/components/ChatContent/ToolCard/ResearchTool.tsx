@@ -1,5 +1,5 @@
+import { BookOpen } from "lucide-react";
 import React, { useMemo } from "react";
-import { ReaderIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard } from "./ReportToolCard";
 
@@ -26,8 +26,9 @@ export const ResearchTool: React.FC<ResearchToolProps> = ({ toolCall }) => {
   return (
     <ReportToolCard
       toolCall={toolCall}
-      icon={<ReaderIcon />}
+      icon={<BookOpen />}
       defaultSummary={summary}
+      unboundedContent
     />
   );
 };

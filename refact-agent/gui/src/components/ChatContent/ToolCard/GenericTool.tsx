@@ -1,5 +1,5 @@
+import { Settings } from "lucide-react";
 import React, { useMemo } from "react";
-import { GearIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -25,14 +25,29 @@ function formatArgs(argsStr: string): string {
     const entries = Object.entries(args);
     if (entries.length === 0) return "";
     return entries
-      .map(([k, v]) => {
-        const valueStr = typeof v === "string" ? v : JSON.stringify(v);
-        return `${k}=${valueStr}`;
+      .map(([key, value]) => {
+        const valueStr =
+          typeof value === "string" ? value : JSON.stringify(value);
+        return [key, valueStr].join("=");
       })
       .join(", ");
   } catch {
     return argsStr;
   }
+}
+
+function formatRawArgs(argsStr: string): string {
+  try {
+    return JSON.stringify(JSON.parse(argsStr) as unknown, null, 2);
+  } catch {
+    return argsStr;
+  }
+}
+
+function truncatePreview(text: string, maxLength = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return normalized.slice(0, maxLength - 1).concat("…");
 }
 
 function looksLikeMarkdown(text: string): boolean {
@@ -76,7 +91,11 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
       : null;
 
   const toolName = toolCall.function.name ?? "tool";
-  const argsPreview = formatArgs(toolCall.function.arguments);
+  const argsPreview = truncatePreview(formatArgs(toolCall.function.arguments));
+  const rawArgs = useMemo(
+    () => formatRawArgs(toolCall.function.arguments),
+    [toolCall.function.arguments],
+  );
 
   const summary = useMemo(() => {
     const displayName = formatToolDisplayName(toolName);
@@ -97,22 +116,34 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     <>
       <span data-testid="generic-tool" hidden />
       <ToolCard
-        icon={<GearIcon />}
+        icon={<Settings />}
         summary={summary}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        {content && (
+        <Box className={styles.section}>
+          <Box className={styles.sectionLabel}>Arguments</Box>
           <Box className={styles.resultContent}>
-            {shouldRenderMarkdown ? (
-              <Box className={styles.markdownContent}>
-                <Markdown>{content}</Markdown>
-              </Box>
-            ) : (
-              <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-            )}
+            <ShikiCodeBlock showLineNumbers={false}>{rawArgs}</ShikiCodeBlock>
+          </Box>
+        </Box>
+
+        {content && (
+          <Box className={styles.section}>
+            <Box className={styles.sectionLabel}>Result</Box>
+            <Box className={styles.resultContent}>
+              {shouldRenderMarkdown ? (
+                <Box className={styles.markdownContent}>
+                  <Markdown>{content}</Markdown>
+                </Box>
+              ) : (
+                <ShikiCodeBlock showLineNumbers={false}>
+                  {content}
+                </ShikiCodeBlock>
+              )}
+            </Box>
           </Box>
         )}
       </ToolCard>

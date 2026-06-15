@@ -1,15 +1,10 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Box } from "@radix-ui/themes";
-import {
-  LightningBoltIcon,
-  CopyIcon,
-  CheckIcon,
-  FileTextIcon,
-} from "@radix-ui/react-icons";
+import { Check, Copy, FileText, Zap } from "lucide-react";
 import classNames from "classnames";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { useDelayedUnmount } from "../shared/useDelayedUnmount";
+import { Icon } from "../ui";
 import { useStoredOpen } from "./useStoredOpen";
+import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../hooks";
 import { isIdeHost } from "../../utils/isIdeHost";
@@ -43,13 +38,7 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
   const copyToClipboard = useCopyToClipboard();
   const { newFile } = useEventsBusForIDE();
   const [copied, setCopied] = useState(false);
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const [animateContent, setAnimateContent] = useState(false);
-
-  const handleAnimatedToggle = useCallback(() => {
-    setAnimateContent(true);
-    handleToggle();
-  }, [handleToggle]);
+  const [isOpen, , setIsOpen] = useStoredOpen(storeKey, true);
 
   const handleCopy = useCallback(
     (e: React.MouseEvent) => {
@@ -73,79 +62,65 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
     [report, newFile],
   );
 
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen && !!report,
-    200,
-    animateContent,
-  );
-
   const showSaveButton = isIdeHost();
   const shouldRenderMarkdown =
     report.length <= MAX_MD_RENDER_CHARS && looksLikeMarkdown(report);
 
   return (
-    <div className={classNames(styles.card, styles.variantSkillReport)}>
-      <Flex
-        className={styles.header}
-        align="center"
-        gap="2"
-        onClick={handleAnimatedToggle}
-      >
-        <span className={styles.icon}>
-          <LightningBoltIcon />
-        </span>
-        <Text size="1" className={styles.summary}>
-          Skill report: {skillName}
-        </Text>
-        {report && (
+    <AnimatedCollapsible
+      actions={
+        report ? (
           <span className={styles.actions}>
             <button
+              aria-label="Copy report"
               className={classNames(
                 styles.actionButton,
                 copied && styles.copiedButton,
               )}
               onClick={handleCopy}
               title="Copy report"
+              type="button"
             >
-              {copied ? <CheckIcon /> : <CopyIcon />}
+              <Icon
+                icon={copied ? Check : Copy}
+                size="sm"
+                tone={copied ? "success" : "muted"}
+              />
             </button>
             {showSaveButton && (
               <button
+                aria-label="Save as file"
                 className={styles.actionButton}
                 onClick={handleSave}
                 title="Save as file"
+                type="button"
               >
-                <FileTextIcon />
+                <Icon icon={FileText} size="sm" tone="muted" />
               </button>
             )}
           </span>
-        )}
-      </Flex>
-
-      {shouldRender && report && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-            !animateContent && styles.noTransition,
+        ) : undefined
+      }
+      className={classNames(styles.card, styles.variantSkillReport)}
+      header={<span className={styles.summary}>Skill report: {skillName}</span>}
+      icon={<Icon icon={Zap} size="sm" tone="accent" />}
+      onOpenChange={setIsOpen}
+      open={isOpen}
+      status="success"
+      variant="compact"
+    >
+      {report && (
+        <div className={styles.content}>
+          {shouldRenderMarkdown ? (
+            <div className={styles.markdown}>
+              <Markdown>{report}</Markdown>
+            </div>
+          ) : (
+            <ShikiCodeBlock showLineNumbers={false}>{report}</ShikiCodeBlock>
           )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              {shouldRenderMarkdown ? (
-                <Text size="2">
-                  <Markdown>{report}</Markdown>
-                </Text>
-              ) : (
-                <ShikiCodeBlock showLineNumbers={false}>
-                  {report}
-                </ShikiCodeBlock>
-              )}
-            </Box>
-          </div>
         </div>
       )}
-    </div>
+    </AnimatedCollapsible>
   );
 };
 

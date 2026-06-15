@@ -1,0 +1,144 @@
+.panel {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--rf-panel-pad);
+}
+
+.filter {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 320px;
+  overflow: hidden;
+}
+
+.scrollList {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.listRow {
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  gap: var(--rf-row-gap);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-row-pad);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.listRow[data-clickable] {
+  cursor: pointer;
+}
+
+.listRow:hover,
+.listRow:focus-visible {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+  outline: none;
+}
+
+.listRow[data-clickable]:active {
+  transform: translateY(1px);
+}
+
+.listIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.listContent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.listTitle,
+.listSubtitle,
+.listMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  max-width: 100%;
+  color: var(--rf-color-fg);
+  font-size: 12px;
+}
+
+.listSubtitle,
+.listMeta,
+.emptyText {
+  color: var(--rf-color-muted);
+  font-size: 11px;
+}
+
+.listMeta {
+  flex: 0 0 auto;
+  font-size: 10px;
+  max-width: 100%;
+}
+
+.emptyText {
+  padding: var(--rf-space-2) var(--rf-space-1);
+}
+
+@media (max-width: 720px) {
+  .panel {
+    padding: var(--rf-panel-pad-compact);
+  }
+}
+
+@media (max-width: 520px) {
+  .filter {
+    max-width: 100%;
+  }
+
+  .listRow {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .listMeta {
+    flex: 1 1 auto;
+    margin-left: 0;
+    padding-left: calc(var(--rf-icon-lg) + var(--rf-space-2));
+  }
+}

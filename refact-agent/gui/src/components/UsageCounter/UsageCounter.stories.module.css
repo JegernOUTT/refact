@@ -1,0 +1,7 @@
+.frame {
+  display: flex;
+  width: 50dvw;
+  height: 100dvh;
+  align-items: center;
+  justify-content: center;
+}

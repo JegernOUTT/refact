@@ -1,10 +1,10 @@
 .skillCard {
-  border-left: 2px solid var(--accent-6);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-accent);
+  padding-left: var(--rf-space-2);
 }
 
 .skillText {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .skillName {
@@ -12,5 +12,5 @@
 }
 
 .body {
-  padding: var(--space-2) 0;
+  padding: var(--rf-space-2) 0;
 }

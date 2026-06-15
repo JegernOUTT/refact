@@ -33,6 +33,9 @@ const VALID_SETUP_MODES: &[&str] = &[
     "setup_commands",
     "setup_agents_md",
     "setup_subagents",
+    "setup_modes",
+    "setup_hooks",
+    "setup_knowledge",
 ];
 
 pub struct ToolBuddySay {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -31,11 +31,18 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
 use crate::privacy::PrivacySettings;
 use crate::background_tasks::BackgroundTasksHolder;
+use crate::ext::hooks_runner::HooksConfig;
 use crate::scheduler::SchedulerConfig;
 use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
 use crate::knowledge_index::KnowledgeIndex;
 use refact_context_api::{HttpClientAccess, PathsAccess, ShutdownAccess};
+
+fn daemon_auth_token_from_env() -> Option<String> {
+    std::env::var("REFACT_DAEMON_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+}
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct CommandLine {
@@ -196,18 +203,42 @@ pub struct CommandLine {
     pub privacy_yaml: String,
     #[structopt(long, help = "Disable the scheduler runner and cron scheduling tools.")]
     pub no_scheduler: bool,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon endpoint for managed workers."
+    )]
+    pub daemon_endpoint: String,
+    #[structopt(skip = daemon_auth_token_from_env())]
+    pub daemon_auth_token: Option<String>,
+    #[structopt(
+        long,
+        default_value = "",
+        help = "Daemon project id for managed workers."
+    )]
+    pub project_id: String,
+}
+
+impl CommandLine {
+    fn with_daemon_auth_token_from_env(mut self) -> Self {
+        self.daemon_auth_token = self.daemon_auth_token.or_else(daemon_auth_token_from_env);
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct EngineGlobalConfig {
     #[serde(default)]
     scheduler: SchedulerConfig,
+    #[serde(default)]
+    hooks: HooksConfig,
 }
 
 impl Default for EngineGlobalConfig {
     fn default() -> Self {
         Self {
             scheduler: SchedulerConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -243,6 +274,7 @@ impl AtCommandsPreviewCache {
 
 pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
+    pub lsp_tcp_client_count: Arc<AtomicUsize>,
     pub exec_registry: Arc<ExecRegistry>,
     pub cmdline: CommandLine,
     pub http_client: reqwest::Client,
@@ -289,6 +321,7 @@ pub struct GlobalContext {
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
     pub scheduler_config: SchedulerConfig,
+    pub hooks_config: HooksConfig,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -379,7 +412,10 @@ impl GlobalContext {
     }
 }
 
-async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) -> SchedulerConfig {
+async fn load_engine_global_config(
+    config_dir: &PathBuf,
+    cmdline: &CommandLine,
+) -> (SchedulerConfig, HooksConfig) {
     let path = if cmdline.privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
     } else {
@@ -389,7 +425,7 @@ async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) 
         Ok(content) => {
             serde_yaml::from_str::<EngineGlobalConfig>(&content).unwrap_or_else(|error| {
                 tracing::warn!(
-                    "failed to parse scheduler config from {}: {error}",
+                    "failed to parse engine global config from {}: {error}",
                     path.display()
                 );
                 EngineGlobalConfig::default()
@@ -397,15 +433,16 @@ async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) 
         }
         Err(error) => {
             tracing::warn!(
-                "failed to read scheduler config from {}: {error}",
+                "failed to read engine global config from {}: {error}",
                 path.display()
             );
             EngineGlobalConfig::default()
         }
     };
-    config
+    let scheduler = config
         .scheduler
-        .with_startup_overrides(cmdline.no_scheduler)
+        .with_startup_overrides(cmdline.no_scheduler);
+    (scheduler, config.hooks)
 }
 
 impl ShutdownAccess for GlobalContext {
@@ -678,19 +715,16 @@ fn build_shared_http_client_builder() -> reqwest::ClientBuilder {
 pub async fn create_global_context(
     cache_dir: PathBuf,
     config_dir: PathBuf,
-) -> (
-    Arc<GlobalContext>,
-    std::sync::mpsc::Receiver<String>,
-    CommandLine,
-) {
-    let cmdline = CommandLine::from_args();
+    cmdline: CommandLine,
+) -> (Arc<GlobalContext>, std::sync::mpsc::Receiver<String>) {
     let (ask_shutdown_sender, ask_shutdown_receiver) = std::sync::mpsc::channel::<String>();
+    let cmdline = cmdline.with_daemon_auth_token_from_env();
     let mut http_client_builder = build_shared_http_client_builder();
     if cmdline.insecure {
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
     }
     let http_client = http_client_builder.build().unwrap();
-    let scheduler_config = load_engine_global_config(&config_dir, &cmdline).await;
+    let (scheduler_config, hooks_config) = load_engine_global_config(&config_dir, &cmdline).await;
 
     let mut workspace_dirs: Vec<PathBuf> = vec![];
     if !cmdline.workspace_folder.is_empty() {
@@ -712,6 +746,7 @@ pub async fn create_global_context(
         .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
+        lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
         exec_registry: Arc::new(ExecRegistry::new()),
         cmdline: cmdline.clone(),
         http_client: http_client.clone(),
@@ -768,18 +803,37 @@ pub async fn create_global_context(
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
         scheduler_config,
+        hooks_config,
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     crate::chat::start_session_cleanup_task(app_state);
     crate::chat::start_trajectory_watcher(gcx.clone());
-    (gcx, ask_shutdown_receiver, cmdline)
+    (gcx, ask_shutdown_receiver)
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn test_engine_global_config_parses_trusted_projects() {
+        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\n";
+        let cfg: EngineGlobalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.hooks.trusted_projects,
+            vec!["/home/me/repo".to_string()]
+        );
+        assert!(cfg.scheduler.enabled);
+    }
+
+    #[test]
+    fn test_engine_global_config_hooks_default_empty() {
+        let cfg: EngineGlobalConfig =
+            serde_yaml::from_str("scheduler:\n  enabled: true\n").unwrap();
+        assert!(cfg.hooks.trusted_projects.is_empty());
+    }
 
     #[tokio::test]
     async fn app_state_from_test_gcx_clones() {
@@ -907,6 +961,9 @@ pub mod tests {
             indexing_yaml: String::new(),
             privacy_yaml: String::new(),
             no_scheduler: false,
+            daemon_endpoint: String::new(),
+            daemon_auth_token: None,
+            project_id: String::new(),
         };
 
         let http_client = build_shared_http_client_builder()
@@ -916,6 +973,7 @@ pub mod tests {
 
         let cx = GlobalContext {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
             cmdline,
             http_client,
@@ -968,6 +1026,7 @@ pub mod tests {
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,
             scheduler_config: SchedulerConfig::default(),
+            hooks_config: HooksConfig::default(),
         };
         Arc::new(cx)
     }

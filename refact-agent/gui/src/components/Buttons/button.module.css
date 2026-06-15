@@ -1,26 +1,24 @@
 .rightButton {
   position: absolute;
-  /* right: 20px; */
-  right: var(--space-3);
-  min-width: 50px;
+  right: var(--rf-space-3);
+  min-width: calc(var(--rf-control-h) * 2);
 }
 
 .error {
-  color: var(--red-9);
-  font-size: 0.875rem;
-  margin-top: 0.5rem;
+  margin-top: var(--rf-space-2);
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-2);
 }
 
 .rightButtonGroup {
   position: absolute;
-  /* right: 10px; */
-  right: var(--space-1);
+  right: var(--rf-space-1);
 }
 
 .button_faded {
-  mask-image: linear-gradient(
-    to top,
-    var(--color-background) 50%,
-    transparent 100%
-  );
+  mask-image: linear-gradient(to top, var(--rf-color-bg) 50%, transparent 100%);
+}
+
+.flipIcon svg {
+  transform: scaleX(-1);
 }

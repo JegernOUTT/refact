@@ -1,0 +1,86 @@
+.item {
+  --rf-setting-item-control-max: 360px;
+
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--rf-row-gap);
+  padding: var(--rf-row-pad) 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.row {
+  grid-template-columns: minmax(0, 1fr) minmax(
+      0,
+      var(--rf-setting-item-control-max)
+    );
+  align-items: center;
+  column-gap: var(--rf-space-4);
+}
+
+.stack {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.copy,
+.control {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--rf-space-1);
+}
+
+.control {
+  --rf-input-max: var(--rf-setting-item-control-max);
+
+  width: 100%;
+  max-width: var(--rf-setting-item-control-max);
+  justify-self: end;
+  justify-items: end;
+}
+
+.stack .control {
+  --rf-input-max: 100%;
+
+  max-width: 100%;
+  justify-self: stretch;
+  justify-items: stretch;
+}
+
+.titleRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-row-gap);
+}
+
+.title {
+  min-width: 0;
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (width <= 640px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .control {
+    --rf-input-max: 100%;
+
+    max-width: 100%;
+    justify-self: stretch;
+    justify-items: stretch;
+  }
+}

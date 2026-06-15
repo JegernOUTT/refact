@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Tooltip } from "@radix-ui/themes";
-import { CopyIcon, ChatBubbleIcon } from "@radix-ui/react-icons";
+import { MessageCircle, Copy } from "lucide-react";
 import { addInputValue } from "../ChatForm/actions";
+import { Icon, IconButton, Tooltip } from "../ui";
 import styles from "./SelectionToolbar.module.css";
 
 type ToolbarState = {
@@ -105,18 +105,33 @@ export const SelectionToolbar: React.FC = () => {
   return (
     <div
       data-selection-toolbar=""
-      className={styles.toolbar}
+      className={`${styles.toolbar} rf-enter-rise`}
       style={{ top: state.top, left: state.left }}
     >
-      <Tooltip content="Copy">
-        <div className={styles.item} onClick={onCopy}>
-          <CopyIcon />
-        </div>
+      <Tooltip delayDuration={150}>
+        <Tooltip.Trigger asChild>
+          <IconButton
+            aria-label="Copy"
+            className={styles.item}
+            icon={Copy}
+            onClick={onCopy}
+            size="sm"
+            variant="plain"
+          />
+        </Tooltip.Trigger>
+        <Tooltip.Content>Copy</Tooltip.Content>
       </Tooltip>
-      <Tooltip content="Reply with quote">
-        <div className={styles.item} onClick={onReply}>
-          <ChatBubbleIcon />
-        </div>
+      <Tooltip delayDuration={150}>
+        <Tooltip.Trigger asChild>
+          <button
+            className={`${styles.item} rf-pressable`}
+            onClick={onReply}
+            type="button"
+          >
+            <Icon icon={MessageCircle} size="sm" tone="muted" />
+          </button>
+        </Tooltip.Trigger>
+        <Tooltip.Content>Reply with quote</Tooltip.Content>
       </Tooltip>
     </div>
   );

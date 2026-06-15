@@ -1,18 +1,11 @@
-import React, { FC, useEffect, useState, useMemo, useCallback } from "react";
-import {
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-} from "@tanstack/react-table";
-import type { ColumnDef } from "@tanstack/react-table";
-import { Button, Flex, Table } from "@radix-ui/themes";
-import { PlusIcon } from "@radix-ui/react-icons";
-import { DefaultCell } from "./DefaultCell";
+import { FC, useCallback, useEffect, useMemo, useState } from "react";
+import isEqual from "lodash.isequal";
 
-import styles from "./ConfirmationTable.module.css";
+import { EditableTable } from "../../ui";
 import { debugIntegrations } from "../../../debugConfig";
 import { MCPEnvs } from "../../../services/refact";
-import isEqual from "lodash.isequal";
+
+import styles from "./IntegrationTables.module.css";
 
 type KeyValueTableProps = {
   initialData: Record<string, string>;
@@ -22,11 +15,14 @@ type KeyValueTableProps = {
 };
 
 type KeyValueRow = {
+  id: string;
   key: string;
   value: string;
   originalKey: string;
   order: number;
 };
+
+let keyValueRowId = 0;
 
 export const KeyValueTable: FC<KeyValueTableProps> = ({
   initialData,
@@ -37,271 +33,155 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
   const [nextOrder, setNextOrder] = useState(
     () => Object.keys(initialData).length,
   );
-
-  const [data, setData] = useState<MCPEnvs>(() => initialData);
+  const [rows, setRows] = useState<KeyValueRow[]>(() => makeRows(initialData));
   const [previousData, setPreviousData] = useState<MCPEnvs>(() => initialData);
   const [previousInitialData, setPreviousInitialData] =
     useState<Record<string, string>>(initialData);
 
-  const [keyOrders, setKeyOrders] = useState<Record<string, number>>(() => {
-    const orders: Record<string, number> = {};
-    Object.keys(initialData).forEach((key, index) => {
-      orders[key] = index;
-    });
-    return orders;
-  });
+  const tableData = useMemo(
+    () => [...rows].sort((a, b) => a.order - b.order),
+    [rows],
+  );
 
-  const isDataChanged = useMemo(() => {
-    return !isEqual(previousData, data);
-  }, [previousData, data]);
+  const duplicateKeys = useMemo(
+    () => findDuplicateKeys(tableData),
+    [tableData],
+  );
+
+  const emittedData = useMemo(
+    () => (duplicateKeys.size === 0 ? rowsToData(tableData) : null),
+    [duplicateKeys, tableData],
+  );
 
   const updateData = useCallback(() => {
-    setPreviousData(data);
-    onChange(data);
-  }, [data, onChange]);
+    if (!emittedData || isEqual(previousData, emittedData)) {
+      return;
+    }
 
-  // Sync with initialData when it changes from parent
+    setPreviousData(emittedData);
+    onChange(emittedData);
+  }, [emittedData, onChange, previousData]);
+
   useEffect(() => {
     if (!isEqual(previousInitialData, initialData)) {
       setPreviousInitialData(initialData);
-      setData(initialData);
+      setRows(makeRows(initialData));
       setPreviousData(initialData);
-
-      // Update key orders for new data
-      const orders: Record<string, number> = {};
-      Object.keys(initialData).forEach((key, index) => {
-        orders[key] = index;
-      });
-      setKeyOrders(orders);
       setNextOrder(Object.keys(initialData).length);
     }
   }, [initialData, previousInitialData]);
 
-  // Only call onChange if data has actually changed
   useEffect(() => {
-    if (isDataChanged) {
-      updateData();
-    }
-  }, [updateData, isDataChanged]);
-
-  const addRow = () => {
-    const newKey = `${Object.keys(data).length}`;
-    setData((prev) => ({ ...prev, [newKey]: "" })); // Adds number in the key, maybe we don't need it
-    setKeyOrders((prev) => ({ ...prev, [newKey]: nextOrder }));
-    setNextOrder((prev) => prev + 1);
-  };
-
-  const removeRow = (originalKey: string) => {
-    setData((prev) => {
-      const { [originalKey]: _removed, ...rest } = prev;
-      return rest;
-    });
-    setKeyOrders((prev) => {
-      const { [originalKey]: _removed, ...rest } = prev;
-      return rest;
-    });
-  };
-
-  const updateRow = (
-    originalKey: string,
-    field: "key" | "value",
-    newValue: string,
-  ) => {
-    setData((prev) => {
-      if (field === "key") {
-        const { [originalKey]: value, ...rest } = prev;
-        return { ...rest, [newValue]: value };
-      } else {
-        return { ...prev, [originalKey]: newValue };
-      }
-    });
-
-    if (field === "key") {
-      setKeyOrders((prev) => {
-        const order = prev[originalKey];
-        const { [originalKey]: _removed, ...rest } = prev;
-        return { ...rest, [newValue]: order };
-      });
-    }
-  };
-
-  const handleKeyPress = (
-    e: React.KeyboardEvent<HTMLInputElement>,
-    isLastRow: boolean,
-    originalKey: string,
-    field: "key" | "value",
-    value: string,
-  ) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (isLastRow) {
-        updateRow(originalKey, field, value);
-        addRow();
-      } else {
-        const nextInput = document.querySelector<HTMLElement>(
-          `[data-next-row="${originalKey}"][data-field="${field}"]`,
-        );
-        nextInput?.focus();
-      }
-    }
-  };
-
-  const tableData = useMemo(
-    () =>
-      Object.entries(data)
-        .map(
-          ([key, value]): KeyValueRow => ({
-            key,
-            value,
-            originalKey: key,
-            order: keyOrders[key],
-          }),
-        )
-        .sort((a, b) => a.order - b.order),
-    [data, keyOrders],
-  );
+    updateData();
+  }, [updateData]);
 
   useEffect(() => {
     debugIntegrations(`[DEBUG]: KeyValueTable data changed: `, tableData);
   }, [tableData]);
 
-  const columns = useMemo<ColumnDef<KeyValueRow>[]>(
-    () => [
-      {
-        id: "key",
-        header: columnNames[0],
-        cell: ({ row }) => (
-          <DefaultCell
-            initialValue={row.original.key}
-            data-row-index={row.index}
-            data-field="key"
-            data-next-row={row.original.originalKey}
-            onChange={(value) =>
-              updateRow(row.original.originalKey, "key", value)
-            }
-            onKeyPress={(e) =>
-              handleKeyPress(
-                e,
-                row.index === tableData.length - 1,
-                row.original.originalKey,
-                "key",
-                e.currentTarget.value,
-              )
-            }
-          />
-        ),
-      },
-      {
-        id: "value",
-        header: columnNames[1],
-        cell: ({ row }) => (
-          <DefaultCell
-            initialValue={row.original.value}
-            data-row-index={row.index}
-            data-field="value"
-            data-next-row={row.original.originalKey}
-            onChange={(value) =>
-              updateRow(row.original.originalKey, "value", value)
-            }
-            onKeyPress={(e) =>
-              handleKeyPress(
-                e,
-                row.index === tableData.length - 1,
-                row.original.originalKey,
-                "value",
-                e.currentTarget.value,
-              )
-            }
-          />
-        ),
-      },
-      {
-        id: "actions",
-        header: "",
-        cell: ({ row }) => (
-          <Flex gap="3" width="100%">
-            <Button
-              size="1"
-              type="button"
-              onClick={() => removeRow(row.original.originalKey)}
-              variant="outline"
-              color="red"
-            >
-              Remove
-            </Button>
-          </Flex>
-        ),
-      },
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tableData.length],
-  );
+  const handleRowsChange = useCallback((nextRows: KeyValueRow[]) => {
+    setRows(nextRows);
+  }, []);
 
-  const table = useReactTable({
-    data: tableData,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
+  const getRowId = useCallback((row: KeyValueRow) => row.id, []);
+
+  const createRow = useCallback((): KeyValueRow => {
+    const existingKeys = new Set(rows.map((row) => row.key));
+    const nextKeyOrder = findNextKeyOrder(nextOrder, existingKeys);
+
+    setNextOrder(nextKeyOrder + 1);
+
+    return {
+      id: nextRowId(),
+      key: String(nextKeyOrder),
+      value: "",
+      originalKey: "",
+      order: nextOrder,
+    };
+  }, [nextOrder, rows]);
 
   return (
-    <Flex direction="column" gap="2" mb="1" width="100%">
-      <Flex direction="column" gap="2" mb="1" width="100%">
-        <Table.Root size="1">
-          <Table.Header>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <Table.Row key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <Table.ColumnHeaderCell key={header.id}>
-                    {flexRender(
-                      header.column.columnDef.header,
-                      header.getContext(),
-                    )}
-                  </Table.ColumnHeaderCell>
-                ))}
-              </Table.Row>
-            ))}
-          </Table.Header>
-          <Table.Body>
-            {table.getRowModel().rows.length ? (
-              table.getRowModel().rows.map((row) => (
-                <Table.Row key={row.id}>
-                  {row.getVisibleCells().map((cell) => (
-                    <Table.Cell
-                      key={cell.id}
-                      className={
-                        cell.column.id === "actions"
-                          ? styles.actionCell
-                          : undefined
-                      }
-                    >
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext(),
-                      )}
-                    </Table.Cell>
-                  ))}
-                </Table.Row>
-              ))
-            ) : (
-              <Table.Row>
-                <Table.Cell colSpan={columns.length}>{emptyMessage}</Table.Cell>
-              </Table.Row>
-            )}
-          </Table.Body>
-        </Table.Root>
-        <Button
-          onClick={addRow}
-          type="button"
-          size="1"
-          variant="surface"
-          color="gray"
-          className={styles.addRowButtonAlignedOnStart}
-        >
-          <Flex align="stretch" gap="1">
-            <PlusIcon /> Add row
-          </Flex>
-        </Button>
-      </Flex>
-    </Flex>
+    <EditableTable<KeyValueRow>
+      addLabel="Add row"
+      className={styles.table}
+      columns={[
+        {
+          id: "key",
+          header: columnNames[0],
+          getInputProps: ({ row, rowIndex }) => ({
+            "data-row-id": row.id,
+            "data-row-index": rowIndex,
+            "data-field": "key",
+            "data-next-row": row.originalKey,
+          }),
+        },
+        {
+          id: "value",
+          header: columnNames[1],
+          getInputProps: ({ row, rowIndex }) => ({
+            "data-row-id": row.id,
+            "data-row-index": rowIndex,
+            "data-field": "value",
+            "data-next-row": row.originalKey,
+          }),
+        },
+      ]}
+      createRow={createRow}
+      emptyMessage={emptyMessage}
+      removeLabel="Remove"
+      getRowId={getRowId}
+      validate={({ columnId, value }) => {
+        if (columnId !== "key" || !duplicateKeys.has(value)) {
+          return null;
+        }
+
+        return `Duplicate key "${value}" is already used.`;
+      }}
+      value={tableData}
+      onChange={handleRowsChange}
+    />
   );
 };
+
+function makeRows(data: Record<string, string>): KeyValueRow[] {
+  return Object.entries(data).map(([key, value], order) => ({
+    id: nextRowId(),
+    key,
+    value,
+    originalKey: key,
+    order,
+  }));
+}
+
+function rowsToData(rows: KeyValueRow[]): MCPEnvs {
+  return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+}
+
+function findDuplicateKeys(rows: KeyValueRow[]): Set<string> {
+  const counts = new Map<string, number>();
+
+  rows.forEach((row) => {
+    counts.set(row.key, (counts.get(row.key) ?? 0) + 1);
+  });
+
+  return new Set(
+    Array.from(counts.entries())
+      .filter(([, count]) => count > 1)
+      .map(([key]) => key),
+  );
+}
+
+function findNextKeyOrder(start: number, existingKeys: Set<string>): number {
+  let candidate = start;
+
+  while (existingKeys.has(String(candidate))) {
+    candidate += 1;
+  }
+
+  return candidate;
+}
+
+function nextRowId(): string {
+  keyValueRowId += 1;
+  return `key-value-row-${keyValueRowId}`;
+}

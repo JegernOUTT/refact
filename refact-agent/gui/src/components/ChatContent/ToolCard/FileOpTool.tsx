@@ -1,5 +1,5 @@
+import { MoveRight, Trash2, CirclePlus } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { MoveIcon, TrashIcon, PlusCircledIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -141,7 +141,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       const src = mvArgs.source ?? "";
       const dest = mvArgs.destination ?? "";
       return {
-        icon: <MoveIcon />,
+        icon: <MoveRight />,
         summary: (
           <>
             Move{" "}
@@ -167,7 +167,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       const addArgs = args as AddWorkspaceArgs;
       const path = addArgs.path ?? "";
       return {
-        icon: <PlusCircledIcon />,
+        icon: <CirclePlus />,
         summary: (
           <>
             Add workspace{" "}
@@ -186,7 +186,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
       0,
     );
     return {
-      icon: <TrashIcon />,
+      icon: <Trash2 />,
       summary: (
         <>
           Delete <span className={styles.filename}>{basename(path)}</span>

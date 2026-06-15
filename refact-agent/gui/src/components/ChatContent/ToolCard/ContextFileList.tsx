@@ -1,11 +1,10 @@
+import { FileText } from "lucide-react";
 import React, { useState, useCallback } from "react";
-import { FileTextIcon } from "@radix-ui/react-icons";
-import { Box, Flex, Text } from "@radix-ui/themes";
-import classNames from "classnames";
+import { Box, Text } from "@radix-ui/themes";
 import { ChatContextFile } from "../../../services/refact/types";
 import { useEventsBusForIDE } from "../../../hooks";
 import { ShikiCodeBlock } from "../../Markdown";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import styles from "./ContextFileList.module.css";
 
 function filename(path: string): string {
@@ -41,7 +40,6 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
   onOpenFile,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
   const displayName = formatFileName(file.file_name, file.line1, file.line2);
   const extension = getExtensionFromName(file.file_name);
 
@@ -53,44 +51,32 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
     [onOpenFile, file.file_name, file.line1],
   );
 
-  const handleToggle = useCallback(() => {
-    setIsOpen((prev) => !prev);
+  const handleOpenChange = useCallback((open: boolean) => {
+    setIsOpen(open);
   }, []);
 
   return (
-    <div className={styles.item}>
-      <Flex
-        className={styles.header}
-        align="center"
-        gap="2"
-        onClick={handleToggle}
-      >
-        <FileTextIcon className={styles.icon} />
+    <AnimatedCollapsible
+      className={styles.item}
+      header={
         <Text size="1" className={styles.filename} onClick={handleFileClick}>
           {displayName}
         </Text>
-      </Flex>
-
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-          )}
+      }
+      icon={<FileText className={styles.icon} />}
+      open={isOpen}
+      onOpenChange={handleOpenChange}
+      variant="compact"
+    >
+      <Box className={styles.content}>
+        <ShikiCodeBlock
+          className={extension ? `language-${extension}` : undefined}
+          showLineNumbers={false}
         >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              <ShikiCodeBlock
-                className={extension ? `language-${extension}` : undefined}
-                showLineNumbers={false}
-              >
-                {file.file_content}
-              </ShikiCodeBlock>
-            </Box>
-          </div>
-        </div>
-      )}
-    </div>
+          {file.file_content}
+        </ShikiCodeBlock>
+      </Box>
+    </AnimatedCollapsible>
   );
 };
 
@@ -104,7 +90,7 @@ export const ContextFileList: React.FC<ContextFileListProps> = ({ files }) => {
   if (files.length === 0) return null;
 
   return (
-    <Flex direction="column" gap="1" className={styles.list}>
+    <div className={styles.list}>
       {files.map((file, index) => (
         <ContextFileItem
           key={`${file.file_name}-${file.line1}-${file.line2}-${index}`}
@@ -112,7 +98,7 @@ export const ContextFileList: React.FC<ContextFileListProps> = ({ files }) => {
           onOpenFile={queryPathThenOpenFile}
         />
       ))}
-    </Flex>
+    </div>
   );
 };
 

@@ -1,84 +1,290 @@
 .panel {
-  height: 100%;
-  overflow: auto;
-  padding: var(--space-4);
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.content {
+  container-type: inline-size;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4);
+  min-width: 0;
+  gap: var(--rf-space-5);
+}
+
+.summaryBadges {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.layout {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--rf-space-5);
+}
+
+.createCard,
+.listPane,
+.form,
+.editForm,
+.editGrid,
+.commandGrid,
+.listTitleBlock,
+.jobCard,
+.jobTitleBlock,
+.jobMetaItem,
+.jobMeta dd {
+  display: grid;
+  min-width: 0;
+}
+
+.createCard {
+  gap: var(--rf-space-4);
+  padding: var(--rf-space-4);
+}
+
+.listPane {
+  gap: var(--rf-space-3);
+}
+
+.paneTitle {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .form {
-  display: grid;
-  gap: var(--space-3);
+  gap: var(--rf-space-4);
 }
 
-.field {
-  display: grid;
-  gap: var(--space-1);
+.editForm,
+.editGrid,
+.commandGrid {
+  gap: var(--rf-space-3);
 }
 
-.inlineFields {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
-  gap: var(--space-2);
+.sectionHint,
+.jobCron,
+.jobMeta dt,
+.jobMeta dd,
+.jobDescription,
+.metaSecondary {
+  margin: 0;
+  line-height: var(--rf-line);
 }
 
-.toggles {
+.sectionHint,
+.jobCron,
+.jobMeta dt,
+.metaSecondary {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.sectionHint {
+  max-width: 72ch;
+}
+
+.sectionHint code,
+.jobCron,
+.monoField {
+  font-family: var(--rf-font-mono);
+}
+
+.sectionHint code,
+.jobCron {
+  overflow-wrap: anywhere;
+}
+
+.presetGroup {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: var(--rf-space-2);
 }
 
-.toggle {
-  display: flex;
+.presetPill {
+  display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: var(--space-2);
+  justify-content: center;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  background: transparent;
+  color: var(--rf-color-muted);
+  font: 600 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  cursor: pointer;
 }
 
-.error {
-  color: var(--red-11);
+.presetPill:hover {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
 }
 
-.tableWrap {
-  overflow-x: auto;
+.presetPill:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
-.table {
-  width: 100%;
-  border-collapse: collapse;
+@media (prefers-reduced-motion: no-preference) {
+  .presetPill {
+    transition:
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
 }
 
-.table th,
-.table td {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
-  text-align: left;
-  vertical-align: top;
+.presetPill[aria-pressed="true"] {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
-.table th {
-  color: var(--gray-11);
-  font-size: var(--font-size-1);
-  font-weight: 600;
+.fieldControl,
+.monoField {
+  box-sizing: border-box;
+  min-width: 0;
 }
 
-.actions {
-  text-align: right;
+.toggles,
+.editGrid,
+.commandGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-3);
 }
 
-.empty {
-  padding: var(--space-4);
-  color: var(--gray-11);
-  text-align: center;
+.formActions,
+.listHeader,
+.jobHeader,
+.jobBadges,
+.jobActions {
+  display: flex;
+  min-width: 0;
+}
+
+.formActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+}
+
+.listHeader {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2) var(--rf-space-3);
+}
+
+.listTitleBlock {
+  gap: var(--rf-space-1);
+}
+
+.emptyState {
+  min-width: 0;
+}
+
+.jobList {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  gap: var(--rf-space-3);
+}
+
+.jobCard {
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+}
+
+.jobHeader {
+  align-items: flex-start;
+  gap: var(--rf-space-3);
+}
+
+.iconTile {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--rf-radius-card);
+  padding: var(--rf-space-2);
+  background: var(--rf-color-accent-soft);
+}
+
+.jobTitleBlock {
+  flex: 1 1 0;
+  gap: var(--rf-space-1);
+}
+
+.jobTitle {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+}
+
+.jobBadges {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+}
+
+.jobDescription {
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+}
+
+.jobMeta {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-3);
+  margin: 0;
+}
+
+.jobMetaItem {
+  gap: var(--rf-space-1);
+}
+
+.jobMeta dd {
+  gap: var(--rf-space-1);
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 650;
+}
+
+.metaSecondary {
+  font-weight: 400;
+}
+
+.jobActions {
+  justify-content: flex-end;
+}
+
+@container (width <= 880px) {
+  .layout,
+  .toggles,
+  .editGrid,
+  .commandGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (width <= 640px) {
+  .jobMeta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .formActions,
+  .jobActions,
+  .jobBadges {
+    justify-content: flex-start;
+  }
 }

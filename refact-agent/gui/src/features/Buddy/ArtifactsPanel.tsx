@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, Button, Card, Flex, Heading, Table } from "@radix-ui/themes";
+import { Badge, Button, Surface, Text } from "../../components/ui";
 import {
   useApproveBuddyArtifactMutation,
   useGetBuddyArtifactsQuery,
@@ -18,67 +18,74 @@ export const ArtifactsPanel: React.FC = () => {
   const ops = data?.ops ?? [];
 
   return (
-    <Card className={styles.panel}>
-      <Heading size="3" mb="2">
-        📥 Memory Ops
-      </Heading>
-      <Table.Root>
-        <Table.Header>
-          <Table.Row>
-            <Table.ColumnHeaderCell>Title</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>Type</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>Status</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>Created</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>Actions</Table.ColumnHeaderCell>
-          </Table.Row>
-        </Table.Header>
-        <Table.Body>
-          {ops.map((op) => (
-            <Table.Row key={op.op_id}>
-              <Table.Cell>
-                {op.title ?? op.payload?.title ?? op.op_id}
-              </Table.Cell>
-              <Table.Cell>{op.op_type}</Table.Cell>
-              <Table.Cell>
-                <Badge color={statusColor(op.status)}>{op.status}</Badge>
-              </Table.Cell>
-              <Table.Cell>{op.created_at}</Table.Cell>
-              <Table.Cell>
-                {isPending(op.status) && (
-                  <Flex gap="2">
-                    <Button
-                      size="1"
-                      onClick={() => void approve({ op_id: op.op_id })}
-                    >
-                      Approve
-                    </Button>
-                    <Button
-                      size="1"
-                      variant="soft"
-                      color="red"
-                      onClick={() => void reject({ op_id: op.op_id })}
-                    >
-                      Reject
-                    </Button>
-                  </Flex>
-                )}
-              </Table.Cell>
-            </Table.Row>
-          ))}
-        </Table.Body>
-      </Table.Root>
-    </Card>
+    <Surface
+      className={styles.panel}
+      animated="rise"
+      radius="card"
+      variant="glass"
+    >
+      <div className={styles.header}>
+        <Text as="strong" size="3" weight="bold">
+          📥 Memory Ops
+        </Text>
+      </div>
+      <div className={`scrollX ${styles.tableScroll}`}>
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ops.map((op) => (
+              <tr key={op.op_id} className="rf-enter-rise">
+                <td>{op.title ?? op.payload?.title ?? op.op_id}</td>
+                <td>{op.op_type}</td>
+                <td>
+                  <Badge tone={statusTone(op.status)}>{op.status}</Badge>
+                </td>
+                <td>{op.created_at}</td>
+                <td>
+                  {isPending(op.status) && (
+                    <div className={styles.actions}>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => void approve({ op_id: op.op_id })}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={() => void reject({ op_id: op.op_id })}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
   );
 };
 
-function statusColor(
+function statusTone(
   status: ArtifactStatus,
-): "gray" | "green" | "red" | "yellow" {
+): "default" | "success" | "danger" | "warning" {
   const normalized = status.toLowerCase();
-  if (normalized === "applied") return "green";
-  if (normalized === "rejected" || normalized === "failed") return "red";
-  if (normalized === "pending" || normalized === "approved") return "yellow";
-  return "gray";
+  if (normalized === "applied") return "success";
+  if (normalized === "rejected" || normalized === "failed") return "danger";
+  if (normalized === "pending" || normalized === "approved") return "warning";
+  return "default";
 }
 
 function isPending(status: ArtifactStatus): boolean {

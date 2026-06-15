@@ -1,116 +1,163 @@
 import React from "react";
-import { Button, Flex, Heading, Text } from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  CubeIcon,
-  FileTextIcon,
-  LightningBoltIcon,
-  PersonIcon,
-} from "@radix-ui/react-icons";
+import { ArrowLeft } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
+import { Button, Tabs } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
-import { push } from "../Pages/pagesSlice";
+import { CommandsMarketplace } from "../CommandsMarketplace";
 import type { Config } from "../Config/configSlice";
+import { MarketplacePanel } from "../Extensions/components/MarketplacePanel";
+import { MCPMarketplace } from "../MCPMarketplace";
+import { change } from "../Pages/pagesSlice";
+import type { Page } from "../Pages/pagesSlice";
+import { SkillsMarketplace } from "../SkillsMarketplace";
+import { SettingsSection } from "../Settings/SettingsSection";
+import { SubagentsMarketplace } from "../SubagentsMarketplace";
+import {
+  marketplacePageToTab,
+  marketplaceTabToPage,
+  type MarketplaceTabId,
+} from "./marketplaceRoutes";
 import styles from "./MarketplaceHub.module.css";
 
 type MarketplaceHubProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
   back: () => void;
+  page: Page;
+  embedded?: boolean;
 };
 
-type HubCard = {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  action: () => void;
-};
+const MARKETPLACE_DESCRIPTION =
+  "Browse and install skills, commands, subagents, MCP servers, and extension plugins from curated community sources.";
 
-const ICON_SIZE = 22;
+const tabs: { id: MarketplaceTabId; label: string }[] = [
+  { id: "skills", label: "Skills" },
+  { id: "commands", label: "Commands" },
+  { id: "subagents", label: "Subagents" },
+  { id: "mcp", label: "MCP Servers" },
+  { id: "extensions", label: "Extensions" },
+];
 
 export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   host,
+  tabbed,
   back,
+  page,
+  embedded = false,
 }) => {
   const dispatch = useAppDispatch();
+  const activeTab = marketplacePageToTab(page) ?? "skills";
+  const activeIndex = tabs.findIndex((tab) => tab.id === activeTab);
 
-  const cards: HubCard[] = [
-    {
-      icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,
-      title: "Skills",
-      description:
-        "Agent skills that run automatically during coding sessions — code review, brainstorming, security checks, and more.",
-      action: () => dispatch(push({ name: "skills marketplace" })),
-    },
-    {
-      icon: <FileTextIcon width={ICON_SIZE} height={ICON_SIZE} />,
-      title: "Commands",
-      description:
-        "Slash commands you invoke explicitly — /review, /test-plan, /commit-message, and hundreds more.",
-      action: () => dispatch(push({ name: "commands marketplace" })),
-    },
-    {
-      icon: <PersonIcon width={ICON_SIZE} height={ICON_SIZE} />,
-      title: "Subagents",
-      description:
-        "Specialized sub-agents that handle complex multi-step tasks — SDLC workflows, DevOps, research, and domain-specific automation.",
-      action: () => dispatch(push({ name: "subagents marketplace" })),
-    },
-    {
-      icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
-      title: "MCP Servers",
-      description:
-        "Model Context Protocol servers that extend the agent with external tools — GitHub, Playwright, Notion, Slack, databases, and more.",
-      action: () => dispatch(push({ name: "mcp marketplace" })),
-    },
-  ];
+  const handleTabChange = (next: string) => {
+    dispatch(change(marketplaceTabToPage(next as MarketplaceTabId)));
+  };
+
+  const tabsList = (
+    <Tabs.List
+      activeIndex={Math.max(activeIndex, 0)}
+      itemCount={tabs.length}
+      className={styles.tabsList}
+    >
+      {tabs.map((tab) => (
+        <Tabs.Trigger key={tab.id} value={tab.id}>
+          {tab.label}
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
+  );
+
+  const panels = (
+    <>
+      <Tabs.Content value="skills" className={styles.tabPanel}>
+        {activeTab === "skills" && (
+          <SkillsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="commands" className={styles.tabPanel}>
+        {activeTab === "commands" && (
+          <CommandsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="subagents" className={styles.tabPanel}>
+        {activeTab === "subagents" && (
+          <SubagentsMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="mcp" className={styles.tabPanel}>
+        {activeTab === "mcp" && (
+          <MCPMarketplace
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromMarketplace={back}
+          />
+        )}
+      </Tabs.Content>
+      <Tabs.Content value="extensions" className={styles.tabPanel}>
+        {activeTab === "extensions" && <MarketplacePanel />}
+      </Tabs.Content>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <SettingsSection
+          title="Marketplace"
+          description={MARKETPLACE_DESCRIPTION}
+          subNav={tabsList}
+        >
+          {panels}
+        </SettingsSection>
+      </Tabs>
+    );
+  }
 
   return (
-    <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
+    <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex direction="column" gap="4">
-          <Flex align="center" gap="3">
-            <Button variant="ghost" size="1" onClick={back}>
-              <ArrowLeftIcon />
+        <div className={styles.pageStack}>
+          <div className={styles.header}>
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={ArrowLeft}
+              onClick={back}
+            >
               Back
             </Button>
-            <Heading size="4">Marketplace</Heading>
-          </Flex>
-
-          <Text size="2" color="gray">
-            Browse and install extensions for Refact. Each category is backed by
-            curated community sources — enable a source once, then install
-            individual items into your project or global config.
-          </Text>
-
-          <div className={styles.grid}>
-            {cards.map((card) => (
-              <button
-                key={card.title}
-                className={styles.card}
-                onClick={card.action}
-                type="button"
-              >
-                <Flex direction="column" gap="2" className={styles.cardBody}>
-                  <Flex align="center" gap="2" className={styles.cardHeader}>
-                    <span className={styles.cardIcon}>{card.icon}</span>
-                    <Text size="3" weight="bold">
-                      {card.title}
-                    </Text>
-                    <span className={styles.cardArrow}>
-                      <ArrowRightIcon width={14} height={14} />
-                    </span>
-                  </Flex>
-                  <Text size="2" color="gray" className={styles.cardDesc}>
-                    {card.description}
-                  </Text>
-                </Flex>
-              </button>
-            ))}
+            <div className={styles.headerText}>
+              <h2 className={styles.title}>Marketplace</h2>
+              <p className={styles.description}>{MARKETPLACE_DESCRIPTION}</p>
+            </div>
           </div>
-        </Flex>
+
+          <Tabs
+            value={activeTab}
+            onValueChange={handleTabChange}
+            className={styles.tabsRoot}
+          >
+            {tabsList}
+            {panels}
+          </Tabs>
+        </div>
       </ScrollArea>
     </PageWrapper>
   );

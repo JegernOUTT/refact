@@ -1,6 +1,7 @@
+import { Code, Timer, Rows3 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Box, Button, Flex, Spinner, Text } from "@radix-ui/themes";
-import { CodeIcon, LapTimerIcon, RowsIcon } from "@radix-ui/react-icons";
+import { Box, Flex, Text } from "@radix-ui/themes";
+import { FileText } from "lucide-react";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../../hooks";
@@ -19,8 +20,8 @@ import {
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
 import { usePostMessage } from "../../../hooks/usePostMessage";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
-import { ToolCallTooltip } from "./ToolCallTooltip";
+import { Badge, Button } from "../../ui";
+import { ToolCard } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
 import { ProcessControls } from "./ProcessControls";
@@ -396,6 +397,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const copyableOutput = useMemo(() => copyableOutputText(content), [content]);
   const isBusy = isBusyStatus(status);
   const livePreview = latestChunkPreview(metadata, content, toolCall);
+  const showLivePreview = isBusy && livePreview !== null;
   const nowMs = useRunningNowMs(isBusy);
   const duration = durationLabel(process, nowMs);
   const logPath = persistedOutputPath(metadata);
@@ -410,11 +412,6 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const hiddenProcesses = Math.max(
     0,
     (metadata?.processes?.length ?? 0) - listedProcesses.length,
-  );
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen,
-    200,
-    true,
   );
   const details = detailRows(process);
   const showStdinInput = Boolean(
@@ -433,40 +430,23 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     [host, logPath, postMessage],
   );
 
-  const header = (
-    <Flex
-      className={styles.header}
-      align="center"
-      gap="2"
-      onClick={handleToggle}
-    >
-      <span className={styles.icon}>
-        {isBusy ? (
-          <Spinner size="1" />
-        ) : toolName === "process_list" ? (
-          <RowsIcon />
-        ) : (
-          <CodeIcon />
-        )}
-      </span>
-      <Text
-        size="1"
-        className={styles.summary}
-        title={process.shortDescription}
-      >
-        {process.shortDescription}
-      </Text>
-      <Flex className={styles.meta} align="center" gap="2">
-        {meta && (
-          <Text size="1" color="gray">
-            {meta}
-          </Text>
-        )}
+  const icon = toolName === "process_list" ? <Rows3 /> : <Code />;
+
+  const summaryText = isBusy ? (
+    <span className="rf-text-shimmer">{process.shortDescription}</span>
+  ) : (
+    process.shortDescription
+  );
+
+  const summary = (
+    <span className={styles.execTitle} title={process.shortDescription}>
+      <span className={styles.summary}>{summaryText}</span>
+      <span className={styles.meta}>
+        {meta && <span className={styles.metaText}>{meta}</span>}
         <ProcessStatusBadge status={status} />
         {metadata?.tty === true && (
           <Badge
-            size="1"
-            variant="soft"
+            tone="accent"
             className={styles.ptyChip}
             data-testid="exec-pty-chip"
           >
@@ -474,149 +454,134 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           </Badge>
         )}
         {process.processId && (
-          <Badge size="1" variant="surface" className={styles.processChip}>
+          <Badge tone="muted" className={styles.processChip}>
             {process.processId}
           </Badge>
         )}
-      </Flex>
-    </Flex>
+      </span>
+    </span>
   );
 
   return (
-    <div
-      className={styles.card}
-      data-testid="exec-tool-card"
-      data-exec-process-id={process.processId}
-    >
+    <div data-testid="exec-tool-card" data-exec-process-id={process.processId}>
       <span data-testid={`exec-tool-${toolName}`} hidden />
-      <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
-
-      {isBusy && (
+      {showLivePreview && (
         <Text
           size="1"
-          color={livePreview ? undefined : "gray"}
           className={styles.livePreview}
           data-testid="exec-live-preview"
-          title={livePreview ?? undefined}
+          title={livePreview}
         >
-          {livePreview ?? "Waiting for output…"}
+          <span className="rf-text-shimmer">{livePreview}</span>
         </Text>
       )}
 
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              {details.length > 0 && (
-                <Box className={styles.detailsGrid}>
-                  {details.map((row) => (
-                    <React.Fragment key={row.label}>
-                      <Text size="1" className={styles.detailLabel}>
-                        {row.label}
-                      </Text>
-                      <Text
-                        size="1"
-                        className={classNames(
-                          styles.detailValue,
-                          row.code && styles.codeValue,
-                        )}
-                        title={row.value}
-                      >
-                        {row.value}
-                      </Text>
-                    </React.Fragment>
-                  ))}
-                </Box>
-              )}
-
-              <ProcessControls
-                command={process.command}
-                output={copyableOutput}
-                processId={process.processId}
-              />
-
-              {logPath && (
-                <Flex gap="2" wrap="wrap" className={styles.controls}>
-                  <Button
-                    type="button"
-                    size="1"
-                    variant="soft"
-                    color="gray"
-                    className={styles.logButton}
-                    onClick={handleOpenLog}
-                  >
-                    📄 Open log
-                  </Button>
-                </Flex>
-              )}
-
-              <ProcessOutputView
-                content={content}
-                transcript={metadata?.transcript}
-              />
-
-              {listedProcesses.length > 0 && (
-                <Box
-                  className={styles.processList}
-                  data-testid="exec-process-list"
-                >
-                  {listedProcesses.map((item) => (
-                    <Flex
-                      key={item.process_id}
-                      className={styles.processListItem}
-                      align="center"
-                      justify="between"
-                      gap="2"
-                    >
-                      <Flex direction="column" gap="1">
-                        <Text size="1" weight="medium">
-                          {processItemLabel(item)}
-                        </Text>
-                        {item.process_id && (
-                          <Text
-                            size="1"
-                            color="gray"
-                            className={styles.codeValue}
-                          >
-                            {item.process_id}
-                          </Text>
-                        )}
-                      </Flex>
-                      <ProcessStatusBadge
-                        status={processListItemStatus(item)}
-                      />
-                    </Flex>
-                  ))}
-                  {hiddenProcesses > 0 && (
-                    <Text size="1" color="gray">
-                      {hiddenProcesses} more processes hidden
-                    </Text>
-                  )}
-                </Box>
-              )}
-
-              {!metadata && (
-                <Flex align="center" gap="1" mt="2">
-                  <LapTimerIcon />
-                  <Text size="1" color="gray">
-                    Plain text result; structured process metadata was not
-                    available.
+      <ToolCard
+        className={styles.card}
+        icon={icon}
+        summary={summary}
+        status={
+          isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"
+        }
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        <Box className={styles.content}>
+          {details.length > 0 && (
+            <Box className={styles.detailsGrid}>
+              {details.map((row) => (
+                <React.Fragment key={row.label}>
+                  <Text size="1" className={styles.detailLabel}>
+                    {row.label}
                   </Text>
-                </Flex>
-              )}
+                  <Text
+                    size="1"
+                    className={classNames(
+                      styles.detailValue,
+                      row.code && styles.codeValue,
+                    )}
+                    title={row.value}
+                  >
+                    {row.value}
+                  </Text>
+                </React.Fragment>
+              ))}
+            </Box>
+          )}
 
-              {showStdinInput && process.processId && (
-                <ProcessStdinInput processId={process.processId} />
+          <ProcessControls
+            command={process.command}
+            output={copyableOutput}
+            processId={process.processId}
+          />
+
+          {logPath && (
+            <Flex gap="2" wrap="wrap" className={styles.controls}>
+              <Button
+                type="button"
+                size="sm"
+                variant="soft"
+                className={styles.logButton}
+                onClick={handleOpenLog}
+                leftIcon={FileText}
+              >
+                Open log
+              </Button>
+            </Flex>
+          )}
+
+          <ProcessOutputView
+            content={content}
+            transcript={metadata?.transcript}
+          />
+
+          {listedProcesses.length > 0 && (
+            <Box className={styles.processList} data-testid="exec-process-list">
+              {listedProcesses.map((item) => (
+                <Flex
+                  key={item.process_id}
+                  className={styles.processListItem}
+                  align="center"
+                  justify="between"
+                  gap="2"
+                >
+                  <Flex direction="column" gap="1">
+                    <Text size="1" weight="medium">
+                      {processItemLabel(item)}
+                    </Text>
+                    {item.process_id && (
+                      <Text size="1" color="gray" className={styles.codeValue}>
+                        {item.process_id}
+                      </Text>
+                    )}
+                  </Flex>
+                  <ProcessStatusBadge status={processListItemStatus(item)} />
+                </Flex>
+              ))}
+              {hiddenProcesses > 0 && (
+                <Text size="1" color="gray">
+                  {hiddenProcesses} more processes hidden
+                </Text>
               )}
             </Box>
-          </div>
-        </div>
-      )}
+          )}
+
+          {!metadata && (
+            <Flex align="center" gap="1" mt="2">
+              <Timer />
+              <Text size="1" color="gray">
+                Plain text result; structured process metadata was not
+                available.
+              </Text>
+            </Flex>
+          )}
+
+          {showStdinInput && process.processId && (
+            <ProcessStdinInput processId={process.processId} />
+          )}
+        </Box>
+      </ToolCard>
     </div>
   );
 };

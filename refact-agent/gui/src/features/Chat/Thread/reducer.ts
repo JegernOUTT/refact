@@ -78,6 +78,7 @@ import {
   openBuddyChat,
   newBuddyChatAction,
   hydratePersistedChatTabs,
+  reorderOpenThreads,
 } from "./actions";
 import { applyDeltaOps } from "../../../services/refact/chatSubscription";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
@@ -412,8 +413,16 @@ function applyRestoredThread(
   payload: ReturnType<typeof restoreChat>["payload"],
   fallbackToolUse: ToolUse,
 ) {
-  const messages = payload.messages.map(normalizeMessage);
+  const restoredMessages = payload.messages.map(normalizeMessage);
   const existing = rt.thread;
+  // History list entries are metadata-only stubs (messages: []). Restoring one
+  // for a thread that already holds messages (e.g. populated by an SSE
+  // snapshot on a live subscription) must not wipe the loaded history — the
+  // subscription is deduped, so no new snapshot would ever refill it.
+  const messages =
+    restoredMessages.length === 0 && existing.messages.length > 0
+      ? existing.messages
+      : restoredMessages;
   rt.thread = {
     ...existing,
     id: payload.id,
@@ -932,6 +941,16 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (state.current_thread_id === id) {
       state.current_thread_id = state.open_thread_ids[0] ?? "";
     }
+  });
+
+  builder.addCase(reorderOpenThreads, (state, action) => {
+    const { sourceId, targetId } = action.payload;
+    if (sourceId === targetId) return;
+    const sourceIndex = state.open_thread_ids.indexOf(sourceId);
+    const targetIndex = state.open_thread_ids.indexOf(targetId);
+    if (sourceIndex === -1 || targetIndex === -1) return;
+    const [source] = state.open_thread_ids.splice(sourceIndex, 1);
+    state.open_thread_ids.splice(targetIndex, 0, source);
   });
 
   builder.addCase(restoreChat, (state, action) => {

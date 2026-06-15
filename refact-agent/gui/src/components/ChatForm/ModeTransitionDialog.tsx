@@ -1,16 +1,15 @@
 import React, { useCallback, useState } from "react";
-import {
-  Dialog,
-  Flex,
-  Text,
-  Button,
-  Callout,
-  Badge,
-  Spinner,
-} from "@radix-ui/themes";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { LoaderCircle } from "lucide-react";
+import { Dialog, Icon } from "../ui";
+import { Callout } from "../Callout";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
+import { useCreatePlannerChatFromTransitionMutation } from "../../services/refact/tasks";
+import {
+  addPlannerChat,
+  setTaskActiveChat,
+} from "../../features/Tasks/tasksSlice";
 import {
   createChatWithId,
   requestSseRefresh,
@@ -53,18 +52,16 @@ type ModeTransitionDialogProps = {
   targetMode: string;
   targetModeTitle: string;
   targetModeDescription: string;
+  taskId?: string;
 };
 
 type TransitionPhase = "analyzing" | "refreshing" | "opening" | "starting";
 
-const TRANSITION_PHASES: Record<
-  TransitionPhase,
-  { label: string; progress: number }
-> = {
-  analyzing: { label: "Analyzing conversation...", progress: 30 },
-  refreshing: { label: "Updating chat list...", progress: 55 },
-  opening: { label: "Opening new chat...", progress: 75 },
-  starting: { label: "Starting assistant...", progress: 92 },
+const TRANSITION_PHASES: Record<TransitionPhase, { label: string }> = {
+  analyzing: { label: "Analyzing conversation..." },
+  refreshing: { label: "Updating chat list..." },
+  opening: { label: "Opening new chat..." },
+  starting: { label: "Starting assistant..." },
 };
 
 function waitForNextFrame(): Promise<void> {
@@ -91,6 +88,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   targetMode,
   targetModeTitle,
   targetModeDescription,
+  taskId,
 }) => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -110,8 +108,10 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
 
   const [applyMutation, { isLoading: isApplying }] =
     useApplyModeTransitionMutation();
+  const [createFromTransition, { isLoading: isTransitioning }] =
+    useCreatePlannerChatFromTransitionMutation();
 
-  const isBusy = isApplying || phase !== null;
+  const isBusy = isApplying || isTransitioning || phase !== null;
 
   const handleApply = useCallback(async () => {
     if (isBusy) return;
@@ -126,41 +126,89 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     setError(null);
     setPhase("analyzing");
     try {
-      const result = await applyMutation({
-        chatId,
-        targetMode,
-        targetModeDescription,
-      }).unwrap();
+      let newChatId: string;
+      if (taskId) {
+        const result = await createFromTransition({
+          taskId,
+          sourceChatId: chatId,
+          targetMode,
+          targetModeDescription,
+        }).unwrap();
+        newChatId = result.new_chat_id;
+        const now = new Date().toISOString();
+        setPhase("opening");
+        dispatch(
+          createChatWithId({
+            id: newChatId,
+            mode: targetMode,
+            isTaskChat: true,
+            taskMeta: {
+              task_id: taskId,
+              role: "planner",
+              planner_chat_id: newChatId,
+            },
+            parentId: chatId,
+            linkType: "mode_transition",
+            worktree: sourceWorktree,
+          }),
+        );
+        dispatch(
+          addPlannerChat({
+            taskId,
+            planner: {
+              id: newChatId,
+              title: "",
+              createdAt: now,
+              updatedAt: now,
+              mode: targetMode,
+            },
+          }),
+        );
+        dispatch(
+          setTaskActiveChat({
+            taskId,
+            activeChat: { type: "planner", chatId: newChatId },
+          }),
+        );
+        dispatch(requestSseRefresh({ chatId: newChatId }));
+      } else {
+        const result = await applyMutation({
+          chatId,
+          targetMode,
+          targetModeDescription,
+        }).unwrap();
+        newChatId = result.new_chat_id;
 
-      setPhase("refreshing");
-      await dispatch(
-        trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
-          forceRefetch: true,
-        }),
-      ).unwrap();
+        setPhase("refreshing");
+        await dispatch(
+          trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
+            forceRefetch: true,
+          }),
+        ).unwrap();
 
-      setPhase("opening");
-      dispatch(closeThread({ id: chatId, force: true }));
-      dispatch(
-        createChatWithId({
-          id: result.new_chat_id,
-          mode: targetMode,
-          parentId: chatId,
-          linkType: "mode_transition",
-          worktree: sourceWorktree,
-        }),
-      );
-      dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
-      dispatch(push({ name: "chat" }));
+        setPhase("opening");
+        dispatch(closeThread({ id: chatId, force: true }));
+        dispatch(
+          createChatWithId({
+            id: newChatId,
+            mode: targetMode,
+            parentId: chatId,
+            linkType: "mode_transition",
+            worktree: sourceWorktree,
+          }),
+        );
+        dispatch(requestSseRefresh({ chatId: newChatId }));
+        dispatch(push({ name: "chat" }));
+      }
 
       await waitForNextFrame();
       setPhase("starting");
       try {
-        await regenerate(result.new_chat_id, config, apiKey ?? undefined);
+        await regenerate(newChatId, config, apiKey ?? undefined);
       } catch (regenerateError) {
         dispatch(
           updateChatRuntimeFromSessionState({
-            id: result.new_chat_id,
+            id: newChatId,
             session_state: "error",
             error: formatRegenerateError(regenerateError),
           }),
@@ -182,7 +230,9 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     targetMode,
     targetModeTitle,
     targetModeDescription,
+    taskId,
     applyMutation,
+    createFromTransition,
     dispatch,
     onOpenChange,
     config,
@@ -214,91 +264,83 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   const phaseInfo = phase ? TRANSITION_PHASES[phase] : null;
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content
-        maxWidth="500px"
-        className={styles.dialogContent}
-        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-      >
-        <Dialog.Title>
-          <Flex align="center" gap="2">
-            <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
-            {isSelf ? (
-              <Badge color="green">
-                {displayTargetModeTitle || displayTargetMode}
-              </Badge>
-            ) : (
-              <>
-                <Badge color="gray">{displayCurrentMode}</Badge>
-                <Text color="gray">→</Text>
-                <Badge color="blue">
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
+        <Flex
+          direction="column"
+          gap="3"
+          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
+        >
+          <Dialog.Title>
+            <Flex align="center" gap="2">
+              <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
+              {isSelf ? (
+                <Badge color="green">
                   {displayTargetModeTitle || displayTargetMode}
                 </Badge>
-              </>
-            )}
-          </Flex>
-        </Dialog.Title>
-
-        <Dialog.Description size="2" color="gray">
-          {isSelf
-            ? "The assistant will analyze your conversation and create a fresh start with preserved context."
-            : "The assistant will analyze your conversation and preserve relevant context for the new mode."}
-        </Dialog.Description>
-
-        {error && (
-          <Callout.Root color="red" className={styles.callout}>
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{error}</Callout.Text>
-          </Callout.Root>
-        )}
-
-        {phaseInfo && (
-          <Flex direction="column" gap="3" className={styles.loadingContainer}>
-            <Flex align="center" justify="center" gap="2">
-              <Spinner />
-              <Text color="gray" role="status" aria-live="polite">
-                {phaseInfo.label}
-              </Text>
+              ) : (
+                <>
+                  <Badge color="gray">{displayCurrentMode}</Badge>
+                  <Text color="gray">→</Text>
+                  <Badge color="blue">
+                    {displayTargetModeTitle || displayTargetMode}
+                  </Badge>
+                </>
+              )}
             </Flex>
-            <div
-              className={styles.progressTrack}
-              role="progressbar"
-              aria-label={isSelf ? "Restart progress" : "Switch progress"}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={phaseInfo.progress}
-            >
-              <div
-                className={styles.progressFill}
-                style={{ width: `${phaseInfo.progress}%` }}
-              />
-            </div>
-          </Flex>
-        )}
+          </Dialog.Title>
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray" disabled={isBusy}>
-              Cancel
+          <Dialog.Description>
+            {isSelf
+              ? "The assistant will analyze your conversation and create a fresh start with preserved context."
+              : "The assistant will analyze your conversation and preserve relevant context for the new mode."}
+          </Dialog.Description>
+
+          {error && (
+            <Callout type="error" preventClose className={styles.callout}>
+              {error}
+            </Callout>
+          )}
+
+          {phaseInfo && (
+            <Flex
+              direction="column"
+              gap="3"
+              className={styles.loadingContainer}
+            >
+              <Flex align="center" justify="center" gap="2">
+                <Icon
+                  icon={LoaderCircle}
+                  size="md"
+                  tone="accent"
+                  className={styles.spinnerIcon}
+                />
+                <Text color="gray" role="status" aria-live="polite">
+                  {phaseInfo.label}
+                </Text>
+              </Flex>
+            </Flex>
+          )}
+
+          <Flex gap="3" mt="4" justify="end">
+            <Dialog.Close asChild>
+              <Button variant="soft" color="gray" disabled={isBusy}>
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button onClick={() => void handleApply()} disabled={isBusy}>
+              {isBusy
+                ? isSelf
+                  ? "Restarting..."
+                  : "Switching..."
+                : isSelf
+                  ? "Restart Mode"
+                  : "Switch Mode"}
             </Button>
-          </Dialog.Close>
-          <Button onClick={() => void handleApply()} disabled={isBusy}>
-            {isBusy ? (
-              <>
-                <Spinner size="1" />
-                {isSelf ? "Restarting..." : "Switching..."}
-              </>
-            ) : isSelf ? (
-              "Restart Mode"
-            ) : (
-              "Switch Mode"
-            )}
-          </Button>
+          </Flex>
         </Flex>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 

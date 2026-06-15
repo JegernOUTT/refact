@@ -1,5 +1,5 @@
 import React, { useCallback } from "react";
-import { Badge, Button } from "@radix-ui/themes";
+import { Badge, Button } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   clearActiveSpeech,

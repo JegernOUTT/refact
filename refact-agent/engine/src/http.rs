@@ -44,7 +44,7 @@ pub(crate) fn resolve_http_bind_addr(
     Ok(SocketAddr::new(ip, port))
 }
 
-const MDNS_SERVICE_TYPE: &str = "_refact-lsp._tcp.local.";
+pub(crate) const MDNS_SERVICE_TYPE: &str = "_refact-lsp._tcp.local.";
 
 #[derive(Clone, Debug, Default)]
 pub struct GuiPublicOriginCandidates {
@@ -164,6 +164,10 @@ impl MdnsRegistration {
     }
 }
 
+pub(crate) fn should_advertise_mdns(cmdline: &crate::global_context::CommandLine) -> bool {
+    cmdline.daemon_endpoint.is_empty()
+}
+
 fn start_mdns_advertisement(port: u16, app_searchable_id: String) -> Option<MdnsRegistration> {
     let daemon = match ServiceDaemon::new() {
         Ok(daemon) => daemon,
@@ -252,7 +256,11 @@ pub async fn start_server(
         match builder {
             Ok(builder) => {
                 info!("HTTP server listening on {}", addr);
-                let mdns = start_mdns_advertisement(port, app_searchable_id.clone());
+                let mdns = if should_advertise_mdns(&gcx.cmdline) {
+                    start_mdns_advertisement(port, app_searchable_id.clone())
+                } else {
+                    None
+                };
                 let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
                 let gui_origins = gui_public_origin_candidates(port);
                 let router = make_refact_http_server(app_state).layer(Extension(gui_origins));
@@ -312,5 +320,19 @@ mod tests {
     #[test]
     fn http_bind_rejects_invalid_host() {
         assert!(resolve_http_bind_addr(Some("localhost"), false, 8001).is_err());
+    }
+
+    #[tokio::test]
+    async fn mdns_advertises_without_daemon_endpoint() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        assert!(should_advertise_mdns(&gcx.cmdline));
+    }
+
+    #[tokio::test]
+    async fn mdns_skips_with_daemon_endpoint() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut cmdline = gcx.cmdline.clone();
+        cmdline.daemon_endpoint = "http://127.0.0.1:8488".to_string();
+        assert!(!should_advertise_mdns(&cmdline));
     }
 }

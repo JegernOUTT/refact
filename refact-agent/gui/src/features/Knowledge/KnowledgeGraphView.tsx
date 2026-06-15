@@ -1,17 +1,23 @@
-import { useEffect, useRef, useState, useMemo, useCallback } from "react";
-import CytoscapeComponent from "react-cytoscapejs";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import cytoscape from "cytoscape";
 import type Cytoscape from "cytoscape";
 import fcose from "cytoscape-fcose";
-import { Flex, Text } from "@radix-ui/themes";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
+import CytoscapeComponent from "react-cytoscapejs";
+import { Search } from "lucide-react";
+
+import { Icon, LoadingState, Surface } from "../../components/ui";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 import type {
-  KnowledgeGraphNode,
   KnowledgeGraphEdge,
+  KnowledgeGraphNode,
 } from "../../services/refact/types";
+import { isActiveKnowledgeDocNode } from "./knowledgeGraphFilters";
 import styles from "./KnowledgeGraphView.module.css";
+import { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 
 cytoscape.use(fcose);
+
+type GraphEdge = KnowledgeGraphEdge & { id?: string };
 
 type CytoscapeElement = {
   data: {
@@ -27,27 +33,12 @@ type CytoscapeElement = {
 
 interface KnowledgeGraphViewProps {
   nodes: KnowledgeGraphNode[];
-  edges: KnowledgeGraphEdge[];
+  edges: GraphEdge[];
   selectedId: string | null;
   onSelectId: (id: string | null) => void;
   isLoading?: boolean;
+  isActive?: boolean;
 }
-
-const isDocNode = (node: KnowledgeGraphNode): boolean => {
-  const nodeType = node.node_type;
-  if (nodeType === "doc_deprecated" || nodeType === "doc_trajectory") {
-    return false;
-  }
-  return nodeType === "doc" || nodeType.startsWith("doc_");
-};
-const NODE_COLORS: Record<string, string> = {
-  code: "#3B82F6",
-  decision: "#8B5CF6",
-  preference: "#10B981",
-  pattern: "#F59E0B",
-  lesson: "#06B6D4",
-  default: "#8B5CF6",
-};
 
 export function KnowledgeGraphView({
   nodes,
@@ -55,15 +46,18 @@ export function KnowledgeGraphView({
   selectedId,
   onSelectId,
   isLoading = false,
+  isActive = true,
 }: KnowledgeGraphViewProps) {
   const cyRef = useRef<Cytoscape.Core | null>(null);
   const layoutRef = useRef<Cytoscape.Layouts | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [cyReady, setCyReady] = useState(false);
   const cyReadyRef = useRef(false);
+  const { colors } = useKnowledgeGraphTheme();
+  const reducedMotion = useReducedMotion();
 
   const filteredNodes = useMemo(() => {
-    return nodes.filter((node) => isDocNode(node));
+    return nodes.filter(isActiveKnowledgeDocNode);
   }, [nodes]);
 
   const filteredEdges = useMemo(() => {
@@ -96,9 +90,11 @@ export function KnowledgeGraphView({
         },
         group: "nodes" as const,
       })),
-      ...filteredEdges.map((edge) => ({
+      ...filteredEdges.map((edge, index) => ({
         data: {
-          id: `${edge.source}-${edge.target}-${edge.edge_type}`,
+          id:
+            edge.id ??
+            `${edge.source}::${edge.target}::${edge.edge_type}::${index}`,
           source: edge.source,
           target: edge.target,
           label: edge.edge_type,
@@ -108,15 +104,23 @@ export function KnowledgeGraphView({
     ];
   }, [filteredNodes, filteredEdges, degreeMap]);
 
-  const stylesheet: unknown[] = useMemo(() => {
+  const stylesheet = useMemo<Cytoscape.StylesheetStyle[]>(() => {
+    const nodeColors: Record<string, string> = {
+      code: colors.kind.code,
+      decision: colors.kind.decision,
+      preference: colors.kind.preference,
+      pattern: colors.kind.pattern,
+      lesson: colors.kind.lesson,
+    };
+
     return [
       {
         selector: "node",
         style: {
-          "background-color": "#8B5CF6",
+          "background-color": colors.kind.other,
           label: "",
           "font-size": "12px",
-          color: "#ffffff",
+          color: colors.foreground,
           "text-valign": "center",
           "text-halign": "center",
           width: "mapData(degree, 1, 20, 30, 60)",
@@ -125,40 +129,90 @@ export function KnowledgeGraphView({
           "text-max-width": "80px",
         },
       },
-      ...Object.entries(NODE_COLORS)
-        .filter(([type]) => type !== "default")
-        .map(([type, color]) => ({
-          selector: `node[type="${type}"]`,
-          style: {
-            "background-color": color,
-          },
-        })),
+      ...Object.entries(nodeColors).map(([type, color]) => ({
+        selector: `node[type="${type}"]`,
+        style: {
+          "background-color": color,
+        },
+      })),
       {
         selector: "edge",
         style: {
           width: 1,
-          "line-color": "#9CA3AF",
-          "target-arrow-color": "#9CA3AF",
+          "line-color": colors.muted,
+          "target-arrow-color": colors.muted,
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
-          opacity: 0.4,
+          opacity: 0.5,
         },
       },
       {
         selector: "node:selected",
         style: {
           "border-width": 5,
-          "border-color": "#FFFFFF",
+          "border-color": colors.border,
           "border-opacity": 1,
           width: "mapData(degree, 1, 20, 40, 80)",
           height: "mapData(degree, 1, 20, 40, 80)",
-          "background-color": "#A78BFA",
-          "box-shadow": "0 0 20px #8B5CF6",
+          "background-color": colors.accent,
+          "box-shadow": `0 0 20px ${colors.accentSoft}`,
           "z-index": 999,
         },
       },
     ];
-  }, []);
+  }, [colors]);
+
+  const runLayout = useCallback(() => {
+    if (!cyRef.current || elements.length === 0) return null;
+
+    if (layoutRef.current) {
+      layoutRef.current.stop();
+    }
+
+    const animate = !reducedMotion && filteredNodes.length <= 160;
+
+    const layout = cyRef.current.layout({
+      name: "fcose",
+      quality: "default",
+      randomize: true,
+      animate,
+      animationDuration: animate ? 500 : 0,
+      fit: true,
+      padding: 40,
+      nodeRepulsion: 8000,
+      idealEdgeLength: 80,
+      edgeElasticity: 0.45,
+      gravity: 0.35,
+      gravityRange: 3.0,
+      numIter: 1200,
+      packComponents: true,
+      nodeSeparation: 90,
+      tile: false,
+    } as Cytoscape.LayoutOptions);
+
+    layoutRef.current = layout;
+    layout.run();
+    return layout;
+  }, [elements.length, filteredNodes.length, reducedMotion]);
+
+  const resizeAndFit = useCallback(
+    (rerunLayout = false) => {
+      const cy = cyRef.current;
+      const container = containerRef.current;
+      if (!cy || !container) return;
+
+      const { width, height } = container.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+
+      cy.resize();
+      if (rerunLayout) {
+        runLayout();
+      } else if (elements.length > 0) {
+        cy.fit(cy.elements(), 50);
+      }
+    },
+    [elements.length, runLayout],
+  );
 
   const handleNodeClick = useCallback(
     (nodeId: string) => {
@@ -172,154 +226,153 @@ export function KnowledgeGraphView({
   }, [onSelectId]);
 
   useEffect(() => {
-    if (!cyRef.current || !cyReady) return;
+    const cy = cyRef.current;
+    if (!cy || !cyReady) return;
 
+    let labelsVisible = cy.zoom() > 1.2;
     const handleZoom = () => {
-      if (!cyRef.current) return;
-      const zoom = cyRef.current.zoom();
-      cyRef.current.elements("node").forEach((node) => {
-        const label = zoom > 1.2 ? (node.data("label") as string) : "";
-        node.style("label", label);
+      const shouldShow = cy.zoom() > 1.2;
+      if (shouldShow === labelsVisible) return;
+      labelsVisible = shouldShow;
+      cy.elements("node").forEach((node) => {
+        node.style("label", shouldShow ? (node.data("label") as string) : "");
       });
     };
 
-    cyRef.current.on("tap", "node", (e: Cytoscape.EventObject) => {
+    const handleNodeTap = (e: Cytoscape.EventObject) => {
       handleNodeClick((e.target as Cytoscape.NodeSingular).id());
-    });
+    };
 
-    cyRef.current.on("tap", (e: Cytoscape.EventObject) => {
-      if (e.target === cyRef.current) {
+    const handleCanvasTap = (e: Cytoscape.EventObject) => {
+      if (e.target === cy) {
         handleBackgroundClick();
       }
-    });
+    };
 
-    cyRef.current.on("zoom", handleZoom);
+    const handleNodeMouseOver = (e: Cytoscape.EventObject) => {
+      const node = e.target as Cytoscape.NodeSingular;
+      node.style("label", node.data("label") as string);
+    };
 
-    cyRef.current.on("mouseover", "node", (e: Cytoscape.EventObject) => {
-      (e.target as Cytoscape.NodeSingular).style(
-        "label",
-        (e.target as Cytoscape.NodeSingular).data("label") as string,
-      );
-    });
-
-    cyRef.current.on("mouseout", "node", (e: Cytoscape.EventObject) => {
-      const zoom = cyRef.current?.zoom() ?? 1;
+    const handleNodeMouseOut = (e: Cytoscape.EventObject) => {
+      const zoom = cy.zoom();
       if (zoom <= 1.2) {
         (e.target as Cytoscape.NodeSingular).style("label", "");
       }
-    });
+    };
+
+    cy.on("tap", "node", handleNodeTap);
+    cy.on("tap", handleCanvasTap);
+    cy.on("zoom", handleZoom);
+    cy.on("mouseover", "node", handleNodeMouseOver);
+    cy.on("mouseout", "node", handleNodeMouseOut);
 
     return () => {
-      if (cyRef.current) {
-        cyRef.current.off("tap");
-        cyRef.current.off("zoom");
-        cyRef.current.off("mouseover");
-        cyRef.current.off("mouseout");
-      }
+      cy.off("tap", "node", handleNodeTap);
+      cy.off("tap", handleCanvasTap);
+      cy.off("zoom", handleZoom);
+      cy.off("mouseover", "node", handleNodeMouseOver);
+      cy.off("mouseout", "node", handleNodeMouseOut);
     };
   }, [cyReady, handleNodeClick, handleBackgroundClick]);
 
   useEffect(() => {
-    if (!cyReady || !containerRef.current || !cyRef.current) return;
-    if (typeof ResizeObserver === "undefined") return;
+    if (!cyRef.current || !cyReady || elements.length === 0) return;
 
-    const ro = new ResizeObserver(() => {
-      cyRef.current?.resize();
-    });
-    ro.observe(containerRef.current);
-    return () => ro.disconnect();
-  }, [cyReady]);
+    const layout = runLayout();
+
+    return () => {
+      layout?.stop();
+    };
+  }, [cyReady, elements.length, runLayout]);
 
   useEffect(() => {
-    if (!cyRef.current || !cyReady) return;
+    if (!cyReady || !isActive) return;
 
-    if (layoutRef.current) {
-      layoutRef.current.stop();
-    }
+    const timeoutId = window.setTimeout(() => resizeAndFit(false), 80);
+    return () => window.clearTimeout(timeoutId);
+  }, [cyReady, isActive, resizeAndFit]);
 
-    const layoutOpts: Cytoscape.LayoutOptions & Record<string, unknown> = {
-      name: "fcose",
-      animationDuration: 500,
-      randomize: true,
-      randomSeed: 42,
-      idealEdgeLength: 220,
-      nodeRepulsion: 18000,
-      nodeSeparation: 90,
-      edgeElasticity: 0.35,
-      gravity: 0.15,
-      packComponents: true,
-      componentSpacing: 140,
-      padding: 30,
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !cyReady) return;
+
+    let timeoutId: number | undefined;
+    const scheduleResize = () => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+      timeoutId = window.setTimeout(() => resizeAndFit(), 80);
     };
 
-    layoutRef.current = cyRef.current.layout(layoutOpts);
+    if (typeof ResizeObserver === "undefined") {
+      scheduleResize();
+      return () => {
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      };
+    }
 
-    requestAnimationFrame(() => {
-      cyRef.current?.resize();
-      if (layoutRef.current) {
-        layoutRef.current.run();
-      }
-    });
-  }, [cyReady, elements]);
+    const observer = new ResizeObserver(scheduleResize);
+    observer.observe(container);
+    scheduleResize();
+
+    return () => {
+      observer.disconnect();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [cyReady, resizeAndFit]);
 
   useEffect(() => {
     if (!cyRef.current || !cyReady) return;
 
-    cyRef.current.$("node:selected").unselect();
-
+    cyRef.current.elements().unselect();
     if (selectedId) {
       const node = cyRef.current.$id(selectedId);
       if (node.length > 0) {
         node.select();
-
-        const currentZoom = cyRef.current.zoom();
-        const targetZoom = Math.max(currentZoom, 1.5);
-
-        cyRef.current.animate({
-          center: { eles: node },
-          zoom: targetZoom,
-          duration: 400,
-          easing: "ease-out",
-        });
+        if (reducedMotion) {
+          cyRef.current.center(node);
+          cyRef.current.zoom(1.5);
+        } else {
+          cyRef.current.animate({
+            center: { eles: node },
+            zoom: 1.5,
+            duration: 500,
+          });
+        }
       }
     }
-  }, [cyReady, selectedId]);
+  }, [cyReady, reducedMotion, selectedId]);
 
   if (isLoading) {
     return (
-      <Flex align="center" justify="center" height="100%">
-        <Text>Loading graph...</Text>
-      </Flex>
+      <LoadingState
+        className={`${styles.loadingState} rf-enter`}
+        label="Loading graph..."
+      />
     );
   }
 
   if (filteredNodes.length === 0) {
     return (
-      <div className={styles.emptyState}>
-        <div className={styles.emptyStateIcon}>
-          <MagnifyingGlassIcon />
-        </div>
-        <div className={styles.emptyStateText}>
-          <p>No linked memories</p>
-        </div>
-      </div>
+      <Surface
+        className={styles.emptyState}
+        radius="none"
+        variant="plain"
+        animated
+      >
+        <Icon icon={Search} size="lg" tone="faint" />
+        <p className={styles.emptyStateText}>No linked memories</p>
+      </Surface>
     );
   }
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        overflow: "hidden",
-      }}
-    >
+    <div ref={containerRef} className={`${styles.graphContainer} rf-enter`}>
       <CytoscapeComponent
+        className={styles.graphCanvas}
         elements={elements}
-        style={{ width: "100%", height: "100%" }}
-        stylesheet={stylesheet as Cytoscape.StylesheetStyle[]}
+        stylesheet={stylesheet}
         cy={(cy) => {
           cyRef.current = cy;
           if (!cyReadyRef.current) {

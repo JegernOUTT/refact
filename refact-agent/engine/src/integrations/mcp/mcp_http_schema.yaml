@@ -6,7 +6,7 @@ fields:
     f_type: string_to_string_map
     f_desc: "HTTP headers to include in requests to the MCP server."
     f_default:
-      User-Agent: "Refact.ai (+https://github.com/smallcloudai/refact)"
+      User-Agent: "Refact.ai (+https://github.com/JegernOUTT/refact)"
       Accept: "application/json, text/event-stream"
       Content-Type: application/json
   auth_type:

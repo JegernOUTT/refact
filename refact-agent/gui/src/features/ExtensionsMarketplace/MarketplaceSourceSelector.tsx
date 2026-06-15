@@ -1,6 +1,6 @@
 import React from "react";
-import { Badge, Flex } from "@radix-ui/themes";
-import { ExclamationTriangleIcon, GearIcon } from "@radix-ui/react-icons";
+import { AlertTriangle, Settings } from "lucide-react";
+import { Badge, Icon } from "../../components/ui";
 import type { ExtensionMarketplaceSource } from "../../services/refact/extensionsMarketplace";
 import styles from "./ExtensionsMarketplace.module.css";
 
@@ -20,11 +20,12 @@ export const MarketplaceSourceSelector: React.FC<
   );
 
   return (
-    <Flex gap="2" wrap="wrap" align="center">
+    <div className={styles.sourceSelector}>
       <Badge
-        color={selectedSource === null ? "blue" : "gray"}
-        variant={selectedSource === null ? "solid" : "soft"}
+        tone={selectedSource === null ? "accent" : "muted"}
         className={styles.sourceTab}
+        role="button"
+        tabIndex={0}
         onClick={() => onSelectSource(null)}
       >
         All ({total})
@@ -32,35 +33,40 @@ export const MarketplaceSourceSelector: React.FC<
       {sources.map((source) => (
         <Badge
           key={source.id}
-          color={
+          tone={
             source.error
-              ? "red"
+              ? "danger"
               : selectedSource === source.id
-                ? "blue"
-                : "gray"
+                ? "accent"
+                : "muted"
           }
-          variant={selectedSource === source.id ? "solid" : "soft"}
-          className={styles.sourceTab}
+          className={
+            source.enabled ? styles.sourceTab : styles.sourceTabDisabled
+          }
+          role="button"
+          tabIndex={source.enabled ? 0 : -1}
           onClick={() =>
             source.enabled &&
             onSelectSource(selectedSource === source.id ? null : source.id)
           }
-          style={{ opacity: source.enabled ? 1 : 0.5 }}
         >
           {source.label}
           {source.item_count !== undefined && ` (${source.item_count})`}
-          {source.error && <ExclamationTriangleIcon />}
+          {source.error && (
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+          )}
         </Badge>
       ))}
       <Badge
-        color="gray"
-        variant="soft"
+        tone="muted"
         className={styles.sourceTab}
+        role="button"
+        tabIndex={0}
         onClick={onOpenSettings}
         title="Manage marketplace sources"
       >
-        <GearIcon />
+        <Icon icon={Settings} size="sm" tone="muted" />
       </Badge>
-    </Flex>
+    </div>
   );
 };

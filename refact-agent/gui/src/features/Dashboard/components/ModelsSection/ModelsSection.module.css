@@ -1,7 +1,7 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-section-gap);
   flex-shrink: 0;
 }
 
@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .headerToggle {
@@ -19,10 +19,10 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   flex: 1;
   min-width: 0;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .headerToggle:hover {
@@ -37,48 +37,55 @@
 .configureButton {
   display: flex;
   align-items: center;
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a5);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  border: var(--rf-hairline) solid var(--rf-border);
   background: transparent;
   cursor: pointer;
-  color: var(--gray-11);
-  transition: background var(--motion-fast) ease;
+  color: var(--rf-color-fg);
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .configureButton:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .configureButton:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
 .models {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .models[data-breakpoint="narrow"] {
   flex-direction: column;
 }
 
+.models[data-breakpoint="narrow"] .modelRow {
+  width: 100%;
+}
+
 .modelRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
   cursor: help;
   min-width: 0;
-  transition: background var(--motion-fast) ease;
+  max-width: 100%;
+  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .modelRow:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .modelLabel {
@@ -92,7 +99,7 @@
 }
 
 .modelCount {
-  padding-left: var(--space-2);
+  padding-left: var(--rf-space-2);
 }
 
 .hoverCard {

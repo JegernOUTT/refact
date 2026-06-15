@@ -1,20 +1,17 @@
 import React, { useMemo, useState } from "react";
-import {
-  Button,
-  Callout,
-  Flex,
-  Heading,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  InfoCircledIcon,
-  MagnifyingGlassIcon,
-} from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { ArrowLeft, Info, Search } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
-import { Spinner } from "../../components/Spinner";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  FieldText,
+  Icon,
+  LoadingState,
+  VirtualizedGrid,
+} from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import type { Config } from "../Config/configSlice";
 import type {
@@ -29,12 +26,15 @@ import { MarketplaceSourceSelector } from "./MarketplaceSourceSelector";
 import { MarketplaceSourceSettings } from "./MarketplaceSourceSettings";
 import styles from "./ExtensionsMarketplace.module.css";
 
+const MARKETPLACE_CARD_HEIGHT = 240;
+
 type ExtensionsMarketplaceProps = {
   host: Config["host"];
   title: string;
   kind: "skill" | "command" | "subagent";
   tabbed: Config["tabbed"];
   back: () => void;
+  embedded?: boolean;
   items: ExtensionMarketplaceItem[];
   sources: ExtensionMarketplaceSource[];
   isLoading: boolean;
@@ -55,6 +55,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   title,
   kind,
   back,
+  embedded = false,
   items,
   sources,
   isLoading,
@@ -155,109 +156,112 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
     }
   };
 
-  return (
-    <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
-      <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex direction="column" gap="4">
-          <Flex align="center" gap="3">
-            <Button variant="ghost" size="1" onClick={back}>
-              <ArrowLeftIcon />
-              Back
-            </Button>
-            <Heading size="4">{title}</Heading>
-          </Flex>
+  const content = (
+    <div className={styles.pageStack}>
+      {!embedded && (
+        <div className={styles.header}>
+          <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={back}>
+            Back
+          </Button>
+          <h2 className={styles.title}>{title}</h2>
+        </div>
+      )}
 
-          <TextField.Root
-            size="2"
-            placeholder={`Search ${kind}s…`}
+      <div className={styles.toolbar}>
+        <div className={styles.quickAddRow}>
+          <FieldText
+            aria-label={`Search ${kind}s`}
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          >
-            <TextField.Slot>
-              <MagnifyingGlassIcon />
-            </TextField.Slot>
-          </TextField.Root>
-
-          <MarketplaceSourceSelector
-            sources={sources}
-            selectedSource={selectedSource}
-            onSelectSource={setSelectedSource}
-            onOpenSettings={() => setSettingsOpen(true)}
+            placeholder={`Search ${kind}s…`}
+            onChange={setSearch}
+            className={styles.grow}
           />
+          <Icon icon={Search} tone="muted" />
+        </div>
 
-          <Flex direction="column" gap="2">
-            <Text size="2" weight="bold">
-              Add GitHub Source by URL
-            </Text>
-            <Flex gap="2">
-              <TextField.Root
-                size="2"
-                placeholder="https://github.com/owner/repo"
-                value={quickAddUrl}
-                onChange={(event) => setQuickAddUrl(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    void handleQuickAdd();
-                  }
-                }}
-              />
-              <Button
-                size="2"
-                onClick={() => void handleQuickAdd()}
-                disabled={!quickAddUrl.trim() || isAddingSource}
-              >
-                {isAddingSource ? "Adding…" : "Add"}
-              </Button>
-            </Flex>
-            {quickAddError && (
-              <Callout.Root color="red" size="1">
-                <Callout.Icon>
-                  <InfoCircledIcon />
-                </Callout.Icon>
-                <Callout.Text>{quickAddError}</Callout.Text>
-              </Callout.Root>
-            )}
-          </Flex>
+        <MarketplaceSourceSelector
+          sources={sources}
+          selectedSource={selectedSource}
+          onSelectSource={setSelectedSource}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+      </div>
 
-          {errorMessage && (
-            <Callout.Root color="red" size="1">
-              <Callout.Icon>
-                <InfoCircledIcon />
-              </Callout.Icon>
-              <Callout.Text>{errorMessage}</Callout.Text>
-            </Callout.Root>
+      <div className={styles.quickAddSection}>
+        <p className={styles.text}>Add GitHub Source by URL</p>
+        <div className={styles.quickAddRow}>
+          <FieldText
+            aria-label="GitHub source URL"
+            placeholder="https://github.com/owner/repo"
+            value={quickAddUrl}
+            onChange={setQuickAddUrl}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void handleQuickAdd();
+              }
+            }}
+            className={styles.grow}
+          />
+          <Button
+            variant="primary"
+            onClick={() => void handleQuickAdd()}
+            disabled={!quickAddUrl.trim() || isAddingSource}
+            loading={isAddingSource}
+          >
+            {isAddingSource ? "Adding…" : "Add"}
+          </Button>
+        </div>
+        {quickAddError && (
+          <div className={classNames(styles.notice, styles.noticeDanger)}>
+            <Icon icon={Info} tone="danger" />
+            <p className={styles.smallText}>{quickAddError}</p>
+          </div>
+        )}
+      </div>
+
+      {errorMessage && (
+        <ErrorState
+          title={`Failed to load ${kind}s marketplace`}
+          description={errorMessage}
+        />
+      )}
+
+      {isLoading && <LoadingState label={`Loading ${kind}s marketplace`} />}
+
+      {!isLoading && !errorMessage && filteredItems.length === 0 && (
+        <EmptyState
+          title={`No ${kind}s found`}
+          description="Try another search term or source."
+        />
+      )}
+
+      {!isLoading && filteredItems.length > 0 && (
+        <VirtualizedGrid
+          items={filteredItems}
+          getItemKey={(item) => `${item.source_id}:${item.id}`}
+          rowHeight={MARKETPLACE_CARD_HEIGHT}
+          aria-label={`${kind}s`}
+          renderItem={(item) => (
+            <MarketplaceItemCard
+              item={item}
+              isInstalling={
+                isInstalling &&
+                installingItem?.id === item.id &&
+                installingItem.source_id === item.source_id
+              }
+              onInstall={(next) => {
+                setInstallError(null);
+                setInstallingItem(next);
+              }}
+            />
           )}
+        />
+      )}
+    </div>
+  );
 
-          {isLoading && <Spinner spinning />}
-
-          {!isLoading && !errorMessage && filteredItems.length === 0 && (
-            <Text size="2" color="gray" align="center">
-              No {kind}s found
-            </Text>
-          )}
-
-          {!isLoading && filteredItems.length > 0 && (
-            <div className={styles.grid}>
-              {filteredItems.map((item) => (
-                <MarketplaceItemCard
-                  key={`${item.source_id}:${item.id}`}
-                  item={item}
-                  isInstalling={
-                    isInstalling &&
-                    installingItem?.id === item.id &&
-                    installingItem.source_id === item.source_id
-                  }
-                  onInstall={(next) => {
-                    setInstallError(null);
-                    setInstallingItem(next);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-        </Flex>
-      </ScrollArea>
-
+  const dialogs = (
+    <>
       <MarketplaceSourceSettings
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
@@ -281,6 +285,20 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
           void handleInstall(scope, params, overwrite)
         }
       />
+    </>
+  );
+
+  return embedded ? (
+    <>
+      {content}
+      {dialogs}
+    </>
+  ) : (
+    <PageWrapper host={host}>
+      <ScrollArea scrollbars="vertical" fullHeight>
+        {content}
+      </ScrollArea>
+      {dialogs}
     </PageWrapper>
   );
 };

@@ -50,7 +50,7 @@ prompt: |
 
   **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs. `sleep` waits without holding a shell process.
 
-  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_delete` manage jobs.
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_update`/`cron_delete` manage jobs.
 
   %CD_INSTRUCTIONS%
   %SHELL_INSTRUCTIONS%
@@ -120,8 +120,11 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
 
 tool_confirm:
   rules:
+    - match: "cron_update"
+      action: auto
     - match: "*"
       action: auto

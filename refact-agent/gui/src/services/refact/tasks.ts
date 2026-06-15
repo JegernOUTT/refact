@@ -106,6 +106,8 @@ export interface TrajectoryInfo {
   created_at: string;
   updated_at: string;
   session_state?: string;
+  mode?: string;
+  parent_id?: string;
   waiting_for_card_ids?: string[];
 }
 
@@ -312,17 +314,21 @@ export const tasksApi = createApi({
       ],
     }),
 
-    createPlannerChat: builder.mutation<{ chat_id: string }, string>({
-      queryFn: async (taskId, api, _opts, baseQuery) => {
+    createPlannerChat: builder.mutation<
+      { chat_id: string; mode?: string },
+      { taskId: string; mode?: string }
+    >({
+      queryFn: async ({ taskId, mode }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/planner-chats`),
           method: "POST",
+          body: mode ? { mode } : {},
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as { chat_id: string } };
+        return { data: result.data as { chat_id: string; mode?: string } };
       },
-      invalidatesTags: (_result, _error, taskId) => [
+      invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },
       ],
     }),
@@ -337,6 +343,7 @@ export const tasksApi = createApi({
           url: buildApiUrlFromState(
             state,
             `/v1/tasks/${taskId}/planner-chats/${chatId}`,
+            { force: "true" },
           ),
           method: "DELETE",
         });
@@ -345,6 +352,7 @@ export const tasksApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },
+        { type: "Board", id: taskId },
         { type: "Tasks", id: taskId },
         "Tasks",
       ],
@@ -356,10 +364,11 @@ export const tasksApi = createApi({
         taskId: string;
         sourceChatId: string;
         targetModeDescription?: string;
+        targetMode?: string;
       }
     >({
       queryFn: async (
-        { taskId, sourceChatId, targetModeDescription },
+        { taskId, sourceChatId, targetModeDescription, targetMode },
         api,
         _opts,
         baseQuery,
@@ -374,6 +383,7 @@ export const tasksApi = createApi({
           body: {
             source_chat_id: sourceChatId,
             target_mode_description: targetModeDescription ?? "",
+            target_mode: targetMode ?? "task_planner",
           },
         });
         if (result.error) return { error: result.error };
@@ -403,22 +413,24 @@ export const tasksApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
+        const requestBody: {
+          body: string;
+          author_role: "user";
+          reply_to?: string;
+        } = {
+          body,
+          author_role: authorRole,
+        };
+        if (replyTo !== undefined) {
+          requestBody.reply_to = replyTo;
+        }
         const result = await baseQuery({
-          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/cards/${cardId}/comments`,
+          ),
           method: "POST",
-          body: {
-            rev: 0,
-            patches: [
-              {
-                type: "AddComment",
-                card_id: cardId,
-                body,
-                author_role: authorRole,
-                author_id: null,
-                reply_to: replyTo ?? null,
-              },
-            ],
-          },
+          body: requestBody,
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskBoard };

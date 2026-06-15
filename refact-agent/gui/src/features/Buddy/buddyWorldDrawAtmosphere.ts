@@ -34,44 +34,43 @@ import {
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
-interface SkyStop {
-  offset: number;
-  color: string;
-}
-
-const SKY_STOPS: Record<
+const GHIBLI_SKY_STOPS: Record<
   BuddyWorldState["atmosphere"]["paletteHint"],
-  SkyStop[]
+  Array<{ offset: number; color: string }>
 > = {
   dawn: [
-    { offset: 0, color: "#0EA5E9" },
-    { offset: 0.5, color: "#F59E0B" },
-    { offset: 1, color: "#166534" },
+    { offset: 0, color: "#7FA8D4" },
+    { offset: 0.42, color: "#C3CFE0" },
+    { offset: 0.68, color: "#F4D9AC" },
+    { offset: 1, color: "#F3B27E" },
   ],
   day: [
-    { offset: 0, color: "#38BDF8" },
-    { offset: 0.58, color: "#93C5FD" },
-    { offset: 1, color: "#15803D" },
+    { offset: 0, color: "#3D7EC2" },
+    { offset: 0.45, color: "#7DB8E8" },
+    { offset: 0.78, color: "#B9E0F2" },
+    { offset: 1, color: "#E3F4F8" },
   ],
   dusk: [
-    { offset: 0, color: "#7C2D12" },
-    { offset: 0.54, color: "#6D28D9" },
-    { offset: 1, color: "#14532D" },
+    { offset: 0, color: "#54498A" },
+    { offset: 0.4, color: "#9A6486" },
+    { offset: 0.7, color: "#D67E6A" },
+    { offset: 1, color: "#F2B05E" },
   ],
   night: [
-    { offset: 0, color: "#111827" },
-    { offset: 0.55, color: "#312E81" },
-    { offset: 1, color: "#064E3B" },
+    { offset: 0, color: "#0E1733" },
+    { offset: 0.5, color: "#1C2C55" },
+    { offset: 0.82, color: "#2E4374" },
+    { offset: 1, color: "#3D5587" },
   ],
   dream: [
-    { offset: 0, color: "#1E1B4B" },
-    { offset: 0.58, color: "#6D28D9" },
-    { offset: 1, color: "#064E3B" },
+    { offset: 0, color: "#2C2553" },
+    { offset: 0.5, color: "#6E5FA8" },
+    { offset: 1, color: "#BCA9E0" },
   ],
   storm: [
-    { offset: 0, color: "#020617" },
-    { offset: 0.5, color: "#312E81" },
-    { offset: 1, color: "#14532D" },
+    { offset: 0, color: "#39465A" },
+    { offset: 0.55, color: "#5C6B7E" },
+    { offset: 1, color: "#93A2B2" },
   ],
 };
 
@@ -80,7 +79,7 @@ export function drawSkyGradient(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  const stops = SKY_STOPS[worldPaletteHint(args.world)];
+  const stops = GHIBLI_SKY_STOPS[worldPaletteHint(args.world)];
 
   for (const stop of stops) {
     gradient.addColorStop(clamp(stop.offset, 0, 1), stop.color);
@@ -96,132 +95,124 @@ function drawSkyStructures(args: DrawBuddyWorldBaseArgs): void {
   const serious = args.world.atmosphere.serious;
   const warning = hasWorldLayer(args.world, "provider_flicker") && !serious;
   const active = hasWorldLayer(args.world, "workshop_runes");
-  const crystalX = width * 0.75;
-  const crystalY = height * 0.49;
-  const lighthouseX = width * 0.88;
-  const lighthouseY = height * 0.56;
-  const crystalTone = serious ? "#F87171" : warning ? "#F59E0B" : "#93C5FD";
-  const beaconTone = serious || warning ? "#FDE68A" : "#E0E7FF";
-  const beamAlpha = alphaForMotion(
-    serious ? 0.24 : active ? 0.17 : warning ? 0.12 : 0.1,
-    args.reducedMotion,
+  const night =
+    worldPaletteHint(args.world) === "night" ||
+    worldPaletteHint(args.world) === "dream";
+  const hillX = width * 0.84;
+  const hillY = height * 0.625;
+  const haze = alphaForMotion(0.5, args.reducedMotion);
+  const moundColor = night ? "#24405A" : "#6FA382";
+  const trunkColor = night ? "#2C2118" : "#574436";
+  const leafDeep = night ? "#1C3A2A" : "#4F6E58";
+  const leafMid = night ? "#27513A" : "#5E8266";
+
+  fillEllipse(args.ctx, hillX, hillY + 16, width * 0.16, 24, moundColor, haze);
+  fillEllipse(
+    args.ctx,
+    hillX - 4,
+    hillY + 9,
+    width * 0.1,
+    13,
+    moundColor,
+    haze * 0.9,
+  );
+  fillPixelRect(args.ctx, hillX - 2, hillY - 18, 4, 22, trunkColor, haze + 0.2);
+  fillEllipse(
+    args.ctx,
+    hillX + wave(frame, 90, 0, 1.5, args.reducedMotion),
+    hillY - 26,
+    22,
+    13,
+    leafDeep,
+    haze + 0.18,
+  );
+  fillEllipse(
+    args.ctx,
+    hillX - 12 + wave(frame, 84, 1, 1.2, args.reducedMotion),
+    hillY - 19,
+    12,
+    8,
+    leafMid,
+    haze + 0.12,
+  );
+  fillEllipse(
+    args.ctx,
+    hillX + 13 + wave(frame, 96, 2, 1.2, args.reducedMotion),
+    hillY - 18,
+    11,
+    7,
+    leafMid,
+    haze + 0.12,
   );
 
-  fillCircle(
-    args.ctx,
-    crystalX,
-    crystalY - 18,
-    serious ? 32 : 24,
-    crystalTone,
-    serious ? 0.07 : 0.035,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 6,
-    crystalY - 34,
-    12,
-    20,
-    crystalTone,
-    0.8,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 12,
-    crystalY - 18,
-    24,
-    18,
-    "#1E293B",
-    0.86,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX - 4,
-    crystalY - 28,
-    8,
-    24,
-    "#DBEAFE",
-    serious ? 0.52 : 0.42,
-  );
-  fillPixelRect(
-    args.ctx,
-    crystalX + 10,
-    crystalY - 28 + wave(frame, 36, 0, 3, args.reducedMotion),
-    4,
-    4,
-    beaconTone,
-    0.72,
-  );
-  if (warning || serious) {
-    strokeCircle(
-      args.ctx,
-      crystalX,
-      crystalY - 19,
-      28 + wave(frame, warning ? 28 : 18, 0, 3, args.reducedMotion),
-      warning ? "#FCD34D" : "#F87171",
-      warning ? 1.5 : 3,
-      alphaForMotion(warning ? 0.12 : 0.32, args.reducedMotion),
-    );
+  const toriiX = hillX - 26;
+  const toriiTone = serious ? "#E25B4A" : "#C2563C";
+  fillPixelRect(args.ctx, toriiX - 7, hillY - 4, 3, 12, toriiTone, haze + 0.16);
+  fillPixelRect(args.ctx, toriiX + 4, hillY - 4, 3, 12, toriiTone, haze + 0.16);
+  fillPixelRect(args.ctx, toriiX - 10, hillY - 7, 20, 3, toriiTone, haze + 0.2);
+  fillPixelRect(args.ctx, toriiX - 6, hillY - 3, 12, 2, toriiTone, haze + 0.12);
+  if (serious) {
+    const swing = wave(frame, 26, 0, 1, args.reducedMotion);
+    fillPixelRect(args.ctx, toriiX - 5 + swing, hillY - 1, 3, 4, "#F87171");
+    fillPixelRect(args.ctx, toriiX + 3 - swing, hillY - 1, 3, 4, "#F87171");
+    fillPixelRect(args.ctx, toriiX - 4 + swing, hillY, 1, 1, "#FDE68A", 0.9);
+    fillPixelRect(args.ctx, toriiX + 4 - swing, hillY, 1, 1, "#FDE68A", 0.9);
   }
 
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 10,
-    lighthouseY - 26,
-    20,
-    44,
-    "#334155",
-    0.92,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 15,
-    lighthouseY + 15,
-    30,
-    6,
-    "#0F172A",
-    0.72,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 7,
-    lighthouseY - 36,
-    14,
-    10,
-    beaconTone,
-    0.86,
-  );
-  fillPixelRect(
-    args.ctx,
-    lighthouseX - 12,
-    lighthouseY - 40,
-    24,
-    5,
-    "#CBD5E1",
-    0.9,
-  );
-  strokeLine(
-    args.ctx,
-    { x: lighthouseX - 7, y: lighthouseY - 31 },
-    {
-      x: width * 0.58,
-      y: height * 0.18 + wave(frame, 86, 0, 5, args.reducedMotion),
-    },
-    beaconTone,
-    args.compact ? 2 : 3,
-    beamAlpha,
-  );
-  if (active) {
-    strokeLine(
+  if (warning || serious) {
+    const pulse = wave(frame, warning ? 28 : 16, 0, 0.08, args.reducedMotion);
+    fillCircle(
       args.ctx,
-      { x: crystalX + 8, y: crystalY - 25 },
-      {
-        x: width * 0.48 + wave(frame, 72, 0, 14, args.reducedMotion),
-        y: height * 0.18 + wave(frame, 58, 1, 5, args.reducedMotion),
-      },
-      "#22D3EE",
-      args.compact ? 2 : 4,
-      alphaForMotion(0.22, args.reducedMotion),
+      toriiX,
+      hillY - 8,
+      serious ? 22 : 15,
+      serious ? "#F87171" : "#FCD34D",
+      alphaForMotion((serious ? 0.16 : 0.1) + pulse, args.reducedMotion),
     );
+    strokeCircle(
+      args.ctx,
+      toriiX,
+      hillY - 8,
+      18 + wave(frame, warning ? 30 : 18, 1, 3, args.reducedMotion),
+      serious ? "#F87171" : "#FCD34D",
+      serious ? 2 : 1.5,
+      alphaForMotion(serious ? 0.22 : 0.1, args.reducedMotion),
+    );
+    if (warning) {
+      const flickA = Math.abs(wave(frame, 21, 0, 1.6, args.reducedMotion));
+      fillPixelRect(
+        args.ctx,
+        toriiX - 9,
+        hillY - 14 - flickA,
+        1.8,
+        1.8,
+        "#F59E0B",
+        alphaForMotion(0.72, args.reducedMotion),
+      );
+      fillPixelRect(
+        args.ctx,
+        toriiX + 8,
+        hillY - 10 + flickA * 0.6,
+        1.5,
+        1.5,
+        "#F59E0B",
+        alphaForMotion(0.6, args.reducedMotion),
+      );
+    }
+  }
+  if (active) {
+    const count = countForMotion(4, args.compact, args.reducedMotion);
+    for (let index = 0; index < count; index += 1) {
+      const rise = ((frame * 0.4 + index * 25) % 100) / 100;
+      drawSpark(
+        args.ctx,
+        hillX - 26 + wave(frame, 22 + index, index, 4, args.reducedMotion),
+        hillY - 10 - rise * 30,
+        1.6,
+        "#FDE68A",
+        alphaForMotion((1 - rise) * 0.5, args.reducedMotion),
+      );
+    }
   }
 }
 
@@ -286,6 +277,54 @@ export function drawObservatoryStructures(args: DrawBuddyWorldBaseArgs): void {
 
   drawSkyStructures(args);
 }
+const HORIZON_HAZE_TINTS: Record<
+  BuddyWorldState["atmosphere"]["paletteHint"],
+  string
+> = {
+  dawn: "#F8E3C0",
+  day: "#DCEFF8",
+  dusk: "#F0B98A",
+  night: "#3D5587",
+  dream: "#C6B4E6",
+  storm: "#9FAEBD",
+};
+
+export function drawHorizonHaze(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const tint = HORIZON_HAZE_TINTS[worldPaletteHint(args.world)];
+  const baseY = height * 0.645;
+  const breathe = wave(frame, 210, 0, 2.2, args.reducedMotion);
+
+  fillEllipse(
+    args.ctx,
+    width * 0.5,
+    baseY + breathe,
+    width * 0.62,
+    height * 0.085,
+    tint,
+    alphaForMotion(0.16, args.reducedMotion),
+  );
+  fillEllipse(
+    args.ctx,
+    width * 0.26,
+    baseY + 7 - breathe * 0.5,
+    width * 0.3,
+    height * 0.05,
+    tint,
+    alphaForMotion(0.11, args.reducedMotion),
+  );
+  fillEllipse(
+    args.ctx,
+    width * 0.76,
+    baseY + 9 + breathe * 0.4,
+    width * 0.26,
+    height * 0.045,
+    tint,
+    alphaForMotion(0.1, args.reducedMotion),
+  );
+}
 
 export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
   const { ctx, world } = args;
@@ -309,20 +348,60 @@ export function drawCelestial(args: DrawBuddyWorldBaseArgs): void {
         : "#FBBF24";
   const glowColor = isNight ? "#818CF8" : isEvening ? "#FB7185" : "#FBBF24";
 
-  fillCircle(ctx, x, y, isNight ? 34 : 42, glowColor, isNight ? 0.24 : 0.26);
-  fillPixelRect(ctx, x - 13, y - 13, 26, 26, color);
-  fillPixelRect(ctx, x - 18, y - 8, 36, 16, color);
-  fillPixelRect(ctx, x - 8, y - 18, 16, 36, color);
-
   if (isNight) {
-    fillPixelRect(ctx, x + 4, y - 13, 14, 26, "#4C1D95");
+    const moonPhase = clamp(
+      Number.isFinite(world.moonPhase) ? world.moonPhase : 0.5,
+      0,
+      1,
+    );
+    fillCircle(ctx, x, y, 30, glowColor, 0.13);
+    fillCircle(ctx, x, y, 19, glowColor, 0.16);
+    fillCircle(ctx, x, y, 16.6, "#CBD7F2", 0.66);
+    fillCircle(ctx, x, y, 15.6, color);
+    const illumination = 1 - Math.abs(moonPhase - 0.5) * 2;
+    const shadowShift = (1 - illumination) * 21;
+    if (shadowShift > 1.4) {
+      const fromLeft = moonPhase < 0.5;
+      fillCircle(
+        ctx,
+        x + (fromLeft ? -shadowShift : shadowShift),
+        y - shadowShift * 0.1,
+        14.8,
+        "#2B3760",
+        0.9,
+      );
+    }
+    fillCircle(ctx, x - 5, y - 3.4, 2.7, "#C7D2FE", 0.6);
+    fillCircle(ctx, x + 4.4, y + 4.6, 2, "#C7D2FE", 0.5);
+    fillCircle(ctx, x + 6.2, y - 6.4, 1.3, "#C7D2FE", 0.44);
+    fillCircle(ctx, x - 4.6, y - 3, 1.1, "#EEF2FF", 0.5);
+    fillPixelRect(ctx, x - 24, y - 11, 2, 2, color, 0.78);
+    fillPixelRect(ctx, x + 22, y + 7, 1.6, 1.6, color, 0.62);
     return;
   }
 
-  fillPixelRect(ctx, x - 2, y - 32, 4, 8, "#F59E0B");
-  fillPixelRect(ctx, x - 2, y + 24, 4, 8, "#F59E0B");
-  fillPixelRect(ctx, x - 32, y - 2, 8, 4, "#F59E0B");
-  fillPixelRect(ctx, x + 24, y - 2, 8, 4, "#F59E0B");
+  fillCircle(ctx, x, y, 46, glowColor, 0.16);
+  fillCircle(ctx, x, y, 30, glowColor, 0.18);
+  fillCircle(ctx, x, y, 17.4, color, 0.4);
+  fillCircle(ctx, x, y, 14.6, color);
+  fillCircle(ctx, x - 4.6, y - 5, 4.6, "#FFF6D8", 0.55);
+  const raySpin = args.reducedMotion ? 0 : frame / 460;
+  const rayPulse = Math.abs(wave(frame, 44, 0, 2.2, args.reducedMotion));
+  for (let ray = 0; ray < 8; ray += 1) {
+    const angle = (ray / 8) * TAU + raySpin;
+    const inner = 20 + rayPulse;
+    const outer = inner + (ray % 2 === 0 ? 7 : 4.4);
+    strokeLine(
+      ctx,
+      { x: x + Math.cos(angle) * inner, y: y + Math.sin(angle) * inner },
+      { x: x + Math.cos(angle) * outer, y: y + Math.sin(angle) * outer },
+      color,
+      1.7,
+      alphaForMotion(0.5, args.reducedMotion),
+    );
+  }
+  fillPixelRect(ctx, x - 26, y + 9, 2, 2, color, 0.66);
+  fillPixelRect(ctx, x + 24, y - 12, 1.8, 1.8, color, 0.58);
   if (isMorning || isEvening) {
     fillEllipse(
       ctx,
@@ -475,24 +554,314 @@ function drawAurora(args: DrawBuddyWorldBaseArgs, alpha = 0.3): void {
   const { ctx } = args;
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
-  const y = pctY(height, args.world.weatherY);
+  const y = pctY(height, args.world.weatherY) - height * 0.07;
   const frame = safeFrame(args.frame);
   const bands = countForMotion(3, args.compact, args.reducedMotion);
 
   for (let index = 0; index < bands; index += 1) {
     const color = index % 2 === 0 ? "#2DD4BF" : "#A855F7";
+    const drift = wave(
+      frame,
+      110 + index * 16,
+      index * 1.4,
+      5,
+      args.reducedMotion,
+    );
+    const lift = index * 9;
     strokeBezier(
       ctx,
-      {
-        x: 0,
-        y: y + index * 10 + wave(frame, 90, index, 3, args.reducedMotion),
-      },
-      { x: width * 0.28, y: y - 28 + index * 8 },
-      { x: width * 0.6, y: y + 36 - index * 6 },
-      { x: width, y: y - 8 + index * 8 },
+      { x: width * 0.08, y: y + 24 - lift + drift },
+      { x: width * 0.26, y: y - 26 - lift - drift * 0.6 },
+      { x: width * 0.5, y: y + 18 - lift + drift },
+      { x: width * 0.82, y: y - 30 - lift },
       color,
-      args.compact ? 5 : 8,
-      alphaForMotion(alpha, args.reducedMotion),
+      args.compact ? 7 : 11,
+      alphaForMotion(alpha * 0.55, args.reducedMotion),
+    );
+  }
+}
+
+function drawBirds(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(4, args.compact, args.reducedMotion);
+  const alpha = alphaForMotion(0.5, args.reducedMotion);
+
+  for (let index = 0; index < count; index += 1) {
+    const speed = 0.42 + seededUnit(163, index) * 0.32;
+    const travel = args.reducedMotion ? index * 137 : frame * speed;
+    const x = ((travel + index * 173) % (width + 120)) - 60;
+    const y =
+      height * (0.12 + seededUnit(167, index) * 0.2) +
+      wave(frame, 34, index, 4, args.reducedMotion);
+    const flap = args.reducedMotion ? 0 : Math.sin(frame / 6 + index * 1.4);
+    fillPixelRect(
+      args.ctx,
+      x - 4,
+      y + (flap > 0 ? -2 : 0),
+      4,
+      2,
+      "#1E293B",
+      alpha,
+    );
+    fillPixelRect(args.ctx, x, y + (flap > 0 ? 0 : -2), 4, 2, "#1E293B", alpha);
+  }
+
+  if (args.reducedMotion) return;
+  const vWithin = (frame * 1.2) % 2_100;
+  if (vWithin >= 640) return;
+  const t = vWithin / 640;
+  const vx = width * (-0.08 + t * 1.16);
+  const vy =
+    height * (0.14 + Math.sin(t * Math.PI) * 0.05) +
+    wave(frame, 26, 2, 2, args.reducedMotion);
+  const fade = Math.min(1, Math.min(t * 7, (1 - t) * 7));
+  const flockCount = countForMotion(5, args.compact, false);
+  for (let index = 0; index < flockCount; index += 1) {
+    const row = Math.ceil(index / 2);
+    const side = index % 2 === 0 ? 1 : -1;
+    const bx = vx - row * 10;
+    const by = vy + side * row * 5.4;
+    const flap = Math.sin(frame / 4.6 + index * 1.1);
+    fillPixelRect(
+      args.ctx,
+      bx - 3.4,
+      by + (flap > 0 ? -1.8 : 0),
+      3.4,
+      1.6,
+      "#1E293B",
+      alpha * fade,
+    );
+    fillPixelRect(
+      args.ctx,
+      bx,
+      by + (flap > 0 ? 0 : -1.8),
+      3.4,
+      1.6,
+      "#1E293B",
+      alpha * fade,
+    );
+  }
+}
+
+function drawButterflies(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(3, args.compact, args.reducedMotion);
+  const colors = ["#F9A8D4", "#93C5FD", "#FDE68A"];
+
+  for (let index = 0; index < count; index += 1) {
+    const x =
+      width * (0.28 + seededUnit(173, index) * 0.44) +
+      wave(frame, 26 + index, index, 14, args.reducedMotion);
+    const y =
+      height * (0.58 + seededUnit(179, index) * 0.16) +
+      wave(frame, 18 + index, index * 2, 8, args.reducedMotion);
+    const open = args.reducedMotion || Math.sin(frame / 4 + index) > 0;
+    const color = colors[index % colors.length];
+    const span = open ? 3 : 2;
+    const alpha = alphaForMotion(0.78, args.reducedMotion);
+    fillPixelRect(args.ctx, x - span, y, span, 3, color, alpha);
+    fillPixelRect(args.ctx, x + 1, y, span, 3, color, alpha);
+    fillPixelRect(args.ctx, x, y, 1, 3, "#334155", alpha);
+  }
+}
+
+function drawOwl(args: DrawBuddyWorldBaseArgs): void {
+  const anchor = objectAnchor(args, "providers", { x: 72, y: 67 });
+  const frame = safeFrame(args.frame);
+  const width = safeDimension(args.width, 720);
+  const x = anchor.x + 27;
+  const y = anchor.y - 38 + wave(frame, 110, 0, 1, args.reducedMotion);
+  const gazeOffset =
+    typeof args.actorXPercent === "number" &&
+    Number.isFinite(args.actorXPercent)
+      ? Math.max(
+          -1,
+          Math.min(1, Math.sign(pctX(width, args.actorXPercent) - x)),
+        )
+      : 0;
+
+  fillPixelRect(args.ctx, x - 4, y, 8, 9, "#475569", 0.92);
+  fillPixelRect(args.ctx, x - 2, y + 4, 4, 5, "#94A3B8", 0.8);
+  fillPixelRect(args.ctx, x - 4, y - 2, 2, 2, "#475569", 0.92);
+  fillPixelRect(args.ctx, x + 2, y - 2, 2, 2, "#475569", 0.92);
+  const blink =
+    !args.reducedMotion && Math.floor(frame / 30) % 9 === 0 ? true : false;
+  if (blink) {
+    fillPixelRect(args.ctx, x - 3, y + 2, 2, 1, "#1E293B", 0.9);
+    fillPixelRect(args.ctx, x + 1, y + 2, 2, 1, "#1E293B", 0.9);
+  } else {
+    fillPixelRect(args.ctx, x - 3 + gazeOffset, y + 1, 2, 2, "#FDE047", 0.95);
+    fillPixelRect(args.ctx, x + 1 + gazeOffset, y + 1, 2, 2, "#FDE047", 0.95);
+  }
+}
+
+function drawShootingStars(args: DrawBuddyWorldBaseArgs): void {
+  if (args.reducedMotion) return;
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const period = 540;
+  const within = frame % period;
+  if (within > 70) return;
+  const burst = Math.floor(frame / period);
+  const sx = width * (0.15 + seededUnit(191, burst) * 0.6) + within * 3.2;
+  const sy = height * (0.08 + seededUnit(193, burst) * 0.18) + within * 1.1;
+  const fade = within < 12 ? within / 12 : Math.max(0, 1 - (within - 12) / 58);
+  strokeLine(
+    args.ctx,
+    { x: sx, y: sy },
+    { x: sx - 18, y: sy - 8 },
+    "#F8FAFC",
+    1.6,
+    fade * 0.78,
+  );
+  drawSpark(args.ctx, sx, sy, 1.8, "#FDE68A", fade * 0.9);
+}
+
+function drawSeasonPetals(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(14, args.compact, args.reducedMotion);
+
+  for (let index = 0; index < count; index += 1) {
+    const fall = args.reducedMotion
+      ? 0
+      : frame * (0.34 + seededUnit(197, index) * 0.3);
+    const x =
+      (seededUnit(199, index) * width +
+        fall * 0.4 +
+        wave(frame, 30 + index, index, 7, args.reducedMotion) +
+        width) %
+      width;
+    const y = (seededUnit(211, index) * height + fall) % (height * 0.94);
+    const alpha = alphaForMotion(
+      0.32 + seededUnit(223, index) * 0.3,
+      args.reducedMotion,
+    );
+    fillPixelRect(
+      args.ctx,
+      x,
+      y,
+      2,
+      2,
+      index % 3 === 0 ? "#FBCFE8" : "#F9A8D4",
+      alpha,
+    );
+  }
+}
+
+function drawSeasonLeaves(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(12, args.compact, args.reducedMotion);
+  const colors = ["#FB923C", "#D97706", "#F87171"];
+
+  for (let index = 0; index < count; index += 1) {
+    const fall = args.reducedMotion
+      ? 0
+      : frame * (0.22 + seededUnit(227, index) * 0.24);
+    const x =
+      (seededUnit(229, index) * width +
+        wave(frame, 24 + index, index, 12, args.reducedMotion) +
+        fall * 0.3 +
+        width) %
+      width;
+    const y = (seededUnit(233, index) * height + fall) % (height * 0.96);
+    const alpha = alphaForMotion(
+      0.36 + seededUnit(239, index) * 0.3,
+      args.reducedMotion,
+    );
+    fillPixelRect(args.ctx, x, y, 3, 2, colors[index % colors.length], alpha);
+  }
+}
+
+function drawSeasonSnow(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(26, args.compact, args.reducedMotion);
+
+  for (let index = 0; index < count; index += 1) {
+    const fall = args.reducedMotion
+      ? 0
+      : frame * (0.18 + seededUnit(241, index) * 0.2);
+    const x =
+      (seededUnit(251, index) * width +
+        wave(frame, 44 + index, index, 6, args.reducedMotion) +
+        width) %
+      width;
+    const y = (seededUnit(257, index) * height + fall) % (height * 0.98);
+    const size = index % 5 === 0 ? 2.4 : 1.7;
+    const alpha = alphaForMotion(
+      0.4 + seededUnit(263, index) * 0.3,
+      args.reducedMotion,
+    );
+    fillPixelRect(args.ctx, x, y, size, size, "#F8FAFC", alpha);
+  }
+}
+
+function drawSummerShimmer(args: DrawBuddyWorldBaseArgs): void {
+  if (args.reducedMotion) return;
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(6, args.compact, false);
+
+  for (let index = 0; index < count; index += 1) {
+    const x =
+      width * (0.1 + (index / count) * 0.8) +
+      Math.sin(frame / 22 + index * 2.1) * 4;
+    const y = height * 0.56;
+    const alpha = 0.035 + Math.abs(Math.sin(frame / 30 + index)) * 0.045;
+    fillPixelRect(args.ctx, x, y - 14, 2, 18, "#FEF3C7", alpha);
+  }
+}
+
+function drawMorningFog(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const count = countForMotion(5, args.compact, args.reducedMotion);
+
+  for (let index = 0; index < count; index += 1) {
+    const drift = args.reducedMotion ? 0 : frame * (0.1 + index * 0.03);
+    const x = ((seededUnit(269, index) * width + drift) % (width + 200)) - 100;
+    const y = height * (0.66 + seededUnit(271, index) * 0.16);
+    fillEllipse(
+      args.ctx,
+      x,
+      y,
+      args.compact ? 52 : 80,
+      args.compact ? 8 : 11,
+      "#CBD5E1",
+      alphaForMotion(0.07 + seededUnit(277, index) * 0.05, args.reducedMotion),
+    );
+  }
+}
+
+function drawRainbow(args: DrawBuddyWorldBaseArgs): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const bands = ["#F87171", "#FB923C", "#FACC15", "#4ADE80", "#60A5FA"];
+  const baseY = height * 0.66;
+
+  for (let index = 0; index < bands.length; index += 1) {
+    const lift = index * (args.compact ? 3 : 4);
+    strokeBezier(
+      args.ctx,
+      { x: width * 0.12, y: baseY },
+      { x: width * 0.32, y: height * 0.16 + lift },
+      { x: width * 0.58, y: height * 0.16 + lift },
+      { x: width * 0.78, y: baseY },
+      bands[index],
+      args.compact ? 2 : 3,
+      alphaForMotion(0.13, args.reducedMotion),
     );
   }
 }
@@ -503,13 +872,18 @@ export function drawAmbientLayers(args: DrawBuddyWorldBaseArgs): void {
   if (hasWorldLayer(args.world, "fireflies")) drawFireflies(args);
   if (hasWorldLayer(args.world, "aurora")) drawAurora(args, 0.28);
   if (hasWorldLayer(args.world, "cozy_home_glow")) drawCozyHomeGlow(args);
+  if (hasWorldLayer(args.world, "birds")) drawBirds(args);
+  if (hasWorldLayer(args.world, "butterflies")) drawButterflies(args);
+  if (hasWorldLayer(args.world, "owl")) drawOwl(args);
+  if (hasWorldLayer(args.world, "shooting_stars")) drawShootingStars(args);
 }
 
 function drawRain(args: DrawBuddyWorldBaseArgs): void {
   const x = pctX(args.width, args.world.weatherX);
   const y = pctY(args.height, args.world.weatherY);
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const count = countForMotion(18, args.compact, args.reducedMotion);
 
   drawCloud(
     args.ctx,
@@ -519,10 +893,21 @@ function drawRain(args: DrawBuddyWorldBaseArgs): void {
     "#94A3B8",
     0.84,
   );
-  for (let index = 0; index < count; index += 1) {
-    const rx = x - 54 + ((index * 13 + frame) % 112);
-    const ry = y + 18 + ((index * 19 + frame * 2) % 72);
-    fillPixelRect(args.ctx, rx, ry, 2, 7, "#38BDF8", 0.72);
+  const overcastCount = countForMotion(3, args.compact, args.reducedMotion);
+  for (let index = 0; index < overcastCount; index += 1) {
+    const drift = args.reducedMotion ? 0 : frame * (0.16 + index * 0.07);
+    const cx = ((seededUnit(283, index) * width + drift) % (width + 180)) - 90;
+    const cy =
+      height * (0.06 + seededUnit(293, index) * 0.14) +
+      wave(frame, 64, index, 2, args.reducedMotion);
+    drawCloud(
+      args.ctx,
+      cx,
+      cy,
+      args.compact ? 0.88 : 1.18,
+      index % 2 === 0 ? "#64748B" : "#94A3B8",
+      0.46 + seededUnit(307, index) * 0.22,
+    );
   }
 }
 
@@ -597,14 +982,9 @@ function drawDreamLetters(args: DrawBuddyWorldBaseArgs): void {
 function drawProviderStorm(args: DrawBuddyWorldBaseArgs): void {
   const x = pctX(args.width, args.world.weatherX);
   const y = pctY(args.height, args.world.weatherY);
-  const width = safeDimension(args.width, 720);
-  const height = safeDimension(args.height, 260);
-  const frame = safeFrame(args.frame);
   const intensity = worldIntensity(args.world);
-  const rainCount = countForMotion(18, args.compact, args.reducedMotion);
   const boltAlpha = alphaForMotion(0.68 + intensity * 0.22, args.reducedMotion);
 
-  fillRect(args.ctx, 0, 0, width, height, "#020617", 0.12 + intensity * 0.08);
   drawCloud(
     args.ctx,
     x - 42,
@@ -623,12 +1003,6 @@ function drawProviderStorm(args: DrawBuddyWorldBaseArgs): void {
     2,
     boltAlpha * 0.64,
   );
-
-  for (let index = 0; index < rainCount; index += 1) {
-    const rx = x - 60 + ((index * 17 + frame * 2) % 130);
-    const ry = y + 18 + ((index * 11 + frame) % 64);
-    fillPixelRect(args.ctx, rx, ry, 2, 8, "#7DD3FC", 0.72);
-  }
 }
 
 function drawDreamMist(args: DrawBuddyWorldBaseArgs): void {
@@ -893,4 +1267,125 @@ export function drawWeatherAtmosphere(args: DrawBuddyWorldBaseArgs): void {
   if (hasWorldLayer(args.world, "memory_orbs")) drawMemoryOrbs(args);
   if (hasWorldLayer(args.world, "toy_glow")) drawToyGlow(args);
   if (hasWorldLayer(args.world, "empty_food_nook")) drawEmptyFoodNook(args);
+  if (hasWorldLayer(args.world, "rainbow")) drawRainbow(args);
+  if (hasWorldLayer(args.world, "morning_fog")) drawMorningFog(args);
+  if (hasWorldLayer(args.world, "summer_shimmer")) drawSummerShimmer(args);
+}
+
+function drawRainLayers(args: DrawBuddyWorldBaseArgs, heavy: boolean): void {
+  const width = safeDimension(args.width, 720);
+  const height = safeDimension(args.height, 260);
+  const frame = safeFrame(args.frame);
+  const farCount = countForMotion(
+    heavy ? 30 : 24,
+    args.compact,
+    args.reducedMotion,
+  );
+  const nearCount = countForMotion(
+    heavy ? 18 : 12,
+    args.compact,
+    args.reducedMotion,
+  );
+  const fallSpeed = heavy ? 6.4 : 4.6;
+  const slant = heavy ? 1.9 : 1.1;
+
+  for (let index = 0; index < farCount; index += 1) {
+    const lane = seededUnit(311, index) * width;
+    const drop = args.reducedMotion
+      ? 0
+      : frame * (fallSpeed * 0.55 + seededUnit(317, index) * 1.2);
+    const ry = ((seededUnit(313, index) * height + drop) % (height + 24)) - 12;
+    const rx = (((lane - ry * slant * 0.5) % width) + width) % width;
+    fillPixelRect(
+      args.ctx,
+      rx,
+      ry,
+      1.5,
+      8,
+      "#7DD3FC",
+      alphaForMotion(0.36 + seededUnit(331, index) * 0.16, args.reducedMotion),
+    );
+  }
+
+  for (let index = 0; index < nearCount; index += 1) {
+    const lane = seededUnit(337, index) * width;
+    const drop = args.reducedMotion
+      ? 0
+      : frame * (fallSpeed + seededUnit(349, index) * 1.6);
+    const ry = ((seededUnit(347, index) * height + drop) % (height + 30)) - 15;
+    const rx = (((lane - ry * slant) % width) + width) % width;
+    fillPixelRect(
+      args.ctx,
+      rx,
+      ry,
+      2,
+      12,
+      "#0EA5E9",
+      alphaForMotion(0.52 + seededUnit(353, index) * 0.18, args.reducedMotion),
+    );
+  }
+
+  const splashCount = countForMotion(
+    heavy ? 9 : 7,
+    args.compact,
+    args.reducedMotion,
+  );
+  for (let slot = 0; slot < splashCount; slot += 1) {
+    const sx = width * (0.04 + seededUnit(359, slot) * 0.92);
+    const sy = height * (0.88 + seededUnit(367, slot) * 0.08);
+    const period = 22 + (slot % 4) * 5;
+    const phase = args.reducedMotion
+      ? (slot % period) / period
+      : ((frame + slot * 9) % period) / period;
+    if (phase < 0.3) {
+      fillPixelRect(
+        args.ctx,
+        sx,
+        sy - 3,
+        1.6,
+        3.4,
+        "#BAE6FD",
+        alphaForMotion(0.5, args.reducedMotion),
+      );
+    } else {
+      const grow = (phase - 0.3) / 0.7;
+      strokeEllipse(
+        args.ctx,
+        sx,
+        sy,
+        1.5 + grow * 5.5,
+        0.7 + grow * 1.9,
+        "#BAE6FD",
+        1,
+        alphaForMotion(0.42 * (1 - grow), args.reducedMotion),
+      );
+    }
+  }
+}
+
+export function drawPrecipitation(args: DrawBuddyWorldBaseArgs): void {
+  const weather = worldWeather(args.world);
+  const stormy =
+    weather === "storm" || hasWorldLayer(args.world, "provider_storm");
+
+  if (stormy) {
+    const width = safeDimension(args.width, 720);
+    const height = safeDimension(args.height, 260);
+    fillRect(
+      args.ctx,
+      0,
+      0,
+      width,
+      height,
+      "#020617",
+      0.12 + worldIntensity(args.world) * 0.08,
+    );
+    drawRainLayers(args, true);
+  } else if (weather === "rain") {
+    drawRainLayers(args, false);
+  }
+
+  if (hasWorldLayer(args.world, "season_petals")) drawSeasonPetals(args);
+  if (hasWorldLayer(args.world, "season_leaves")) drawSeasonLeaves(args);
+  if (hasWorldLayer(args.world, "season_snow")) drawSeasonSnow(args);
 }

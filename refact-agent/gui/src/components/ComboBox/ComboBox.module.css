@@ -1,44 +1,90 @@
 .popover {
+  --rf-combobox-ideal-width: var(
+    --rf-combobox-anchor-width,
+    var(--rf-overlay-popover-max)
+  );
+  --rf-combobox-max-height: min(
+    var(--popover-available-height, calc(var(--rf-control-h) * 8)),
+    calc(100dvh - var(--rf-space-5))
+  );
+
   position: relative;
-  z-index: 50;
-  min-width: 180px;
-  max-width: 400px;
-  border-radius: max(var(--radius-2), var(--radius-full));
-  /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
+  z-index: var(--rf-z-popover);
+  width: min(
+    var(--rf-combobox-ideal-width),
+    calc(100vw - 2 * var(--rf-space-3))
+  );
+  min-width: min(
+    var(--rf-overlay-popover-min),
+    calc(100vw - 2 * var(--rf-space-3))
+  );
+  max-height: var(--rf-combobox-max-height);
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   transform: translateZ(0);
   will-change: transform;
 }
 
+.popover:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-1);
+}
+
 .popover__scroll {
-  --scrollarea-scrollbar-vertical-margin-right: 2px;
-  max-height: min(var(--popover-available-height, 186px), 186px);
+  --scrollarea-scrollbar-vertical-margin-right: var(--rf-space-1);
+
+  max-height: var(--rf-combobox-max-height);
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
+}
+
+.popover__scroll:hover {
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong))
+    transparent;
 }
 
 .popover__box {
-  overflow-y: hidden;
-  overflow-x: hidden;
   display: flex !important;
+  min-width: 0;
   flex-direction: column !important;
-  padding-top: 0px !important;
-  padding-bottom: 0px !important;
+  gap: var(--rf-space-1);
+  overflow: hidden;
+  padding: var(--rf-space-1) !important;
 }
 
 .item {
   display: flex;
+  min-width: 0;
+  min-height: var(--rf-control-h-sm);
   cursor: default;
-  /* TODO: negative margin ? */
-  margin: 0 -4px !important;
-  padding: 2px 4px !important;
+  margin: 0 !important;
+  padding: var(--rf-space-1) var(--rf-space-2) !important;
+  color: var(--rf-color-fg) !important;
+  border-radius: var(--rf-radius-chip) !important;
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui) !important;
 }
 
 .item[data-active-item] {
-  background-color: var(--accent-a5);
+  color: var(--rf-color-fg) !important;
+  background-color: var(--rf-color-accent-soft) !important;
+}
+
+.item:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
 .combobox__item {
   display: flex;
+  min-width: 0;
+  width: 100%;
   align-items: center !important;
   flex-direction: row !important;
-  width: 100%;
   overflow: hidden;
 }

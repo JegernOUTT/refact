@@ -1,48 +1,63 @@
-.grid {
+.pageStack,
+.header,
+.headerText,
+.tabsRoot,
+.tabsList,
+.tabPanel {
+  min-width: 0;
+}
+
+.pageStack,
+.headerText,
+.tabsRoot,
+.tabPanel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
 }
 
-.card {
-  all: unset;
-  cursor: pointer;
-  display: block;
+.pageStack {
+  gap: var(--rf-space-4);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.headerText {
+  gap: var(--rf-space-1);
+}
+
+.title,
+.description {
+  margin: 0;
+  line-height: var(--rf-line);
+}
+
+.title {
+  font-size: var(--rf-text-4);
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--rf-color-fg);
+}
+
+.description {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-muted);
+}
+
+.tabsRoot {
+  gap: var(--rf-space-4);
+}
+
+.tabsList {
+  box-sizing: border-box;
   width: 100%;
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  background: var(--color-surface);
-  transition:
-    border-color 0.15s,
-    background 0.15s;
+  max-width: 100%;
 }
 
-.card:hover {
-  border-color: var(--accent-a8);
-  background: var(--gray-a2);
-}
-
-.cardBody {
-  padding: var(--space-3) var(--space-4);
-}
-
-.cardHeader {
-  position: relative;
-}
-
-.cardIcon {
-  color: var(--accent-9);
-  display: flex;
-  align-items: center;
-}
-
-.cardArrow {
-  margin-left: auto;
-  color: var(--gray-a9);
-  display: flex;
-  align-items: center;
-}
-
-.cardDesc {
-  line-height: 1.5;
+.tabPanel {
+  gap: var(--rf-space-4);
 }

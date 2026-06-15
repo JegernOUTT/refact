@@ -1,27 +1,35 @@
 .root {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  min-width: 0;
   height: 100%;
   min-height: 0;
-  padding: var(--space-2);
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   overflow: hidden;
 }
 
 .header {
+  min-width: 0;
   flex-shrink: 0;
 }
 
 .filters {
   flex-shrink: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  padding: var(--rf-panel-pad);
+}
+
+.filterRow {
+  min-width: 0;
 }
 
 .filterControl {
-  min-width: 140px;
+  width: min(180px, 100%);
+  min-width: min(140px, 100%);
+}
+
+.errorState {
+  flex-shrink: 0;
 }
 
 .list {
@@ -29,20 +37,42 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
+}
+
+.list > * {
+  flex-shrink: 0;
+}
+
+.loadingState,
+.inlineLoading {
+  display: flex;
+  justify-content: center;
+  padding: var(--rf-space-4);
+}
+
+.inlineLoading {
+  padding: var(--rf-space-2);
 }
 
 .row {
-  border: 1px solid var(--gray-a5);
-  background: var(--color-background);
-  padding: var(--space-3);
-  border-radius: var(--radius-3);
+  padding: var(--rf-panel-pad);
   cursor: pointer;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.row:hover {
+  background: var(--rf-surface-1);
 }
 
 .rowPinned {
-  border-color: var(--amber-8);
-  box-shadow: 0 0 0 1px var(--amber-a7);
+  box-shadow: inset 2px 0 0 var(--rf-color-warning);
+}
+
+.rowTop {
+  min-width: 0;
 }
 
 .rowHeader {
@@ -50,36 +80,73 @@
   min-width: 0;
 }
 
+.rowTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rowControls {
   flex-shrink: 0;
 }
 
 .rowIconButton {
-  width: 22px;
-  height: 22px;
+  color: var(--rf-color-muted);
+}
+
+.rowIconButton:hover:not(:disabled) {
+  color: var(--rf-color-accent);
+}
+
+.iconButtonPinned {
+  color: var(--rf-color-warning);
+}
+
+.dangerIcon:hover:not(:disabled) {
+  color: var(--rf-color-danger);
+}
+
+.confirmPopover {
+  width: min(220px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .content {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
-  margin-top: var(--space-2);
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
   max-height: 320px;
+  min-width: 0;
+  margin-top: var(--rf-space-3);
+  padding-top: var(--rf-space-3);
   overflow: auto;
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
 .emptyState {
-  padding: var(--space-6) var(--space-3);
+  padding: var(--rf-space-6) var(--rf-space-3);
+  color: var(--rf-color-muted);
   text-align: center;
 }
 
+.mutedText {
+  color: var(--rf-color-muted);
+}
+
+.editorDialog,
 .historyDialog {
-  width: min(760px, calc(100vw - var(--space-8)));
-  max-width: 760px;
+  width: min(100%, calc(100vw - 2 * var(--rf-space-3)));
+}
+
+.editorForm {
+  min-width: 0;
+}
+
+.editorTextarea {
+  min-height: 260px;
+  resize: vertical;
 }
 
 .historyBody {
+  min-width: 0;
   min-height: 360px;
 }
 
@@ -87,28 +154,39 @@
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   flex: 0 0 220px;
   max-height: 420px;
+  min-width: 0;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .historyVersionButton {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
   width: 100%;
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-2);
-  background: var(--color-background);
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
   color: inherit;
-  text-align: left;
   cursor: pointer;
+  text-align: left;
 }
 
-.historyVersionButton:hover,
+.historyVersionButton:hover {
+  background: var(--rf-surface-1);
+}
+
+.historyVersionButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
 .historyVersionButtonActive {
-  border-color: var(--accent-a7);
-  background: var(--accent-a3);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .historyContent {
@@ -117,8 +195,43 @@
   min-width: 0;
   max-height: 420px;
   overflow: auto;
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  padding: var(--rf-space-3);
+}
+
+@media (max-width: 640px) {
+  .root {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .filters,
+  .row {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .rowTop,
+  .historyBody {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filterControl {
+    width: 100%;
+  }
+
+  .rowControls {
+    align-self: flex-start;
+  }
+
+  .historyList,
+  .historyContent {
+    flex: none;
+    max-height: 240px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row,
+  .historyVersionButton {
+    transition: none;
+  }
 }

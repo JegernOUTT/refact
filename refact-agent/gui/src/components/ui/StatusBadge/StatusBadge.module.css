@@ -1,0 +1,31 @@
+.statusBadge {
+  min-width: 0;
+}
+
+.icon {
+  flex: 0 0 auto;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pulse {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulse {
+    animation: rf-soft-pulse calc(var(--rf-dur-slow) * 4)
+      var(--rf-ease-standard) infinite alternate;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}

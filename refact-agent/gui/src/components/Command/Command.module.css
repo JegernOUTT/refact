@@ -1,4 +1,26 @@
 .markdown {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.variant_chat {
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-3);
+  line-height: 1.6;
+}
+
+.variant_tool {
+  font-size: var(--rf-text-2);
+  line-height: 1.5;
+}
+
+.variant_terminal {
+  font-size: var(--rf-text-2);
+  line-height: 1.45;
 }
 
 .markdown pre {
@@ -6,7 +28,7 @@
 }
 
 .pre {
-  padding: var(--space-2) !important;
+  padding: var(--rf-space-2) !important;
   margin: 0 !important;
 }
 

@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{
     active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    CronStore, ScheduledTask,
+    Action, AgentTarget, CronStore, Delivery, Job,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -179,21 +179,66 @@ fn parse_scope(args: &HashMap<String, Value>) -> Result<CronListScope, String> {
     }
 }
 
-fn task_value(task: &ScheduledTask, now_ms: u64, tz: chrono_tz::Tz) -> Value {
+fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
+    let cron = task.cron_expr().unwrap_or_default();
     json!({
         "id": task.id,
-        "cron": task.cron,
-        "human_schedule": human_schedule(&task.cron),
+        "cron": cron,
+        "human_schedule": human_schedule(cron),
         "description": task.description,
-        "prompt": first_chars(&task.prompt, 200),
-        "chat_id": task.chat_id,
-        "mode": task.mode,
+        "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
+        "action_kind": task.action_kind(),
+        "delivery": delivery_value(&task.delivery),
+        "chat_id": task.chat_id(),
+        "target": if job_is_isolated(task) { "isolated" } else { "existing_chat" },
+        "isolated": job_is_isolated(task),
+        "mode": task.mode(),
         "recurring": task.recurring,
         "durable": task.durable,
-        "next_fire_at_ms": next_run_ms(&task.cron, now_ms, tz).unwrap_or(0),
+        "next_fire_at_ms": next_run_ms(task, now_ms, tz).unwrap_or(0),
         "fire_count": task.fire_count,
         "created_at_ms": task.created_at_ms,
     })
+}
+
+fn delivery_value(delivery: &Delivery) -> Value {
+    match delivery {
+        Delivery::Chat => json!({"kind": "chat"}),
+        Delivery::Webhook { url, token } => json!({
+            "kind": "webhook",
+            "url": url,
+            "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+        }),
+        Delivery::Notifier {
+            integration_id,
+            target,
+        } => json!({
+            "kind": "notifier",
+            "integration_id": integration_id,
+            "target": target,
+        }),
+        Delivery::None => json!({"kind": "none"}),
+    }
+}
+
+fn job_is_isolated(task: &Job) -> bool {
+    matches!(
+        &task.action,
+        Action::AgentTurn {
+            target: AgentTarget::Isolated,
+            ..
+        } | Action::Command {
+            target: AgentTarget::Isolated,
+            ..
+        }
+    )
+}
+
+#[cfg(test)]
+fn set_job_isolated(task: &mut Job) {
+    if let Action::AgentTurn { target, .. } = &mut task.action {
+        *target = AgentTarget::Isolated;
+    }
 }
 
 fn first_chars(value: &str, max_chars: usize) -> String {
@@ -208,38 +253,50 @@ mod tests {
         InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
     };
 
-    fn session_task(id: &str) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "*/5 * * * *".to_string(),
-            prompt: "session prompt".to_string(),
-            description: format!("{id} desc"),
-            recurring: true,
-            durable: false,
-            created_at_ms: 1000,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+    fn session_task(id: &str) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "*/5 * * * *".to_string(),
+            "session prompt".to_string(),
+            format!("{id} desc"),
+            true,
+            false,
+            1000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
     }
 
-    fn durable_task(id: &str) -> ScheduledTask {
-        ScheduledTask {
-            id: id.to_string(),
-            cron: "0 9 * * *".to_string(),
-            prompt: "durable prompt".to_string(),
-            description: format!("{id} desc"),
-            recurring: true,
-            durable: true,
-            created_at_ms: 1000,
-            chat_id: Some("chat".to_string()),
-            mode: Some("agent".to_string()),
-            last_fired_at_ms: None,
-            fire_count: 0,
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
-        }
+    fn durable_task(id: &str) -> Job {
+        let mut task = Job::new_cron_agent_chat(
+            "0 9 * * *".to_string(),
+            "durable prompt".to_string(),
+            format!("{id} desc"),
+            true,
+            true,
+            1000,
+        );
+        task.id = id.to_string();
+        task.set_existing_chat(Some("chat".to_string()));
+        task.set_mode(Some("agent".to_string()));
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task
+    }
+
+    fn command_task(id: &str) -> Job {
+        let mut task = session_task(id);
+        task.action = Action::Command {
+            argv: vec!["printf".to_string(), "hello".to_string()],
+            target: AgentTarget::ExistingChat {
+                chat_id: "chat".to_string(),
+            },
+            cwd: None,
+            env: None,
+            timeout_secs: None,
+        };
+        task
     }
 
     async fn test_ccx() -> Arc<AMutex<AtCommandsContext>> {
@@ -355,7 +412,42 @@ mod tests {
         let items = run_tool(&mut tool, ccx, Some("session")).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["chat_id"], json!("chat"));
+        assert_eq!(items[0]["target"], json!("existing_chat"));
+        assert_eq!(items[0]["isolated"], json!(false));
         assert_eq!(items[0]["mode"], json!("agent"));
+        assert_eq!(items[0]["action_kind"], json!("agent_turn"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_command_action_kind() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        session_store
+            .add(command_task("cron_list_command_action"))
+            .await
+            .unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["action_kind"], json!("command"));
+        assert_eq!(items[0]["chat_id"], json!("chat"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_isolated_target() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let mut task = session_task("cron_list_isolated_target");
+        set_job_isolated(&mut task);
+        session_store.add(task).await.unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["chat_id"], Value::Null);
+        assert_eq!(items[0]["target"], json!("isolated"));
+        assert_eq!(items[0]["isolated"], json!(true));
     }
 
     #[tokio::test]

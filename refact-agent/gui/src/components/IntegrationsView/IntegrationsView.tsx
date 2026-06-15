@@ -1,44 +1,41 @@
-import { Box, Container, Flex } from "@radix-ui/themes";
+import classNames from "classnames";
 import { FC, ReactNode } from "react";
+import { selectConfig } from "../../features/Config/configSlice";
 import { clearError, getErrorMessage } from "../../features/Errors/errorsSlice";
 import {
   clearInformation,
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
-import { LeftRightPadding } from "../../features/Integrations/Integrations";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { IntegrationWithIconResponse } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
 import { InformationCallout } from "../Callout/Callout";
 import { Spinner } from "../Spinner";
 import { IntegrationsList } from "./DisplayIntegrations/IntegrationsList";
-import { IntegrationForm } from "./IntegrationForm";
 import { IntegrationsHeader } from "./Header/IntegrationsHeader";
+import { IntegrationForm } from "./IntegrationForm";
 import styles from "./IntegrationsView.module.css";
 import { IntermediateIntegration } from "./IntermediateIntegration";
 import { useIntegrations } from "./hooks/useIntegrations";
-import classNames from "classnames";
-import { selectConfig } from "../../features/Config/configSlice";
 
 type IntegrationViewProps = {
   integrationsMap?: IntegrationWithIconResponse;
-  leftRightPadding: LeftRightPadding;
   isLoading: boolean;
   goBack?: () => void;
   handleIfInnerIntegrationWasSet: (state: boolean) => void;
+  embedded?: boolean;
 };
 
 export const IntegrationsView: FC<IntegrationViewProps> = ({
   integrationsMap,
   isLoading,
-  leftRightPadding,
   goBack,
   handleIfInnerIntegrationWasSet,
+  embedded,
 }) => {
   const dispatch = useAppDispatch();
   const globalError = useAppSelector(getErrorMessage);
   const information = useAppSelector(getInformationMessage);
-
   const config = useAppSelector(selectConfig);
 
   const {
@@ -73,7 +70,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
 
     return (
       <IntegrationsHeader
-        leftRightPadding={leftRightPadding}
         handleFormReturn={handleFormReturn}
         handleInstantReturn={goBackAndClearError}
         instantBackReturn={
@@ -87,6 +83,7 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
           ""
         }
         icon={integrationLogo}
+        embedded={embedded}
       />
     );
   };
@@ -99,7 +96,7 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
     if (!currentIntegration) return null;
 
     return (
-      <Flex direction="column" align="start" justify="between" height="100%">
+      <div className={styles.content}>
         <IntegrationForm
           handleSubmit={(event) => void handleSubmit(event)}
           handleDeleteIntegration={(path) => void handleDeleteIntegration(path)}
@@ -136,7 +133,7 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
             {globalError}
           </ErrorCallout>
         )}
-      </Flex>
+      </div>
     );
   };
 
@@ -144,13 +141,13 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
     if (!currentNotConfiguredIntegration) return null;
 
     return (
-      <Flex direction="column" align="start" justify="between" height="100%">
+      <div className={styles.content}>
         <IntermediateIntegration
           handleSubmit={handleNotConfiguredIntegrationSubmit}
           integration={currentNotConfiguredIntegration}
           handleMCPWizardSubmit={handleMCPWizardSubmit}
         />
-      </Flex>
+      </div>
     );
   };
 
@@ -192,26 +189,24 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
   };
 
   return (
-    <Container px="1">
-      <Box style={{ width: "inherit", height: "100%" }}>
-        <Flex direction="column" style={{ width: "100%", height: "100%" }}>
-          {renderHeader()}
-          {renderContent()}
-          {globalError && (
-            <ErrorCallout
-              mx="0"
-              timeout={3000}
-              onClick={() => dispatch(clearError())}
-              className={classNames(styles.popup, {
-                [styles.popup_ide]: config.host !== "web",
-              })}
-              preventRetry
-            >
-              {globalError}
-            </ErrorCallout>
-          )}
-        </Flex>
-      </Box>
-    </Container>
+    <div className={styles.root}>
+      <div className={styles.content}>
+        {renderHeader()}
+        {renderContent()}
+        {globalError && (
+          <ErrorCallout
+            mx="0"
+            timeout={3000}
+            onClick={() => dispatch(clearError())}
+            className={classNames(styles.popup, {
+              [styles.popup_ide]: config.host !== "web",
+            })}
+            preventRetry
+          >
+            {globalError}
+          </ErrorCallout>
+        )}
+      </div>
+    </div>
   );
 };

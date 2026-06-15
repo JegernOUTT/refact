@@ -119,6 +119,8 @@ pub struct PlannerFromTransitionRequest {
     pub source_chat_id: String,
     #[serde(default)]
     pub target_mode_description: String,
+    #[serde(default)]
+    pub target_mode: Option<String>,
 }
 
 fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
@@ -615,7 +617,18 @@ pub async fn handle_planner_from_transition(
         ));
     }
 
-    let target_mode = "task_planner".to_string();
+    let target_mode = req
+        .target_mode
+        .clone()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "task_planner".to_string());
+    if target_mode.eq_ignore_ascii_case("task_agent") {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "task_agent chats cannot be created here".to_string(),
+        ));
+    }
 
     let decisions = analyze_mode_transition(
         gcx.clone(),
@@ -650,7 +663,7 @@ pub async fn handle_planner_from_transition(
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
-        mode: target_mode,
+        mode: target_mode.clone(),
         tool_use: thread.tool_use.clone(),
         messages: new_messages.clone(),
         created_at: now,
@@ -700,12 +713,14 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    create_initial_plan_document_for_transition(
-        gcx.clone(),
-        &task_id,
-        decisions.initial_plan.as_deref(),
-    )
-    .await;
+    if target_mode == "task_planner" {
+        create_initial_plan_document_for_transition(
+            gcx.clone(),
+            &task_id,
+            decisions.initial_plan.as_deref(),
+        )
+        .await;
+    }
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,

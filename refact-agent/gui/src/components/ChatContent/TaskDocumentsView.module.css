@@ -1,52 +1,102 @@
 .root {
+  display: grid;
+  gap: var(--rf-space-2);
   width: 100%;
+  min-width: 0;
   overflow: hidden;
 }
 
 .header {
-  margin-bottom: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.headerTitle {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
+}
+
+.headerMeta,
+.slug,
+.updatedAt {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.badges,
+.rowBody,
+.rowMeta,
+.identity {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.badges,
+.rowMeta {
+  flex-wrap: wrap;
+}
+
+.rows {
+  display: grid;
+  gap: var(--rf-space-2);
 }
 
 .row {
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a3);
-  border-radius: var(--radius-2);
-  background: var(--gray-a1);
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
-.identity {
-  min-width: 0;
+.rowBody {
+  justify-content: space-between;
 }
 
 .identityText {
   min-width: 0;
 }
 
-.star,
-.starPinned {
-  color: var(--gray-10);
-  font-size: 16px;
-  line-height: 1;
-}
-
-.starPinned {
-  color: var(--amber-11);
-}
-
-.updatedAt {
-  max-width: 190px;
+.name,
+.slug {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.name {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 650;
+}
+
+.star,
+.starPinned {
+  flex: 0 0 auto;
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-3);
+}
+
+.starPinned {
+  color: var(--rf-color-warning);
+}
+
 .markdown {
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a3);
-  border-radius: var(--radius-2);
-  background: var(--gray-a1);
+  min-width: 0;
+  color: var(--rf-color-fg);
+}
+
+@media (max-width: 480px) {
+  .rowBody {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }

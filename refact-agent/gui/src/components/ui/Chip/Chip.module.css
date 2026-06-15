@@ -1,0 +1,100 @@
+.chip {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-2);
+  line-height: 1;
+  vertical-align: middle;
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.chip:hover:not(.disabled) {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chip:hover:not(.disabled) {
+    transform: translateY(-1px);
+  }
+}
+
+.selected {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-fg);
+}
+
+.disabled {
+  color: var(--rf-color-muted);
+  cursor: default;
+  opacity: 0.62;
+}
+
+.radiusChip {
+  border-radius: var(--rf-radius-chip);
+}
+
+.radiusPill {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-pill);
+}
+
+.icon,
+.remove {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  line-height: 0;
+}
+
+.icon svg,
+.remove svg {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove {
+  width: 18px;
+  height: 18px;
+  margin-right: calc(var(--rf-space-2xs) * -1);
+  padding: 0;
+  border: 0;
+  border-radius: var(--rf-radius-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.remove:disabled {
+  cursor: default;
+}
+
+.remove:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.remove:hover:not(:disabled) {
+  background: var(--rf-surface-3);
+}

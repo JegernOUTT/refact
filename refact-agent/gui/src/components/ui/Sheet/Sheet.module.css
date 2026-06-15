@@ -1,0 +1,100 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--rf-z-overlay, 600);
+  background: var(--rf-surface-3);
+}
+
+.content {
+  --rf-overlay-ideal-width: var(--rf-overlay-max-width, 360px);
+  --rf-overlay-ideal-height: var(--rf-overlay-max-height, 60dvh);
+
+  position: fixed;
+  z-index: var(--rf-z-modal, 700);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  overflow-y: auto;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.contentNoScroll {
+  overflow: hidden;
+}
+
+.content:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+
+.bottom {
+  right: var(--rf-space-3);
+  bottom: var(--rf-space-3);
+  left: var(--rf-space-3);
+  max-height: min(
+    var(--rf-overlay-ideal-height),
+    calc(100dvh - var(--rf-space-5))
+  );
+  border-radius: var(--rf-radius-card);
+}
+
+.top {
+  top: var(--rf-space-3);
+  right: var(--rf-space-3);
+  left: var(--rf-space-3);
+  max-height: min(
+    var(--rf-overlay-ideal-height),
+    calc(100dvh - var(--rf-space-5))
+  );
+  border-radius: var(--rf-radius-card);
+}
+
+.left,
+.right {
+  top: var(--rf-space-3);
+  bottom: var(--rf-space-3);
+  width: min(
+    var(--rf-overlay-ideal-width),
+    calc(100vw - 2 * var(--rf-space-3))
+  );
+  max-height: calc(100dvh - var(--rf-space-5));
+  border-radius: var(--rf-radius-card);
+}
+
+.left {
+  left: var(--rf-space-3);
+}
+
+.right {
+  right: var(--rf-space-3);
+}
+
+.inner {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+}
+
+.innerNoScroll {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 600 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}

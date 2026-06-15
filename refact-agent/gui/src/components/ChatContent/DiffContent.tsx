@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useRef } from "react";
+import classNames from "classnames";
 import { Text, Container, Box, Flex, Link } from "@radix-ui/themes";
 import { DiffMessage, type DiffChunk } from "../../services/refact";
-import { ScrollArea } from "../ScrollArea";
 import styles from "./ChatContent.module.css";
 import { filename } from "../../utils";
 import * as Collapsible from "@radix-ui/react-collapsible";
@@ -18,30 +18,17 @@ const DiffLine: React.FC<{
   sign: string;
   line: string;
 }> = ({ lineNumber, sign, line }) => {
-  const backgroundColorLeft = sign === "-" ? "#592e30" : "#3b5840";
-  const backgroundColor = sign === "-" ? "#3e2628" : "#2c3e33";
+  const toneClass =
+    sign === "-" ? styles.diff_line_remove : styles.diff_line_add;
   return (
-    <Flex className={styles.diff_line} style={{ minWidth: "min-content" }}>
-      <Text
-        size="2"
-        className={styles.diff_line_number}
-        style={{ backgroundColor: backgroundColorLeft }}
-      >
+    <Flex className={classNames(styles.diff_line, toneClass)}>
+      <Text size="2" className={styles.diff_line_number}>
         {lineNumber ?? ""}
       </Text>
-      <Text size="2" className={styles.diff_sign} style={{ backgroundColor }}>
+      <Text size="2" className={styles.diff_sign}>
         {sign}
       </Text>
-      <Text
-        size="2"
-        className={styles.diff_line_content}
-        style={{
-          backgroundColor,
-          whiteSpace: "pre",
-          whiteSpaceTrim: "none",
-          minWidth: "min-content",
-        }}
-      >
+      <Text size="2" className={styles.diff_line_content}>
         {line}
       </Text>
     </Flex>
@@ -68,10 +55,7 @@ const DiffHighlight: React.FC<{
 }> = ({ startLine, sign, text }) => {
   const lines = useMemo(() => splitDiffLines(text), [text]);
   return (
-    <Flex
-      direction="column"
-      style={{ minWidth: "min-content", alignSelf: "stretch", width: "100%" }}
-    >
+    <Flex direction="column" className={styles.diff_highlight}>
       {lines.map((line, index) => {
         return (
           <DiffLine
@@ -96,15 +80,10 @@ export const Diff: React.FC<DiffProps> = ({ diff }) => {
   const isRename = diff.file_action === "rename" && diff.file_name_rename;
 
   return (
-    <Flex
-      className={styles.diff}
-      py="2"
-      direction="column"
-      style={{ minWidth: "min-content" }}
-    >
+    <Flex className={styles.diff} py="2" direction="column">
       {isRename && (
         <Flex py="1" px="2">
-          <Text size="1" color="orange">
+          <Text size="1" className={styles.diffRenameText}>
             {filename(diff.file_name)} was renamed to{" "}
             {filename(diff.file_name_rename ?? "")}
           </Text>
@@ -163,24 +142,26 @@ function buildDiffTitleNodes(
       const newName = filename(renameAction.file_name_rename);
       nodes.push(
         <Text
-          style={{ display: "inline-block" }}
+          className={styles.diffTitleNode}
           key={fullPath + "-" + diffForFile.length}
         >
-          {name}{" "}
-          <Text color="orange" style={{ fontStyle: "italic" }}>
-            → {newName}
-          </Text>
+          {name} <span className={styles.diffRenameText}>→ {newName}</span>
         </Text>,
       );
     } else {
       nodes.push(
         <Text
-          style={{ display: "inline-block" }}
+          className={styles.diffTitleNode}
           key={fullPath + "-" + diffForFile.length}
         >
-          {name} {addCount > 0 && <Text color="green">+{addCount}</Text>}
+          {name}{" "}
+          {addCount > 0 && (
+            <span className={styles.diffAddedText}>+{addCount}</span>
+          )}
           {addCount > 0 && removeCount > 0 && " "}
-          {removeCount > 0 && <Text color="red">-{removeCount}</Text>}
+          {removeCount > 0 && (
+            <span className={styles.diffRemovedText}>-{removeCount}</span>
+          )}
         </Text>,
       );
     }
@@ -202,7 +183,8 @@ export const DiffContent: React.FC<{
   onOpenChange?: (open: boolean) => void;
 }> = ({ diffs, open: controlledOpen, onOpenChange }) => {
   const [internalOpen, setInternalOpen] = React.useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const contentId = React.useId();
+  const ref = useRef<HTMLButtonElement>(null);
   const handleScroll = useHideScroll(ref);
 
   const isControlled = controlledOpen !== undefined;
@@ -227,20 +209,34 @@ export const DiffContent: React.FC<{
   return (
     <Collapsible.Root open={open} onOpenChange={(v) => setOpen(v)}>
       <Collapsible.Trigger asChild>
-        <Flex gap="2" align="center" ref={ref}>
+        <button
+          type="button"
+          ref={ref}
+          className={styles.diffHeader}
+          aria-controls={contentId}
+        >
           <Text weight="light" size="1">
             <DiffTitle diffs={diffs} />
           </Text>
-          <Chevron open={open} />
-        </Flex>
+          <Chevron open={open} className={styles.diffChevron} />
+        </button>
       </Collapsible.Trigger>
-      <Collapsible.Content>
-        <Flex direction="column">
-          <DiffForm diffs={diffs} />
-          <FadedButton color="gray" onClick={handleHide} mx="2">
-            Hide Diff
-          </FadedButton>
-        </Flex>
+      <Collapsible.Content forceMount asChild>
+        <div
+          id={contentId}
+          className={classNames("rf-expand-grid", styles.diffContentGrid)}
+          data-open={open}
+          hidden={false}
+        >
+          <div className={styles.diffContentBody}>
+            <Flex direction="column">
+              <DiffForm diffs={diffs} />
+              <FadedButton color="gray" onClick={handleHide} mx="2">
+                Hide Diff
+              </FadedButton>
+            </Flex>
+          </div>
+        </div>
       </Collapsible.Content>
     </Collapsible.Root>
   );
@@ -287,9 +283,12 @@ export const DiffForm: React.FC<{
                 >
                   <Text
                     as="span"
-                    color={
-                      renameAction?.file_name_rename ? "orange" : undefined
-                    }
+                    className={classNames({
+                      [styles.diffRenameText]: Boolean(
+                        renameAction?.file_name_rename,
+                      ),
+                      [styles.diffFilePath]: !renameAction?.file_name_rename,
+                    })}
                   >
                     {renameAction?.file_name_rename
                       ? renameAction.file_name_rename
@@ -298,20 +297,15 @@ export const DiffForm: React.FC<{
                 </Link>
               </TruncateLeft>
             </Flex>
-            <ScrollArea scrollbars="horizontal" asChild>
-              <Box style={{ minWidth: "100%", position: "relative" }}>
-                <Box
-                  style={{
-                    background: "rgb(51, 51, 51)",
-                    minWidth: "min-content",
-                  }}
-                >
+            <Box className="scrollX">
+              <Box className={styles.diff_scroll_inner}>
+                <Box className={styles.diff_file_body}>
                   {diffsForFile.map((diff, i) => (
                     <Diff key={`${fullFilePath}-${index}-${i}`} diff={diff} />
                   ))}
                 </Box>
               </Box>
-            </ScrollArea>
+            </Box>
           </Box>
         );
       })}
@@ -341,7 +335,7 @@ const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({
 
   return (
     <Container>
-      <Flex direction="column" gap="4" py="4">
+      <Flex direction="column" gap="4" py="4" className="rf-enter-rise">
         <DiffContent
           diffs={groupedByFileName}
           open={open}

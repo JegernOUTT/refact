@@ -5,17 +5,112 @@
 .markdown {
   position: relative;
   max-width: 100%;
-  font-family:
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-3);
   line-height: 1.6;
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.markdown :where(p) {
+  margin: var(--rf-space-2) 0;
+}
+
+.markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin: var(--rf-space-3) 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.markdown h1 {
+  font-size: var(--rf-text-5);
+}
+
+.markdown h2 {
+  font-size: var(--rf-text-4);
+}
+
+.markdown :where(h3, h4, h5, h6) {
+  font-size: var(--rf-text-3);
+}
+
+.markdown blockquote {
+  margin: var(--rf-space-3) 0;
+  padding-left: var(--rf-space-3);
+  color: var(--rf-color-muted);
+  border-left: var(--rf-hairline) solid var(--rf-border-strong);
+}
+
+.markdown kbd {
+  padding: calc(var(--rf-space-1) / 2) var(--rf-space-1);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+}
+
+.markdown :where(strong, .bold) {
+  font-weight: 700;
+}
+
+.puzzle_link {
+  display: flex;
+  margin-top: var(--rf-space-2);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+}
+
+.table {
+  width: max-content;
+  max-width: 100%;
+  margin: var(--rf-space-2) 0;
+  border-collapse: collapse;
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.table :where(th, td) {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+}
+
+.table th {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  font-weight: 650;
+}
+
+.variant_chat {
+  font-size: var(--rf-text-3);
+  line-height: 1.6;
+}
+
+.variant_tool {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
+  font-size: var(--rf-text-2);
+  line-height: 1.5;
+}
+
+.variant_terminal {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
+  line-height: 1.45;
 }
 
 .floatButton {
@@ -26,8 +121,7 @@
 .code {
   display: inline-block;
   max-width: 100%;
-  font-family: "SF Mono", "Fira Code", "JetBrains Mono", Consolas,
-    "Liberation Mono", Menlo, monospace;
+  font-family: var(--rf-font-mono);
   font-size: 0.9em;
 }
 
@@ -43,9 +137,10 @@
   word-break: break-word;
   word-wrap: break-word;
   white-space: break-spaces;
-  background-color: var(--gray-a3);
-  padding: 2px 6px;
-  border-radius: 4px;
+  background-color: var(--rf-surface-2);
+  padding: calc(var(--rf-space-1) / 2) var(--rf-space-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
   font-size: 0.875em;
 }
 
@@ -54,7 +149,7 @@
   color: inherit;
   background: none;
   display: block;
-  overflow-x: auto;
+  overflow-x: visible;
 }
 
 .code_wrap {
@@ -65,33 +160,36 @@
 .code_block ::selection {
   background-color: var(
     --refact-chat-code-selection-color,
-    rgba(173, 214, 255, 0.5)
+    var(--rf-color-accent-soft)
   );
 }
 
 .shiki_wrapper {
   display: block;
-  margin: var(--space-3) 0;
+  margin: var(--rf-code-block-margin, var(--rf-space-3) 0);
+  min-width: 0;
 }
 
 .shiki_pre {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   position: relative;
   margin: 0;
-  padding: var(--space-3);
-  border-radius: var(--radius-2);
-  background-color: var(--gray-a2) !important;
-  overflow-x: auto;
+  padding: var(--rf-code-block-padding, var(--rf-space-3));
+  background-color: var(--rf-code-block-bg, var(--rf-surface-1)) !important;
+  border: var(--rf-code-block-border-width, var(--rf-hairline)) solid
+    var(--rf-border);
+  border-radius: var(--rf-code-block-radius, var(--rf-radius-card));
+  overflow-x: visible;
 }
 
 /* Copy button - hidden by default, shown on hover or focus */
 .shiki_pre .copy_button {
   position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
+  top: var(--rf-space-2);
+  right: var(--rf-space-2);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
   z-index: 1;
 }
 
@@ -104,14 +202,13 @@
 .shiki_code {
   display: flex;
   flex-direction: row;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
 }
 
 .shiki_code code {
   flex: 1;
-  font-family: "SF Mono", "Fira Code", "JetBrains Mono", Consolas,
-    "Liberation Mono", Menlo, monospace;
-  font-size: var(--font-size-1);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
   line-height: 1.4;
   white-space: normal;
 }
@@ -137,11 +234,11 @@
   flex-direction: column;
   text-align: right;
   user-select: none;
-  color: var(--gray-9);
-  font-size: var(--font-size-1);
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-1);
   line-height: 1.4;
-  padding-right: var(--space-2);
-  border-right: 1px solid var(--gray-5);
+  padding-right: var(--rf-space-2);
+  border-right: 1px solid var(--rf-border);
 }
 
 .line_number {
@@ -149,8 +246,8 @@
 }
 
 .list {
-  padding-inline-start: var(--space-6);
-  margin: var(--space-2) 0;
+  padding-inline-start: var(--rf-space-6);
+  margin: var(--rf-space-2) 0;
 }
 
 .list_item {
@@ -169,8 +266,8 @@
 }
 
 .patch_title {
-  padding-left: var(--space-2);
-  padding-right: var(--space-2);
+  padding-left: var(--rf-space-2);
+  padding-right: var(--rf-space-2);
 }
 
 .patch_title,
@@ -209,12 +306,12 @@
 }
 
 .streaming_text {
-  animation: streamFadeIn 0.15s ease-out;
+  animation: streamFadeIn var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .streaming_cursor::after {
   content: "▋";
   animation: cursorBlink 1s step-end infinite;
-  color: var(--accent-9);
-  margin-left: 2px;
+  color: var(--rf-color-accent);
+  margin-left: calc(var(--rf-space-1) / 2);
 }

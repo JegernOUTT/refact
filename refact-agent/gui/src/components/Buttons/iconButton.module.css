@@ -1,4 +1,0 @@
-/* Re-export shared iconButton for backward compatibility */
-.iconButton {
-  composes: iconButton from "../shared/iconButton.module.css";
-}

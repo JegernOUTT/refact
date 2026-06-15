@@ -1,0 +1,24 @@
+.stack {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-4);
+  width: min(100%, 720px);
+}
+
+.note {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.preview {
+  min-width: 0;
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-1);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

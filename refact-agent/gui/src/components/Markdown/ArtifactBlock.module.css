@@ -1,16 +1,28 @@
 .artifact_container {
   position: relative;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-card);
   overflow: hidden;
-  background-color: var(--gray-a2);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .artifact_container {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .artifact_container {
+  backdrop-filter: none;
 }
 
 .tab_bar {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--gray-a3);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .tab_bar_spacer {
@@ -22,8 +34,8 @@
   border: none;
   display: block;
   min-height: 60px;
-  background: white;
-  border-radius: 0 0 var(--radius-2) var(--radius-2);
+  background: Canvas;
+  border-radius: 0 0 var(--rf-radius-card) var(--rf-radius-card);
 }
 
 .source_view {
@@ -32,9 +44,9 @@
 }
 
 .error_bar {
-  padding: var(--space-1) var(--space-2);
-  color: var(--red-9);
-  font-size: var(--font-size-1);
-  border-top: 1px solid var(--gray-a4);
-  background: var(--red-a2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-color-danger-soft);
 }

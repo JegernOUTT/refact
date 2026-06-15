@@ -7,7 +7,7 @@ import * as statusBar from "./statusBar";
 import {
 	type CapsResponse,
     type CustomPromptsResponse,
-    ChatMessages,
+    type ChatMessages,
 } from "refact-chat-js/dist/events";
 
 
@@ -264,7 +264,8 @@ export function rust_url(addthis: string)
     while (url.endsWith("/")) {
         url = url.slice(0, -1);
     }
-    url += addthis;
+    const suffix = addthis.startsWith("/") ? addthis : `/${addthis}`;
+    url += suffix;
     return url;
 }
 

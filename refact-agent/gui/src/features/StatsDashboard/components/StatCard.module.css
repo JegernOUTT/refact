@@ -1,16 +1,70 @@
 .card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-height: 100%;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.iconShell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  color: var(--rf-color-accent);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+}
+
+.title,
+.subtitle {
+  margin: 0;
 }
 
 .title {
-  color: var(--gray-10);
-  margin-bottom: var(--space-1);
+  color: var(--rf-color-muted);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.valueRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .value {
-  line-height: 1.1;
-  margin-bottom: var(--space-1);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font: 750 var(--rf-text-5) / 1.05 var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trendIcon {
+  flex: 0 0 auto;
 }
 
 .subtitle {
-  color: var(--gray-9);
+  color: var(--rf-color-faint);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    backdrop-filter: none;
+  }
 }

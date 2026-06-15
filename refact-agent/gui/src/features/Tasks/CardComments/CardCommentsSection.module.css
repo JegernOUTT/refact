@@ -1,15 +1,73 @@
+.commentsRoot {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.commentsHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.commentList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
 .commentItem {
-  background: var(--gray-2);
-  border-radius: var(--radius-2);
-  padding: var(--space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: color-mix(in oklab, var(--rf-surface-glass) 58%, transparent);
+  box-shadow: var(--rf-elev-panel);
+  padding: var(--rf-row-pad);
+  min-width: 0;
+}
+
+.commentItem:hover {
+  border-color: var(--rf-border-strong);
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
+}
+
+.commentReply {
+  margin-left: var(--rf-space-4);
 }
 
 .commentBody {
-  font-size: var(--font-size-1);
-  margin-bottom: var(--space-1);
+  font-size: var(--rf-font-size-1);
+  margin-bottom: var(--rf-space-1);
+  overflow-wrap: anywhere;
 }
 
 .composer {
-  border-top: 1px solid var(--gray-a4);
-  padding-top: var(--space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  padding-top: var(--rf-space-2);
+}
+
+@media (max-width: 420px) {
+  .commentReply {
+    margin-left: var(--rf-space-2);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .commentsRoot {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .commentsRoot {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

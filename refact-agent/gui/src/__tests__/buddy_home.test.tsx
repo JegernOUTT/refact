@@ -524,12 +524,12 @@ describe("ActivityFeed_filter_chips_filter_by_workflow_prefix", () => {
       { preloadedState: CONFIG_STATE },
     );
 
-    await user.click(screen.getByRole("radio", { name: "refact_* refact_*" }));
+    await user.click(screen.getByRole("radio", { name: "refact_*" }));
 
     expect(screen.getByText("Compile sniffer")).toBeInTheDocument();
     expect(screen.queryByText("Memory garden")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("radio", { name: "buddy_* buddy_*" }));
+    await user.click(screen.getByRole("radio", { name: "buddy_*" }));
 
     expect(screen.queryByText("Compile sniffer")).not.toBeInTheDocument();
     expect(screen.getByText("Memory garden")).toBeInTheDocument();
@@ -1159,7 +1159,7 @@ describe("BuddyHome_renders_all_sections", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
 
     const settingsSection = await screen.findByTestId(
       "buddy-home-settings-section",
@@ -1798,7 +1798,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
-  it("keeps showcase speech ahead of local hotspot reactions from travel onward", async () => {
+  it("lets a user care click preempt a running showcase with a visible world activity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-01T00:00:40Z"));
     const onCare = vi.fn();
@@ -1853,34 +1853,40 @@ describe("BuddyWorld_dynamic_environment", () => {
       expect(onCare).toHaveBeenCalledWith("play", "scroll");
 
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-showcase",
+        "none",
+      );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+        "data-care-activity",
+        "play",
+      );
+      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-source",
-        "showcase",
+        "care",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-priority",
-        "backend-showcase-director-local",
+        "backend-care-session-arc-showcase-director-local",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
         "data-speech-text",
-        "Buddy gathers the memory fireflies into a soft night map.",
+        "Buddy catches a warm sunbeam and opens the focus scroll.",
       );
 
-      await vi.advanceTimersByTimeAsync(3817);
+      await vi.advanceTimersByTimeAsync(3_817);
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
         "data-pose",
-        "meditate",
+        "pounce",
       );
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-source",
-        "showcase",
+        "data-care-activity",
+        "play",
       );
+
+      await vi.advanceTimersByTimeAsync(7_700);
       expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-priority",
-        "backend-showcase-director-local",
-      );
-      expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-        "data-speech-text",
-        "Buddy gathers the memory fireflies into a soft night map.",
+        "data-care-activity",
+        "none",
       );
     } finally {
       vi.useRealTimers();
@@ -2046,7 +2052,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     }
   });
 
-  it("uses top bubble for center director targets", async () => {
+  it("uses a side bubble for elevated center director targets so speech stays unclipped", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-01T08:00:00Z"));
     try {
@@ -2090,25 +2096,28 @@ describe("BuddyWorld_dynamic_environment", () => {
       );
       expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
         "data-bubble-position",
-        "top",
+        "right",
       );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("keeps side bubbles for ordinary speech but lifts long compact speech", () => {
+  it("keeps side bubbles for ordinary speech and long compact speech", () => {
     const longSpeech =
-      "The observatory has a very long update that should avoid narrow side clipping in compact scenes.";
+      "The observatory has a very long update that should avoid short-scene top clipping in compact scenes.";
 
     expect(bubblePositionForSceneX(67, false, longSpeech)).toBe("left");
     expect(bubblePositionForSceneX(67, true, "Short update.")).toBe("left");
     expect(bubblePositionForSceneX(38, true, "Short update.")).toBe("right");
-    expect(bubblePositionForSceneX(67, true, longSpeech)).toBe("top");
-    expect(bubblePositionForSceneX(38, true, longSpeech)).toBe("top");
+    expect(bubblePositionForSceneX(67, true, longSpeech)).toBe("left");
+    expect(bubblePositionForSceneX(38, true, longSpeech)).toBe("right");
+    expect(
+      bubblePositionForSceneX(50, true, "A medium compact line here"),
+    ).toBe("right");
   });
 
-  it("keeps compact long active speech on top after moving to a side target", async () => {
+  it("keeps compact long active speech beside the buddy after moving to a side target", async () => {
     const longSpeech =
       "The observatory has a very long update that should avoid narrow side clipping in compact scenes.";
     const onOpenPage = vi.fn();
@@ -2150,7 +2159,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     });
     expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
       "data-bubble-position",
-      "top",
+      "left",
     );
     expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
       "data-compact-bubble",
@@ -3006,10 +3015,10 @@ describe("BuddySettingsPanel_autosave", () => {
 
     const { user } = render(<BuddySettingsPanel />, { store });
 
-    const normalButton = screen.getByRole("button", { name: "normal" });
+    const normalButton = screen.getByRole("radio", { name: /normal/i });
     await user.click(normalButton);
 
-    expect(normalButton).toHaveAttribute("aria-pressed", "true");
+    expect(normalButton).toBeChecked();
     await waitFor(() => {
       expect(capturedBody).toEqual({ humor_level: "normal" });
     });
@@ -3104,7 +3113,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
     const { user } = render(<BuddySettingsPanel />, { store });
 
-    await user.click(screen.getByRole("button", { name: "normal" }));
+    await user.click(screen.getByRole("radio", { name: /normal/i }));
 
     await waitFor(() => {
       expect(store.getState().buddy.snapshot?.settings.humor_level).toBe(
@@ -3502,7 +3511,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const { user } = render(<BuddyHome />, { store });
 
     await screen.findByTestId("buddy-home-content");
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("switch", { name: /buddy enabled/i }));
 
     await waitFor(() => {
@@ -3744,16 +3753,16 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
       screen.getByRole("switch", { name: /humor enabled/i }),
     ).toBeInTheDocument();
 
-    expect(screen.getByRole("button", { name: "off" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "light" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "normal" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /off/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /light/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /normal/i })).toBeInTheDocument();
 
     expect(
-      screen.getByRole("button", { name: "read_only" }),
+      screen.getByRole("radio", { name: /read only/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "suggest" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /suggest/i })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "safe_auto" }),
+      screen.getByRole("radio", { name: /safe auto/i }),
     ).toBeInTheDocument();
 
     expect(
@@ -3772,64 +3781,64 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
     render(<BuddySettingsPanel />, { store });
 
     expect(
-      screen.getByRole("checkbox", { name: /task health/i }),
+      screen.getByRole("switch", { name: /task health/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /trajectory clutter/i }),
+      screen.getByRole("switch", { name: /trajectory clutter/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /chat pattern/i }),
+      screen.getByRole("switch", { name: "Chat Pattern" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /customization drift/i }),
+      screen.getByRole("switch", { name: /customization drift/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /memory garden/i }),
+      screen.getByRole("switch", { name: /memory garden/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /mcp auth/i }),
+      screen.getByRole("switch", { name: /mcp auth/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /git pressure/i }),
+      screen.getByRole("switch", { name: /git pressure/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /diagnostics/i }),
+      screen.getByRole("switch", { name: "Diagnostics" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("checkbox", { name: /provider health/i }),
+      screen.getByRole("switch", { name: /provider health/i }),
     ).toBeInTheDocument();
   });
 });
 
 describe("BuddySettingsPanel_segmented_controls_accessible_state", () => {
-  it("active humor_level button has aria-pressed true and others have aria-pressed false", () => {
+  it("active humor_level radio is checked and others are unchecked", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
     render(<BuddySettingsPanel />, { store });
 
-    const lightBtn = screen.getByRole("button", { name: "light" });
-    const offBtn = screen.getByRole("button", { name: "off" });
-    const normalBtn = screen.getByRole("button", { name: "normal" });
+    const lightBtn = screen.getByRole("radio", { name: /light/i });
+    const offBtn = screen.getByRole("radio", { name: /off/i });
+    const normalBtn = screen.getByRole("radio", { name: /normal/i });
 
-    expect(lightBtn).toHaveAttribute("aria-pressed", "true");
-    expect(offBtn).toHaveAttribute("aria-pressed", "false");
-    expect(normalBtn).toHaveAttribute("aria-pressed", "false");
+    expect(lightBtn).toBeChecked();
+    expect(offBtn).not.toBeChecked();
+    expect(normalBtn).not.toBeChecked();
   });
 
-  it("active autonomy_level button has aria-pressed true and others have aria-pressed false", () => {
+  it("active autonomy_level radio is checked and others are unchecked", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
 
     render(<BuddySettingsPanel />, { store });
 
-    const suggestBtn = screen.getByRole("button", { name: "suggest" });
-    const readOnlyBtn = screen.getByRole("button", { name: "read_only" });
-    const safeAutoBtn = screen.getByRole("button", { name: "safe_auto" });
+    const suggestBtn = screen.getByRole("radio", { name: /suggest/i });
+    const readOnlyBtn = screen.getByRole("radio", { name: /read only/i });
+    const safeAutoBtn = screen.getByRole("radio", { name: /safe auto/i });
 
-    expect(suggestBtn).toHaveAttribute("aria-pressed", "true");
-    expect(readOnlyBtn).toHaveAttribute("aria-pressed", "false");
-    expect(safeAutoBtn).toHaveAttribute("aria-pressed", "false");
+    expect(suggestBtn).toBeChecked();
+    expect(readOnlyBtn).not.toBeChecked();
+    expect(safeAutoBtn).not.toBeChecked();
   });
 });
 
@@ -4040,7 +4049,7 @@ describe("BuddyHome_disabled_state", () => {
     const { user } = render(<BuddyHome />, { store });
 
     const settingsBtn = await screen.findByRole("button", {
-      name: /settings/i,
+      name: "Settings",
     });
     expect(settingsBtn).toBeInTheDocument();
 
@@ -4131,7 +4140,7 @@ describe("BuddyHome_disabled_state", () => {
     ).toBeInTheDocument();
     expect(screen.queryByTestId("buddy-home-content")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
 
     const enabledSwitch = await screen.findByRole("switch", {
       name: /buddy enabled/i,
@@ -4371,96 +4380,121 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     ),
   ];
 
-  it("activity panel has panelScroll class for bounded internal scrolling", async () => {
+  it("activity panel uses a standalone glass surface with an internal scroll list", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(...commonHandlers);
 
     render(<BuddyHome />, { store });
     const panel = await screen.findByTestId("buddy-activity-panel");
-    expect(panel.className).toContain("panelScroll");
+    expect(panel.className).not.toContain("panelScroll");
+    expect(panel.className).toContain("glass");
+    expect(panel.querySelector('[class*="scrollList"]')).not.toBeNull();
   });
 
-  it("recent errors panel has panelScroll class for bounded internal scrolling", async () => {
+  it("recent errors panel uses a standalone glass surface with an internal scroll list", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(...commonHandlers);
 
     render(<BuddyHome />, { store });
     const panel = await screen.findByTestId("buddy-recent-errors-panel");
-    expect(panel.className).toContain("panelScroll");
+    expect(panel.className).not.toContain("panelScroll");
+    expect(panel.className).toContain("glass");
+    expect(panel.querySelector('[class*="scrollList"]')).not.toBeNull();
   });
 
-  it("rowFlexBottom block bounds explicit and implicit bottom row sizing", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const block = readCssBlock(css, ".rowFlexBottom");
+  it("recent chats panel uses a standalone glass surface with an internal scroll list", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    server.use(...commonHandlers);
 
-    expect(block).toContain("grid-template-rows: clamp(180px, 30vh, 360px)");
-    expect(block).toContain("grid-auto-rows: clamp(180px, 30vh, 360px)");
-    expect(block).toContain("min-height: 0");
+    render(<BuddyHome />, { store });
+    const panel = await screen.findByTestId("buddy-recent-chats");
+    expect(panel.className).not.toContain("panelScroll");
+    expect(panel.className).toContain("glass");
+  });
+
+  it("main grid bounds redesigned panel rows", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+    const mainGridBlock = readCssBlock(css, ".mainGrid");
+    const panelSlotBlock = readCssBlock(css, ".panelSlot");
+
+    expect(mainGridBlock).toContain("repeat(3, minmax(0, 1fr))");
+    expect(mainGridBlock).toContain("align-items: start");
+    expect(panelSlotBlock).toContain("overflow: hidden");
+    expect(panelSlotBlock).toContain("min-height: 0");
+    expect(css).toContain("height: clamp(300px, 34vh, 360px)");
+    expect(css).toContain("height: clamp(230px, 27vh, 290px)");
     expect(css).not.toContain("max-height: 860px");
   });
 
-  it("panelScroll default block clips panel overflow", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const block = readCssBlock(css, ".panelScroll");
+  it("recent chats panel clips overflow while entries scroll internally", async () => {
+    const recentChatsCss = await readGuiSource(
+      "features/Buddy/BuddyRecentChats.module.css",
+    );
+    const panelBlock = readCssBlock(recentChatsCss, ".panel");
+    const entriesBlock = readCssBlock(recentChatsCss, ".scrollList");
 
-    expect(block).toContain("overflow: hidden");
+    expect(panelBlock).toContain("height: 100%");
+    expect(panelBlock).toContain("overflow: hidden");
+    expect(entriesBlock).toContain("flex: 1");
+    expect(entriesBlock).toContain("min-height: 0");
+    expect(entriesBlock).toContain("overflow-y: auto");
+    expect(entriesBlock).toContain("overflow-x: hidden");
   });
 
-  it("scrollList default block keeps vertical internal scrolling", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const block = readCssBlock(css, ".scrollList");
-
-    expect(block).toContain("flex: 1");
-    expect(block).toContain("min-height: 0");
-    expect(block).toContain("overflow-y: auto");
-    expect(block).toContain("overflow-x: hidden");
-  });
-
-  it("BuddyRecentChats entriesScroll keeps internal scrolling at common IDE sizes", async () => {
+  it("activity panel CSS bounds the surface and keeps the list as the scroller", async () => {
     const css = await readGuiSource(
-      "features/Buddy/BuddyRecentChats.module.css",
+      "features/Buddy/BuddyActivityPanel.module.css",
     );
-    const block = readCssBlock(css, ".entriesScroll");
+    const panelBlock = readCssBlock(css, ".panel");
+    const scrollBlock = readCssBlock(css, ".scrollList");
 
-    expect(block).toContain("flex: 1");
-    expect(block).toContain("min-height: 0");
-    expect(block).toContain("overflow-y: auto");
-    expect(block).toContain("overflow-x: hidden");
-    expect(css).not.toContain("@media (max-width: 720px)");
-    expect(css).toContain("@media (max-width: 520px)");
+    expect(panelBlock).toContain("height: 100%");
+    expect(panelBlock).toContain("overflow: hidden");
+    expect(scrollBlock).toContain("flex: 1 1 auto");
+    expect(scrollBlock).toContain("min-height: 0");
+    expect(scrollBlock).toContain("overflow-y: auto");
+    expect(scrollBlock).toContain("overflow-x: hidden");
   });
 
-  it("common IDE stacked media rule does not disable internal bottom scrolling", async () => {
-    const homeCss = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const homeStackedBlock = readCssMediaBlock(homeCss, "(max-width: 720px)");
-    const recentChatsCss = await readGuiSource(
-      "features/Buddy/BuddyRecentChats.module.css",
+  it("recent errors panel CSS bounds the surface and keeps the list as the scroller", async () => {
+    const css = await readGuiSource(
+      "features/Buddy/BuddyRecentErrorsPanel.module.css",
     );
+    const panelBlock = readCssBlock(css, ".panel");
+    const scrollBlock = readCssBlock(css, ".scrollList");
 
-    expect(homeStackedBlock).not.toContain("grid-template-rows: auto");
-    expect(homeStackedBlock).not.toContain("grid-auto-rows: auto");
-    expect(homeStackedBlock).not.toContain("overflow-y: visible");
-    expect(homeStackedBlock).not.toContain("overflow: visible");
-    expect(recentChatsCss).not.toContain("@media (max-width: 720px)");
+    expect(panelBlock).toContain("height: 100%");
+    expect(panelBlock).toContain("overflow: hidden");
+    expect(scrollBlock).toContain("flex: 1 1 auto");
+    expect(scrollBlock).toContain("min-height: 0");
+    expect(scrollBlock).toContain("overflow-y: auto");
+    expect(scrollBlock).toContain("overflow-x: hidden");
   });
 
-  it("tiny width media rule intentionally allows natural bottom-panel expansion", async () => {
+  it("stacked media keeps redesigned panels bounded", async () => {
     const homeCss = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    const homeTinyBlock = readCssMediaBlock(homeCss, "(max-width: 520px)");
-    const recentChatsCss = await readGuiSource(
-      "features/Buddy/BuddyRecentChats.module.css",
+    const homeWideStackBlock = readCssMediaBlock(
+      homeCss,
+      "(max-width: 1100px)",
     );
-    const recentChatsTinyBlock = readCssMediaBlock(
-      recentChatsCss,
-      "(max-width: 520px)",
+    const homeIdeStackBlock = readCssMediaBlock(homeCss, "(max-width: 720px)");
+    const activityCss = await readGuiSource(
+      "features/Buddy/BuddyActivityPanel.module.css",
+    );
+    const recentErrorsCss = await readGuiSource(
+      "features/Buddy/BuddyRecentErrorsPanel.module.css",
     );
 
-    expect(homeTinyBlock).toContain("grid-template-rows: auto");
-    expect(homeTinyBlock).toContain("grid-auto-rows: auto");
-    expect(homeTinyBlock).toContain("overflow: visible");
-    expect(homeTinyBlock).toContain("overflow-y: visible");
-    expect(recentChatsTinyBlock).toContain("overflow-y: visible");
+    expect(homeWideStackBlock).toContain("repeat(2, minmax(0, 1fr))");
+    expect(homeIdeStackBlock).toContain(
+      "grid-template-columns: minmax(0, 1fr)",
+    );
+    expect(homeIdeStackBlock).toContain("height: min(420px, 70vh)");
+    expect(homeIdeStackBlock).not.toContain("overflow-y: visible");
+    expect(activityCss).not.toContain("overflow-y: visible");
+    expect(recentErrorsCss).not.toContain("overflow-y: visible");
   });
 });

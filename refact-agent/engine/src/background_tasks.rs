@@ -116,6 +116,11 @@ pub async fn start_background_tasks(
         }),
     ]);
     bg.extend(crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await);
+    if !gcx.cmdline.daemon_endpoint.is_empty() {
+        bg.push_back(tokio::spawn(crate::daemon_link::daemon_link_task(
+            gcx.clone(),
+        )));
+    }
     let ast = gcx.clone().ast_service.lock().unwrap().clone();
     if let Some(ast_service) = ast {
         bg.extend(

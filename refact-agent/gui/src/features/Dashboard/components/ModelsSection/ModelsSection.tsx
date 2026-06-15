@@ -1,6 +1,12 @@
 import React from "react";
-import { Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
-import { ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
+import {
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardSkeleton as Skeleton,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { Icon } from "../../../../components/ui";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { useGetCapsQuery } from "../../../../services/refact/caps";
 import { useAppDispatch } from "../../../../hooks";
@@ -27,8 +33,8 @@ function ModelRow({
   return (
     <HoverCard.Root openDelay={300} closeDelay={100}>
       <HoverCard.Trigger>
-        <div className={styles.modelRow}>
-          <Text size="1" color="gray" className={styles.modelLabel}>
+        <div className={`${styles.modelRow} rf-enter-rise rf-pressable`}>
+          <Text size="1" tone="muted" className={styles.modelLabel}>
             {label}
           </Text>
           <Text size="1" weight="medium" truncate className={styles.modelName}>
@@ -47,7 +53,7 @@ function ModelRow({
           <Text size="2" weight="bold">
             {label}
           </Text>
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             {explanation}
           </Text>
           <Text size="1">Current: {model}</Text>
@@ -75,13 +81,13 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({
             onClick={onToggleCollapsed}
             aria-expanded={!collapsed}
           >
-            <Text size="1" weight="bold" color="gray" className={styles.label}>
+            <Text size="1" weight="bold" tone="muted" className={styles.label}>
               DEFAULT MODELS
             </Text>
             {collapsed ? (
-              <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+              <Icon icon={ChevronDown} size="sm" tone="muted" />
             ) : (
-              <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
+              <Icon icon={ChevronUp} size="sm" tone="muted" />
             )}
           </button>
         </div>
@@ -106,13 +112,13 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({
           onClick={onToggleCollapsed}
           aria-expanded={!collapsed}
         >
-          <Text size="1" weight="bold" color="gray" className={styles.label}>
+          <Text size="1" weight="bold" tone="muted" className={styles.label}>
             DEFAULT MODELS
           </Text>
           {collapsed ? (
-            <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
+            <Icon icon={ChevronDown} size="sm" tone="muted" />
           ) : (
-            <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
+            <Icon icon={ChevronUp} size="sm" tone="muted" />
           )}
         </button>
         <button
@@ -182,7 +188,7 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({
             />
           )}
         </div>
-        <Text size="1" color="gray" className={styles.modelCount}>
+        <Text size="1" tone="muted" className={styles.modelCount}>
           {chatModelCount} chat + {completionModelCount} completion models
           available
         </Text>

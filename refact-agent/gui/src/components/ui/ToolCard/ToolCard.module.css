@@ -1,0 +1,158 @@
+.root {
+  /* Aligns body content with the title text: toggle pad + icon column + gap. */
+  --rf-toolcard-body-offset: calc(
+    var(--rf-space-2) + var(--rf-icon) + var(--rf-space-2)
+  );
+  --rf-toolcard-body-padding-block: var(--rf-space-2);
+  --rf-toolcard-body-padding-inline-start: var(--rf-toolcard-body-offset);
+
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  background: transparent;
+  border-radius: var(--rf-radius-card);
+}
+
+.header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) 0;
+}
+
+.toggle {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+  font: inherit;
+}
+
+.toggle:hover {
+  color: var(--rf-color-fg);
+}
+
+.toggle:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.leadingIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: var(--rf-icon);
+  min-width: var(--rf-icon);
+  align-items: center;
+  justify-content: center;
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 700;
+  line-height: var(--rf-line);
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1 1 auto;
+  min-width: var(--rf-space-2);
+}
+
+.chevron {
+  flex: 0 0 auto;
+  transition: transform var(--rf-toolcard-motion-duration)
+    var(--rf-ease-entrance);
+}
+
+.root[data-open="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+.actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+}
+
+.bodyGrid {
+  pointer-events: none;
+}
+
+.root[data-open="true"] .bodyGrid {
+  pointer-events: auto;
+}
+
+.bodyShell {
+  min-width: 0;
+  opacity: 0;
+  transform: translateY(var(--rf-collapse-enter-y));
+}
+
+.root[data-open="true"] .bodyShell {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/*
+ * Canonical tool body contract: this outer body owns indentation and padding.
+ * Feature tool bodies add local structure, not competing outer padding shells.
+ */
+.body {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-toolcard-body-padding-block) 0
+    var(--rf-toolcard-body-padding-block)
+    var(--rf-toolcard-body-padding-inline-start);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bodyGrid {
+    transition: grid-template-rows var(--rf-toolcard-motion-duration)
+      var(--rf-ease-entrance);
+  }
+
+  .bodyShell {
+    transition:
+      opacity var(--rf-toolcard-motion-duration) var(--rf-ease-entrance),
+      transform var(--rf-toolcard-motion-duration) var(--rf-ease-entrance);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron,
+  .bodyGrid,
+  .bodyShell {
+    transition: none;
+  }
+
+  .bodyShell {
+    transform: none;
+  }
+}

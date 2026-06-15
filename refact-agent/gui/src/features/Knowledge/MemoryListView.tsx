@@ -1,13 +1,17 @@
 import { useEffect, useRef } from "react";
+import classNames from "classnames";
 import {
-  CounterClockwiseClockIcon,
-  FileIcon,
-  Link2Icon,
-  MagnifyingGlassIcon,
-  ReaderIcon,
-  StarIcon,
-  TargetIcon,
-} from "@radix-ui/react-icons";
+  BookOpen,
+  FileText,
+  Link2,
+  Repeat2,
+  Search,
+  Star,
+  Target,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+
+import { Badge, Icon, Surface, VirtualList } from "../../components/ui";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import styles from "./MemoryListView.module.css";
 
@@ -19,23 +23,27 @@ interface MemoryListViewProps {
 }
 
 const KIND_CONFIG = {
-  code: { Icon: FileIcon, color: "#3B82F6" },
-  decision: { Icon: TargetIcon, color: "#8B5CF6" },
-  preference: { Icon: StarIcon, color: "#10B981" },
-  pattern: { Icon: CounterClockwiseClockIcon, color: "#F59E0B" },
-  lesson: { Icon: ReaderIcon, color: "#06B6D4" },
+  code: { icon: FileText },
+  decision: { icon: Target },
+  preference: { icon: Star },
+  pattern: { icon: Repeat2 },
+  lesson: { icon: BookOpen },
 } as const;
 
 type KindKey = keyof typeof KIND_CONFIG;
+type KindConfig = {
+  icon: LucideIcon;
+};
 
-function getKindConfig(kind: string | undefined): {
-  Icon: (typeof KIND_CONFIG)[KindKey]["Icon"];
-  color: string;
-} {
+function getKindConfig(kind: string | undefined): KindConfig {
   if (kind && kind in KIND_CONFIG) {
     return KIND_CONFIG[kind as KindKey];
   }
   return KIND_CONFIG.code;
+}
+
+function formatKind(kind: string): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
 export function MemoryListView({
@@ -58,92 +66,117 @@ export function MemoryListView({
 
   if (memories.length === 0) {
     return (
-      <div className={styles.emptyState}>
-        <div className={styles.emptyIcon}>
-          <MagnifyingGlassIcon />
-        </div>
+      <Surface className={styles.emptyState} radius="none">
+        <Icon icon={Search} size="lg" tone="faint" />
         <p className={styles.emptyText}>No memories to display</p>
-      </div>
+      </Surface>
     );
   }
 
   return (
-    <div className={styles.container}>
-      <div className={styles.grid}>
-        {memories.map((memory) => {
+    <Surface className={styles.container} radius="none">
+      <VirtualList
+        className={classNames(styles.list, "rf-enter-rise")}
+        height="100%"
+        items={memories}
+        getItemKey={(memory) => memory.memid}
+        renderItem={(memory) => {
           const isSelected = selectedId === memory.memid;
           const isLinked = linkedIds.has(memory.memid);
           const kind = memory.kind ?? "code";
           const kindConfig = getKindConfig(memory.kind);
-          const KindIcon = kindConfig.Icon;
 
           return (
-            <button
+            <Surface
+              className={classNames(
+                styles.cardFrame,
+                isSelected && styles.selected,
+              )}
               key={memory.memid}
-              ref={(el) => {
-                if (el) {
-                  cardRefs.current.set(memory.memid, el);
-                } else {
-                  cardRefs.current.delete(memory.memid);
-                }
-              }}
-              className={`${styles.card} ${isSelected ? styles.selected : ""}`}
-              onClick={() => onSelectId(memory.memid)}
-              type="button"
-              aria-pressed={isSelected}
+              variant={isSelected ? "selected" : "plain"}
+              animated="rise"
             >
-              <div className={styles.header}>
-                <div className={styles.headerLeft}>
-                  <span
-                    className={styles.kindBadge}
-                    style={{ backgroundColor: kindConfig.color }}
-                    aria-label={`Kind: ${kind}`}
-                  >
-                    <KindIcon />
-                  </span>
-                  <span className={styles.title}>
-                    {memory.title ?? "Untitled"}
-                  </span>
-                </div>
-                {isLinked && (
-                  <span
-                    className={styles.linkBadge}
-                    aria-label="Linked in graph"
-                  >
-                    <Link2Icon />
-                  </span>
+              <button
+                ref={(el) => {
+                  if (el) {
+                    cardRefs.current.set(memory.memid, el);
+                  } else {
+                    cardRefs.current.delete(memory.memid);
+                  }
+                }}
+                className={classNames(
+                  styles.card,
+                  "rf-pressable",
+                  isSelected && styles.selected,
                 )}
-              </div>
-
-              <div className={styles.metadata}>
-                <div className={styles.metaRow}>
-                  <span className={styles.metaLabel}>Kind:</span>
-                  <span className={styles.metaValue}>
-                    {kind.charAt(0).toUpperCase() + kind.slice(1)}
-                  </span>
-                </div>
-                {memory.tags.length > 0 && (
-                  <div className={styles.metaRow}>
-                    <span className={styles.metaLabel}>Tags:</span>
-                    <div className={styles.tags}>
-                      {memory.tags.slice(0, 3).map((tag) => (
-                        <span key={tag} className={styles.tagDot} title={tag}>
-                          ●
-                        </span>
-                      ))}
-                      {memory.tags.length > 3 && (
-                        <span className={styles.tagMore}>
-                          +{memory.tags.length - 3}
-                        </span>
-                      )}
-                    </div>
+                onClick={() => onSelectId(memory.memid)}
+                type="button"
+                aria-pressed={isSelected}
+              >
+                <div className={styles.header}>
+                  <div className={styles.headerLeft}>
+                    <span
+                      className={styles.kindBadge}
+                      aria-label={`Kind: ${kind}`}
+                    >
+                      <Icon
+                        className={styles.kindIcon}
+                        icon={kindConfig.icon}
+                        tone="muted"
+                      />
+                    </span>
+                    <span className={styles.title}>
+                      {memory.title ?? "Untitled"}
+                    </span>
                   </div>
-                )}
-              </div>
-            </button>
+                  {isLinked ? (
+                    <span
+                      className={styles.linkBadge}
+                      aria-label="Linked in graph"
+                    >
+                      <Icon
+                        className={styles.linkIcon}
+                        icon={Link2}
+                        size="sm"
+                        tone="muted"
+                      />
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className={styles.metadata}>
+                  <div className={styles.metaRow}>
+                    <span className={styles.metaLabel}>Kind:</span>
+                    <span className={styles.metaValue}>{formatKind(kind)}</span>
+                  </div>
+                  {memory.tags.length > 0 ? (
+                    <div className={styles.metaRow}>
+                      <span className={styles.metaLabel}>Tags:</span>
+                      <div className={styles.tags}>
+                        {memory.tags.slice(0, 3).map((tag) => (
+                          <Badge
+                            key={tag}
+                            className={styles.tagBadge}
+                            tone="muted"
+                            title={tag}
+                          >
+                            {tag}
+                          </Badge>
+                        ))}
+                        {memory.tags.length > 3 ? (
+                          <span className={styles.tagMore}>
+                            +{memory.tags.length - 3}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </button>
+            </Surface>
           );
-        })}
-      </div>
-    </div>
+        }}
+      />
+    </Surface>
   );
 }

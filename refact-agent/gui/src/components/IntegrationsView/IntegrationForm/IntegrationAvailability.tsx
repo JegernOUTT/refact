@@ -1,7 +1,8 @@
-import { Flex, Switch } from "@radix-ui/themes";
 import type { FC } from "react";
-import { CustomLabel } from "../CustomFieldsAndWidgets";
 import { toPascalCase } from "../../../utils/toPascalCase";
+import { Flex, Switch } from "../../ui";
+
+import styles from "./IntegrationForm.module.css";
 
 type IntegrationAvailabilityProps = {
   fieldName: string;
@@ -18,28 +19,25 @@ export const IntegrationAvailability: FC<IntegrationAvailabilityProps> = ({
     onChange(fieldName, checked);
   };
 
-  // TODO: temporal solution to hide the switch for isolated mode
   if (fieldName === "when_isolated") return null;
 
-  const handleLabelClick = () => {
-    handleSwitchChange(value);
-  };
+  const label = toPascalCase(
+    fieldName === "on_your_laptop" ? "enable" : "run_in_docker",
+  );
 
   return (
-    <Flex style={{ marginBottom: "0.75rem" }}>
+    <Flex className={styles.availabilityToggle}>
       <Flex align="center" justify="between" gap="3">
         <Switch
           id={`switch-${fieldName}`}
-          size="2"
           checked={value}
           onCheckedChange={handleSwitchChange}
         />
-        <label htmlFor={`switch-${fieldName}`} onClick={handleLabelClick}>
-          <CustomLabel
-            label={toPascalCase(
-              fieldName === "on_your_laptop" ? "enable" : "run_in_docker",
-            )}
-          />
+        <label
+          className={styles.availabilityLabel}
+          htmlFor={`switch-${fieldName}`}
+        >
+          {label}
         </label>
       </Flex>
     </Flex>

@@ -1,9 +1,9 @@
 .diffContent {
-  overflow-x: visible;
-  padding-left: var(--space-2);
-  font-family: var(--code-font-family);
-  font-size: 12px;
-  line-height: 1.45;
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
 }
 
 .diffBlock {
@@ -11,7 +11,7 @@
   --edit-diff-add-num-bg: var(--diffBlob-additionNum-bgColor, #3fb9504d);
   --edit-diff-remove-line-bg: var(--diffBlob-deletionLine-bgColor, #f851491a);
   --edit-diff-remove-num-bg: var(--diffBlob-deletionNum-bgColor, #f851494d);
-  padding: 0 0 var(--space-1);
+  padding: 0 0 var(--rf-space-1);
 }
 
 .diffBlock:last-child {
@@ -20,7 +20,7 @@
 
 .hunkHeader {
   min-width: 0;
-  padding: 2px 0;
+  padding: var(--rf-space-2xs) 0;
   white-space: pre-wrap;
   user-select: none;
 }
@@ -28,8 +28,8 @@
 .hunkFileButton,
 .hunkFileName {
   all: unset;
-  color: var(--accent-11);
-  font-family: var(--code-font-family);
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
 }
 
 .hunkFileButton {
@@ -42,24 +42,24 @@
 
 .hunkTitle {
   color: inherit;
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   flex: 0 1 auto;
   min-width: 0;
 }
 
 .statsInline {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 12px;
   flex: 1 1 auto;
 }
 
 .added {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .removed {
-  color: var(--red-11);
-  margin-left: 4px;
+  color: var(--rf-color-danger);
+  margin-left: var(--rf-space-1);
 }
 
 .hunkActions {
@@ -67,7 +67,39 @@
 }
 
 .hunkActionButton {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  border-radius: var(--rf-radius-ctl);
+  color: var(--rf-color-muted);
   cursor: pointer;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.hunkActionButton:hover {
+  background: color-mix(in oklab, var(--rf-surface-glass) 44%, transparent);
+  color: var(--rf-color-fg);
+}
+
+.hunkActionButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
+}
+
+.hunkActionButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.hunkActionButton svg {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
 }
 
 .diffLine {
@@ -79,9 +111,9 @@
   width: 40px;
   min-width: 40px;
   text-align: center;
-  padding: 0 var(--space-1);
-  color: var(--gray-12);
-  border-right: 1px solid var(--gray-a4);
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-fg);
+  border-right: 1px solid var(--rf-border);
   user-select: none;
   flex-shrink: 0;
 }
@@ -108,21 +140,21 @@
   overflow-wrap: anywhere;
   flex: 1 1 auto;
   min-width: 0;
-  padding-right: var(--space-2);
-  color: color-mix(in oklab, var(--gray-12) 90%, white 10%);
+  padding-right: var(--rf-space-2);
+  color: color-mix(in oklab, var(--rf-color-fg) 90%, white 10%);
   background: transparent;
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: inherit;
   line-height: inherit;
   filter: brightness(1.18) saturate(1.04);
 }
 
 .context {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .context .sign {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .remove {
@@ -130,7 +162,7 @@
 }
 
 .remove .sign {
-  color: var(--diffBlob-deletionLine-fgColor, var(--gray-12));
+  color: var(--diffBlob-deletionLine-fgColor, var(--rf-color-fg));
 }
 
 .add {
@@ -138,18 +170,18 @@
 }
 
 .add .sign {
-  color: var(--diffBlob-additionLine-fgColor, var(--gray-12));
+  color: var(--diffBlob-additionLine-fgColor, var(--rf-color-fg));
 }
 
 .showMoreButton {
   display: block;
   width: 100%;
   min-width: 0;
-  padding: var(--space-1) 0;
-  color: var(--accent-11);
+  padding: var(--rf-space-1) 0;
+  color: var(--rf-color-accent);
   background: transparent;
   border: 0;
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
@@ -160,9 +192,19 @@
 }
 
 .fileList {
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .fileItem {
-  overflow: visible;
+  min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .hunkActionButton:hover {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .hunkActionButton:hover {
+  background: var(--rf-surface-glass);
 }

@@ -1,5 +1,8 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import { Badge } from "@radix-ui/themes";
+import {
+  BuddySpeechBubble,
+  type BuddySpeechExitKind,
+} from "./BuddySpeechBubble";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {
@@ -17,69 +20,13 @@ import {
 import type {
   BuddyCanvasProps,
   BuddyAnimState,
+  BuddyControl,
+  BuddyEnvContext,
   BuddySemanticState,
+  BuddySpeechStyle,
   BuddyEvent,
   BubblePosition,
 } from "./types";
-
-const BUBBLE_STYLES: Record<
-  BubblePosition,
-  {
-    container: React.CSSProperties;
-    tail: React.CSSProperties;
-  }
-> = {
-  top: {
-    container: {
-      bottom: "56%",
-      left: "calc(50% + var(--buddy-walk-x, 0px))",
-      transform: "translateX(-50%)",
-    },
-    tail: {
-      top: "100%",
-      left: "50%",
-      transform: "translateX(-50%)",
-      borderLeft: "14px solid transparent",
-      borderRight: "14px solid transparent",
-      /* borderTop set dynamically via palette */
-    },
-  },
-  left: {
-    container: {
-      right: "calc(52% - var(--buddy-walk-x, 0px))",
-      top: "47%",
-      marginRight: "-2px",
-      transform: "translateY(-50%)",
-    },
-    tail: {
-      left: "100%",
-      top: "50%",
-      transform: "translateY(-50%)",
-      borderTop: "16px solid transparent",
-      borderBottom: "16px solid transparent",
-      /* borderLeft set dynamically via palette */
-    },
-  },
-  right: {
-    container: {
-      left: "calc(52% + var(--buddy-walk-x, 0px))",
-      top: "47%",
-      marginLeft: "-2px",
-      transform: "translateY(-50%)",
-    },
-    tail: {
-      right: "100%",
-      top: "50%",
-      transform: "translateY(-50%)",
-      borderTop: "16px solid transparent",
-      borderBottom: "16px solid transparent",
-      /* borderRight set dynamically via palette */
-    },
-  },
-};
-
-const BUBBLE_FILL = "rgba(244, 250, 255, 0.9)";
-const BUBBLE_TEXT = "#102033";
 
 const BUBBLE_POSITIONS: BubblePosition[] = ["top", "left", "right"];
 
@@ -100,6 +47,11 @@ function ellipsizeMiddle(text: string, maxLength: number): string {
 
 interface BubbleView {
   text: string;
+  textKey: number;
+  enterKey: number;
+  style: BuddySpeechStyle;
+  closing: boolean;
+  exitKind: BuddySpeechExitKind;
   position: BubblePosition;
   width:
     | "max-content"
@@ -118,50 +70,57 @@ interface BubbleView {
   walkOffsetPx: number;
 }
 
-type BubbleStyle = React.CSSProperties & { "--buddy-walk-x"?: string };
+interface BubbleControlExitState {
+  kind: BuddySpeechExitKind;
+  atMs: number;
+  consumed: boolean;
+}
 
-function innerTailStyle(
-  position: BubblePosition,
-  compact: boolean,
+interface BubbleClosingState {
+  startedAtMs: number;
+  kind: BuddySpeechExitKind;
+  text: string;
+  style: BuddySpeechStyle;
+}
+
+const NATURAL_EXIT_MS = 200;
+const CONTROL_EXIT_MS = 270;
+const CONTROL_EXIT_RECENT_MS = 1_500;
+
+function bubbleAnchorStyle(
+  view: BubbleView,
+  displaySize: number,
+  stage: number,
+  chatCompanion: boolean,
 ): React.CSSProperties {
-  const sideTransparent = compact
-    ? "8px solid transparent"
-    : "10px solid transparent";
-  const sideFill = compact
-    ? `10px solid ${BUBBLE_FILL}`
-    : `14px solid ${BUBBLE_FILL}`;
-
-  if (position === "left") {
+  const k = displaySize / CANVAS_SIZE;
+  const [spriteW, spriteH] = STAGE_SIZES[stage] ?? [28, 18];
+  const walk = view.walkOffsetPx;
+  if (view.position === "top") {
+    const headTopPx = (CANVAS_CENTER_Y - 1.8 * (spriteH / 2 + 10)) * k;
     return {
-      left: "calc(100% - 4px)",
-      top: "50%",
-      transform: "translateY(-50%)",
-      borderTop: sideTransparent,
-      borderBottom: sideTransparent,
-      borderLeft: sideFill,
+      left: `calc(50% + ${walk}px)`,
+      bottom: `${Math.round(displaySize - headTopPx + 4)}px`,
+      transform: "translateX(-50%)",
     };
   }
-
-  if (position === "right") {
+  const faceTopPx = Math.round((CANVAS_CENTER_Y - 1.8 * (spriteH / 2 - 6)) * k);
+  const sideEdgePx = Math.round(1.8 * (spriteW / 2 + 7) * k);
+  if (view.position === "left") {
     return {
-      right: "calc(100% - 4px)",
-      top: "50%",
+      right: chatCompanion
+        ? `calc(78% - ${walk}px)`
+        : `calc(50% + ${sideEdgePx}px - ${walk}px)`,
+      top: `${faceTopPx}px`,
       transform: "translateY(-50%)",
-      borderTop: sideTransparent,
-      borderBottom: sideTransparent,
-      borderRight: sideFill,
     };
   }
-
   return {
-    top: "calc(100% - 4px)",
-    left: "50%",
-    transform: "translateX(-50%)",
-    borderLeft: compact ? "8px solid transparent" : "11px solid transparent",
-    borderRight: compact ? "8px solid transparent" : "11px solid transparent",
-    borderTop: compact
-      ? `10px solid ${BUBBLE_FILL}`
-      : `14px solid ${BUBBLE_FILL}`,
+    left: chatCompanion
+      ? `calc(78% + ${walk}px)`
+      : `calc(50% + ${sideEdgePx}px + ${walk}px)`,
+    top: `${faceTopPx}px`,
+    transform: "translateY(-50%)",
   };
 }
 
@@ -171,7 +130,12 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   displaySize = 512,
   className,
   style,
+  envContext,
+  spritePointer = false,
+  cursorBridgeRef,
   speechOverride,
+  speechStyle,
+  speechMedia,
   speechControls,
   speechIntent,
   onSpeechControlClick,
@@ -183,10 +147,16 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<BuddyAnimState>(createInitialAnimState());
   const semanticRef = useRef<BuddySemanticState>(state);
+  const envRef = useRef<BuddyEnvContext | null>(envContext ?? null);
   const prevSignalTimeRef = useRef<number>(0);
   const frameIdRef = useRef<number>(0);
   const [bubbleView, setBubbleView] = useState<BubbleView>(() => ({
     text: "",
+    textKey: 0,
+    enterKey: 0,
+    style: "say",
+    closing: false,
+    exitKind: "natural",
     position: bubblePosition,
     width: "max-content",
     maxWidth: "300px",
@@ -198,11 +168,18 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const bubbleViewRef = useRef<BubbleView>(bubbleView);
   const bubblePositionRef = useRef<BubblePosition>(bubblePosition);
   const speechOverrideRef = useRef<string | null | undefined>(speechOverride);
+  const speechStyleRef = useRef<BuddySpeechStyle>("say");
+  const controlExitRef = useRef<BubbleControlExitState | null>(null);
+  const bubbleClosingRef = useRef<BubbleClosingState | null>(null);
   const speechControlCount = speechControls?.length ?? 0;
 
   useEffect(() => {
     speechOverrideRef.current = speechOverride;
   }, [speechOverride]);
+
+  useEffect(() => {
+    speechStyleRef.current = speechStyle ?? "say";
+  }, [speechStyle]);
 
   useEffect(() => {
     bubbleViewRef.current = bubbleView;
@@ -224,6 +201,10 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     semanticRef.current = state;
   }, [state]);
 
+  useEffect(() => {
+    envRef.current = envContext ?? null;
+  }, [envContext]);
+
   const emit = useCallback(
     (event: BuddyEvent) => {
       onEvent?.(event);
@@ -239,7 +220,12 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       lastSignalType
     ) {
       prevSignalTimeRef.current = lastSignalTime;
-      triggerSignalAnimation(animRef.current, lastSignalType, emit);
+      triggerSignalAnimation(
+        animRef.current,
+        lastSignalType,
+        emit,
+        semanticRef.current,
+      );
     }
   }, [state.activity, emit]);
 
@@ -250,11 +236,25 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         return;
       }
 
-      const ctx = canvasRef.current?.getContext("2d");
-      if (ctx) {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (canvas && ctx) {
+        const pixelRatio = Math.min(
+          2,
+          Math.max(1, window.devicePixelRatio || 1),
+        );
+        const targetSize = Math.max(1, Math.round(displaySize * pixelRatio));
+        if (canvas.width !== targetSize || canvas.height !== targetSize) {
+          canvas.width = targetSize;
+          canvas.height = targetSize;
+        }
+        const backingScale = targetSize / CANVAS_SIZE;
         const sem = semanticRef.current;
-        stepAnimFrame(animRef.current, sem, emit);
-        renderFrame(ctx, animRef.current, sem);
+        stepAnimFrame(animRef.current, sem, emit, envRef.current);
+        ctx.save();
+        ctx.scale(backingScale, backingScale);
+        renderFrame(ctx, animRef.current, sem, backingScale);
+        ctx.restore();
 
         const anim = animRef.current;
         const previous = bubbleViewRef.current;
@@ -271,11 +271,69 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           chatCompanionBubble ? 160 : compactBubble ? 120 : 170,
         );
         const opacity = overrideText ? 1 : anim.statusOpacity;
-        const visible = opacity > 0.02 && text.length > 0;
+        const rawVisible = opacity > 0.02 && text.length > 0;
+        const nowMs = Date.now();
+        const controlExit = controlExitRef.current;
+        if (
+          controlExit !== null &&
+          !controlExit.consumed &&
+          previous.visible &&
+          !previous.closing &&
+          bubbleClosingRef.current === null
+        ) {
+          controlExit.consumed = true;
+          bubbleClosingRef.current = {
+            startedAtMs: nowMs,
+            kind: controlExit.kind,
+            text: previous.text,
+            style: previous.style,
+          };
+        } else if (
+          !rawVisible &&
+          previous.visible &&
+          !previous.closing &&
+          previous.text.length > 0 &&
+          bubbleClosingRef.current === null
+        ) {
+          bubbleClosingRef.current = {
+            startedAtMs: nowMs,
+            kind:
+              controlExit !== null &&
+              nowMs - controlExit.atMs < CONTROL_EXIT_RECENT_MS
+                ? controlExit.kind
+                : "natural",
+            text: previous.text,
+            style: previous.style,
+          };
+        }
+
+        let closingActive = false;
+        let exitKind: BuddySpeechExitKind = "natural";
+        let frozenText: string | null = null;
+        let frozenStyle: BuddySpeechStyle | null = null;
+        const closingState = bubbleClosingRef.current;
+        if (closingState !== null) {
+          const exitDurationMs =
+            closingState.kind === "natural" ? NATURAL_EXIT_MS : CONTROL_EXIT_MS;
+          if (nowMs - closingState.startedAtMs >= exitDurationMs) {
+            bubbleClosingRef.current = null;
+          } else {
+            closingActive = true;
+            exitKind = closingState.kind;
+            frozenText = closingState.text;
+            frozenStyle = closingState.style;
+          }
+        }
+
+        const displayText = frozenText ?? text;
+        const liveStyle: BuddySpeechStyle =
+          overrideText.length > 0 ? speechStyleRef.current : "say";
+        const displayStyle = frozenStyle ?? liveStyle;
+        const visible = closingActive || rawVisible;
         const hasControls = speechControlCount > 0;
-        const isVeryLongText = text.length > 130;
-        const isLongText = text.length > 72;
-        const isMediumText = text.length > 34;
+        const isVeryLongText = displayText.length > 130;
+        const isLongText = displayText.length > 72;
+        const isMediumText = displayText.length > 34;
         const fixedWidth = hasControls || isLongText || chatCompanionBubble;
         const width: BubbleView["width"] = chatCompanionBubble
           ? isVeryLongText
@@ -314,17 +372,32 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           previous.width !== "200px" &&
           previous.width !== "220px";
         const position =
-          text !== previous.text || fixedWidth !== previousFixedWidth
+          displayText !== previous.text || fixedWidth !== previousFixedWidth
             ? randomizeBubblePosition
               ? fixedWidth
                 ? "top"
                 : randomBubblePosition(previous.position)
               : bubblePositionRef.current
             : previous.position;
-        const nextOpacity = visible ? Math.min(1, opacity) : 0;
+        const nextOpacity = closingActive
+          ? Math.max(previous.opacity, 0.85)
+          : visible
+            ? Math.min(1, opacity)
+            : 0;
         const opacityChanged = Math.abs(previous.opacity - nextOpacity) > 0.03;
         const nextView: BubbleView = {
-          text,
+          text: displayText,
+          textKey:
+            displayText !== previous.text && displayText.length > 0
+              ? previous.textKey + 1
+              : previous.textKey,
+          enterKey:
+            visible && !closingActive && (!previous.visible || previous.closing)
+              ? previous.enterKey + 1
+              : previous.enterKey,
+          style: displayStyle,
+          closing: closingActive,
+          exitKind,
           position,
           width,
           maxWidth,
@@ -336,6 +409,10 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
 
         if (
           previous.text !== nextView.text ||
+          previous.enterKey !== nextView.enterKey ||
+          previous.style !== nextView.style ||
+          previous.closing !== nextView.closing ||
+          previous.exitKind !== nextView.exitKind ||
           previous.position !== nextView.position ||
           previous.width !== nextView.width ||
           previous.maxWidth !== nextView.maxWidth ||
@@ -361,23 +438,24 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     speechControlCount,
   ]);
 
-  const toCanvasCoords = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const clientToCanvasCoords = useCallback(
+    (clientX: number, clientY: number) => {
       const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return null;
+      if (!rect || rect.width === 0 || rect.height === 0) return null;
+      const clampNorm = (value: number) => Math.max(-1.6, Math.min(1.6, value));
       return {
-        x: ((e.clientX - rect.left) / rect.width) * CANVAS_SIZE,
-        y: ((e.clientY - rect.top) / rect.height) * CANVAS_SIZE,
-        normX: ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        normY: ((e.clientY - rect.top) / rect.height) * 2 - 1,
+        x: ((clientX - rect.left) / rect.width) * CANVAS_SIZE,
+        y: ((clientY - rect.top) / rect.height) * CANVAS_SIZE,
+        normX: clampNorm(((clientX - rect.left) / rect.width) * 2 - 1),
+        normY: clampNorm(((clientY - rect.top) / rect.height) * 2 - 1),
       };
     },
     [],
   );
 
-  const onMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+  const applyPointerMove = useCallback(
+    (clientX: number, clientY: number) => {
+      const coords = clientToCanvasCoords(clientX, clientY);
       if (!coords) return;
       const anim = animRef.current;
       anim.mouseSpeed = Math.sqrt(
@@ -398,7 +476,14 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       anim.mouseProximity = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / 80);
       anim.mouseAngle = Math.atan2(coords.normY, coords.normX);
     },
-    [toCanvasCoords],
+    [clientToCanvasCoords],
+  );
+
+  const onMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      applyPointerMove(e.clientX, e.clientY);
+    },
+    [applyPointerMove],
   );
 
   const onMouseLeave = useCallback(() => {
@@ -409,9 +494,20 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     anim.dragging = false;
   }, []);
 
+  useEffect(() => {
+    if (!cursorBridgeRef) return;
+    cursorBridgeRef.current = {
+      move: applyPointerMove,
+      leave: onMouseLeave,
+    };
+    return () => {
+      cursorBridgeRef.current = null;
+    };
+  }, [applyPointerMove, cursorBridgeRef, onMouseLeave]);
+
   const onMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+    (e: React.MouseEvent<HTMLElement>) => {
+      const coords = clientToCanvasCoords(e.clientX, e.clientY);
       if (!coords) return;
       const stage = semanticRef.current.progress.stage;
       const [spriteW] = STAGE_SIZES[stage] ?? [28, 18];
@@ -425,7 +521,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         animRef.current.dragging = true;
       }
     },
-    [toCanvasCoords],
+    [clientToCanvasCoords],
   );
 
   const onMouseUp = useCallback(() => {
@@ -438,13 +534,58 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   }, []);
 
   const onClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const coords = toCanvasCoords(e);
+    (e: React.MouseEvent<HTMLElement>) => {
+      const coords = clientToCanvasCoords(e.clientX, e.clientY);
       if (!coords) return;
       const stage = semanticRef.current.progress.stage;
-      handlePet(animRef.current, coords.x, coords.y, emit, stage);
+      handlePet(
+        animRef.current,
+        coords.x,
+        coords.y,
+        emit,
+        stage,
+        semanticRef.current,
+      );
     },
-    [toCanvasCoords, emit],
+    [clientToCanvasCoords, emit],
+  );
+
+  const handleSpeechControlClick = useCallback(
+    (ctrl: BuddyControl) => {
+      const anim = animRef.current;
+      const isPrimary = ctrl.style === "primary";
+      controlExitRef.current = {
+        kind: isPrimary ? "accept" : "dismiss",
+        atMs: Date.now(),
+        consumed: false,
+      };
+      if (isPrimary) {
+        anim.beats.push(
+          { at: anim.frame + 1, kind: "squash", x: 1.16, y: 0.85 },
+          { at: anim.frame + 6, kind: "squash", x: 1, y: 1 },
+          { at: anim.frame + 2, kind: "sparks", count: 10 },
+          { at: anim.frame + 2, kind: "eyes", eyeStyle: "star", frames: 60 },
+        );
+      } else {
+        anim.beats.push(
+          { at: anim.frame + 1, kind: "squash", x: 0.96, y: 1.05 },
+          { at: anim.frame + 5, kind: "squash", x: 1, y: 1 },
+          { at: anim.frame + 2, kind: "eyes", eyeStyle: "shifty", frames: 50 },
+          { at: anim.frame + 3, kind: "dust", count: 2 },
+        );
+      }
+      onSpeechControlClick?.(ctrl);
+    },
+    [onSpeechControlClick],
+  );
+
+  const scaleK = displaySize / CANVAS_SIZE;
+  const [spriteHitW, spriteHitH] = STAGE_SIZES[state.progress.stage] ?? [
+    28, 18,
+  ];
+  const hitDiameter = Math.round((spriteHitW + 12) * 1.8 * scaleK);
+  const hitHeight = Math.round(
+    Math.max(hitDiameter * 0.84, (spriteHitH + 14) * 1.8 * scaleK),
   );
 
   return (
@@ -456,163 +597,78 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         width: displaySize,
         height: displaySize,
         flexShrink: 0,
+        pointerEvents: spritePointer ? "none" : undefined,
         ...style,
       }}
     >
       <canvas
         ref={canvasRef}
-        width={CANVAS_SIZE}
-        height={CANVAS_SIZE}
+        width={displaySize}
+        height={displaySize}
         style={{
           width: displaySize,
           height: displaySize,
-          imageRendering: "pixelated",
           display: "block",
-          cursor: "pointer",
+          cursor: spritePointer ? "default" : "pointer",
+          pointerEvents: spritePointer ? "none" : undefined,
         }}
-        onMouseMove={onMouseMove}
-        onMouseLeave={onMouseLeave}
-        onMouseDown={onMouseDown}
-        onMouseUp={onMouseUp}
-        onClick={onClick}
+        onMouseMove={spritePointer ? undefined : onMouseMove}
+        onMouseLeave={spritePointer ? undefined : onMouseLeave}
+        onMouseDown={spritePointer ? undefined : onMouseDown}
+        onMouseUp={spritePointer ? undefined : onMouseUp}
+        onClick={spritePointer ? undefined : onClick}
       />
-      {displaySize >= 100 &&
-        (() => {
-          const pos = BUBBLE_STYLES[bubbleView.position];
-          const compactBubble = compactBubbleOverride || displaySize <= 180;
-          const chatCompanionBubble =
-            chatCompanionBubbleOverride && displaySize <= 180;
-          const tailColor: React.CSSProperties =
-            bubbleView.position === "left"
-              ? {
-                  borderLeft: `${compactBubble ? 12 : 18}px solid ${
-                    palette.body
-                  }`,
-                }
-              : bubbleView.position === "right"
-                ? {
-                    borderRight: `${compactBubble ? 12 : 18}px solid ${
-                      palette.body
-                    }`,
-                  }
-                : {
-                    borderTop: `${compactBubble ? 14 : 18}px solid ${
-                      palette.body
-                    }`,
-                  };
-          const compactSideContainer: React.CSSProperties = compactBubble
-            ? bubbleView.position === "left"
-              ? {
-                  right: chatCompanionBubble
-                    ? `calc(78% - ${bubbleView.walkOffsetPx}px)`
-                    : "calc(86% - var(--buddy-walk-x, 0px))",
-                }
-              : bubbleView.position === "right"
-                ? {
-                    left: chatCompanionBubble
-                      ? `calc(78% + ${bubbleView.walkOffsetPx}px)`
-                      : "calc(86% + var(--buddy-walk-x, 0px))",
-                  }
-                : {}
-            : {};
-          const bubbleStyle: BubbleStyle = {
+      {spritePointer && (
+        <div
+          data-testid="buddy-sprite-hit"
+          style={{
             position: "absolute",
-            ...pos.container,
-            ...compactSideContainer,
-            "--buddy-walk-x": `${bubbleView.walkOffsetPx}px`,
-            background: BUBBLE_FILL,
-            border: `3px solid ${palette.body}`,
-            borderRadius: "8px",
-            padding: "6px 10px",
-            fontSize: "10.5px",
-            fontFamily:
-              "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-            fontWeight: 700,
-            letterSpacing: "0.05px",
-            lineHeight: 1.36,
-            whiteSpace: bubbleView.whiteSpace,
-            width: bubbleView.width,
-            maxWidth: bubbleView.maxWidth,
-            overflowWrap: "break-word",
-            overflow: "visible",
-            pointerEvents: speechControlCount > 0 ? "auto" : "none",
-            color: BUBBLE_TEXT,
-            boxShadow: `4px 4px 0 rgba(0, 0, 0, 0.34), 0 0 0 1px ${palette.dark}`,
-            zIndex: 5,
-            visibility: bubbleView.visible ? "visible" : "hidden",
-            opacity: bubbleView.opacity,
-          };
-          return (
-            <div data-bubble-position={bubbleView.position} style={bubbleStyle}>
-              {speechIntent && (
-                <Badge size="1" variant="soft">
-                  {speechIntent}
-                </Badge>
-              )}
-              <span>{bubbleView.text}</span>
-              {speechControls?.length ? (
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "6px",
-                    flexWrap: "wrap",
-                    marginTop: "6px",
-                  }}
-                >
-                  {speechControls.map((ctrl) => (
-                    <button
-                      key={ctrl.id}
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSpeechControlClick?.(ctrl);
-                      }}
-                      style={{
-                        background:
-                          ctrl.style === "primary"
-                            ? palette.body
-                            : "rgba(16, 32, 51, 0.06)",
-                        border: `2px solid ${palette.body}`,
-                        borderRadius: "8px",
-                        color:
-                          ctrl.style === "primary" ? "#0d0d16" : BUBBLE_TEXT,
-                        fontFamily:
-                          "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-                        fontWeight: 700,
-                        fontSize: "10px",
-                        padding: "2px 7px",
-                        cursor: "pointer",
-                        letterSpacing: "0.1px",
-                      }}
-                    >
-                      {ctrl.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              <div
-                style={{
-                  position: "absolute",
-                  width: 0,
-                  height: 0,
-                  ...pos.tail,
-                  ...tailColor,
-                  filter: `drop-shadow(3px 3px 0 rgba(0, 0, 0, 0.32))`,
-                  zIndex: 1,
-                }}
-              />
-              <div
-                style={{
-                  position: "absolute",
-                  width: 0,
-                  height: 0,
-                  ...innerTailStyle(bubbleView.position, compactBubble),
-                  zIndex: 2,
-                }}
-              />
-            </div>
-          );
-        })()}
+            left: `calc(50% + ${bubbleView.walkOffsetPx}px)`,
+            top: Math.round(CANVAS_CENTER_Y * scaleK),
+            width: hitDiameter,
+            height: hitHeight,
+            transform: "translate(-50%, -50%)",
+            borderRadius: 9999,
+            pointerEvents: "auto",
+            cursor: "pointer",
+          }}
+          onMouseMove={onMouseMove}
+          onMouseLeave={onMouseLeave}
+          onMouseDown={onMouseDown}
+          onMouseUp={onMouseUp}
+          onClick={onClick}
+        />
+      )}
+      {displaySize >= 100 && (
+        <BuddySpeechBubble
+          text={bubbleView.text}
+          textKey={bubbleView.textKey}
+          enterKey={bubbleView.enterKey}
+          position={bubbleView.position}
+          palette={palette}
+          visible={bubbleView.visible}
+          opacity={bubbleView.opacity}
+          compact={compactBubbleOverride || displaySize <= 180}
+          width={bubbleView.width}
+          maxWidth={bubbleView.maxWidth}
+          whiteSpace={bubbleView.whiteSpace}
+          anchorStyle={bubbleAnchorStyle(
+            bubbleView,
+            displaySize,
+            state.progress.stage,
+            chatCompanionBubbleOverride && displaySize <= 180,
+          )}
+          intent={speechIntent}
+          bubbleStyle={bubbleView.style}
+          closing={bubbleView.closing}
+          exitKind={bubbleView.exitKind}
+          media={speechMedia}
+          controls={speechControls}
+          onControlClick={
+            onSpeechControlClick ? handleSpeechControlClick : undefined
+          }
+        />
+      )}
     </div>
   );
 };

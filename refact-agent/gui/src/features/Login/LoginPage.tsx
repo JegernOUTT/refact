@@ -1,6 +1,8 @@
 import React, { useCallback } from "react";
-import { Box, Button, Card, Flex, Grid, Heading, Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { ArrowLeft } from "lucide-react";
 import { ScrollArea } from "../../components/ScrollArea";
+import { Button, EmptyState, LoadingState } from "../../components/ui";
 import { useAppDispatch, useGetConfiguredProvidersQuery } from "../../hooks";
 import { ProviderCard } from "../Providers/ProviderCard";
 import { ProviderPreview } from "../Providers/ProviderPreview";
@@ -9,6 +11,7 @@ import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useCon
 import { push } from "../Pages/pagesSlice";
 import { getProviderName } from "../Providers/getProviderName";
 import { hasAnyUsableActiveProvider } from "./providerAccess";
+import styles from "./LoginPage.module.css";
 
 export const LoginPage: React.FC = () => {
   const dispatch = useAppDispatch();
@@ -62,98 +65,89 @@ export const LoginPage: React.FC = () => {
 
   return (
     <ScrollArea scrollbars="vertical" fullHeight>
-      <Box mx="auto" p="6" style={{ maxWidth: 960 }}>
-        <Flex direction="column" gap="4">
-          <Heading align="center" as="h2" size="6">
-            Set Up Providers
-          </Heading>
-          <Text size="2" color="gray" align="center">
+      <main className={classNames(styles.page, "rf-enter")}>
+        <section className={styles.hero}>
+          <p className={styles.kicker}>Welcome to Refact</p>
+          <h2 className={styles.title}>Set Up Providers</h2>
+          <p className={styles.subtitle}>
             Configure at least one BYOK provider or local runtime, enable a
             model, then continue.
-          </Text>
+          </p>
+        </section>
 
-          {!currentProvider && (
-            <>
-              <Grid columns={{ initial: "2", sm: "3" }} gap="3" width="100%">
-                {sortedConfiguredProviders.map((provider) => (
-                  <ProviderCard
-                    key={provider.name}
-                    provider={provider}
-                    setCurrentProvider={() =>
-                      setCurrentProviderName(provider.name)
-                    }
-                  />
-                ))}
-              </Grid>
-              {providersQuery.isError && (
-                <Card variant="surface">
-                  <Text size="2" color="gray">
-                    Unable to load providers from the backend. Check that the
-                    local Refact engine is running and the UI is using the
-                    correct port.
-                  </Text>
-                </Card>
-              )}
-              {!providersQuery.isSuccess && !providersQuery.isError && (
-                <Card variant="surface">
-                  <Text size="2" color="gray">
-                    Waiting for the local Refact engine before loading
-                    providers.
-                  </Text>
-                </Card>
-              )}
-              {providersQuery.isSuccess &&
-                sortedConfiguredProviders.length === 0 && (
-                  <Card variant="surface">
-                    <Text size="2" color="gray">
-                      The backend returned an empty provider list. Restart the
-                      local Refact engine, then open the Providers screen again.
-                    </Text>
-                  </Card>
-                )}
-            </>
-          )}
-
-          {currentProvider && (
-            <Card variant="surface" style={{ padding: "var(--space-4)" }}>
-              <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-                <Heading as="h4" size="3">
-                  {getProviderName(currentProvider)}
-                </Heading>
-                <Button
-                  variant="outline"
-                  onClick={() => setCurrentProviderName(null)}
-                >
-                  Back to providers
-                </Button>
-              </Flex>
-              <ProviderPreview
-                configuredProviders={sortedConfiguredProviders}
-                currentProvider={currentProvider}
-                handleSetCurrentProvider={(provider: ProviderListItem | null) =>
-                  setCurrentProviderName(provider?.name ?? null)
-                }
+        {!currentProvider && (
+          <>
+            <div className={classNames(styles.providerGrid, "rf-stagger")}>
+              {sortedConfiguredProviders.map((provider) => (
+                <ProviderCard
+                  key={provider.name}
+                  provider={provider}
+                  setCurrentProvider={() =>
+                    setCurrentProviderName(provider.name)
+                  }
+                />
+              ))}
+            </div>
+            {providersQuery.isError && (
+              <EmptyState
+                title="Unable to load providers"
+                description="Check that the local Refact engine is running and the UI is using the correct port."
               />
-            </Card>
-          )}
+            )}
+            {!providersQuery.isSuccess && !providersQuery.isError && (
+              <LoadingState label="Waiting for the local Refact engine before loading providers." />
+            )}
+            {providersQuery.isSuccess &&
+              sortedConfiguredProviders.length === 0 && (
+                <EmptyState
+                  title="No providers found"
+                  description="Restart the local Refact engine, then open the Providers screen again."
+                />
+              )}
+          </>
+        )}
 
-          <Flex justify="end" gap="3" mt="2" align="center" wrap="wrap">
-            <Text size="2" color="gray">
-              {providerStatusLabel}
-            </Text>
-            <Button
-              onClick={onContinue}
-              disabled={
-                !providersQuery.isSuccess ||
-                providersQuery.isFetching ||
-                !hasAnyActiveProvider
+        {currentProvider && (
+          <section
+            className={classNames(styles.providerPreview, "rf-enter-rise")}
+          >
+            <div className={styles.providerHeader}>
+              <h3 className={styles.providerTitle}>
+                {getProviderName(currentProvider)}
+              </h3>
+              <Button
+                variant="soft"
+                leftIcon={ArrowLeft}
+                onClick={() => setCurrentProviderName(null)}
+              >
+                Back to providers
+              </Button>
+            </div>
+            <ProviderPreview
+              configuredProviders={sortedConfiguredProviders}
+              currentProvider={currentProvider}
+              handleSetCurrentProvider={(provider: ProviderListItem | null) =>
+                setCurrentProviderName(provider?.name ?? null)
               }
-            >
-              Continue
-            </Button>
-          </Flex>
-        </Flex>
-      </Box>
+            />
+          </section>
+        )}
+
+        <footer className={styles.footer}>
+          <span className={styles.status}>{providerStatusLabel}</span>
+          <Button
+            variant="primary"
+            onClick={onContinue}
+            disabled={
+              !providersQuery.isSuccess ||
+              providersQuery.isFetching ||
+              !hasAnyActiveProvider
+            }
+          >
+            Continue
+          </Button>
+        </footer>
+      </main>
     </ScrollArea>
   );
 };

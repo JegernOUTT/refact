@@ -1,14 +1,15 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
 import {
-  FileIcon,
-  GlobeIcon,
-  MagnifyingGlassIcon,
-  QuestionMarkCircledIcon,
-  ReaderIcon,
-  SewingPinIcon,
-  RowsIcon,
-} from "@radix-ui/react-icons";
+  File,
+  Globe,
+  HelpCircle,
+  Library,
+  ListTree,
+  MapPin,
+  Rows3,
+  Search,
+} from "lucide-react";
+import { Icon } from "../ui";
 import type { ChipDisplayInfo } from "../../utils/atCommands";
 import styles from "./AtCommandChip.module.css";
 
@@ -17,15 +18,18 @@ type AtCommandChipProps = {
   onClick?: () => void;
 };
 
-const CHIP_ICONS: Record<ChipDisplayInfo["type"], React.ReactNode> = {
-  file: <FileIcon />,
-  web: <GlobeIcon />,
-  tree: <RowsIcon />,
-  search: <MagnifyingGlassIcon />,
-  definition: <SewingPinIcon />,
-  "knowledge-load": <ReaderIcon />,
-  references: <SewingPinIcon />,
-  help: <QuestionMarkCircledIcon />,
+const CHIP_ICONS: Record<
+  ChipDisplayInfo["type"],
+  React.ComponentProps<typeof Icon>["icon"]
+> = {
+  file: File,
+  web: Globe,
+  tree: Rows3,
+  search: Search,
+  definition: MapPin,
+  "knowledge-load": Library,
+  references: ListTree,
+  help: HelpCircle,
 };
 
 export const AtCommandChip: React.FC<AtCommandChipProps> = ({
@@ -58,10 +62,8 @@ export const AtCommandChip: React.FC<AtCommandChipProps> = ({
       tabIndex={chip.disabled ? -1 : 0}
       aria-disabled={chip.disabled}
     >
-      <span className={styles.icon}>{CHIP_ICONS[chip.type]}</span>
-      <Text size="1" className={styles.label}>
-        {chip.label}
-      </Text>
+      <Icon icon={CHIP_ICONS[chip.type]} size="sm" className={styles.icon} />
+      <span className={styles.label}>{chip.label}</span>
     </span>
   );
 };

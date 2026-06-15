@@ -1,7 +1,9 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
-import classNames from "classnames";
+import { Pin, RefreshCw, Smile, Target, Zap } from "lucide-react";
+import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
 import { SKILLS } from "./constants";
+import { BuddySectionHeader } from "./BuddySectionHeader";
+import { skillIcon } from "./buddyIcons";
 import type {
   BuddyControl,
   BuddyNeeds,
@@ -9,7 +11,7 @@ import type {
   BuddyQuest,
   BuddySettings,
 } from "./types";
-import styles from "./BuddyHome.module.css";
+import styles from "./BuddyPersonalityPanel.module.css";
 
 export interface NeedRow {
   key: keyof BuddyNeeds;
@@ -33,6 +35,25 @@ interface BuddyPersonalityPanelProps {
   onPromptChange: (prompt: string | null) => void;
 }
 
+const fillStyle = (fill: number): React.CSSProperties =>
+  ({ "--buddy-fill": `${fill}%` }) as React.CSSProperties;
+
+const Meter: React.FC<{
+  label: string;
+  value: React.ReactNode;
+  fill: number;
+}> = ({ label, value, fill }) => (
+  <div className={styles.meterRow}>
+    <div className={styles.meterHeader}>
+      <span className={styles.meterName}>{label}</span>
+      <span className={styles.meterValue}>{value}</span>
+    </div>
+    <div className={styles.meterBar}>
+      <div className={styles.meterFill} style={fillStyle(fill)} />
+    </div>
+  </div>
+);
+
 export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   personality,
   needRows,
@@ -46,206 +67,142 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   onToggleProactive,
   onPromptChange,
 }) => (
-  <div
-    className={classNames(styles.row, styles.rowSingle)}
+  <Surface
+    className={styles.panel}
     data-testid="buddy-personality-panel"
+    animated="rise"
+    radius="card"
+    variant="glass"
   >
-    <div className={classNames(styles.panel, styles.personaPanel)}>
-      <div className={styles.panelHeader}>
-        <div className={styles.panelTitleGroup}>
-          <Text
-            size="1"
-            weight="bold"
-            color="gray"
-            className={styles.sectionLabel}
-          >
-            PERSONALITY
-          </Text>
-          <Text size="2" weight="bold">
-            {personality?.archetype_label ?? name}
-          </Text>
-          <Text size="1" color="gray">
-            {personality?.vibe ?? "Playful, quirky, helpful"}
-          </Text>
-        </div>
-      </div>
+    <BuddySectionHeader icon={Smile} label="Personality" />
+    <div className={styles.archetype}>
+      <Text size="2" weight="bold" className={styles.archetypeName}>
+        {personality?.archetype_label ?? name}
+      </Text>
+      <Text size="1" color="gray" className={styles.vibe}>
+        {personality?.vibe ?? "Playful, quirky, helpful"}
+      </Text>
+    </div>
 
+    <div className={styles.scrollBody}>
       {personality?.summary && (
-        <Text size="1" className={styles.personalitySummary}>
+        <Text size="1" className={styles.summary}>
           {personality.summary}
         </Text>
       )}
 
-      <div className={styles.personaGrid}>
-        <div className={styles.personaSection}>
-          <Text
-            size="1"
-            weight="bold"
-            color="gray"
-            className={styles.sectionLabel}
-          >
-            NEEDS
-          </Text>
-          <div className={styles.needsGrid}>
-            {needRows.map((item) => (
-              <div key={item.key} className={styles.needRow}>
-                <div className={styles.needHeader}>
-                  <span>{item.label}</span>
-                  <span>{item.value}</span>
-                </div>
-                <div className={styles.needBar}>
-                  <div
-                    className={styles.needFill}
-                    style={{ width: `${item.fill}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className={styles.personaSection}>
-          <Text
-            size="1"
-            weight="bold"
-            color="gray"
-            className={styles.sectionLabel}
-          >
-            TRAITS
-          </Text>
-          <div className={styles.traitsGrid}>
-            {Object.entries(personality?.traits ?? {}).map(([key, value]) => {
-              const fill = Math.max(0, Math.min(100, Number(value) || 0));
-              return (
-                <div key={key} className={styles.traitRow}>
-                  <div className={styles.traitHeader}>
-                    <span className={styles.traitName}>{key}</span>
-                    <span className={styles.traitValue}>{value}</span>
-                  </div>
-                  <div className={styles.needBar}>
-                    <div
-                      className={styles.needFill}
-                      style={{ width: `${fill}%` }}
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className={styles.personaSection}>
-          <Text
-            size="1"
-            weight="bold"
-            color="gray"
-            className={styles.sectionLabel}
-          >
-            SKILLS
-          </Text>
-          <div className={styles.skillsRow}>
-            {unlockedSkills.length === 0 && (
-              <Text size="1" color="gray">
-                None yet
-              </Text>
-            )}
-            {unlockedSkills.map((id) => {
-              const skill = SKILLS.find((s) => s.id === id);
-              return skill ? (
-                <span key={id} className={styles.skillChip}>
-                  {skill.icon} {skill.name}
-                </span>
-              ) : null;
-            })}
-          </div>
-        </div>
+      <div className={styles.meterColumns}>
+        <section className={styles.meterSection}>
+          <span className={styles.sectionLabel}>Needs</span>
+          {needRows.map((item) => (
+            <Meter
+              key={item.key}
+              label={item.label}
+              value={item.value}
+              fill={item.fill}
+            />
+          ))}
+        </section>
+        <section className={styles.meterSection}>
+          <span className={styles.sectionLabel}>Traits</span>
+          {Object.entries(personality?.traits ?? {}).map(([key, value]) => {
+            const fill = Math.max(0, Math.min(100, Number(value) || 0));
+            return <Meter key={key} label={key} value={value} fill={fill} />;
+          })}
+        </section>
       </div>
+
+      <section className={styles.skillsSection}>
+        <span className={styles.sectionLabel}>Skills</span>
+        <div className={styles.skillsRow}>
+          {unlockedSkills.length === 0 && (
+            <Text size="1" color="gray">
+              None yet
+            </Text>
+          )}
+          {unlockedSkills.map((id) => {
+            const skill = SKILLS.find((s) => s.id === id);
+            return skill ? (
+              <Badge key={id} tone="muted" className={styles.skillChip}>
+                <Icon icon={skillIcon(id)} size="sm" />
+                {skill.name}
+              </Badge>
+            ) : null;
+          })}
+        </div>
+      </section>
 
       {activeQuest && (
         <div className={styles.questCard}>
           <div className={styles.questHeader}>
-            <div>
-              <Text
-                size="1"
-                weight="bold"
-                color="gray"
-                className={styles.sectionLabel}
-              >
-                ACTIVE QUEST
+            <span className={styles.questTitleGroup}>
+              <Icon icon={Target} size="sm" tone="accent" />
+              <Text size="2" weight="bold" className={styles.questTitle}>
+                {activeQuest.title}
               </Text>
-              <Text size="2" weight="bold">
-                {activeQuest.icon} {activeQuest.title}
-              </Text>
-            </div>
-            <Text size="1" color="gray">
-              +{activeQuest.reward_xp} growth
-            </Text>
+            </span>
+            <Badge tone="accent">+{activeQuest.reward_xp} growth</Badge>
           </div>
 
           <Text size="1" className={styles.questDescription}>
             {activeQuest.description}
           </Text>
 
-          <div className={styles.questProgressRow}>
-            <Text size="1" color="gray">
-              Progress
-            </Text>
-            <Text size="1" weight="bold">
-              {Math.min(activeQuest.progress, activeQuest.goal)} /{" "}
-              {activeQuest.goal}
-            </Text>
-          </div>
-          <div className={styles.questProgressBar}>
-            <div
-              className={styles.questProgressFill}
-              style={{
-                width: `${Math.min(
-                  100,
-                  (Math.max(0, activeQuest.progress) /
-                    Math.max(1, activeQuest.goal)) *
-                    100,
-                )}%`,
-              }}
-            />
-          </div>
+          <Meter
+            label="Progress"
+            value={`${Math.min(activeQuest.progress, activeQuest.goal)} / ${
+              activeQuest.goal
+            }`}
+            fill={Math.min(
+              100,
+              (Math.max(0, activeQuest.progress) /
+                Math.max(1, activeQuest.goal)) *
+                100,
+            )}
+          />
 
           <div className={styles.questControls}>
             {activeQuest.controls.map((ctrl) => (
-              <button
+              <Button
                 key={ctrl.id}
                 type="button"
-                className={classNames(styles.chip, {
-                  [styles.chipPrimary]: ctrl.style === "primary",
-                })}
+                size="sm"
+                variant={ctrl.style === "primary" ? "primary" : "ghost"}
                 onClick={() => onQuestControl(ctrl)}
               >
                 {ctrl.label}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
       )}
 
       <div className={styles.actionRow}>
-        <button type="button" className={styles.chip} onClick={onReroll}>
-          Reroll personality
-        </button>
-        <button
+        <Button
           type="button"
-          className={classNames(styles.chip, {
-            [styles.chipPrimary]: settings?.proactive_enabled,
-          })}
+          size="sm"
+          variant="ghost"
+          leftIcon={RefreshCw}
+          onClick={onReroll}
+        >
+          Reroll personality
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={settings?.proactive_enabled ? "primary" : "ghost"}
+          leftIcon={Zap}
           onClick={onToggleProactive}
           disabled={isSavingSettings}
           aria-pressed={settings?.proactive_enabled}
         >
           Proactive {settings?.proactive_enabled ? "on" : "off"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className={classNames(styles.chip, {
-            [styles.chipPrimary]: !!settings?.personality_prompt,
-          })}
+          size="sm"
+          variant={settings?.personality_prompt ? "primary" : "ghost"}
+          leftIcon={Pin}
           onClick={() =>
             onPromptChange(
               settings?.personality_prompt ? null : personality?.prompt ?? null,
@@ -255,8 +212,8 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           aria-pressed={!!settings?.personality_prompt}
         >
           Pin current vibe
-        </button>
+        </Button>
       </div>
     </div>
-  </div>
+  </Surface>
 );

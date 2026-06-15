@@ -30,6 +30,7 @@ members = [
     "crates/refact-voice",
     "crates/refact-context-api",
     "crates/refact-runtime-api",
+    "crates/refact-tui",
 ]
 resolver = "2"
 
@@ -95,6 +96,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "refact"
+path = "src/bin/refact.rs"
+test = false
+bench = false
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]
@@ -140,6 +147,7 @@ refact-caps-core = { path = "crates/refact-caps-core" }
 refact-voice = { path = "crates/refact-voice" }
 refact-context-api = { path = "crates/refact-context-api", features = ["http-client"] }
 refact-runtime-api = { path = "crates/refact-runtime-api" }
+refact-tui = { path = "crates/refact-tui" }
 
 astral-tokio-tar = "0.5.2"
 axum = { version = "0.6.20", features = ["default", "http2"] }
@@ -153,6 +161,7 @@ cron = "0.12"
 iana-time-zone = "0.1"
 diff = "0.1.13"
 dunce = "1.0.5"
+fd-lock = "4.0.4"
 dyn_partial_eq = "=0.1.2"
 filetime = "0.2.25"
 futures = "0.3"
@@ -184,6 +193,7 @@ rayon = "1.8.0"
 regex = "1.9.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
 eventsource-stream = "0.2"
+flate2 = "1.0"
 resvg = "0.44.0"
 ropey = "1.6"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
@@ -211,6 +221,7 @@ tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "
 tokio-rusqlite = "0.5.0"
 tokio-util = { version = "0.7.12", features = ["compat"] }
 tokio-tungstenite = { version = "0.21.0", features = ["rustls-tls-webpki-roots"] }
+tar = "0.4"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tower-lsp = "0.20"
 tracing = "0.1"
@@ -225,10 +236,12 @@ tree-sitter-python = "0.23"
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 typetag = "0.2"
+unicode-width = "0.2"
 url = "2.4.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3"
 which = "7.0.2"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 petgraph = "0.6"
 zerocopy = "0.8.14"
 

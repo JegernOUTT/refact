@@ -1,14 +1,14 @@
 .bars {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--rf-space-1);
   width: 100%;
 }
 
 .barRow {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   cursor: default;
 }
 
@@ -22,5 +22,5 @@
 .barLabel {
   max-width: 60px;
   font-size: 10px;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }

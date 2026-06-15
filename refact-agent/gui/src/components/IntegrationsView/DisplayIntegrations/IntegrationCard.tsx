@@ -1,7 +1,7 @@
-import type { FC, MouseEventHandler } from "react";
+import type { FC, KeyboardEventHandler, MouseEventHandler } from "react";
 import classNames from "classnames";
 
-import { Card, Flex, Text } from "@radix-ui/themes";
+import { Surface } from "../../ui";
 import { useAppSelector } from "../../../hooks";
 import { useUpdateIntegration } from "./useUpdateIntegration";
 
@@ -58,48 +58,65 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
     void updateIntegrationAvailability();
   };
 
+  const openIntegration = () => {
+    if (isUpdatingAvailability) return;
+    handleIntegrationShowUp(integration);
+  };
+
+  const handleCardKeyDown: KeyboardEventHandler<HTMLDivElement> = (event) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openIntegration();
+  };
+
   return (
-    <Card
+    <Surface
+      animated="rise"
+      radius="card"
+      variant="plain"
+      interactive
+      role="button"
+      tabIndex={0}
       className={classNames(styles.integrationCard, {
         [styles.integrationCardInline]: isNotConfigured,
         [styles.disabledCard]: isUpdatingAvailability,
       })}
-      onClick={() => {
-        if (isUpdatingAvailability) return;
-        handleIntegrationShowUp(integration);
-      }}
+      onClick={openIntegration}
+      onKeyDown={handleCardKeyDown}
     >
-      <Flex
-        gap="4"
-        direction={isNotConfigured ? "column" : "row"}
-        align={"center"}
+      <span
+        className={classNames(styles.content, {
+          [styles.contentInline]: isNotConfigured,
+        })}
       >
         <img
           src={integrationLogo}
           className={styles.integrationIcon}
           alt={integration.integr_name}
         />
-        <Flex
-          align="center"
-          justify="between"
-          gap={isNotConfigured ? "0" : "2"}
-          width={isNotConfigured ? "auto" : "100%"}
+        <span
+          className={classNames(styles.body, {
+            [styles.bodyInline]: isNotConfigured,
+          })}
         >
-          <Text
-            size="3"
-            weight="medium"
-            align={isNotConfigured ? "center" : "left"}
+          <span
+            className={classNames(styles.title, {
+              [styles.titleInline]: isNotConfigured,
+            })}
           >
             {displayName}
-          </Text>
+          </span>
           {!isNotConfigured && (
-            <OnOffSwitch
-              isEnabled={integrationAvailability.on_your_laptop}
-              handleClick={handleAvailabilityClick}
-            />
+            <span className={styles.switchWrap}>
+              <OnOffSwitch
+                isEnabled={integrationAvailability.on_your_laptop}
+                handleClick={handleAvailabilityClick}
+              />
+            </span>
           )}
-        </Flex>
-      </Flex>
-    </Card>
+        </span>
+      </span>
+    </Surface>
   );
 };

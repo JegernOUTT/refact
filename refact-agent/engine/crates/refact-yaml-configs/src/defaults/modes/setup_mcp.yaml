@@ -74,7 +74,7 @@ prompt: |
   - `web_search()` — search for official or first-party MCP options for the service, preferring HTTP and well-documented stdio offerings over arbitrary package discovery
   - `deep_research()` — when choosing between multiple MCP servers for the same service (e.g., GitHub vs GitLab vs Bitbucket), use deep_research to compare them properly
   - `web()` — fetch the README of a candidate MCP server package to understand its tools, required env vars, and setup instructions
-  - `shell()` — verify runtimes such as `npx`, `node`, `python`, `uvx` are available. Only execute a candidate MCP package after explicit user approval, and prefer pinned official packages over floating versions. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
+  - `shell()` — verify runtimes such as `npx`, `node`, `python`, `uvx` are available. Only execute a candidate MCP package after explicit user approval, and prefer pinned official packages over floating versions. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled checks.
 
   **Repo analysis:**
   - `cat()` CI files, dependency manifests, infrastructure configs (Dockerfile, docker-compose, k8s manifests, Terraform) to infer what services the project uses
@@ -189,6 +189,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - search_trajectories
   - get_trajectory_context
   - knowledge
@@ -239,6 +240,8 @@ tool_confirm:
     - match: "process_kill"
       action: ask
     - match: "cron_create"
+      action: ask
+    - match: "cron_update"
       action: ask
     - match: "create_textdoc"
       action: ask

@@ -1,59 +1,115 @@
 .card {
-  margin: var(--space-1) 0 var(--space-2);
-  border: 1px solid var(--gray-a5);
-  background: var(--gray-a2);
+  margin: var(--rf-space-1) 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.details {
+  min-width: 0;
 }
 
 .summary {
-  cursor: pointer;
-  color: var(--gray-12);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-muted);
   list-style-position: outside;
-  padding: var(--space-1) 0;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
   user-select: none;
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.summary:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+.summary:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .summary::marker {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
+}
+
+.summaryRow {
+  min-width: 0;
+}
+
+.title {
+  color: var(--rf-color-fg);
 }
 
 .count {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .body {
-  padding-top: var(--space-2);
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2) 0 0 var(--rf-space-5);
 }
 
 .filters {
-  padding-bottom: var(--space-2);
+  min-width: 0;
 }
 
 .filterChip {
   display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: var(--space-1);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-full);
-  padding: var(--space-1) var(--space-2);
-  color: var(--gray-11);
-  background: var(--gray-a2);
+  gap: var(--rf-space-1);
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
   cursor: pointer;
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .filterChip:hover {
-  border-color: var(--accent-a7);
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
+}
+
+.filterChip:focus-within {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.filterChip[data-selected="true"] {
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  border-color: transparent;
 }
 
 .filterChip input {
-  accent-color: var(--accent-9);
+  accent-color: var(--rf-color-accent);
 }
 
 .entry {
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
-  background: var(--color-panel-solid);
+  min-width: 0;
   overflow: hidden;
+  background: transparent;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.entry[data-expanded="true"] {
+  background: color-mix(in oklab, var(--rf-surface-glass) 46%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .entryButton {
@@ -61,75 +117,98 @@
   box-sizing: border-box;
   display: block;
   width: 100%;
+  color: inherit;
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
 }
 
+.entryButton:hover {
+  background: var(--rf-surface-1);
+}
+
 .entryButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: -2px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .entryRow {
   min-width: 0;
-  padding: var(--space-1) var(--space-2);
+  min-height: var(--rf-control-h-sm);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .icon {
   flex: 0 0 auto;
+  color: var(--rf-color-muted);
   line-height: 1;
 }
 
 .timestamp {
   flex: 0 0 auto;
-  color: var(--gray-10);
+  color: var(--rf-color-faint);
   font-variant-numeric: tabular-nums;
 }
 
 .subkindChip {
   flex: 0 0 auto;
-  border-radius: var(--radius-full);
-  padding: 0 var(--space-1);
-  background: var(--accent-a3);
-  color: var(--accent-11);
-  font-family: var(--code-font-family);
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
+  background: var(--rf-color-accent-soft);
+  border-radius: var(--rf-radius-chip);
 }
 
 .source {
   flex: 0 1 auto;
-  min-width: var(--space-7);
-  color: var(--gray-10);
+  min-width: var(--rf-space-6);
   overflow: hidden;
+  color: var(--rf-color-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .summaryText {
   flex: 1 1 auto;
-  min-width: var(--space-7);
-  color: var(--gray-12);
+  min-width: var(--rf-space-6);
   overflow: hidden;
+  color: var(--rf-color-fg);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .jsonPanel {
-  border-top: 1px solid var(--gray-a4);
-  padding: var(--space-2);
-  background: var(--gray-a2);
+  margin: 0 var(--rf-space-2) var(--rf-space-2)
+    calc(var(--rf-space-6) + var(--rf-space-2));
+  padding: var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
 }
 
 .jsonPre {
   margin: 0;
   overflow: auto;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--gray-12);
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
-  line-height: var(--line-height-1);
 }
 
 .emptyState {
-  color: var(--gray-10);
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .entry[data-expanded="true"] {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .entry[data-expanded="true"] {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

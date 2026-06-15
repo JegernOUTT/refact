@@ -1,11 +1,26 @@
 .panel {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  border-color: var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.headerCopy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .label {
@@ -14,119 +29,183 @@
   font-size: 10px;
 }
 
-.section {
+.headerDescription,
+.settingDescription {
+  color: var(--rf-color-muted);
+  font-size: var(--font-size-1);
+  line-height: var(--line-height-1);
+}
+
+.sectionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.section,
+.sectionWide {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+}
+
+.sectionWide {
+  grid-column: 1 / -1;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-row-gap);
+  min-width: 0;
+  padding: var(--rf-row-pad);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+}
+
+.row:hover {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
 }
 
 .settingText {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
-.settingDescription {
-  font-size: var(--font-size-1);
-  color: var(--gray-11);
-  line-height: var(--line-height-1);
+.segmentedRow {
+  align-items: flex-start;
+  flex-direction: column;
 }
 
-.radioGroup {
+.segmentedControl {
+  width: 100%;
+  max-width: 360px;
+}
+
+.promptActions {
   display: flex;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
-
-.radioBtn {
-  padding: 2px 8px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
-  background: transparent;
-  cursor: pointer;
-  font-size: 11px;
-  color: var(--gray-11);
-  transition: background 0.12s;
-}
-
-.radioBtn:hover {
-  background: var(--gray-a3);
-}
-
-.radioBtnActive {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
-  font-weight: 600;
-}
-
-.observersGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-1) var(--space-2);
-}
-
-@media (max-width: 400px) {
-  .observersGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.toggleRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 11px;
-}
-
-.panelHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.saveStatus {
-  font-size: var(--font-size-1);
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
 }
 
 .digestInput {
-  width: 56px;
-  padding: 2px 6px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
-  background: transparent;
+  width: 72px;
+  min-width: 0;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
   color: inherit;
   font-size: var(--font-size-1);
   text-align: right;
 }
 
 .digestInput:focus {
-  outline: 1px solid var(--accent-a6);
+  outline: 2px solid var(--rf-color-accent);
+  outline-offset: 1px;
+}
+
+.observersGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-row-gap);
+  min-width: 0;
+  padding: var(--rf-row-pad);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+}
+
+.toggleLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnosticsGrid {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--space-1) var(--space-2);
+  gap: var(--rf-space-1) var(--rf-space-2);
   align-items: baseline;
+  min-width: 0;
 }
 
 .pathValue {
+  min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   font-size: var(--font-size-1);
   line-height: var(--line-height-1);
 }
 
 .footer {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   justify-content: flex-end;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .section,
+  .sectionWide {
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 840px) {
+  .sectionGrid,
+  .observersGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .panel,
+  .section,
+  .sectionWide {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .panelHeader,
+  .row,
+  .sectionHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .row {
+    gap: var(--rf-row-gap);
+  }
+
+  .segmentedControl {
+    max-width: 100%;
+  }
 }

@@ -1,12 +1,19 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { act } from "react-dom/test-utils";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { render } from "../../utils/test-utils";
 import { VirtualizedChatList } from "./VirtualizedChatList";
+import { ToolCard } from "./ToolCard/ToolCard";
+import {
+  captureScrollAnchor,
+  restoreScrollAnchor,
+} from "./useChatScrollAnchor";
 
 type VirtuosoCall = {
   atBottomStateChange?: (atBottom: boolean) => void;
   followOutput?: (isAtBottom: boolean) => false | "auto" | "smooth";
+  totalListHeightChanged?: (height: number) => void;
   increaseViewportBy?: { top: number; bottom: number };
   defaultItemHeight?: number;
   minOverscanItemCount?: { top: number; bottom: number };
@@ -215,6 +222,101 @@ describe("VirtualizedChatList", () => {
     });
   });
 
+  test("re-pins to the bottom on total height change while following", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 500,
+      writable: true,
+    });
+
+    call?.totalListHeightChanged?.(2000);
+    expect(scroller.scrollTop).toBe(2000);
+  });
+
+  test("does not re-pin on total height change after the user scrolled up", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 500,
+      writable: true,
+    });
+
+    fireEvent.wheel(scroller, { deltaY: -20 });
+    call?.totalListHeightChanged?.(2000);
+    expect(scroller.scrollTop).toBe(500);
+  });
+
+  test("re-arms auto-follow when bottom is reached without a tracked gesture", async () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const call = getVirtuosoCalls().at(-1);
+
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 100,
+      writable: true,
+    });
+    fireEvent.scroll(scroller);
+
+    fireEvent.wheel(scroller, { deltaY: -20 });
+    scroller.scrollTop = 40;
+    fireEvent.scroll(scroller);
+    const onBottom = call?.atBottomStateChange;
+    expect(onBottom).toBeDefined();
+    onBottom?.(false);
+    expect(screen.getByTitle("Follow stream")).toBeInTheDocument();
+
+    // Simulate a scrollbar drag landing at the bottom: no wheel/keyboard
+    // events are emitted, the intent window from the wheel-up has passed,
+    // and no suppression window is active.
+    await new Promise((resolve) => setTimeout(resolve, 510));
+    onBottom?.(true);
+    await waitFor(() => {
+      expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
+    });
+    expect(call?.followOutput?.(true)).toBe("auto");
+  });
+
   test("does not treat Virtuoso passive upward corrections as user scroll", () => {
     render(
       <div style={{ height: 400 }}>
@@ -404,5 +506,292 @@ describe("VirtualizedChatList", () => {
 
     expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
     expect(call?.followOutput?.(false)).toBe("auto");
+  });
+
+  test("restores captured anchor when content above grows", () => {
+    const scroller = document.createElement("div");
+    const anchor = document.createElement("div");
+    scroller.append(anchor);
+
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, value: 120, writable: true },
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 900 },
+    });
+    scroller.getBoundingClientRect = vi.fn(() => ({
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 300,
+      top: 0,
+      right: 320,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    }));
+    anchor.dataset.chatScrollAnchorItem = "true";
+    anchor.dataset.chatScrollAnchorKey = "anchor";
+    anchor.getBoundingClientRect = vi
+      .fn()
+      .mockReturnValueOnce({
+        x: 0,
+        y: 40,
+        width: 320,
+        height: 40,
+        top: 40,
+        right: 320,
+        bottom: 80,
+        left: 0,
+        toJSON: () => ({}),
+      })
+      .mockReturnValueOnce({
+        x: 0,
+        y: 104,
+        width: 320,
+        height: 40,
+        top: 104,
+        right: 320,
+        bottom: 144,
+        left: 0,
+        toJSON: () => ({}),
+      });
+
+    const snapshot = captureScrollAnchor(scroller);
+    expect(snapshot?.key).toBe("anchor");
+    if (!snapshot) throw new Error("expected captured anchor");
+    expect(restoreScrollAnchor(scroller, snapshot)).toBe(true);
+    expect(scroller.scrollTop).toBe(184);
+  });
+
+  test("does not capture an anchor while at bottom", () => {
+    const scroller = document.createElement("div");
+    const anchor = document.createElement("div");
+    scroller.append(anchor);
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, value: 576, writable: true },
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 900 },
+    });
+    anchor.dataset.chatScrollAnchorItem = "true";
+
+    expect(captureScrollAnchor(scroller)).toBeNull();
+  });
+
+  test("ToolCard expansion preserves the visible scroll anchor", () => {
+    const animationFrames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        animationFrames.push(callback);
+        return animationFrames.length;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    let expanded = false;
+
+    function ExpandableToolList() {
+      const [open, setOpen] = useState(false);
+      return (
+        <VirtualizedChatList
+          items={items}
+          renderItem={(item) => {
+            if (item.key === "k-0") {
+              return (
+                <ToolCard
+                  icon={null}
+                  summary="Expandable tool"
+                  status="success"
+                  isOpen={open}
+                  onToggle={() => {
+                    expanded = !expanded;
+                    setOpen((current) => !current);
+                  }}
+                >
+                  <div style={{ height: 64 }}>Expanded</div>
+                </ToolCard>
+              );
+            }
+            return <div>{item.text}</div>;
+          }}
+        />
+      );
+    }
+
+    render(
+      <div style={{ height: 400 }}>
+        <ExpandableToolList />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, value: 120, writable: true },
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 900 },
+    });
+    scroller.getBoundingClientRect = vi.fn(() => ({
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 300,
+      top: 0,
+      right: 320,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    }));
+
+    const rows = screen.getAllByTestId("chat-virtuoso-item");
+    rows.forEach((row, index) => {
+      row.getBoundingClientRect = vi.fn(() => {
+        if (index === 0) {
+          return {
+            x: 0,
+            y: -140,
+            width: 320,
+            height: 80,
+            top: -140,
+            right: 320,
+            bottom: -60,
+            left: 0,
+            toJSON: () => ({}),
+          };
+        }
+        const top = 40 + (index - 1) * 80 + (expanded ? 64 : 0);
+        return {
+          x: 0,
+          y: top,
+          width: 320,
+          height: 80,
+          top,
+          right: 320,
+          bottom: top + 80,
+          left: 0,
+          toJSON: () => ({}),
+        };
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /expandable tool/i }));
+    expect(animationFrames.length).toBeGreaterThanOrEqual(1);
+
+    act(() => {
+      animationFrames[0](performance.now());
+    });
+
+    expect(scroller.scrollTop).toBe(184);
+  });
+
+  test("prepared ToolCard anchor expires before later toggles", () => {
+    vi.useFakeTimers();
+    const animationFrames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        animationFrames.push(callback);
+        return animationFrames.length;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    let expanded = false;
+
+    function ExpandableToolList() {
+      const [open, setOpen] = useState(false);
+      return (
+        <VirtualizedChatList
+          items={items}
+          renderItem={(item) => {
+            if (item.key === "k-0") {
+              return (
+                <ToolCard
+                  icon={null}
+                  summary="Expiring anchor tool"
+                  status="success"
+                  isOpen={open}
+                  onToggle={() => {
+                    expanded = !expanded;
+                    setOpen((current) => !current);
+                  }}
+                >
+                  <div style={{ height: 64 }}>Expanded</div>
+                </ToolCard>
+              );
+            }
+            return <div>{item.text}</div>;
+          }}
+        />
+      );
+    }
+
+    render(
+      <div style={{ height: 400 }}>
+        <ExpandableToolList />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, value: 120, writable: true },
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 900 },
+    });
+    scroller.getBoundingClientRect = vi.fn(() => ({
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 300,
+      top: 0,
+      right: 320,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    }));
+
+    const rows = screen.getAllByTestId("chat-virtuoso-item");
+    rows.forEach((row, index) => {
+      row.getBoundingClientRect = vi.fn(() => {
+        if (index === 0) {
+          return {
+            x: 0,
+            y: -140,
+            width: 320,
+            height: 80,
+            top: -140,
+            right: 320,
+            bottom: -60,
+            left: 0,
+            toJSON: () => ({}),
+          };
+        }
+        const top = 40 + (index - 1) * 80 + (expanded ? 64 : 0);
+        return {
+          x: 0,
+          y: top,
+          width: 320,
+          height: 80,
+          top,
+          right: 320,
+          bottom: top + 80,
+          left: 0,
+          toJSON: () => ({}),
+        };
+      });
+    });
+
+    const button = screen.getByRole("button", {
+      name: /expiring anchor tool/i,
+    });
+    fireEvent.pointerDown(button);
+    vi.advanceTimersByTime(600);
+    fireEvent.click(button);
+    expect(animationFrames.length).toBeGreaterThanOrEqual(1);
+
+    act(() => {
+      animationFrames[0](performance.now());
+    });
+
+    expect(scroller.scrollTop).toBe(184);
   });
 });

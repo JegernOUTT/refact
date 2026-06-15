@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from "react";
-import { Box, IconButton, Tooltip } from "@radix-ui/themes";
-import { CopyIcon, CodeIcon, EyeOpenIcon } from "@radix-ui/react-icons";
+import { Code, Copy, Eye } from "lucide-react";
+import { IconButton, Tooltip } from "../ui";
 import { PreTag } from "./Pre";
 import styles from "./Markdown.module.css";
 import diagramStyles from "./DiagramBlock.module.css";
 import classNames from "classnames";
 import DOMPurify from "dompurify";
+import { stripExternalRefs } from "./renderUtils";
 
 export type SvgBlockProps = {
   code: string;
@@ -19,7 +20,7 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
     const trimmed = code.trim();
     if (!trimmed.includes("<svg")) return null;
 
-    return DOMPurify.sanitize(trimmed, {
+    const sanitized = DOMPurify.sanitize(trimmed, {
       USE_PROFILES: { svg: true, svgFilters: true },
       ADD_TAGS: [
         "svg",
@@ -54,7 +55,6 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
         "animate",
         "animateTransform",
         "animateMotion",
-        "foreignObject",
         "title",
         "desc",
         "symbol",
@@ -129,65 +129,71 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
         "color",
       ],
     });
+    if (!sanitized.includes("<svg")) return null;
+    return stripExternalRefs(sanitized);
   }, [code]);
 
   if (!sanitizedSvg) {
     return (
-      <Box className={styles.shiki_wrapper}>
+      <div className={styles.shiki_wrapper}>
         <PreTag className={styles.shiki_pre}>
           <code className={classNames(styles.code, styles.code_block)}>
             {code}
           </code>
         </PreTag>
-      </Box>
+      </div>
     );
   }
 
   return (
-    <Box className={styles.shiki_wrapper}>
-      <Box className={diagramStyles.diagram_container}>
-        <Box className={diagramStyles.diagram_toolbar}>
-          <Tooltip content={showSource ? "Show rendered" : "Show source"}>
-            <IconButton
-              size="1"
-              variant="ghost"
-              onClick={() => setShowSource((v) => !v)}
-              aria-label={showSource ? "Show rendered" : "Show source"}
-            >
-              {showSource ? (
-                <EyeOpenIcon width={12} height={12} />
-              ) : (
-                <CodeIcon width={12} height={12} />
-              )}
-            </IconButton>
+    <div className={styles.shiki_wrapper}>
+      <div className={diagramStyles.diagram_container}>
+        <div className={diagramStyles.diagram_toolbar}>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowSource((v) => !v)}
+                aria-label={showSource ? "Show rendered" : "Show source"}
+                icon={showSource ? Eye : Code}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {showSource ? "Show rendered" : "Show source"}
+            </Tooltip.Content>
           </Tooltip>
           {onCopyClick && (
-            <Tooltip content="Copy SVG">
-              <IconButton
-                size="1"
-                variant="ghost"
-                onClick={() => onCopyClick(code)}
-                aria-label="Copy SVG source"
-              >
-                <CopyIcon width={12} height={12} />
-              </IconButton>
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onCopyClick(code)}
+                  aria-label="Copy SVG source"
+                  icon={Copy}
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>Copy SVG</Tooltip.Content>
             </Tooltip>
           )}
-        </Box>
+        </div>
         {showSource ? (
-          <PreTag className={styles.shiki_pre}>
-            <code className={classNames(styles.code, styles.code_block)}>
-              {code}
-            </code>
-          </PreTag>
+          <div className="scrollX">
+            <PreTag className={styles.shiki_pre}>
+              <code className={classNames(styles.code, styles.code_block)}>
+                {code}
+              </code>
+            </PreTag>
+          </div>
         ) : (
-          <Box
-            className={diagramStyles.diagram_render}
+          <div
+            className={diagramStyles.svg_render}
             dangerouslySetInnerHTML={{ __html: sanitizedSvg }}
           />
         )}
-      </Box>
-    </Box>
+      </div>
+    </div>
   );
 };
 

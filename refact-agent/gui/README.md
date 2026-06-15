@@ -64,6 +64,9 @@ Scripts come from `package.json`:
 | `npm run test:unit`        | Run unit tests once                                      |
 | `npm run test:integration` | Run integration tests under `src/__tests__/integration/` |
 | `npm run test:all`         | Run all Vitest tests                                     |
+| `npm run test:e2e`         | Run Playwright e2e suite (no-horizontal-scroll gate)     |
+| `npm run test:e2e:install` | Install Playwright browsers (chromium)                   |
+| `npm run test:e2e:serve`   | Serve the e2e harness via Vite on `127.0.0.1:4173`       |
 | `npm run format:check`     | Check Prettier formatting                                |
 | `npm run format`           | Apply Prettier formatting                                |
 | `npm run storybook`        | Start Storybook on port 6006                             |
@@ -141,7 +144,7 @@ See `src/events/index.ts`, `src/events/setup.ts`, `src/hooks/useEventBusForIDE.t
 
 ## Links
 
-- Root repository: <https://github.com/smallcloudai/refact>
-- Documentation: <https://docs.refact.ai/>
-- Issues: <https://github.com/smallcloudai/refact/issues>
-- Discussions: <https://github.com/smallcloudai/refact/discussions>
+- Root repository: <https://github.com/JegernOUTT/refact>
+- Documentation: <https://github.com/JegernOUTT/refact/wiki>
+- Issues: <https://github.com/JegernOUTT/refact/issues>
+- Discussions: <https://github.com/JegernOUTT/refact/discussions>

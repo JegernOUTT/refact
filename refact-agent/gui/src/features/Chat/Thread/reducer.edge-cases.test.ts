@@ -705,6 +705,77 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     });
   });
 
+  describe("restoreChat with history stubs", () => {
+    const baseHistoryItem = (
+      messages: ChatHistoryItem["messages"],
+    ): ChatHistoryItem => ({
+      id: chatId,
+      messages,
+      model: "gpt-4o",
+      title: "Restored chat",
+      tool_use: "agent",
+      mode: "agent",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      updatedAt: "2026-05-31T00:01:00.000Z",
+      boost_reasoning: false,
+      include_project_info: true,
+      increase_max_tokens: false,
+      context_tokens_cap: undefined,
+      last_user_message_id: "",
+    });
+
+    test("empty-message stub does not wipe snapshot-loaded messages", () => {
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(
+          createSnapshot([
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi there" },
+          ]),
+        ),
+      );
+      expect(state.threads[chatId]!.thread.messages).toHaveLength(2);
+
+      state = chatReducer(state, restoreChat(baseHistoryItem([])));
+
+      expect(state.threads[chatId]!.thread.messages).toHaveLength(2);
+      expect(state.threads[chatId]!.thread.title).toBe("Restored chat");
+      expect(state.current_thread_id).toBe(chatId);
+    });
+
+    test("non-empty restore payload still replaces messages", () => {
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(
+          createSnapshot([
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi there" },
+          ]),
+        ),
+      );
+
+      state = chatReducer(
+        state,
+        restoreChat(
+          baseHistoryItem([{ role: "user", content: "Replacement" }]),
+        ),
+      );
+
+      expect(state.threads[chatId]!.thread.messages).toHaveLength(1);
+    });
+
+    test("fresh runtime restored from empty stub stays empty for snapshot fill", () => {
+      const otherId = "11111111-2222-3333-4444-555555555555";
+      const state = chatReducer(
+        initialState,
+        restoreChat({ ...baseHistoryItem([]), id: otherId }),
+      );
+
+      expect(state.threads[otherId]!.thread.messages).toHaveLength(0);
+      expect(state.threads[otherId]!.snapshot_received).toBe(false);
+    });
+  });
+
   describe("SSE error recovery", () => {
     test("should clear streaming and waiting state on subscription errors", () => {
       let state = chatReducer(

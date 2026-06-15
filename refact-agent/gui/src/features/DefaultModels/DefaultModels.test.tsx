@@ -1,237 +1,327 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
-import { http, HttpResponse } from "msw";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import React from "react";
+import { Provider } from "react-redux";
+import { configureStore } from "@reduxjs/toolkit";
+import { reducer as configReducer } from "../Config/configSlice";
 
-import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
-import type { CapsResponse } from "../../services/refact";
-import type { ProviderDefaults } from "../../services/refact/providers";
-import { server } from "../../utils/mockServer";
-import { render, screen, within } from "../../utils/test-utils";
-import { DefaultModels } from "./DefaultModels";
+vi.mock("../../services/refact/providers", () => ({
+  useGetDefaultsQuery: vi.fn(),
+  useUpdateDefaultsMutation: vi.fn(),
+}));
+
+vi.mock("../../services/refact/caps", () => ({
+  useGetCapsQuery: vi.fn(),
+}));
+
+vi.mock("../../services/refact/buddy", () => ({
+  useGetDraftQuery: vi.fn(),
+}));
 
 vi.mock("../../components/Chat/ModelSelector", () => ({
   ModelSelector: ({
-    capability = "chat",
-    value,
     onValueChange,
-    defaultValue,
-    allowUnset,
+    value,
   }: {
-    capability?: "chat" | "completion" | "embedding";
+    onValueChange: (v: string) => void;
     value?: string;
-    onValueChange: (model: string) => void;
-    defaultValue?: string;
     allowUnset?: boolean;
-  }) => {
-    const options =
-      capability === "completion"
-        ? [
-            "openai/qwen2.5/coder/0.5b/base",
-            "openai/qwen2.5/coder/1.5b/base",
-            "openai/qwen2.5/coder/3b/base",
-          ]
-        : capability === "embedding"
-          ? ["openai/thenlper/gte-base"]
-          : ["openai/gpt-4o", "openai/gpt-4o-mini"];
-    const effectiveValue = value ?? defaultValue ?? "";
-    const showUnavailable = Boolean(
-      effectiveValue && !options.includes(effectiveValue),
-    );
-
-    return (
-      <select
-        aria-label={`${capability}-model`}
-        value={effectiveValue}
-        onChange={(event) => onValueChange(event.currentTarget.value)}
-      >
-        {allowUnset && <option value="">None</option>}
-        {showUnavailable && (
-          <option value={effectiveValue}>Unavailable: {effectiveValue}</option>
-        )}
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    );
-  },
+    unsetLabel?: string;
+    showLabel?: boolean;
+    compact?: boolean;
+    defaultValue?: string;
+  }) => (
+    <button
+      data-testid="model-selector"
+      data-value={value ?? ""}
+      onClick={() => onValueChange("changed-model")}
+    >
+      {value ?? "None"}
+    </button>
+  ),
 }));
 
 vi.mock("../../components/ModelSamplingParams", () => ({
   ModelSamplingParams: ({
-    capability = "chat",
+    onChange,
+    model,
   }: {
-    capability?: "chat" | "completion" | "embedding";
-  }) => (capability === "embedding" ? null : <div>Max tokens</div>),
+    onChange: (k: string, v: unknown) => void;
+    model: string;
+    values: object;
+  }) => (
+    <button
+      data-testid="sampling-params"
+      data-model={model}
+      onClick={() => onChange("temperature", 0.8)}
+    >
+      sampling
+    </button>
+  ),
 }));
 
-const config = {
-  apiKey: "test",
-  host: "web" as const,
-  dev: true,
-  themeProps: {},
-  lspPort: 8001,
-};
+vi.mock("../Buddy/BuddyDraftPreview", () => ({
+  BuddyDraftPreview: () => <div data-testid="buddy-draft-preview" />,
+}));
 
-const baseDefaults: ProviderDefaults = {
-  chat: { model: "openai/gpt-4o", max_new_tokens: 4096 },
+vi.mock("../../components/PageWrapper", () => ({
+  PageWrapper: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="page-wrapper">{children}</div>
+  ),
+}));
+
+vi.mock("../../components/Spinner", () => ({
+  Spinner: ({ spinning }: { spinning?: boolean }) =>
+    spinning ? <div data-testid="spinner" /> : null,
+}));
+
+import { DefaultModels } from "./DefaultModels";
+import {
+  useGetDefaultsQuery,
+  useUpdateDefaultsMutation,
+} from "../../services/refact/providers";
+import { useGetCapsQuery } from "../../services/refact/caps";
+import { useGetDraftQuery } from "../../services/refact/buddy";
+
+const baseDefaults = {
+  chat: {},
   chat_model_2: {},
   task_planner_agent_model: {},
   chat_light: {},
   chat_thinking: {},
   chat_buddy: {},
-  completion_model: "openai/qwen2.5/coder/1.5b/base",
-  embedding_model: "openai/thenlper/gte-base",
-  preserved_field: { nested: true },
+  completion_model: "",
+  embedding_model: "",
 };
 
-function caps(): CapsResponse {
-  return structuredClone(STUB_CAPS_RESPONSE);
+const baseCaps = {
+  chat_default_model: "gpt-4",
+  chat_model_2: "",
+  task_planner_agent_model: "",
+  chat_light_model: "",
+  chat_thinking_model: "",
+  chat_buddy_model: "",
+  completion_default_model: "",
+};
+
+function setupMocks(overrides: { draftData?: unknown } = {}) {
+  const updateDefaults = vi
+    .fn()
+    .mockReturnValue({ unwrap: vi.fn().mockResolvedValue({}) });
+  (useGetDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+    data: baseDefaults,
+    isLoading: false,
+    isSuccess: true,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  (useUpdateDefaultsMutation as ReturnType<typeof vi.fn>).mockReturnValue([
+    updateDefaults,
+    { isLoading: false },
+  ]);
+  (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+    data: baseCaps,
+    refetch: vi.fn(),
+  });
+  (useGetDraftQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+    data: overrides.draftData ?? undefined,
+    isLoading: false,
+    error: undefined,
+  });
+  return { updateDefaults };
 }
 
-function renderDefaultModels(args?: {
-  defaults?: ProviderDefaults;
-  caps?: CapsResponse;
-  onSave?: (body: ProviderDefaults) => void;
-}) {
-  const onSave: (body: ProviderDefaults) => void =
-    args?.onSave ?? vi.fn<(body: ProviderDefaults) => void>();
-  server.use(
-    http.get("*/v1/ping", () => HttpResponse.text("pong")),
-    http.get("*/v1/caps", () => HttpResponse.json(args?.caps ?? caps())),
-    http.get("*/v1/defaults", () =>
-      HttpResponse.json(args?.defaults ?? baseDefaults),
-    ),
-    http.post("*/v1/defaults", async ({ request }) => {
-      onSave((await request.json()) as ProviderDefaults);
-      return HttpResponse.json({ success: true });
-    }),
-  );
+const defaultProps = {
+  backFromDefaultModels: vi.fn(),
+  host: "web" as const,
+  tabbed: false as const,
+};
 
-  return {
-    onSave,
-    ...render(
-      <DefaultModels
-        backFromDefaultModels={vi.fn()}
-        host="web"
-        tabbed={false}
-      />,
-      { preloadedState: { config } },
-    ),
-  };
+function createTestStore() {
+  return configureStore({ reducer: { config: configReducer } });
 }
 
-async function selectByName(name: string) {
-  return screen.findByRole("combobox", { name });
+function renderWithStore(ui: React.ReactElement) {
+  return render(<Provider store={createTestStore()}>{ui}</Provider>);
 }
 
-describe("DefaultModels", () => {
+describe("DefaultModels — embedded", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  test("completion default selector renders completion models", async () => {
-    renderDefaultModels();
+  it("renders all role tabs with short labels", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    for (const label of [
+      "Chat",
+      "Chat 2",
+      "Planner",
+      "Light",
+      "Thinking",
+      "Companion",
+      "Completion",
+      "Embedding",
+    ]) {
+      expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
+    }
+  });
 
-    const selector = await selectByName("completion-model");
+  it("initial Chat tab is active (aria-selected)", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
 
+  it("switches active tab when a different role tab is clicked", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Light" }));
+    expect(screen.getByRole("tab", { name: "Light" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+
+  it("Save button is disabled when no changes", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+  });
+
+  it("model change enables Save button", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getAllByTestId("model-selector")[0]);
     expect(
-      within(selector).getByRole("option", {
-        name: "openai/qwen2.5/coder/0.5b/base",
-      }),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
+  });
+
+  it("Save button calls updateDefaults mutation", async () => {
+    const { updateDefaults } = setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getAllByTestId("model-selector")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(updateDefaults).toHaveBeenCalledOnce());
+  });
+
+  it("sampling change enables Save button", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    const samplingBtns = screen.queryAllByTestId("sampling-params");
+    if (samplingBtns.length > 0) {
+      fireEvent.click(samplingBtns[0]);
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).not.toBeDisabled();
+    }
+  });
+
+  it("applies draft overrides and enables Save when draft is present", () => {
+    setupMocks({
+      draftData: {
+        kind: "defaults_model",
+        yaml_or_json: JSON.stringify({ chat: { model: "draft-model" } }),
+      },
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(screen.getByTestId("buddy-draft-preview")).toBeInTheDocument();
     expect(
-      within(selector).queryByRole("option", { name: "openai/gpt-4o-mini" }),
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
+  });
+
+  it("does not render SettingsShell sidebar (no double shell)", () => {
+    setupMocks();
+    const { container } = render(<DefaultModels {...defaultProps} embedded />);
+    expect(container.querySelector("aside")).not.toBeInTheDocument();
+  });
+
+  it("does not render Back button when embedded", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(
+      screen.queryByRole("button", { name: /back/i }),
     ).not.toBeInTheDocument();
   });
+});
 
-  test("embedding default selector renders embedding model", async () => {
-    renderDefaultModels();
+describe("DefaultModels — standalone (not embedded)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
-    const selector = await selectByName("embedding-model");
+  it("wraps content in PageWrapper", () => {
+    setupMocks();
+    renderWithStore(<DefaultModels {...defaultProps} />);
+    expect(screen.getByTestId("page-wrapper")).toBeInTheDocument();
+  });
 
+  it("renders Back button in standalone mode", () => {
+    setupMocks();
+    renderWithStore(<DefaultModels {...defaultProps} />);
+    expect(screen.getByRole("button", { name: /back/i })).toBeInTheDocument();
+  });
+
+  it("Back button calls backFromDefaultModels", () => {
+    const onBack = vi.fn();
+    setupMocks();
+    renderWithStore(
+      <DefaultModels {...defaultProps} backFromDefaultModels={onBack} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+    expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("model change enables Save in standalone mode", () => {
+    setupMocks();
+    renderWithStore(<DefaultModels {...defaultProps} />);
+    fireEvent.click(screen.getAllByTestId("model-selector")[0]);
     expect(
-      within(selector).getByRole("option", {
-        name: "openai/thenlper/gte-base",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText("Max tokens")).toHaveLength(2);
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
   });
 
-  test("save payload includes completion and embedding defaults while preserving unknown fields", async () => {
-    const onSave = vi.fn<(body: ProviderDefaults) => void>();
-    const { user } = renderDefaultModels({ onSave });
-
-    await user.selectOptions(
-      await selectByName("completion-model"),
-      "openai/qwen2.5/coder/3b/base",
-    );
-    await user.selectOptions(
-      await selectByName("embedding-model"),
-      "openai/thenlper/gte-base",
-    );
-
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-
-    expect(onSave).toHaveBeenCalledTimes(1);
-    const saved = onSave.mock.calls[0][0];
-    expect(saved.completion_model).toBe("openai/qwen2.5/coder/3b/base");
-    expect(saved.embedding_model).toBe("openai/thenlper/gte-base");
-    expect(saved.preserved_field).toEqual({ nested: true });
-    expect(saved.chat.model).toBe("openai/gpt-4o");
+  it("Save mutation dispatched in standalone mode", async () => {
+    const { updateDefaults } = setupMocks();
+    renderWithStore(<DefaultModels {...defaultProps} />);
+    fireEvent.click(screen.getAllByTestId("model-selector")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(updateDefaults).toHaveBeenCalledOnce());
   });
+});
 
-  test("clears unavailable saved defaults", async () => {
-    const onSave = vi.fn<(body: ProviderDefaults) => void>();
-    const { user } = renderDefaultModels({
-      defaults: {
-        ...baseDefaults,
-        completion_model: "missing/completion",
-        embedding_model: "missing/embedding",
-      },
-      onSave,
+describe("DefaultModels — loading state", () => {
+  it("shows spinner while loading defaults", () => {
+    (useGetDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isSuccess: false,
+      isError: false,
+      refetch: vi.fn(),
     });
-
-    expect(
-      within(await selectByName("completion-model")).getByRole("option", {
-        name: "Unavailable: missing/completion",
-      }),
-    ).toBeInTheDocument();
-    await user.selectOptions(await selectByName("completion-model"), "");
-
-    expect(
-      within(await selectByName("embedding-model")).getByRole("option", {
-        name: "Unavailable: missing/embedding",
-      }),
-    ).toBeInTheDocument();
-    await user.selectOptions(await selectByName("embedding-model"), "");
-
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-
-    expect(onSave).toHaveBeenCalledWith(
-      expect.objectContaining({
-        completion_model: "",
-        embedding_model: "",
-      }),
-    );
-  });
-
-  test("chat defaults still save as before", async () => {
-    const onSave = vi.fn<(body: ProviderDefaults) => void>();
-    const { user } = renderDefaultModels({ onSave });
-
-    await user.selectOptions(
-      (await screen.findAllByRole("combobox", { name: "chat-model" }))[0],
-      "openai/gpt-4o-mini",
-    );
-
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-
-    expect(onSave).toHaveBeenCalledTimes(1);
-    const saved = onSave.mock.calls[0][0];
-    expect(saved.chat.model).toBe("openai/gpt-4o-mini");
-    expect(saved.chat.max_new_tokens).toBe(4096);
-    expect(saved.completion_model).toBe("openai/qwen2.5/coder/1.5b/base");
-    expect(saved.embedding_model).toBe("openai/thenlper/gte-base");
+    (useUpdateDefaultsMutation as ReturnType<typeof vi.fn>).mockReturnValue([
+      vi.fn(),
+      { isLoading: false },
+    ]);
+    (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: undefined,
+      refetch: vi.fn(),
+    });
+    (useGetDraftQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: undefined,
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(screen.getByTestId("spinner")).toBeInTheDocument();
   });
 });

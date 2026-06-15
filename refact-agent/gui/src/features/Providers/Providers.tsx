@@ -1,5 +1,4 @@
 import React from "react";
-import { Flex } from "@radix-ui/themes";
 
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
@@ -15,43 +14,43 @@ export type ProvidersProps = {
   backFromProviders: () => void;
   host: Config["host"];
   tabbed: Config["tabbed"];
+  embedded?: boolean;
 };
 export const Providers: React.FC<ProvidersProps> = ({
   backFromProviders,
   host,
+  embedded,
 }) => {
   const { data: configuredProvidersData, isSuccess } =
     useGetConfiguredProvidersQuery();
 
   if (!isSuccess) return <Spinner spinning />;
+
+  const providersView = (
+    <ProvidersView
+      configuredProviders={configuredProvidersData.providers}
+      backFromProviders={backFromProviders}
+      embedded={embedded}
+    />
+  );
+
+  if (embedded) {
+    return (
+      <div className={styles.page}>
+        <div className={styles.content}>{providersView}</div>
+      </div>
+    );
+  }
+
+  const content = (
+    <ScrollArea scrollbars="vertical" fullHeight className={styles.scrollArea}>
+      <div className={styles.content}>{providersView}</div>
+    </ScrollArea>
+  );
+
   return (
-    <PageWrapper
-      host={host}
-      style={{
-        padding: 0,
-        marginTop: 0,
-      }}
-    >
-      <ScrollArea
-        scrollbars="vertical"
-        fullHeight
-        className={styles.scrollArea}
-      >
-        <Flex
-          direction="column"
-          justify="between"
-          flexGrow="1"
-          style={{
-            width: "inherit",
-            minHeight: "100%",
-          }}
-        >
-          <ProvidersView
-            configuredProviders={configuredProvidersData.providers}
-            backFromProviders={backFromProviders}
-          />
-        </Flex>
-      </ScrollArea>
+    <PageWrapper host={host} className={styles.page} noPadding>
+      {content}
     </PageWrapper>
   );
 };

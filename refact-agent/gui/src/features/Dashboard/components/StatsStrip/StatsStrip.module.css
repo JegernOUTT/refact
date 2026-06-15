@@ -1,38 +1,49 @@
 .statsGrid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .statsGrid[data-breakpoint="medium"] {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
 }
 
 .compactRow {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .narrowStats {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   flex-shrink: 0;
+  min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .narrowStats {
+    backdrop-filter: none;
+  }
 }
 
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+  border-radius: var(--rf-radius-card);
   overflow: hidden;
   min-width: 0;
 }
@@ -40,65 +51,85 @@
 .cardTitle {
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
+  padding-bottom: var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  border-image: linear-gradient(90deg, var(--rf-border), transparent) 1;
 }
 
 .cardSection {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .cardDivider {
-  height: 1px;
-  background: var(--gray-a3);
+  height: var(--rf-hairline);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-border),
+    transparent
+  );
+}
+
+.modelRow {
+  border-radius: var(--rf-radius-ctl);
+  cursor: help;
+  max-width: 100%;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.modelRow:hover {
+  background: var(--rf-surface-1);
 }
 
 .modeFill {
   height: 6px;
-  border-radius: 3px;
-  background: var(--accent-8);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-color-accent);
   min-width: 4px;
   flex-shrink: 0;
 }
 
 .configureButton {
-  display: flex;
-  align-items: center;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a5);
-  background: transparent;
-  cursor: pointer;
-  color: var(--gray-11);
-  transition: background var(--motion-fast) ease;
   flex-shrink: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-fg);
+  cursor: pointer;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .configureButton:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
 }
 
 .configureButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: 1px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .hoverTrigger {
   cursor: help;
-  border-bottom: 1px dotted var(--gray-8);
-  font-size: var(--font-size-1);
-  color: var(--gray-11);
-  line-height: 1.4;
+  border-bottom: var(--rf-hairline) dotted var(--rf-border-strong);
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-fg);
+  line-height: var(--rf-line);
 }
 
 .hoverTrigger:hover {
-  border-bottom-color: var(--accent-8);
-  color: var(--gray-12);
+  border-bottom-color: var(--rf-color-accent);
+  color: var(--rf-color-fg-strong);
 }
 
 .hoverContent {
   max-width: 300px;
-  z-index: 100;
+  z-index: var(--rf-z-popover);
 }

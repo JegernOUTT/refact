@@ -2,31 +2,32 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
+  gap: var(--rf-space-2);
+  padding: var(--dashboard-row-padding-block)
+    var(--dashboard-row-padding-inline);
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   background: transparent;
   box-sizing: border-box;
   min-width: 0;
   text-align: left;
-  transition: background var(--motion-fast) ease;
+  transition: background var(--rf-dur-fast) ease;
   overflow: hidden;
 }
 
 .item:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .item:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
 .left {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -58,7 +59,7 @@
 .right {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   flex-shrink: 1;
   min-width: 0;
   overflow: hidden;
@@ -87,23 +88,23 @@
 .diffStatsBadge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  margin-left: var(--space-1);
+  gap: var(--rf-space-2xs);
+  margin-left: var(--rf-space-1);
   flex-shrink: 0;
 }
 
 .diffStatsAdd {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .diffStatsRemove {
-  color: var(--red-11);
+  color: var(--rf-color-danger);
 }
 
 .actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   flex-shrink: 0;
 }
 
@@ -115,14 +116,14 @@
   height: 20px;
   border: none;
   background: transparent;
-  border-radius: var(--radius-1);
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  color: var(--gray-9);
+  color: var(--rf-color-muted);
   opacity: 0;
   pointer-events: none;
   transition:
-    opacity var(--motion-fast) ease,
-    background var(--motion-fast) ease;
+    opacity var(--rf-dur-fast) ease,
+    background var(--rf-dur-fast) ease;
 }
 
 .item:hover .actionButton,
@@ -134,11 +135,11 @@
 .actionButton:hover,
 .actionButton:focus-visible {
   opacity: 1 !important;
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .actionButton:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
@@ -157,21 +158,21 @@
   height: 16px;
   border: none;
   background: transparent;
-  border-radius: var(--radius-1);
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  color: var(--gray-9);
+  color: var(--rf-color-muted);
   flex-shrink: 0;
   padding: 0;
 }
 
 .expandButton:hover {
-  color: var(--gray-11);
-  background: var(--gray-a3);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
 }
 
 .treeIndent {
   display: inline-block;
-  width: 16px;
+  width: var(--dashboard-row-tree-indent);
   flex-shrink: 0;
 }
 

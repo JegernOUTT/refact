@@ -70,7 +70,7 @@ class Initializer : ProjectActivity, Disposable {
 
     private fun checkJcefStatus() {
         if (!JBCefApp.isSupported()) {
-            emitInfoWithDocLink(RefactAIBundle.message("notifications.chatCanNotStartWarning"), "https://docs.refact.ai/guides/plugins/jetbrains/troubleshooting/", false)
+            emitInfoWithDocLink(RefactAIBundle.message("notifications.chatCanNotStartWarning"), "https://github.com/JegernOUTT/refact/wiki/JetBrains-Troubleshooting", false)
             return
         }
     }

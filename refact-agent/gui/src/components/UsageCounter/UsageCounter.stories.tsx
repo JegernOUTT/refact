@@ -13,7 +13,7 @@ import {
   USAGE_COUNTER_STUB_GPT,
   USAGE_COUNTER_STUB_INLINE,
 } from "./UsageCounter.fixtures";
-import { Flex } from "@radix-ui/themes";
+import styles from "./UsageCounter.stories.module.css";
 
 const MockedStore: React.FC<{
   usage: Usage;
@@ -95,9 +95,9 @@ const MockedStore: React.FC<{
     <Provider store={store}>
       <AbortControllerProvider>
         <Theme accentColor="gray">
-          <Flex align="center" justify="center" width="50dvw" height="100dvh">
+          <div className={styles.frame}>
             <UsageCounter isInline={isInline} isMessageEmpty={isMessageEmpty} />
-          </Flex>
+          </div>
         </Theme>
       </AbortControllerProvider>
     </Provider>

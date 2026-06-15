@@ -11,19 +11,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use chrono::Utc;
-use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
-use crate::tasks::types::{
-    BoardCard, CardComment, StatusUpdate, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo,
-};
+use crate::tasks::comments::{self, CreateCardComment};
+use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
 use crate::chat::trajectories::TrajectoryEvent;
 use crate::chat::types::SessionState;
 use crate::tasks::events::{TaskEvent, TaskEventEnvelope};
 use crate::tasks::storage;
-use crate::tools::task_tool_helpers::truncate_chars;
 use crate::tools::tool_task_documents::{
     CreateDocumentRequest, TaskDocumentDetail, TaskDocumentHistoryResponse,
     TaskDocumentListResponse, append_task_document_for_api, create_task_document_for_api,
@@ -67,6 +64,16 @@ pub struct UpdateBoardRequest {
     pub rev: u64,
     #[serde(flatten)]
     pub patch: BoardPatch,
+}
+
+#[derive(Deserialize)]
+pub struct CreateCardCommentRequest {
+    pub body: String,
+    pub author_role: String,
+    #[serde(default)]
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -213,7 +220,7 @@ pub async fn handle_create_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let meta = storage::create_task(gcx.clone(), &req.name)
+    let mut meta = storage::create_task(gcx.clone(), &req.name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !req.target_files.is_empty() {
@@ -247,7 +254,10 @@ pub async fn handle_create_task(
             scope_guard_mode: Default::default(),
             team_members: vec![],
         });
-        storage::save_board(gcx, &meta.id, &board)
+        storage::save_board(gcx.clone(), &meta.id, &board)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        meta = storage::update_task_stats(gcx.clone(), &meta.id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
@@ -419,6 +429,27 @@ pub async fn handle_get_board(
     Ok(Json(board))
 }
 
+pub async fn handle_create_card_comment(
+    State(app): State<AppState>,
+    Path((task_id, card_id)): Path<(String, String)>,
+    Json(req): Json<CreateCardCommentRequest>,
+) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    let (board, _) = comments::create_card_comment(
+        app.gcx.clone(),
+        &task_id,
+        CreateCardComment {
+            card_id,
+            body: req.body,
+            author_role: req.author_role,
+            author_id: req.author_id,
+            reply_to: req.reply_to,
+        },
+    )
+    .await
+    .map_err(map_patch_board_error)?;
+    Ok(Json(board))
+}
+
 fn map_patch_board_error(error: String) -> (StatusCode, String) {
     if error.starts_with("Board rev mismatch:") || error.starts_with("active agent card:") {
         return (StatusCode::CONFLICT, error);
@@ -445,6 +476,10 @@ pub async fn handle_patch_board(
     let gcx = app.gcx.clone();
     let expected_rev = req.rev;
     let patch = req.patch;
+    let comment_card_id = match &patch {
+        BoardPatch::AddComment { card_id, .. } => Some(card_id.clone()),
+        _ => None,
+    };
     let now = Utc::now().to_rfc3339();
 
     let update_result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
@@ -570,30 +605,16 @@ pub async fn handle_patch_board(
                 author_id,
                 reply_to,
             } => {
-                let valid_roles = ["planner", "agents", "user", "system", "http"];
-                if !valid_roles.contains(&author_role.as_str()) {
-                    return Err("invalid author_role".to_string());
-                }
-                let trimmed_body = body.trim();
-                if trimmed_body.is_empty() {
-                    return Err("comment body is empty".to_string());
-                }
-                let card = board
-                    .get_card_mut(&card_id)
-                    .ok_or_else(|| format!("Card {} not found", card_id))?;
-                if let Some(reply_id) = &reply_to {
-                    if !card.comments.iter().any(|c| &c.id == reply_id) {
-                        return Err("reply_to references unknown comment".to_string());
-                    }
-                }
-                card.comments.push(CardComment {
-                    id: Uuid::new_v4().to_string(),
-                    author_role,
-                    author_id,
-                    timestamp: Utc::now().to_rfc3339(),
-                    body: truncate_chars(trimmed_body, 4000),
-                    reply_to,
-                });
+                comments::add_comment_to_board(
+                    board,
+                    CreateCardComment {
+                        card_id,
+                        body,
+                        author_role,
+                        author_id,
+                        reply_to,
+                    },
+                )?;
             }
             BoardPatch::SetFinalReport { card_id, report } => {
                 let card = board
@@ -634,6 +655,9 @@ pub async fn handle_patch_board(
     storage::update_task_stats(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Some(card_id) = comment_card_id {
+        crate::tasks::events::emit_task_comments_changed(app.gcx.clone(), &task_id, &card_id).await;
+    }
 
     Ok(Json(board))
 }
@@ -829,11 +853,35 @@ pub async fn handle_list_task_trajectories(
     Ok(Json(trajectories))
 }
 
+#[derive(Deserialize, Default)]
+pub struct CreatePlannerChatRequest {
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 pub async fn handle_create_planner_chat(
     State(app): State<AppState>,
     Path(task_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
+    let req: CreatePlannerChatRequest = if body_bytes.is_empty() {
+        CreatePlannerChatRequest::default()
+    } else {
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?
+    };
+    let mode = req
+        .mode
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "task_planner".to_string());
+    if mode.eq_ignore_ascii_case("task_agent") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "task_agent chats cannot be created here".to_string(),
+        ));
+    }
     storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -841,11 +889,16 @@ pub async fn handle_create_planner_chat(
     let chat_id = storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::chat::trajectories::save_initial_planner_trajectory(gcx.clone(), &task_id, &chat_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::chat::trajectories::save_initial_task_chat_trajectory(
+        gcx.clone(),
+        &task_id,
+        &chat_id,
+        &mode,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(json!({"chat_id": chat_id})))
+    Ok(Json(json!({"chat_id": chat_id, "mode": mode})))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -941,6 +994,9 @@ async fn find_planner_referencing_agents(
             .collect::<Vec<_>>()
     };
     for (chat_id, session_arc) in live_sessions {
+        if chat_id == planner_chat_id {
+            continue;
+        }
         let task_meta = {
             let session = session_arc.lock().await;
             session.thread.task_meta.clone()
@@ -948,7 +1004,8 @@ async fn find_planner_referencing_agents(
         let Some(task_meta) = task_meta else {
             continue;
         };
-        if task_meta.task_id == task_id
+        if task_meta.role == "agents"
+            && task_meta.task_id == task_id
             && task_meta.planner_chat_id.as_deref() == Some(planner_chat_id)
         {
             seen.insert((chat_id.clone(), "live"));
@@ -1107,6 +1164,18 @@ pub async fn handle_delete_planner_chat(
     tokio::fs::remove_file(&file_path)
         .await
         .map_err(|e| delete_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(dir) = file_path.parent() {
+        if let Err(e) =
+            crate::chat::trajectory_index::remove_trajectory_index_entry(dir, &chat_id).await
+        {
+            tracing::warn!(
+                "Failed to remove planner trajectory {} from index {:?}: {}",
+                chat_id,
+                dir,
+                e
+            );
+        }
+    }
 
     let removed_session = {
         let sessions = gcx.chat_sessions.clone();
@@ -1271,6 +1340,7 @@ pub struct GetDocumentQuery {
 #[derive(Deserialize)]
 pub struct UpdateTaskDocumentRequest {
     pub content: String,
+    pub pinned: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1334,9 +1404,10 @@ pub async fn handle_update_task_document(
     Path((task_id, slug)): Path<(String, String)>,
     Json(req): Json<UpdateTaskDocumentRequest>,
 ) -> Result<Json<TaskDocumentDetail>, (StatusCode, String)> {
-    let result = update_task_document_for_api(app.gcx.clone(), &task_id, &slug, req.content)
-        .await
-        .map_err(map_doc_error)?;
+    let result =
+        update_task_document_for_api(app.gcx.clone(), &task_id, &slug, req.content, req.pinned)
+            .await
+            .map_err(map_doc_error)?;
     Ok(Json(result))
 }
 
@@ -1389,6 +1460,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use refact_chat_api::{ChatMessage, TaskMeta as ChatTaskMeta};
     use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
+    use uuid::Uuid;
 
     async fn setup_task(root: &std::path::Path, task_id: &str) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1430,6 +1502,83 @@ mod tests {
 
     fn app(gcx: Arc<GlobalContext>) -> AppState {
         gcx.app_state(gcx.clone())
+    }
+
+    #[tokio::test]
+    async fn handle_create_task_with_target_files_returns_updated_card_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+
+        let Json(meta) = handle_create_task(
+            State(app(gcx.clone())),
+            Json(CreateTaskRequest {
+                name: "Task with targets".to_string(),
+                target_files: vec!["src/lib.rs".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(meta.cards_total, 1);
+        let tasks_dir = temp.path().join(".refact/tasks");
+        let index = crate::tasks::index::read_task_index(&tasks_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        let entry = index
+            .entries
+            .iter()
+            .find(|entry| entry.id == meta.id)
+            .unwrap();
+        assert_eq!(entry.meta.cards_total, 1);
+    }
+
+    #[tokio::test]
+    async fn create_planner_chat_with_mode_lists_with_that_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "task-mode";
+        let gcx = setup_task(temp.path(), task_id).await;
+
+        let Json(default_res) = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_res["mode"], json!("task_planner"));
+
+        let Json(agent_res) = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::from_static(br#"{"mode":"agent"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent_res["mode"], json!("agent"));
+        let agent_chat_id = agent_res["chat_id"].as_str().unwrap().to_string();
+
+        let rejected = handle_create_planner_chat(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            hyper::body::Bytes::from_static(br#"{"mode":"task_agent"}"#),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
+
+        let Json(list) = handle_list_task_trajectories(
+            State(app(gcx.clone())),
+            Path((task_id.to_string(), "planner".to_string())),
+        )
+        .await
+        .unwrap();
+        let agent_entry = list
+            .iter()
+            .find(|t| t.id == agent_chat_id)
+            .expect("agent-mode chat should be listed in the planner bucket");
+        assert_eq!(agent_entry.mode.as_deref(), Some("agent"));
     }
 
     fn snapshot(
@@ -1534,6 +1683,21 @@ mod tests {
             agent_id: Some(agent_id.to_string()),
             card_id: card_id.map(str::to_string),
             planner_chat_id: Some(planner_chat_id.to_string()),
+        });
+        gcx.chat_sessions.write().await.insert(
+            chat_id.to_string(),
+            Arc::new(tokio::sync::Mutex::new(session)),
+        );
+    }
+
+    async fn insert_live_planner_session(gcx: Arc<GlobalContext>, task_id: &str, chat_id: &str) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.thread.task_meta = Some(ChatTaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(chat_id.to_string()),
         });
         gcx.chat_sessions.write().await.insert(
             chat_id.to_string(),
@@ -1742,7 +1906,7 @@ mod tests {
     async fn add_comment_rejects_empty_body() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-empty-body").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-empty-body".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1773,7 +1937,7 @@ mod tests {
     async fn add_comment_rejects_whitespace_only_body() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-ws-body").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-ws-body".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1804,7 +1968,7 @@ mod tests {
     async fn add_comment_validates_author_role_enum() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-role-enum").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-role-enum".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1835,7 +1999,7 @@ mod tests {
     async fn add_comment_rejects_unknown_reply_to() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-reply-to").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-reply-to".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1866,14 +2030,14 @@ mod tests {
     async fn add_comment_returns_full_uuid_id() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-uuid-id").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-uuid-id".to_string()),
             Json(create_card_request(0, "card-a")),
         )
         .await
         .unwrap();
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-uuid-id".to_string()),
             Json(UpdateBoardRequest {
@@ -1922,7 +2086,7 @@ mod tests {
     async fn delete_card_refuses_active_agent_card_without_force() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-active").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-active".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -1962,7 +2126,7 @@ mod tests {
     async fn delete_card_with_force_removes_active_agent_card() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-force").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-force".to_string()),
             Json(create_card_request(0, "card-a")),
@@ -2004,7 +2168,7 @@ mod tests {
     async fn delete_task_refuses_active_worktree_without_force() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-del-wt").await;
-        handle_patch_board(
+        let _ = handle_patch_board(
             State(app(gcx.clone())),
             Path("task-del-wt".to_string()),
             Json(create_card_request(0, "card-wt")),
@@ -2259,6 +2423,51 @@ mod tests {
             assert!(result.is_ok());
             assert!(!planner_path.exists());
         }
+
+        #[tokio::test]
+        async fn delete_planner_chat_not_blocked_by_own_live_session() {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = setup_task(temp.path(), "task-1").await;
+            save_planner(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
+            let planner_path = temp
+                .path()
+                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
+            assert!(planner_path.exists());
+
+            let result = handle_delete_planner_chat(
+                State(app(gcx)),
+                Path(("task-1".to_string(), "planner-chat".to_string())),
+                no_force(),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            assert!(!planner_path.exists());
+        }
+
+        #[tokio::test]
+        async fn delete_planner_chat_not_blocked_by_sibling_planner_chat() {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = setup_task(temp.path(), "task-1").await;
+            save_planner(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "planner-chat").await;
+            insert_live_planner_session(gcx.clone(), "task-1", "chat-2").await;
+            let planner_path = temp
+                .path()
+                .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");
+            assert!(planner_path.exists());
+
+            let result = handle_delete_planner_chat(
+                State(app(gcx)),
+                Path(("task-1".to_string(), "planner-chat".to_string())),
+                no_force(),
+            )
+            .await;
+
+            assert!(result.is_ok());
+            assert!(!planner_path.exists());
+        }
     }
 
     #[tokio::test]
@@ -2383,6 +2592,7 @@ mod tests {
             Path(("task-doc-404".to_string(), "no-such-slug".to_string())),
             Json(UpdateTaskDocumentRequest {
                 content: "whatever".to_string(),
+                pinned: None,
             }),
         )
         .await;
@@ -2394,7 +2604,7 @@ mod tests {
         use crate::tools::tool_task_documents::CreateDocumentRequest;
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-doc-pin").await;
-        handle_create_task_document(
+        let _ = handle_create_task_document(
             State(app(gcx.clone())),
             Path("task-doc-pin".to_string()),
             Json(CreateDocumentRequest {
@@ -2421,6 +2631,56 @@ mod tests {
         assert_eq!(result.0.content, "body text");
         assert!(result.0.pinned);
         assert_eq!(result.0.version, 2);
+    }
+
+    #[tokio::test]
+    async fn handle_update_task_document_accepts_pinned_in_same_request() {
+        use crate::tools::tool_task_documents::CreateDocumentRequest;
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_task(temp.path(), "task-doc-update-pin").await;
+        let _ = handle_create_task_document(
+            State(app(gcx.clone())),
+            Path("task-doc-update-pin".to_string()),
+            Json(CreateDocumentRequest {
+                slug: "combined-plan".to_string(),
+                name: "Combined Plan".to_string(),
+                kind: "plan".to_string(),
+                content: "v1".to_string(),
+                pinned: Some(true),
+                relevant_cards: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = handle_update_task_document(
+            State(app(gcx.clone())),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+            Json(UpdateTaskDocumentRequest {
+                content: "v2".to_string(),
+                pinned: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.0.content, "v2");
+        assert!(!result.0.pinned);
+        assert_eq!(result.0.version, 2);
+        let history = handle_history_task_document(
+            State(app(gcx.clone())),
+            Path((
+                "task-doc-update-pin".to_string(),
+                "combined-plan".to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(history.0.history.len(), 1);
+        assert_eq!(history.0.history[0].version, 1);
     }
 
     #[tokio::test]

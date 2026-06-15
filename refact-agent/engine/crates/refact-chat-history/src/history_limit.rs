@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, SamplingParameters};
 use refact_core::custom_error::first_n_chars;
-use crate::compression_exemption::{exemption_for, CompressionExemption};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextPressure {
@@ -42,12 +41,7 @@ pub fn compute_context_budget(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
 ) -> ContextBudgetReport {
-    let measured_messages: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| exemption_for(msg) != CompressionExemption::Never)
-        .cloned()
-        .collect();
-    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(&measured_messages);
+    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
     let pressure = pressure_for_used_tokens(used_tokens_estimate, effective_n_ctx);
     ContextBudgetReport {
@@ -99,7 +93,7 @@ pub fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatM
         .map(|x| x.id)
         .collect();
     messages.retain(|m| {
-        let is_tool_result = m.role == "tool" || m.role == "diff";
+        let is_tool_result = m.role == "tool" || m.role == "diff" || m.role == "context_file";
         if is_tool_result && !m.tool_call_id.is_empty() && !tool_call_ids.contains(&m.tool_call_id)
         {
             tracing::warn!("removing tool result with no tool_call: {:?}", m);
@@ -135,6 +129,66 @@ pub fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatM
             false
         }
     });
+}
+
+/// Relocate tool/diff/context_file results so each assistant's results follow it
+/// contiguously. Operates on wire-preparation copies only; transcripts that are
+/// already contiguous come out byte-identical.
+pub fn relocate_tool_results_after_their_calls(messages: &mut Vec<ChatMessage>) {
+    let declares_call = |message: &ChatMessage, call_id: &str| -> bool {
+        message.role == "assistant"
+            && message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|call| call.id == call_id))
+    };
+    let has_any_calls = messages
+        .iter()
+        .any(|message| message.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
+    if !has_any_calls {
+        return;
+    }
+    // Anchor each result to the nearest declaring assistant (preceding preferred, to
+    // tolerate reused tool-call ids), falling back to the nearest following one.
+    let owner_for = |messages: &[ChatMessage], idx: usize, call_id: &str| -> Option<usize> {
+        messages[..idx]
+            .iter()
+            .rposition(|message| declares_call(message, call_id))
+            .or_else(|| {
+                messages[idx + 1..]
+                    .iter()
+                    .position(|message| declares_call(message, call_id))
+                    .map(|offset| idx + 1 + offset)
+            })
+    };
+    let mut owners: Vec<Option<usize>> = vec![None; messages.len()];
+    for idx in 0..messages.len() {
+        let message = &messages[idx];
+        if matches!(message.role.as_str(), "tool" | "diff" | "context_file")
+            && !message.tool_call_id.is_empty()
+        {
+            owners[idx] = owner_for(messages, idx, &message.tool_call_id);
+        }
+    }
+    if owners.iter().all(|owner| owner.is_none()) {
+        return;
+    }
+    let mut results_by_owner: HashMap<usize, Vec<ChatMessage>> = HashMap::new();
+    let mut kept: Vec<(usize, ChatMessage)> = Vec::with_capacity(messages.len());
+    for (idx, message) in messages.drain(..).enumerate() {
+        match owners[idx] {
+            Some(owner_idx) => {
+                results_by_owner.entry(owner_idx).or_default().push(message);
+            }
+            None => kept.push((idx, message)),
+        }
+    }
+    for (original_idx, message) in kept {
+        messages.push(message);
+        if let Some(results) = results_by_owner.remove(&original_idx) {
+            messages.extend(results);
+        }
+    }
 }
 
 pub fn is_content_duplicate(
@@ -240,17 +294,43 @@ pub fn compress_duplicate_context_files(
             continue;
         }
 
-        let best_idx = *indices
+        // A newer re-attachment of the same path with the same line range supersedes
+        // older copies: the file may have changed, so the freshest view is the truth.
+        let mut newest_by_range: HashMap<(usize, usize), usize> = HashMap::new();
+        for &i in indices {
+            let range_key = (all_files[i].line1, all_files[i].line2);
+            let entry = newest_by_range.entry(range_key).or_insert(i);
+            if all_files[i].msg_idx > all_files[*entry].msg_idx {
+                *entry = i;
+            }
+        }
+        for &i in indices {
+            let range_key = (all_files[i].line1, all_files[i].line2);
+            if newest_by_range.get(&range_key) != Some(&i) {
+                all_files[i].is_compressed = true;
+                tracing::info!(
+                    "Stage 0: Marking for compression - superseded by newer attachment of {} at message index {}",
+                    filename,
+                    all_files[i].msg_idx
+                );
+            }
+        }
+
+        let Some(best_idx) = indices
             .iter()
-            .max_by(|&&a, &&b| {
+            .copied()
+            .filter(|&i| !all_files[i].is_compressed)
+            .max_by(|&a, &b| {
                 let size_cmp = all_files[a].content_len.cmp(&all_files[b].content_len);
                 if size_cmp == std::cmp::Ordering::Equal {
-                    all_files[b].msg_idx.cmp(&all_files[a].msg_idx)
+                    all_files[a].msg_idx.cmp(&all_files[b].msg_idx)
                 } else {
                     size_cmp
                 }
             })
-            .unwrap();
+        else {
+            continue;
+        };
         let best_msg_idx = all_files[best_idx].msg_idx;
         preserve_messages[best_msg_idx] = true;
 
@@ -262,7 +342,7 @@ pub fn compress_duplicate_context_files(
         );
 
         for &curr_idx in indices {
-            if curr_idx == best_idx {
+            if curr_idx == best_idx || all_files[curr_idx].is_compressed {
                 continue;
             }
             let current_msg_idx = all_files[curr_idx].msg_idx;
@@ -314,7 +394,9 @@ pub fn compress_duplicate_context_files(
                 if remaining_files.is_empty() {
                     let summary = format!(" Duplicate files compressed: '{}' files were shown earlier in the conversation history. Do not ask for these files again.", compressed_files_str);
                     messages[file.msg_idx].content = ChatContent::SimpleText(summary);
-                    messages[file.msg_idx].role = "cd_instruction".to_string();
+                    if messages[file.msg_idx].tool_call_id.is_empty() {
+                        messages[file.msg_idx].role = "cd_instruction".to_string();
+                    }
                     tracing::info!(
                         "Stage 0: Fully compressed ContextFile at index {}: all {} files removed",
                         file.msg_idx,
@@ -455,10 +537,13 @@ fn validate_chat_history_slice(messages: &[ChatMessage]) -> Result<(), String> {
                                 found = true;
                                 break;
                             }
+                            if matches!(later_msg.role.as_str(), "user" | "assistant" | "system") {
+                                break;
+                            }
                         }
                         if !found {
                             return Err(format!(
-                                "Assistant message at index {} has a tool call id '{}' that is unresponded (no following tool message with that id)",
+                                "Assistant message at index {} has a tool call id '{}' that is unresponded before the next conversation turn (no contiguous tool message with that id)",
                                 idx, tc.id
                             ));
                         }
@@ -487,6 +572,7 @@ pub fn fix_and_limit_messages_history(
     let mut mutable_messages = messages.clone();
     replace_broken_tool_call_messages(&mut mutable_messages, sampling_parameters_to_patch, 16000);
     remove_invalid_tool_calls_and_tool_calls_results(&mut mutable_messages);
+    relocate_tool_results_after_their_calls(&mut mutable_messages);
     validate_chat_history_owned(mutable_messages)
 }
 
@@ -507,6 +593,142 @@ mod tests {
             }]),
             ..Default::default()
         }
+    }
+
+    fn plain_user_msg(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn assistant_declaring_call(call_id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("calling".to_string()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: call_id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn tool_result_msg(call_id: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: call_id.to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn orphaned_context_file_results_are_removed() {
+        let mut answering_dead_call = make_context_file_msg("src/a.rs", "content a");
+        answering_dead_call.tool_call_id = "dead-call".to_string();
+        let free_context = make_context_file_msg("src/b.rs", "content b");
+        let mut messages = vec![plain_user_msg("q"), answering_dead_call, free_context];
+
+        remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|message| message.tool_call_id.is_empty()));
+    }
+
+    #[test]
+    fn relocate_moves_stray_results_back_to_their_call() {
+        let mut messages = vec![
+            plain_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            plain_user_msg("interleaved"),
+            tool_result_msg("tc-1", "result"),
+        ];
+
+        relocate_tool_results_after_their_calls(&mut messages);
+
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "user"]);
+    }
+
+    #[test]
+    fn relocate_keeps_contiguous_transcripts_identical() {
+        let original = vec![
+            plain_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            tool_result_msg("tc-1", "result"),
+            plain_user_msg("next"),
+        ];
+        let mut messages = original.clone();
+
+        relocate_tool_results_after_their_calls(&mut messages);
+
+        assert_eq!(
+            serde_json::to_value(&messages).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn validation_rejects_result_separated_by_user_turn() {
+        let mut answering = make_context_file_msg("src/a.rs", "content");
+        answering.tool_call_id = "tc-1".to_string();
+        let messages = vec![
+            plain_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            plain_user_msg("interleaved"),
+            answering,
+        ];
+
+        assert!(validate_chat_history(&messages).is_err());
+    }
+
+    #[test]
+    fn fix_and_limit_repairs_result_separated_by_user_turn() {
+        let mut answering = make_context_file_msg("src/a.rs", "content");
+        answering.tool_call_id = "tc-1".to_string();
+        let messages = vec![
+            plain_user_msg("q"),
+            assistant_declaring_call("tc-1"),
+            plain_user_msg("interleaved"),
+            answering,
+        ];
+        let mut sampling = SamplingParameters::default();
+
+        let fixed = fix_and_limit_messages_history(&messages, &mut sampling)
+            .expect("relocation must repair the pair");
+
+        let roles: Vec<&str> = fixed.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "context_file", "user"]);
+    }
+
+    #[test]
+    fn newer_same_range_attachment_supersedes_older_copy() {
+        let older = make_context_file_msg("src/main.rs", "fn main() {}\nfn helper() {}\n");
+        let newer = make_context_file_msg("src/main.rs", "fn main() {}\n");
+        let mut messages = vec![older, plain_user_msg("edited the file"), newer];
+
+        let (compressed_count, _) =
+            compress_duplicate_context_files(&mut messages).expect("dedup must succeed");
+
+        assert_eq!(compressed_count, 1);
+        assert!(!messages[0]
+            .content
+            .content_text_only()
+            .contains("fn helper()"));
+        assert!(messages[2]
+            .content
+            .content_text_only()
+            .contains("fn main()"));
     }
 
     fn make_tool_msg(tool_call_id: &str, content: &str, failed: Option<bool>) -> ChatMessage {
@@ -842,5 +1064,61 @@ mod tests {
         let result = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "user");
+    }
+    #[test]
+    fn test_dedup_keeps_context_file_role_for_tool_call_responses() {
+        let mut answered = make_context_file_msg("src/dup.rs", "line1\nline2\nline3");
+        answered.tool_call_id = "call_read".to_string();
+        let standalone = make_context_file_msg("src/dup.rs", "line1\nline2\nline3\nline4");
+        let mut messages = vec![answered, standalone];
+
+        let (count, _) = compress_duplicate_context_files(&mut messages).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(messages[0].role, "context_file");
+        assert_eq!(messages[0].tool_call_id, "call_read");
+        assert!(messages[0]
+            .content
+            .content_text_only()
+            .contains("Duplicate files compressed"));
+        assert_eq!(messages[1].role, "context_file");
+    }
+
+    #[test]
+    fn test_dedup_swaps_role_for_unanswered_duplicates() {
+        let small = make_context_file_msg("src/dup.rs", "line1\nline2\nline3");
+        let large = make_context_file_msg("src/dup.rs", "line1\nline2\nline3\nline4");
+        let mut messages = vec![small, large];
+
+        let (count, _) = compress_duplicate_context_files(&mut messages).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(messages[0].role, "cd_instruction");
+    }
+
+    #[test]
+    fn test_compute_context_budget_counts_tool_call_arguments() {
+        let plain = vec![make_user_msg_basic("short")];
+        let mut with_args = plain.clone();
+        with_args.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "call_big".to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "write".to_string(),
+                    arguments: "x".repeat(40_000),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        });
+
+        let baseline = compute_context_budget(&plain, 100_000).used_tokens_estimate;
+        let with_args_estimate = compute_context_budget(&with_args, 100_000).used_tokens_estimate;
+
+        assert!(with_args_estimate > baseline + 9_000);
     }
 }

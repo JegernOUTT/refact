@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from "react";
-import { Button, Flex, Tabs, Text, SegmentedControl } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import { ArrowLeft } from "lucide-react";
+import { Button, Tabs, SegmentedControl } from "../../components/ui";
 import { PageWrapper } from "../../components/PageWrapper";
 import type { Config } from "../Config/configSlice";
 import type { DateRange, DateRangePreset } from "./types";
@@ -16,12 +16,18 @@ export type StatsDashboardProps = {
   backFromDashboard: () => void;
 };
 
+const rangeOptions = [
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "all", label: "All time" },
+];
+
 export const StatsDashboard: React.FC<StatsDashboardProps> = ({
   host,
-  tabbed,
   backFromDashboard,
 }) => {
   const [dateRange, setDateRange] = useState<DateRange>({ preset: "7d" });
+  const [activeTab, setActiveTab] = useState("overview");
 
   const handlePresetChange = useCallback((preset: string) => {
     setDateRange({ preset: preset as DateRangePreset });
@@ -29,34 +35,38 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
 
   return (
     <PageWrapper host={host}>
-      <Flex direction="column" gap="3" style={{ height: "100%" }}>
-        <Flex justify="between" align="center">
-          {host === "vscode" && !tabbed ? (
-            <Button variant="surface" onClick={backFromDashboard}>
-              <ArrowLeftIcon width="16" height="16" />
-              Back
-            </Button>
-          ) : (
-            <Button variant="outline" onClick={backFromDashboard}>
-              Back
-            </Button>
-          )}
-          <Text size="5" weight="bold">
-            Usage Dashboard
-          </Text>
-          <SegmentedControl.Root
-            value={dateRange.preset}
-            onValueChange={handlePresetChange}
-            size="1"
+      <div className={styles.root}>
+        <header className={styles.header}>
+          <Button
+            leftIcon={ArrowLeft}
+            onClick={backFromDashboard}
+            size="sm"
+            variant="ghost"
           >
-            <SegmentedControl.Item value="7d">7 days</SegmentedControl.Item>
-            <SegmentedControl.Item value="30d">30 days</SegmentedControl.Item>
-            <SegmentedControl.Item value="all">All time</SegmentedControl.Item>
-          </SegmentedControl.Root>
-        </Flex>
+            Back
+          </Button>
+          <h2 className={styles.title}>Usage Dashboard</h2>
+          <SegmentedControl
+            aria-label="Usage date range"
+            className={styles.rangeControls}
+            onValueChange={handlePresetChange}
+            options={rangeOptions}
+            size="sm"
+            value={dateRange.preset}
+          />
+        </header>
 
-        <Tabs.Root defaultValue="overview" className={styles.tabsRoot}>
-          <Tabs.List>
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          className={styles.tabsRoot}
+        >
+          <Tabs.List
+            activeIndex={["overview", "usage", "threads", "tasks"].indexOf(
+              activeTab,
+            )}
+            className={styles.tabsList}
+          >
             <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
             <Tabs.Trigger value="usage">LLM Usage</Tabs.Trigger>
             <Tabs.Trigger value="threads">Threads</Tabs.Trigger>
@@ -67,19 +77,28 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
             <OverviewTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="usage" className={styles.tabContent}>
+          <Tabs.Content
+            value="usage"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <UsageTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="threads" className={styles.tabContent}>
+          <Tabs.Content
+            value="threads"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <ThreadsTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="tasks" className={styles.tabContent}>
+          <Tabs.Content
+            value="tasks"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <TasksTab dateRange={dateRange} />
           </Tabs.Content>
-        </Tabs.Root>
-      </Flex>
+        </Tabs>
+      </div>
     </PageWrapper>
   );
 };

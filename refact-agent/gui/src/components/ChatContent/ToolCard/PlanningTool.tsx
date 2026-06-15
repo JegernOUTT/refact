@@ -1,5 +1,5 @@
+import { Target } from "lucide-react";
 import React from "react";
-import { TargetIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard } from "./ReportToolCard";
 
@@ -11,9 +11,10 @@ export const PlanningTool: React.FC<PlanningToolProps> = ({ toolCall }) => {
   return (
     <ReportToolCard
       toolCall={toolCall}
-      icon={<TargetIcon />}
+      icon={<Target />}
       defaultSummary="Plan solution"
       variant="plan"
+      unboundedContent
     />
   );
 };

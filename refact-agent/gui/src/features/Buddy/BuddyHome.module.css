@@ -1,814 +1,188 @@
-/* -------------------------------------------------------------------------
- * Buddy homepage layout
- * - transparent page background to inherit the host window
- * - fixed-shell pattern: the page itself never scrolls; only list cards do
- * - on narrow IDE/webview widths the page falls back to natural scrolling
- *   so all stacked cards remain reachable
- * ------------------------------------------------------------------------- */
-
 .page {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   background: transparent;
+  color: var(--rf-color-fg);
 }
 
 .content {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   flex: 1 1 0;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
-/* ---------- Shared action chip (declared early so composes can reach
- * it from .careButton / .setupChip below). Unified pill shape used by
- * every clickable Buddy-home action: care, project setup, persona
- * footer, recent-error actions, view-stats, etc. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 9999px;
-  border: 1px solid var(--gray-a4);
-  background: var(--gray-a2);
-  color: var(--gray-12);
-  font-size: 11px;
-  font-family: inherit;
-  line-height: 1.4;
-  cursor: pointer;
-  transition:
-    background 0.12s,
-    border-color 0.12s;
-  white-space: nowrap;
-  min-width: 0;
+.contentPadded,
+.homeContent {
+  padding: var(--rf-space-3);
 }
 
-.chip:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a6);
+.homeContent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
 }
 
-.chip:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: 1px;
-}
-
-.chip:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.chipPrimary {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
-  font-weight: 600;
-}
-
-.chipPrimary:hover {
-  background: var(--accent-a4);
-  border-color: var(--accent-a7);
-}
-
-.chipGhost {
-  background: transparent;
-  border-color: transparent;
-  color: var(--gray-11);
-}
-
-.chipGhost:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a4);
+/* The scroll container is a flex column; children must never flex-shrink
+ * or panels with overflow: hidden collapse to zero height. */
+.homeContent > * {
+  flex-shrink: 0;
 }
 
 .topBar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-a4);
+  gap: var(--rf-space-2);
   flex-shrink: 0;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
   background: transparent;
 }
 
 .topTitle {
-  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   letter-spacing: 0.02em;
-  flex: 1;
+}
+
+/* Hero — the world canvas owns the full card width; identity moved to the
+ * summary strip below so no column steals horizontal space from the scene. */
+.heroCard {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: center;
+  padding: var(--rf-space-2);
 }
 
-/* ---------- Hero ---------- */
+.heroCard [data-testid="buddy-world"] {
+  height: clamp(280px, 38vh, 430px);
+  min-height: 240px;
+  margin: 0;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-surface-2);
+}
 
-.hero {
+/* Project setup strip — pinned right below the identity bar. */
+.setupStrip {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  padding: var(--space-1) var(--space-3) var(--space-2);
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.scene {
-  position: relative;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.glowWrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.glow {
-  position: absolute;
-  inset: -12px;
-  border-radius: 50%;
-  opacity: 0.25;
-  filter: blur(20px);
-  pointer-events: none;
-}
-
-.stageBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border-radius: 9999px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.statusText {
-  font-size: 12px;
-  color: var(--gray-11);
-  text-align: center;
-  min-height: 16px;
-}
-
-.setupChips {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-  justify-content: center;
   flex-wrap: wrap;
-}
-
-.careBar {
-  display: flex;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-/* Care actions reuse the shared .chip class via composes — kept as an
- * alias so the existing JSX (.careButton) keeps working. */
-.careButton {
-  composes: chip;
-}
-
-/* ---------- Now-playing status bubble ---------- */
-
-.statusBubble {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
-  font-size: 11px;
-  max-width: 320px;
-  width: 100%;
-  transition: opacity 0.3s;
-}
-
-.statusIcon {
-  flex-shrink: 0;
-}
-
-.statusContent {
-  flex: 1;
+  gap: var(--rf-space-2);
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  padding: var(--rf-space-2) var(--rf-space-3);
 }
 
-.statusTitle {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.setupLabel {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   white-space: nowrap;
-  color: var(--gray-12);
 }
 
-.progressBar {
-  height: 3px;
-  background: var(--gray-a4);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.progressBar > div {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent-9);
-  transition: width 0.3s ease;
-}
-
-/* ---------- Compact summary strip (replaces STATUS card) ---------- */
-
-.summaryStrip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  row-gap: var(--space-1);
-  padding: 6px var(--space-3);
-  margin: 0 var(--space-3) var(--space-2);
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  flex-shrink: 0;
-}
-
-.statItem {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 56px;
-}
-
-.statItemGrow {
-  flex: 0 1 180px;
-  min-width: 140px;
-}
-
-.statItemHeader {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2);
-  width: 100%;
-}
-
-/* Inline value + bar used by the Growth stat so its baseline sits on the
- * same row as the other stat values (Care, Neglect, Messages, …). */
-.statItemValueRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-}
-
-.statItemDivider {
-  width: 1px;
-  align-self: stretch;
-  background: var(--gray-a4);
-  flex-shrink: 0;
-}
-
-.statSpacer {
-  flex: 1 1 auto;
-}
-
-/* ---------- Layout rows (responsive 2-column) ---------- */
-
-.row {
+.mainGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
-  gap: var(--space-2);
-  padding: 0 var(--space-3) var(--space-2);
-  min-height: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--rf-space-3);
   min-width: 0;
 }
 
-.row3 {
-  grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-}
-
-/* Single full-width row used by the unified PERSONALITY panel. */
-.rowSingle {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.rowFlex {
+.panelColumn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
   min-height: 0;
 }
 
-.rowFlexBottom {
-  grid-template-rows: clamp(180px, 30vh, 360px);
-  grid-auto-rows: clamp(180px, 30vh, 360px);
+.panelSlot {
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+.panelSlotOpportunities,
+.panelSlotChats,
+.panelSlotActivity {
+  height: clamp(300px, 34vh, 360px);
+}
+
+.panelSlotPersonality {
+  height: clamp(300px, 34vh, 360px);
+}
+
+.panelSlotPulse {
+  height: clamp(230px, 27vh, 290px);
+}
+
+.panelSlotErrors {
+  height: clamp(270px, 31vh, 330px);
 }
 
 .settingsSection {
-  padding: 0 var(--space-3) var(--space-3);
-}
-
-.disabledState {
-  min-height: 220px;
-  padding: var(--space-5) var(--space-3);
-}
-
-/* Slim chip strip used for project-setup quick actions placed inline
- * below the summary; intentionally has no panel chrome of its own. */
-.chipStrip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 var(--space-3) var(--space-2);
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.chipStripLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-  color: var(--gray-10);
-  margin-right: var(--space-1);
-}
-
-/* ---------- Shared panel (used by every card on the page) ---------- */
-
-.panel {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-2) var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
   min-width: 0;
-  min-height: 0;
-}
-
-/* Marker class: the panel itself acts as a clipping context so its inner
- * .scrollList becomes the only scrollable region. */
-.panelScroll {
   overflow: hidden;
 }
 
-/* Scrollable list area inside a panel — keeps the panel header fixed and
- * lets only the entries scroll, sharing the same scrollbar treatment as
- * the rest of the app. overflow-x must be explicit because UAs promote
- * `visible` to `auto` whenever overflow-y is auto/scroll, which would
- * otherwise produce a stray horizontal scrollbar. */
-.scrollList {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  min-height: 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-@media (max-width: 980px) {
-  .row3 {
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  }
-}
-
-@media (max-width: 720px) {
-  .row,
-  .row3 {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 520px) {
-  .rowFlexBottom {
-    grid-template-rows: auto;
-    grid-auto-rows: auto;
-    min-height: 0;
-  }
-  .panelScroll {
-    overflow: visible;
-  }
-  .scrollList {
-    overflow-y: visible;
-    overflow-x: hidden;
-    flex: 0 0 auto;
-  }
-}
-
-.panelHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.panelTitleGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.settingsSection > * {
   min-width: 0;
 }
 
-.sectionLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
-/* ---------- Unified personality + care panel ---------- */
-
-/* Three-column inner grid that lays out NEEDS, TRAITS, SKILLS side by
- * side inside a single panel. Collapses to one column on narrow IDEs. */
-.personaGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
-  align-items: start;
-}
-
-.personaSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.draftSection {
   min-width: 0;
-}
-
-@media (max-width: 980px) {
-  .personaGrid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 720px) {
-  .personaGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.personaPanel {
-  gap: var(--space-2);
-}
-
-/* ---------- Care loop card content ---------- */
-
-/* Single-column list inside the narrow personaGrid section. With 5
- * items, a 2-column grid produces an awkward orphan row; a single
- * column keeps the rhythm consistent with SKILLS and lets the bars
- * breathe across the full available width. */
-.needsGrid {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.needRow {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.needHeader {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--gray-11);
-}
-
-.needBar {
-  height: 6px;
-  background: var(--gray-a4);
-  border-radius: 9999px;
-  overflow: hidden;
-}
-
-.needFill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
-  border-radius: 9999px;
-  transition: width 0.4s ease;
-}
-
-/* ---------- Personality card content ---------- */
-
-.personalitySummary {
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.questCard {
-  margin-top: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--accent-a5);
-  border-radius: var(--radius-3);
-  background: linear-gradient(180deg, var(--accent-a2), transparent);
-}
-
-.questHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.questDescription {
-  line-height: 1.45;
-}
-
-.questProgressRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.questProgressBar {
-  height: 6px;
-  border-radius: 9999px;
-  overflow: hidden;
-  background: var(--gray-a4);
-}
-
-.questProgressFill {
-  height: 100%;
-  border-radius: 9999px;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
-  transition: width 0.35s ease;
-}
-
-.questControls {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
-/* Traits share the exact same row layout as needs (label on top, numeric
- * value on the right, progress bar underneath) so the two sections read
- * as one consistent stat block. */
-/* Traits mirror the needs layout — single column keeps the visual
- * cadence of label/value/bar stacked vertically and avoids leaving the
- * 5th item alone on its own row. */
-.traitsGrid {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.traitRow {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.traitHeader {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--gray-11);
-}
-
-.traitName {
-  text-transform: capitalize;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.traitValue {
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.skillsRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.skillChip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 8px;
-  border-radius: 9999px;
-  background: var(--gray-a3);
-  font-size: 11px;
-}
-
-.settingsRow {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
-/* Footer button strip used by the unified persona panel and quest card.
- * Pinning to the bottom (margin-top: auto) keeps controls aligned even
- * when the surrounding content varies in length. */
-.actionRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: auto;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--gray-a3);
-}
-
-/* ---------- XP bar (used in summary strip) ---------- */
-
-.xpBar {
-  height: 6px;
-  background: var(--gray-a4);
-  border-radius: 3px;
-  overflow: hidden;
-  width: 100%;
-}
-
-.xpFill {
-  height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
-  transition: width 0.5s ease;
-}
-
-/* ---------- Project setup card content ---------- */
-
-.setupChipsList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* Project-setup chip reuses the shared .chip class for visual parity
- * with care/persona/error actions. */
-.setupChip {
-  composes: chip;
-}
-
-.setupChipPrimary {
-  composes: chipPrimary;
-}
-
-/* ---------- Shared list rows (activity / workflows) ---------- */
-
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.listRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 6px 8px;
-  border-radius: var(--radius-2);
-  min-width: 0;
-  background: transparent;
-  transition: background 0.12s;
-  cursor: default;
-  text-align: left;
-  border: none;
-  width: 100%;
-  color: inherit;
-  font: inherit;
-}
-
-.listRow[data-clickable] {
-  cursor: pointer;
-}
-
-.listRow:hover,
-.listRow:focus-visible {
-  background: var(--gray-a3);
-  outline: none;
-}
-
-.listIcon {
-  flex-shrink: 0;
-  font-size: 14px;
-  width: 18px;
-  text-align: center;
-}
-
-.listContent {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.listTitle {
-  font-size: 12px;
-  color: var(--gray-12);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-transform: none;
-}
-
-.listSubtitle {
-  font-size: 10px;
-  color: var(--gray-10);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.listMeta {
-  flex-shrink: 0;
-  font-size: 10px;
-  color: var(--gray-9);
-  white-space: nowrap;
-}
-
-.emptyText {
-  color: var(--gray-9);
-  font-size: 11px;
-  padding: var(--space-2) var(--space-1);
-}
-
-/* Recent errors panel — extends .listRow with per-card actions and a muted
- * "acknowledged" state so previously-dismissed errors stay in the history but
- * fade out visually. */
-.errorRow {
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: 8px;
-  flex-wrap: wrap;
-}
-
-.errorRowAcknowledged {
-  opacity: 0.55;
-}
-
-.errorRowAcknowledged .listTitle,
-.errorRowAcknowledged .listSubtitle {
-  color: var(--gray-10);
-}
-
-.ackBadge {
-  display: inline-block;
-  margin-left: var(--space-2);
-  padding: 0 6px;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--gray-11);
-  background: var(--gray-a3);
-  border-radius: var(--radius-2);
-  vertical-align: 1px;
-}
-
-/* Occurrence count badge for deduplicated errors. Sits flush against
- * the title with a tabular feel — "TypeError ×4" — and uses the
- * accent palette so the eye lands on the multiplier first. */
-.countBadge {
-  display: inline-block;
-  margin-left: var(--space-2);
-  padding: 0 6px;
-  font-size: 10px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent-11);
-  background: var(--accent-a3);
-  border-radius: var(--radius-2);
-  vertical-align: 1px;
-}
-
-.errorActions {
-  display: flex;
-  flex-shrink: 0;
-  gap: var(--space-1);
-  align-items: center;
 }
 
 .draftPanel {
-  gap: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
+.draftHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.draftTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+}
+
+.draftLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .draftMeta {
   max-width: 40%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -816,26 +190,89 @@
 
 .draftContent {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  max-height: 260px;
   margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-a3);
-  color: var(--gray-12);
-  font-family: var(--font-mono);
+  padding: var(--rf-space-3);
+  overflow: auto;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 260px;
-  overflow: auto;
 }
 
 .draftActions {
   display: flex;
-  gap: var(--space-2);
   flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
-/* Recent chats panel uses the shared .panel; its internals already render
-   their own header/filters/rows from BuddyRecentChats. */
+.unavailableBody {
+  flex: 1;
+}
+
+.disabledState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-height: min(360px, 60vh);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
+@media (max-width: 1100px) {
+  .mainGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .contentPadded,
+  .homeContent {
+    padding: var(--rf-space-2);
+  }
+
+  .heroCard [data-testid="buddy-world"] {
+    height: 250px;
+    min-height: 220px;
+  }
+
+  .mainGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panelSlot {
+    height: min(420px, 70vh);
+  }
+
+  .draftMeta {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .homeContent,
+  .mainGrid {
+    gap: var(--rf-space-2);
+  }
+
+  .heroCard {
+    padding: var(--rf-space-1);
+  }
+
+  .heroCard [data-testid="buddy-world"] {
+    height: 230px;
+    min-height: 210px;
+  }
+
+  .setupStrip {
+    padding: var(--rf-space-2);
+  }
+}

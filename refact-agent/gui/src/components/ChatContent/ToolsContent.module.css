@@ -1,0 +1,59 @@
+.toolUsageSummary {
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.toolUsageSummary:hover {
+  filter: brightness(1.3);
+}
+
+.toolGroupGrid {
+  pointer-events: none;
+}
+
+.toolGroupGrid[data-open="true"] {
+  pointer-events: auto;
+}
+
+.toolGroupBody {
+  opacity: 0;
+  transform: translateY(-8px) translateZ(0);
+}
+
+.toolGroupGrid[data-open="true"] .toolGroupBody {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
+}
+
+.toolUsageSummaryBody {
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toolGroupGrid {
+    transition: grid-template-rows 170ms var(--rf-ease-entrance);
+  }
+
+  .toolGroupBody {
+    transition:
+      opacity 170ms var(--rf-ease-entrance),
+      transform 170ms var(--rf-ease-entrance);
+    will-change: opacity, transform;
+  }
+
+  .toolGroupGrid:not([data-open="true"]) .toolGroupBody {
+    will-change: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolGroupGrid,
+  .toolUsageSummary,
+  .toolGroupBody {
+    transition: none;
+  }
+
+  .toolGroupBody {
+    transform: none;
+  }
+}

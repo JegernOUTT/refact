@@ -10,7 +10,6 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
-use crate::files_correction::get_project_dirs;
 
 pub struct ToolTrajectoryContext {
     pub config_path: String,
@@ -107,11 +106,14 @@ impl Tool for ToolTrajectoryContext {
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let project_dirs = get_project_dirs(gcx.clone()).await;
-        let traj_path = project_dirs.iter()
-            .map(|dir| dir.join(".refact/trajectories").join(format!("{}.json", trajectory_id)))
-            .find(|p| p.exists())
-            .ok_or(format!("⚠️ Trajectory '{}' not found. 💡 Check .refact/trajectories/ or use knowledge() to search", trajectory_id))?;
+        crate::chat::trajectories::validate_trajectory_id(&trajectory_id).map_err(|e| e.message)?;
+        let traj_path =
+            crate::chat::trajectories::find_trajectory_path(gcx.clone(), &trajectory_id)
+                .await
+                .ok_or(format!(
+            "⚠️ Trajectory '{}' not found. 💡 Check trajectory lists or use knowledge() to search",
+            trajectory_id
+        ))?;
 
         let content = fs::read_to_string(&traj_path)
             .await

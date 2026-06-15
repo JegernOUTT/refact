@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import classNames from "classnames";
-import { Cross1Icon } from "@radix-ui/react-icons";
+import { X } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBrowserRuntime,
@@ -90,7 +90,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
   }, [dispatch, chatId]);
 
   return (
-    <div className={styles.browserPanel}>
+    <div className={classNames(styles.browserPanel, "rf-enter")}>
       <BrowserToolbar chatId={chatId} />
       {notification && (
         <div
@@ -106,7 +106,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
             notification.type === "timeout") && (
             <button
               type="button"
-              className={styles.restartButton}
+              className={classNames(styles.restartButton, "rf-pressable")}
               onClick={handleRestart}
             >
               Restart
@@ -118,7 +118,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
             onClick={handleDismissNotification}
             aria-label="Dismiss browser notification"
           >
-            <Cross1Icon />
+            <X size={13} />
           </button>
         </div>
       )}
@@ -134,7 +134,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
         </span>
         <button
           type="button"
-          className={classNames(styles.timelineToggle, {
+          className={classNames(styles.timelineToggle, "rf-pressable", {
             [styles.timelineToggleActive]: timelineOpen,
           })}
           onClick={handleToggleTimeline}
@@ -144,7 +144,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
         </button>
       </div>
       {frame && (
-        <div className={styles.frameContainer}>
+        <div className={classNames(styles.frameContainer, "rf-enter-rise")}>
           <img
             className={styles.frameImage}
             src={`data:${frame.mime};base64,${frame.data}`}
@@ -153,7 +153,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
         </div>
       )}
       {!frame && isConnected && (
-        <div className={styles.frameContainer}>
+        <div className={classNames(styles.frameContainer, "rf-enter-rise")}>
           <span className={styles.framePlaceholder}>
             Waiting for browser frame…
           </span>

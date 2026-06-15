@@ -6,7 +6,8 @@ import React, {
   useState,
 } from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
-import { Flex, Popover, Text } from "@radix-ui/themes";
+import { GitBranch } from "lucide-react";
+import { Icon, Popover } from "../../components/ui";
 import {
   DEFAULT_MODE,
   selectChatId,
@@ -31,7 +32,6 @@ import {
   CreateWorktreeModal,
   type CreateWorktreeValues,
 } from "./CreateWorktreeModal";
-import { BranchIcon } from "./BranchIcon";
 import { WorktreeMenu } from "./WorktreeMenu";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 import { worktreeErrorText } from "./worktreeError";
@@ -342,8 +342,8 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
 
   return (
     <>
-      <Popover.Root open={menuOpen} onOpenChange={handleMenuOpenChange}>
-        <Popover.Trigger>
+      <Popover open={menuOpen} onOpenChange={handleMenuOpenChange}>
+        <Popover.Trigger asChild>
           <button
             type="button"
             data-testid="worktree-control-trigger"
@@ -354,15 +354,16 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
             aria-label={`Worktree scope: ${triggerLabel}`}
             disabled={disabled}
           >
-            <Flex align="center" gap="1" className={styles.triggerInner}>
+            <span className={styles.triggerInner}>
               {!currentWorktree && sourceBranch && (
-                <span className={styles.branchIcon} aria-hidden="true">
-                  <BranchIcon />
-                </span>
+                <Icon
+                  icon={GitBranch}
+                  size="sm"
+                  tone="muted"
+                  className={styles.branchIcon}
+                />
               )}
-              <Text size="1" className={styles.triggerText}>
-                {label}
-              </Text>
+              <span className={styles.triggerText}>{label}</span>
               {currentWorktree && (
                 <WorktreeStatusBadge
                   worktree={currentWorktree}
@@ -371,7 +372,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
                   deletions={currentDiff?.stats.deletions}
                 />
               )}
-            </Flex>
+            </span>
           </button>
         </Popover.Trigger>
         <WorktreeMenu
@@ -390,7 +391,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           onOpenInNewWindow={() => void handleOpenInNewWindow()}
           onCopyPath={handleCopyPath}
         />
-      </Popover.Root>
+      </Popover>
 
       <CreateWorktreeModal
         open={createOpen}

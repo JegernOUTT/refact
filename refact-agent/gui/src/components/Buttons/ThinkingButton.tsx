@@ -1,16 +1,10 @@
 import React from "react";
+import { Flex, HoverCard, Text } from "@radix-ui/themes";
+import { WandSparkles } from "lucide-react";
 import { useThinking } from "../../hooks/useThinking";
 import { useAppSelector } from "../../hooks";
 import { selectThreadBoostReasoning } from "../../features/Chat";
-import { Button, Flex, HoverCard, Skeleton, Text } from "@radix-ui/themes";
-import { MagicWandIcon } from "@radix-ui/react-icons";
-
-const ThinkButtonContent: React.FC = () => (
-  <Flex as="span" align="center" gap="1">
-    <MagicWandIcon />
-    Think
-  </Flex>
-);
+import { Button, Skeleton } from "../ui";
 
 export const ThinkingButton: React.FC = () => {
   const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
@@ -23,11 +17,7 @@ export const ThinkingButton: React.FC = () => {
   } = useThinking();
   if (!areCapsInitialized) {
     return (
-      <Skeleton>
-        <Button size="1">
-          <ThinkButtonContent />
-        </Button>
-      </Skeleton>
+      <Skeleton height="var(--rf-control-h-sm)" radius="control" width="76px" />
     );
   }
 
@@ -40,14 +30,15 @@ export const ThinkingButton: React.FC = () => {
       <HoverCard.Root>
         <HoverCard.Trigger>
           <Button
-            size="1"
+            leftIcon={WandSparkles}
+            size="sm"
             onClick={(event) =>
               handleReasoningChange(event, !isBoostReasoningEnabled)
             }
-            variant={isBoostReasoningEnabled ? "solid" : "outline"}
+            variant={isBoostReasoningEnabled ? "primary" : "soft"}
             disabled={shouldBeDisabled}
           >
-            <ThinkButtonContent />
+            Think
           </Button>
         </HoverCard.Trigger>
         <HoverCard.Content

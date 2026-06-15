@@ -95,7 +95,7 @@ prompt: |
 
   ### 2. Research — understand what good skills look like
   - `web_search()` / `web()` for best practices if the skill involves an unfamiliar framework, external tool, or process
-  - `shell()` to validate concrete commands the skill tells the agent to run, preferring `--help`, `--version`, dry-run, or other read-only checks first. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
+  - `shell()` to validate concrete commands the skill tells the agent to run, preferring `--help`, `--version`, dry-run, or other read-only checks first. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled checks.
   - `knowledge()` to check if any relevant project patterns are already recorded
 
   Before proposing a new skill, check whether the same skill name already exists in project-local or user/global scope.
@@ -189,6 +189,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - search_trajectories
   - get_trajectory_context
   - knowledge
@@ -239,6 +240,8 @@ tool_confirm:
     - match: "process_kill"
       action: ask
     - match: "cron_create"
+      action: ask
+    - match: "cron_update"
       action: ask
     - match: "create_textdoc"
       action: ask

@@ -247,7 +247,10 @@ fn build_chat_model_record(
                 caps.reasoning_effort_options.clone(),
                 caps.supports_thinking_budget,
                 caps.supports_adaptive_thinking_budget,
-                caps.tokenizer.clone(),
+                model
+                    .tokenizer
+                    .clone()
+                    .unwrap_or_else(|| caps.tokenizer.clone()),
                 caps.supports_clicks,
                 effective_max_output,
                 caps.supports_parallel_tools,
@@ -265,10 +268,7 @@ fn build_chat_model_record(
             model.reasoning_effort_options.clone(),
             model.supports_thinking_budget,
             model.supports_adaptive_thinking_budget,
-            model
-                .tokenizer
-                .clone()
-                .unwrap_or_else(|| "fake".to_string()),
+            model.tokenizer.clone().unwrap_or_default(),
             false,
             model.max_output_tokens,
             model.supports_parallel_tools,
@@ -293,6 +293,30 @@ fn build_chat_model_record(
         _ => "openai",
     }
     .to_string();
+    let tokenizer = if tokenizer.trim().is_empty() {
+        base_provider_names
+            .iter()
+            .find_map(|base_provider| {
+                refact_core::model_caps::predefined_cloud_tokenizer_for_model(
+                    base_provider,
+                    &model_id,
+                )
+            })
+            .or_else(|| {
+                refact_core::model_caps::predefined_cloud_tokenizer_for_model(
+                    provider_name,
+                    &model_id,
+                )
+            })
+            .unwrap_or("fake")
+            .to_string()
+    } else {
+        refact_core::model_caps::normalize_tokenizer_or_default(
+            provider_name,
+            &model_id,
+            &tokenizer,
+        )
+    };
 
     ChatModelRecord {
         base: BaseModelRecord {
@@ -1436,6 +1460,114 @@ mod tests {
         assert_eq!(record.base.tokenizer, "openai-tokenizer");
         assert!(record.supports_tools);
         assert!(record.supports_strict_tools);
+    }
+
+    #[test]
+    fn test_build_chat_model_record_migrates_missing_tokenizers_to_defaults() {
+        let model = AvailableModel {
+            id: "gpt-4.1".to_string(),
+            display_name: None,
+            n_ctx: 128_000,
+            supports_tools: false,
+            supports_parallel_tools: false,
+            supports_strict_tools: false,
+            supports_multimodality: false,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            supports_cache_control: false,
+            tokenizer: None,
+            enabled: true,
+            is_custom: false,
+            pricing: None,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            provider_variants: Vec::new(),
+            wire_format_override: None,
+            endpoint_override: None,
+            base_model: None,
+        };
+
+        let openai_record = build_chat_model_record(
+            "openai",
+            &[],
+            &model,
+            &HashMap::new(),
+            WireFormat::OpenaiChatCompletions,
+            "https://api.openai.com/v1/chat/completions",
+            "sk-test",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(
+            openai_record.base.tokenizer,
+            refact_core::model_caps::OPENAI_CLOUD_TOKENIZER
+        );
+
+        let mut instance_model = model.clone();
+        instance_model.id = "custom-named-model".to_string();
+        let instance_record = build_chat_model_record(
+            "openai_2",
+            &["openai".to_string()],
+            &instance_model,
+            &HashMap::new(),
+            WireFormat::OpenaiChatCompletions,
+            "https://api.openai.com/v1/chat/completions",
+            "sk-test",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(
+            instance_record.base.tokenizer,
+            refact_core::model_caps::OPENAI_CLOUD_TOKENIZER
+        );
+
+        let mut explicit_model = model.clone();
+        explicit_model.tokenizer = Some("hf://custom/tokenizer".to_string());
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            "openai/gpt-4.1".to_string(),
+            ModelCapabilities {
+                tokenizer: refact_core::model_caps::OPENAI_CLOUD_TOKENIZER.to_string(),
+                ..Default::default()
+            },
+        );
+        let explicit_record = build_chat_model_record(
+            "openai",
+            &[],
+            &explicit_model,
+            &model_caps,
+            WireFormat::OpenaiChatCompletions,
+            "https://api.openai.com/v1/chat/completions",
+            "sk-test",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(explicit_record.base.tokenizer, "hf://custom/tokenizer");
+
+        let mut unknown_model = model;
+        unknown_model.id = "unknown-model".to_string();
+        let unknown_record = build_chat_model_record(
+            "custom_provider",
+            &[],
+            &unknown_model,
+            &HashMap::new(),
+            WireFormat::OpenaiChatCompletions,
+            "http://localhost/v1/chat/completions",
+            "",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(unknown_record.base.tokenizer, "fake");
     }
 
     #[test]

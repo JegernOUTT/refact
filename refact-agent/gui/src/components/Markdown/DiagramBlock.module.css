@@ -1,29 +1,47 @@
 .diagram_container {
   position: relative;
-  border-radius: var(--radius-3);
-  background-color: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
+  min-width: 0;
+  max-width: 100%;
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .diagram_container {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .diagram_container {
+  backdrop-filter: none;
 }
 
 .diagram_toolbar {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   position: absolute;
-  top: var(--space-2);
-  right: var(--space-2);
+  top: var(--rf-space-2);
+  right: var(--rf-space-2);
   z-index: 2;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s ease;
-  background-color: var(--gray-a3);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: var(--radius-2);
-  padding: 2px;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  background: var(--rf-surface-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  -webkit-backdrop-filter: blur(var(--rf-blur-overlay));
+  border-radius: var(--rf-radius-ctl);
+  padding: calc(var(--rf-space-1) / 2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diagram_toolbar {
+    transition: none;
+  }
 }
 
 .diagram_container:hover .diagram_toolbar,
@@ -33,9 +51,9 @@
 }
 
 .diagram_zoom_info {
-  font-size: var(--font-size-1);
-  color: var(--gray-a9);
-  padding: 0 var(--space-1);
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+  padding: 0 var(--rf-space-1);
   min-width: 36px;
   text-align: center;
   font-variant-numeric: tabular-nums;
@@ -43,10 +61,12 @@
 
 .diagram_canvas {
   position: relative;
-  height: 500px;
+  height: clamp(240px, 50vh, 560px);
   cursor: grab;
   touch-action: none;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .diagram_canvas_dragging {
@@ -63,19 +83,50 @@
   height: 100%;
 }
 
+/* Non-interactive fallback when SVG metadata cannot be derived. */
+.diagram_fallback {
+  overflow: auto;
+  max-height: clamp(240px, 50vh, 560px);
+  padding: var(--rf-space-3);
+}
+
+.diagram_fallback svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Standalone SVG preview: intrinsic sizing on a content-neutral checkerboard
+   so both dark-on-transparent and light-on-transparent artwork stay
+   readable in either app theme. */
+.svg_render {
+  padding: var(--rf-space-3);
+  overflow: auto;
+  max-height: clamp(240px, 60vh, 640px);
+  background: repeating-conic-gradient(#cfcfcf 0% 25%, #bcbcbc 0% 50%) 0 0 /
+    16px 16px;
+}
+
+.svg_render svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
 .diagram_loading {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: var(--space-4);
-  height: 500px;
-  color: var(--gray-9);
-  font-size: var(--font-size-2);
+  padding: var(--rf-space-4);
+  height: clamp(240px, 50vh, 560px);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
 }
 
 .error_hint {
-  padding: var(--space-2) var(--space-3);
-  color: var(--red-9);
-  font-size: var(--font-size-1);
-  border-top: 1px solid var(--gray-a4);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }

@@ -1,16 +1,27 @@
 pub mod cron_expr;
+pub mod delivery;
+pub mod exec_action;
 pub mod jitter;
+pub mod retry;
 pub mod runner;
+pub mod schedule;
 pub mod store;
 pub mod types;
 
-pub use cron_expr::{CronSchedule, human_schedule, next_run_ms, parse_cron};
+pub use cron_expr::{CronSchedule, human_schedule, next_run_ms as cron_next_run_ms, parse_cron};
 pub use runner::{runner_change_notify, session_cron_store, CronRunner, spawn, spawn_if_enabled};
+pub use retry::{classify, RetryCategory, RetryConfig};
+pub use schedule::{
+    missed_run_grace_ms, next_run_ms, recurring_missed_grace_state, MissedRunGraceConfig,
+    RecurringMissedGraceState, ScheduleTarget,
+};
 pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCronStore};
 pub use types::{
-    CronCreatePolicy, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_JOBS,
-    DURABLE_DISABLED_NOTE, SCHEDULER_DISABLE_ENV, SCHEDULER_DISABLED_ERROR, ScheduledTask,
-    SchedulerConfig, cron_create_policy,
+    Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, Delivery,
+    DEFAULT_MISSED_GRACE_MAX_MS, DEFAULT_MISSED_GRACE_MIN_MS,
+    DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS,
+    DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job, RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV,
+    SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger, cron_create_policy, delivery_from_value,
 };
 
 pub fn scheduler_timezone() -> chrono_tz::Tz {
@@ -75,7 +86,7 @@ mod tests {
         let config = SchedulerConfig::default().with_startup_overrides(false);
 
         assert!(!config.enabled);
-        assert!(spawn_if_enabled(memory_store(), config).is_none());
+        assert!(spawn_if_enabled(memory_store(), config.clone()).is_none());
         assert_eq!(
             cron_create_policy(&config, false),
             Err(SCHEDULER_DISABLED_ERROR.to_string())
@@ -89,7 +100,7 @@ mod tests {
             ..SchedulerConfig::default()
         };
 
-        assert!(spawn_if_enabled(memory_store(), config).is_none());
+        assert!(spawn_if_enabled(memory_store(), config.clone()).is_none());
         assert_eq!(
             cron_create_policy(&config, true),
             Err(SCHEDULER_DISABLED_ERROR.to_string())

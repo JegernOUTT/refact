@@ -1,5 +1,6 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Text } from "../../components/ui";
 import {
   GearIcon,
   CubeIcon,
@@ -55,12 +56,20 @@ export const BuddyWorkshop: React.FC = () => {
   const executeAction = useExecuteBuddyAction();
 
   return (
-    <nav className={styles.workshop} data-testid="buddy-workshop">
+    <nav
+      className={classNames(
+        styles.workshop,
+        "rf-glass-panel",
+        "rf-enter-rise",
+        "rf-stagger",
+      )}
+      data-testid="buddy-workshop"
+    >
       {WORKSHOP_ITEMS.map((item) => (
         <button
           key={item.label}
           type="button"
-          className={styles.navButton}
+          className={classNames(styles.navButton, "rf-pressable")}
           aria-label={item.label}
           onClick={() => void executeAction(item.action, null, -1)}
         >

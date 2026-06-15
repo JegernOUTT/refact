@@ -5,12 +5,12 @@ import {
   loadPersistedActiveTab,
   loadPersistedChatTabs,
   loadPersistedTasksUIState,
-  loadTaskWorkspaceLayout,
+  loadTaskWorkspaceTab,
   saveAskQuestionsDraft,
   savePersistedActiveTab,
   savePersistedChatTabs,
   savePersistedTasksUIState,
-  saveTaskWorkspaceLayout,
+  saveTaskWorkspaceTab,
 } from "../chatUiPersistence";
 import {
   getProjectStorageNamespace,
@@ -262,24 +262,12 @@ describe("chatUiPersistence", () => {
     expect(loadAskQuestionsDraft("tool-call-1")).toBeNull();
   });
 
-  it("persists task workspace layout per task", () => {
-    const defaults = {
-      chatExpanded: false,
-      panelsExpanded: false,
-      boardHeightPx: 180,
-    };
+  it("persists task workspace tab per task", () => {
+    saveTaskWorkspaceTab("task-1", "memories");
+    saveTaskWorkspaceTab("task-2", "board");
 
-    saveTaskWorkspaceLayout("task-1", {
-      chatExpanded: true,
-      panelsExpanded: true,
-      boardHeightPx: 260,
-    });
-
-    expect(loadTaskWorkspaceLayout("task-1", defaults)).toEqual({
-      chatExpanded: true,
-      panelsExpanded: true,
-      boardHeightPx: 260,
-    });
-    expect(loadTaskWorkspaceLayout("task-2", defaults)).toEqual(defaults);
+    expect(loadTaskWorkspaceTab("task-1")).toBe("memories");
+    expect(loadTaskWorkspaceTab("task-2")).toBe("board");
+    expect(loadTaskWorkspaceTab("task-3")).toBeNull();
   });
 });

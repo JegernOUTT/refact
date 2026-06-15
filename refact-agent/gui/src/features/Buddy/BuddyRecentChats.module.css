@@ -1,56 +1,51 @@
-.sectionLabel {
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.filterTabs {
+.panel {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--rf-panel-pad);
 }
 
-/* Filter tabs reuse the shared chip pill so the header controls match
- * the rest of the page. The active state cannot use `composes` (postcss
- * disallows composes on attribute selectors), so the accent treatment
- * is duplicated inline below. */
-.filterTab {
-  composes: chip from "./BuddyHome.module.css";
+.filter {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 320px;
+  min-width: 0;
 }
 
-.filterTab[data-active] {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
-  font-weight: 600;
-}
-
-.filterTab[data-active]:hover {
-  background: var(--accent-a4);
-  border-color: var(--accent-a7);
-}
-
-/* Header chips: + New Chat, View All — same pill shape as everything
- * else on the page. */
-.headerChip {
-  composes: chipGhost from "./BuddyHome.module.css";
-}
-
-.emptyChip {
-  composes: chipPrimary from "./BuddyHome.module.css";
+/* Internal scroller — the panel header and filter stay pinned while the
+ * conversation list scrolls. overflow-x stays hidden so long titles never
+ * produce a stray horizontal scrollbar. */
+.scrollList {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .entryRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-2);
-  border-radius: var(--radius-2);
-  border: none;
-  background: transparent;
+  gap: var(--rf-row-gap);
   width: 100%;
+  min-width: 0;
+  padding: var(--rf-row-pad);
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
   cursor: default;
-  transition: background 0.12s;
+  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .entryRow[data-clickable] {
@@ -58,70 +53,62 @@
 }
 
 .entryRow[data-clickable]:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
+}
+
+.entryRow:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .entryIcon {
-  font-size: 14px;
-  flex-shrink: 0;
-  width: 18px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
 }
 
-.entryTitle {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.entryBody {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
   min-width: 0;
 }
 
-.entryMeta {
-  font-size: var(--font-size-1);
+.entryTitleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: var(--radius-1);
-  background: var(--accent-a3);
-  color: var(--accent-11);
-  font-size: 10px;
-  font-weight: 500;
+.entryTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryBadge {
   flex-shrink: 0;
+}
+
+.entryMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .empty {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  padding: var(--space-4) var(--space-2);
-  color: var(--gray-9);
-}
-
-/* Scrollable entries area inside a panel. Header + filter row stay
- * pinned at the top while the conversation list scrolls vertically.
- * overflow-x is explicit because UAs promote `visible` to `auto` once
- * overflow-y is auto, which would otherwise produce a stray horizontal
- * scrollbar on long chat titles. */
-.entriesScroll {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 1;
+  gap: var(--rf-space-2);
   min-height: 0;
-  min-width: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-@media (max-width: 520px) {
-  .entriesScroll {
-    flex: 0 0 auto;
-    overflow-y: visible;
-  }
+  padding: var(--rf-space-4) var(--rf-space-2);
+  color: var(--rf-color-muted);
 }

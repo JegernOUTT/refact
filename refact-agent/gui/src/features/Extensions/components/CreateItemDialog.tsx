@@ -1,18 +1,20 @@
 import React, { useState, useCallback } from "react";
+import { File, Globe } from "lucide-react";
 import {
-  Flex,
+  Badge,
   Button,
   Dialog,
-  TextField,
-  Text,
+  FieldError,
+  FieldStack,
+  FieldText,
+  Icon,
   SegmentedControl,
-  Badge,
-} from "@radix-ui/themes";
-import { GlobeIcon, FileIcon } from "@radix-ui/react-icons";
+} from "../../../components/ui";
 import {
   useCreateSkillMutation,
   useCreateCommandMutation,
 } from "../../../services/refact/extensions";
+import styles from "./ExtensionDialog.module.css";
 
 type ItemType = "skill" | "command";
 
@@ -95,73 +97,85 @@ export const CreateItemDialog: React.FC<CreateItemDialogProps> = ({
   const title = type === "skill" ? "Create Skill" : "Create Command";
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 400 }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content maxWidth="400px">
         <Dialog.Title>{title}</Dialog.Title>
-        <Flex direction="column" gap="3">
-          <Flex direction="column" gap="1">
-            <Text size="1">Name</Text>
-            <TextField.Root
-              placeholder="my_skill"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </Flex>
-          <Flex direction="column" gap="1">
-            <Text size="1">Description (optional)</Text>
-            <TextField.Root
-              placeholder="Brief description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </Flex>
-          <Flex direction="column" gap="1">
-            <Text size="1">Save to:</Text>
-            {hasProjectRoot ? (
-              <SegmentedControl.Root
-                size="1"
-                value={scope}
-                onValueChange={(v) => setScope(v as "global" | "local")}
-              >
-                <SegmentedControl.Item value="global">
-                  <Flex align="center" gap="1">
-                    <GlobeIcon width={12} height={12} />
-                    Global
-                  </Flex>
-                </SegmentedControl.Item>
-                <SegmentedControl.Item value="local">
-                  <Flex align="center" gap="1">
-                    <FileIcon width={12} height={12} />
-                    Project
-                  </Flex>
-                </SegmentedControl.Item>
-              </SegmentedControl.Root>
-            ) : (
-              <Badge size="1" color="blue" variant="soft">
-                <Flex align="center" gap="1">
-                  <GlobeIcon width={10} height={10} />
-                  Global only (no project open)
-                </Flex>
-              </Badge>
-            )}
-          </Flex>
-          {error && (
-            <Text size="2" color="red">
-              {error}
-            </Text>
-          )}
-        </Flex>
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
-              Cancel
-            </Button>
+        <div className={styles.form}>
+          <FieldStack
+            label="Name"
+            control={
+              <FieldText
+                placeholder="my_skill"
+                value={name}
+                onChange={setName}
+              />
+            }
+          />
+          <FieldStack
+            label="Description (optional)"
+            control={
+              <FieldText
+                placeholder="Brief description"
+                value={description}
+                onChange={setDescription}
+              />
+            }
+          />
+          <FieldStack
+            label="Save to"
+            control={
+              hasProjectRoot ? (
+                <SegmentedControl
+                  size="sm"
+                  value={scope}
+                  onValueChange={(value) =>
+                    setScope(value as "global" | "local")
+                  }
+                  options={[
+                    {
+                      value: "global",
+                      label: (
+                        <span className={styles.scopeLabel}>
+                          <Icon icon={Globe} size="sm" /> Global
+                        </span>
+                      ),
+                    },
+                    {
+                      value: "local",
+                      label: (
+                        <span className={styles.scopeLabel}>
+                          <Icon icon={File} size="sm" /> Project
+                        </span>
+                      ),
+                    },
+                  ]}
+                />
+              ) : (
+                <Badge tone="accent">
+                  <span className={styles.scopeLabel}>
+                    <Icon icon={Globe} size="sm" /> Global only (no project
+                    open)
+                  </span>
+                </Badge>
+              )
+            }
+          />
+          {error && <FieldError>{error}</FieldError>}
+        </div>
+        <div className={styles.actions}>
+          <Dialog.Close asChild>
+            <Button variant="soft">Cancel</Button>
           </Dialog.Close>
-          <Button onClick={() => void handleCreate()} disabled={isLoading}>
-            {isLoading ? "Creating..." : "Create"}
+          <Button
+            variant="primary"
+            onClick={() => void handleCreate()}
+            disabled={isLoading}
+            loading={isLoading}
+          >
+            Create
           </Button>
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

@@ -1,3 +1,4 @@
+import { Copy, Check, FileText, BookOpen, LoaderCircle } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -5,21 +6,20 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
-import {
-  CopyIcon,
-  CheckIcon,
-  FileTextIcon,
-  ReaderIcon,
-} from "@radix-ui/react-icons";
+import { Flex, Text, Box } from "@radix-ui/themes";
+import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../useChatScrollAnchor";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../../hooks";
 import { isIdeHost } from "../../../utils/isIdeHost";
@@ -112,14 +112,19 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   }, [content, extractReport]);
 
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, defaultOpen);
+  const [isOpen, , setOpen] = useStoredOpen(storeKey, defaultOpen);
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
   const [animateContent, setAnimateContent] = useState(false);
   const [bodyReady, setBodyReady] = useState(variant !== "taskDone");
 
-  const handleAnimatedToggle = useCallback(() => {
-    setAnimateContent(true);
-    handleToggle();
-  }, [handleToggle]);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      setAnimateContent(true);
+      preserveScrollAnchor(() => setOpen(open));
+    },
+    [preserveScrollAnchor, setOpen],
+  );
 
   const summary = reportData?.summary ?? defaultSummary;
 
@@ -164,7 +169,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     status === "running",
   );
   const deferredReportMarkdown = useStreamingMarkdown(
-    isOpen ? reportData?.markdown ?? null : null,
+    reportData?.markdown ?? null,
     status === "running",
   );
 
@@ -257,78 +262,154 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     variant,
   ]);
 
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen && !!deferredReportMarkdown && bodyReady,
-    200,
-    animateContent,
-  );
-
-  const showActions = status === "success" && !!deferredReportMarkdown;
+  const showActions =
+    status === "success" && isOpen && !!deferredReportMarkdown;
   const showSaveButton = isIdeHost();
   const variantClass = REPORT_VARIANT_CLASSES[variant];
+  const hasReportBody = !!deferredReportMarkdown && bodyReady;
+
+  const actions = showActions ? (
+    <>
+      <button
+        className={classNames(
+          styles.actionButton,
+          copied && styles.copiedButton,
+        )}
+        onClick={handleCopy}
+        title="Copy report"
+        type="button"
+      >
+        {copied ? <Check /> : <Copy />}
+      </button>
+      {showSaveButton && (
+        <button
+          className={styles.actionButton}
+          onClick={handleSave}
+          title="Save as file"
+          type="button"
+        >
+          <FileText />
+        </button>
+      )}
+    </>
+  ) : null;
 
   const header = (
-    <Flex
-      className={classNames(styles.header)}
-      align="center"
-      gap="2"
-      onClick={handleAnimatedToggle}
-    >
+    <span className={styles.titleRow}>
       <span className={styles.icon}>
-        {status === "running" ? <Spinner size="1" /> : icon}
+        {status === "running" ? (
+          <Icon
+            className="rf-spin"
+            icon={LoaderCircle}
+            size="sm"
+            tone="accent"
+          />
+        ) : (
+          icon
+        )}
       </span>
-      <Text
-        size="1"
+      <span
         className={classNames(
           styles.summary,
-          status === "running" && styles.running,
           status === "error" && styles.error,
           variant === "taskDone" &&
             status === "success" &&
             styles.summaryTaskDone,
         )}
       >
-        {summary}
-      </Text>
-      {meta && (
-        <Text size="1" color="gray" className={styles.meta}>
-          {meta}
-        </Text>
+        {status === "running" ? (
+          <span className="rf-text-shimmer">{summary}</span>
+        ) : (
+          summary
+        )}
+      </span>
+      {meta && <span className={styles.meta}>{meta}</span>}
+      {status === "error" && <span className={styles.errorBadge}>failed</span>}
+    </span>
+  );
+
+  const card = (
+    <AnimatedCollapsible
+      animate={animateContent}
+      actions={actions}
+      className={classNames(
+        "rf-enter",
+        styles.card,
+        variantClass,
+        status === "running" && styles.running,
+        !hasReportBody && styles.withoutBody,
       )}
-      {status === "error" && (
-        <Text size="1" color="red" className={styles.errorBadge}>
-          failed
-        </Text>
-      )}
-      {showActions && (
-        <span className={styles.actions}>
-          <button
+      data-status={status}
+      header={header}
+      onKeyDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onOpenChange={handleOpenChange}
+      onPointerDownCapture={prepareScrollAnchor}
+      open={isOpen}
+      status={status}
+      variant="compact"
+    >
+      {hasReportBody && reportData ? (
+        <>
+          <Box
             className={classNames(
-              styles.actionButton,
-              copied && styles.copiedButton,
+              styles.content,
+              unboundedContent && styles.contentUnbounded,
             )}
-            onClick={handleCopy}
-            title="Copy report"
           >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          {showSaveButton && (
-            <button
-              className={styles.actionButton}
-              onClick={handleSave}
-              title="Save as file"
+            {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
+            looksLikeMarkdown(deferredReportMarkdown) ? (
+              <Text size="2">
+                <Markdown isStreaming={status === "running"}>
+                  {deferredReportMarkdown}
+                </Markdown>
+              </Text>
+            ) : (
+              <ShikiCodeBlock showLineNumbers={false}>
+                {deferredReportMarkdown}
+              </ShikiCodeBlock>
+            )}
+          </Box>
+
+          {reportData.filesChanged && reportData.filesChanged.length > 0 && (
+            <Flex
+              className={styles.fileFooter}
+              gap="2"
+              wrap="wrap"
+              align="center"
             >
-              <FileTextIcon />
-            </button>
+              <Text size="1" color="gray">
+                Files:
+              </Text>
+              {reportData.filesChanged.map((f) => (
+                <Text
+                  key={f}
+                  size="1"
+                  className={styles.fileLink}
+                  onClick={(e) => handleFileClick(e, f)}
+                >
+                  {basename(f)}
+                </Text>
+              ))}
+            </Flex>
           )}
-        </span>
-      )}
-    </Flex>
+
+          {reportData.knowledgePath && (
+            <Text size="1" color="gray" as="p" className={styles.knowledgePath}>
+              <Flex as="span" align="center" gap="1">
+                <BookOpen />
+                Saved to knowledge
+              </Flex>
+            </Text>
+          )}
+        </>
+      ) : null}
+    </AnimatedCollapsible>
   );
 
   return (
-    <div className={classNames(styles.card, variantClass)}>
-      <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
+    <div className={styles.stack}>
+      <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
 
       {deferredEntertainmentText && (
         <div
@@ -339,70 +420,6 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           <Text size="1" color="gray" className={styles.entertainmentText}>
             {deferredEntertainmentText}
           </Text>
-        </div>
-      )}
-
-      {shouldRender && reportData && deferredReportMarkdown && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-            !animateContent && styles.noTransition,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <Box
-              className={classNames(
-                styles.content,
-                unboundedContent && styles.contentUnbounded,
-              )}
-            >
-              {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
-              looksLikeMarkdown(deferredReportMarkdown) ? (
-                <Text size="2">
-                  <Markdown isStreaming={status === "running"}>
-                    {deferredReportMarkdown}
-                  </Markdown>
-                </Text>
-              ) : (
-                <ShikiCodeBlock showLineNumbers={false}>
-                  {deferredReportMarkdown}
-                </ShikiCodeBlock>
-              )}
-            </Box>
-
-            {reportData.filesChanged && reportData.filesChanged.length > 0 && (
-              <Flex gap="2" wrap="wrap" py="1" px="1" align="center">
-                <Text size="1" color="gray">
-                  Files:
-                </Text>
-                {reportData.filesChanged.map((f) => (
-                  <Text
-                    key={f}
-                    size="1"
-                    className={styles.fileLink}
-                    onClick={(e) => handleFileClick(e, f)}
-                  >
-                    {basename(f)}
-                  </Text>
-                ))}
-              </Flex>
-            )}
-
-            {reportData.knowledgePath && (
-              <Text
-                size="1"
-                color="gray"
-                as="p"
-                style={{ padding: "0 var(--space-1)" }}
-              >
-                <Flex as="span" align="center" gap="1">
-                  <ReaderIcon />
-                  Saved to knowledge
-                </Flex>
-              </Text>
-            )}
-          </div>
         </div>
       )}
     </div>

@@ -10,7 +10,7 @@ use process_wrap::tokio::TokioCommandWrap;
 use process_wrap::tokio::ProcessGroup;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -27,11 +27,85 @@ const MAX_OUTPUT_TAIL_CHARS: usize = 4000;
 const MAX_OUTPUT_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 200;
 const VERIFIER_SOURCE: &str = "chat.verifier";
+const STALE_VERIFIER_WRITE: &str = "stale verifier write";
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ExpectedCardState {
+    pub board_rev: u64,
+    card_fingerprint: Value,
+}
+
+impl ExpectedCardState {
+    pub fn from_card(board_rev: u64, card: &BoardCard) -> Self {
+        Self {
+            board_rev,
+            card_fingerprint: verifier_card_fingerprint(card),
+        }
+    }
+
+    pub fn matches_card(&self, card: &BoardCard) -> bool {
+        self.card_fingerprint == verifier_card_fingerprint(card)
+    }
+
+    pub fn matches_board_card(&self, board_rev: u64, card: &BoardCard) -> bool {
+        board_rev >= self.board_rev && self.matches_card(card)
+    }
+}
+
+pub async fn load_expected_card_state(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+) -> Result<ExpectedCardState, String> {
+    let board = storage::load_board(gcx, task_id).await?;
+    let card = board
+        .get_card(card_id)
+        .ok_or_else(|| format!("Card {} not found", card_id))?;
+    Ok(ExpectedCardState::from_card(board.rev, card))
+}
+
+fn verifier_card_fingerprint(card: &BoardCard) -> Value {
+    json!({
+        "id": &card.id,
+        "title": &card.title,
+        "column": &card.column,
+        "priority": &card.priority,
+        "depends_on": &card.depends_on,
+        "instructions": &card.instructions,
+        "assignee": &card.assignee,
+        "agent_chat_id": &card.agent_chat_id,
+        "final_report": &card.final_report,
+        "final_report_structured": &card.final_report_structured,
+        "verifier_report": &card.verifier_report,
+        "created_at": &card.created_at,
+        "started_at": &card.started_at,
+        "completed_at": &card.completed_at,
+        "agent_branch": &card.agent_branch,
+        "agent_worktree": &card.agent_worktree,
+        "agent_worktree_name": &card.agent_worktree_name,
+        "ab_variants": &card.ab_variants,
+        "team_members": &card.team_members,
+        "target_files": &card.target_files,
+        "scope_guard_mode": &card.scope_guard_mode,
+    })
+}
+
+fn stale_verifier_error(task_id: &str, card_id: &str) -> String {
+    format!(
+        "{} for task {} card {}: current card state no longer matches the verifier request",
+        STALE_VERIFIER_WRITE, task_id, card_id
+    )
+}
+
+fn is_stale_verifier_error(error: &str) -> bool {
+    error.starts_with(STALE_VERIFIER_WRITE)
+}
 
 #[derive(Clone, Debug)]
 pub struct VerifyCardRequest {
     pub task_id: String,
     pub card_id: String,
+    pub expected_state: Option<ExpectedCardState>,
 }
 
 #[async_trait]
@@ -130,27 +204,56 @@ pub async fn store_verifier_report(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     card_id: &str,
+    expected_state: Option<&ExpectedCardState>,
     report: VerifierReport,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let card_id = card_id.to_string();
-    storage::update_board_atomic(gcx, task_id, move |board| {
-        let card = board
-            .get_card_mut(&card_id)
-            .ok_or_else(|| format!("Card {} not found", card_id))?;
+    let task_id_owned = task_id.to_string();
+    let expected_state = expected_state.cloned();
+    match storage::update_board_atomic(gcx, task_id, move |board| {
+        let board_rev = board.rev;
+        let Some(card) = board.get_card_mut(&card_id) else {
+            if expected_state.is_some() {
+                return Err(stale_verifier_error(&task_id_owned, &card_id));
+            }
+            return Err(format!("Card {} not found", card_id));
+        };
+        if let Some(expected) = expected_state.as_ref() {
+            if !expected.matches_board_card(board_rev, card) {
+                return Err(stale_verifier_error(&task_id_owned, &card_id));
+            }
+        }
         card.verifier_report = Some(report.clone());
         append_verifier_status(card, &report);
         Ok(())
     })
     .await
-    .map(|_| ())
+    {
+        Ok(_) => Ok(true),
+        Err(error) if is_stale_verifier_error(&error) => {
+            tracing::info!("{}", error);
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequest) {
     tokio::spawn(async move {
         if let Err(error) = verify_card(gcx.clone(), request.clone()).await {
+            if is_stale_verifier_error(&error) {
+                tracing::info!("{}", error);
+                return;
+            }
             let report = launch_failure_report(error);
-            if let Err(store_error) =
-                store_verifier_report(gcx, &request.task_id, &request.card_id, report).await
+            if let Err(store_error) = store_verifier_report(
+                gcx,
+                &request.task_id,
+                &request.card_id,
+                request.expected_state.as_ref(),
+                report,
+            )
+            .await
             {
                 tracing::warn!(
                     "failed to store verifier launch-failure report for card {}: {}",
@@ -166,8 +269,17 @@ pub async fn schedule_card_verifier_after_finish(
     gcx: Arc<GlobalContext>,
     task_id: String,
     card_id: String,
+    expected_state: ExpectedCardState,
 ) {
-    schedule_card_verifier(gcx, VerifyCardRequest { task_id, card_id }).await;
+    schedule_card_verifier(
+        gcx,
+        VerifyCardRequest {
+            task_id,
+            card_id,
+            expected_state: Some(expected_state),
+        },
+    )
+    .await;
 }
 
 pub async fn verify_card(
@@ -180,6 +292,11 @@ pub async fn verify_card(
         .get_card(&request.card_id)
         .ok_or_else(|| format!("Card {} not found", request.card_id))?
         .clone();
+    if let Some(expected) = request.expected_state.as_ref() {
+        if !expected.matches_board_card(board.rev, &card) {
+            return Err(stale_verifier_error(&request.task_id, &request.card_id));
+        }
+    }
     let worktree = card
         .agent_worktree
         .as_ref()
@@ -246,7 +363,17 @@ pub async fn verify_card(
         concerns,
         recommendation,
     };
-    store_verifier_report(gcx, &request.task_id, &request.card_id, report.clone()).await?;
+    let stored = store_verifier_report(
+        gcx,
+        &request.task_id,
+        &request.card_id,
+        request.expected_state.as_ref(),
+        report.clone(),
+    )
+    .await?;
+    if !stored {
+        return Err(stale_verifier_error(&request.task_id, &request.card_id));
+    }
     Ok(report)
 }
 
@@ -547,6 +674,7 @@ async fn run_verifier_review(
         max_new_tokens: 1024,
         temperature: Some(0.0),
         reasoning_effort: None,
+        cache_control: crate::llm::params::CacheControl::Ephemeral,
         parent_tool_call_id: None,
         parent_subchat_tx: None,
         abort_flag: None,
@@ -607,7 +735,7 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::types::{FinalReport, ScopeGuardMode};
+    use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
 
     #[derive(Default)]
     struct MockVerificationRunner {
@@ -661,6 +789,63 @@ mod tests {
             target_files: Vec::new(),
             scope_guard_mode: ScopeGuardMode::Off,
         }
+    }
+
+    fn verifier_report(passed: bool) -> VerifierReport {
+        VerifierReport {
+            passed,
+            command_results: vec![VerificationResult {
+                command: "cargo test verifier".to_string(),
+                exit_code: Some(if passed { 0 } else { 1 }),
+                passed,
+                output_tail: "ok".to_string(),
+            }],
+            concerns: if passed {
+                Vec::new()
+            } else {
+                vec!["failed".to_string()]
+            },
+            recommendation: if passed { "merge" } else { "fix-needed" }.to_string(),
+        }
+    }
+
+    async fn write_task(root: &Path, gcx: Arc<GlobalContext>, card: BoardCard) {
+        let task_id = "task-1";
+        let task_dir = root.join(".refact").join("tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        let now = Utc::now().to_rfc3339();
+        let meta = TaskMeta {
+            schema_version: 1,
+            id: task_id.to_string(),
+            name: "Task".to_string(),
+            status: TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 1,
+            cards_done: 1,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        };
+        storage::save_task_meta(gcx.clone(), task_id, &meta)
+            .await
+            .unwrap();
+        storage::save_board(
+            gcx,
+            task_id,
+            &TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -767,6 +952,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_verifier_report_lands_when_expected_card_state_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
+        card.id = "T-1".to_string();
+        write_task(temp.path(), gcx.clone(), card).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
+
+        let stored = store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(true),
+        )
+        .await
+        .unwrap();
+
+        assert!(stored);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.verifier_report.as_ref().unwrap().passed);
+        assert!(card
+            .status_updates
+            .iter()
+            .any(|update| update.message == "Verifier: PASS"));
+    }
+
+    #[tokio::test]
+    async fn store_verifier_report_noops_when_card_restarted() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
+        card.id = "T-1".to_string();
+        card.agent_chat_id = Some("agent-old".to_string());
+        write_task(temp.path(), gcx.clone(), card).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
+
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.column = "doing".to_string();
+            card.agent_chat_id = Some("agent-new".to_string());
+            card.assignee = Some("agent-new".to_string());
+            card.final_report = None;
+            card.final_report_structured = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let stored = store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(false),
+        )
+        .await
+        .unwrap();
+
+        assert!(!stored);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.verifier_report.is_none());
+        assert_eq!(card.column, "doing");
+        assert_eq!(card.agent_chat_id.as_deref(), Some("agent-new"));
+    }
+
+    #[tokio::test]
+    async fn store_verifier_report_noops_when_card_cleaned_up_after_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
+        card.id = "T-1".to_string();
+        card.agent_branch = Some("refact/task/task-1/card/T-1/agent".to_string());
+        card.agent_worktree = Some(temp.path().join("agent").to_string_lossy().to_string());
+        card.agent_worktree_name = Some("wt-1".to_string());
+        write_task(temp.path(), gcx.clone(), card).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
+
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.agent_branch = None;
+            card.agent_worktree = None;
+            card.agent_worktree_name = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let stored = store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(false),
+        )
+        .await
+        .unwrap();
+
+        assert!(!stored);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.verifier_report.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn store_verifier_report_noops_when_report_already_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
+        card.id = "T-1".to_string();
+        write_task(temp.path(), gcx.clone(), card).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
+
+        store_verifier_report(gcx.clone(), "task-1", "T-1", None, verifier_report(true))
+            .await
+            .unwrap();
+
+        let stored = store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(false),
+        )
+        .await
+        .unwrap();
+
+        assert!(!stored);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.verifier_report.as_ref().unwrap().passed);
+    }
+
+    #[tokio::test]
     async fn verifier_runs_argv_not_shell() {
         let temp = tempfile::tempdir().unwrap();
         let mut runner = MockVerificationRunner::default();
@@ -803,12 +1134,16 @@ mod tests {
 
     #[tokio::test]
     async fn agent_finish_spawns_verifier_through_helper() {
+        let mut card = card("");
+        card.id = "T-missing".to_string();
+        let expected_state = ExpectedCardState::from_card(0, &card);
         let gcx = crate::global_context::tests::make_test_gcx().await;
 
         schedule_card_verifier_after_finish(
             gcx,
             "missing-task".to_string(),
             "T-missing".to_string(),
+            expected_state,
         )
         .await;
     }

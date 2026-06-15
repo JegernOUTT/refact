@@ -1,0 +1,127 @@
+.row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-row-gap, var(--rf-space-1));
+  padding: var(--rf-row-pad, var(--rf-space-2));
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  text-align: start;
+}
+
+button.row,
+a.row {
+  appearance: none;
+  font: inherit;
+}
+
+a.row {
+  text-decoration: none;
+}
+
+.plain {
+  background: transparent;
+}
+
+.glass {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.selected {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
+.interactive {
+  cursor: pointer;
+}
+
+.interactive:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: 2px;
+}
+
+.leading,
+.trailing,
+.meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+}
+
+.content {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+}
+
+.title,
+.subtitle,
+.meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.subtitle,
+.meta {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: 1.25;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .row {
+    transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (hover: hover) {
+  .plain.interactive:hover {
+    background: var(--rf-surface-1);
+  }
+
+  .glass.interactive:hover {
+    background: var(--rf-surface-glass);
+    border-color: var(--rf-border-strong);
+  }
+
+  .selected.interactive:hover {
+    background: var(--rf-color-accent-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .glass {
+  backdrop-filter: none;
+}

@@ -148,6 +148,8 @@ function humanizePage(page: BuddyPage): string {
       return "Companion";
     case "stats":
       return "Stats";
+    case "settings":
+      return "Settings";
     case "customization":
       return "Customization";
     case "providers":

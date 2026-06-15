@@ -1,15 +1,20 @@
-import { Button, Flex, Text } from "@radix-ui/themes";
-
 import { FC } from "react";
+import { Store } from "lucide-react";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
+import {
+  SettingsGroup,
+  SettingsSection,
+} from "../../../features/Settings/SettingsSection";
 import { GlobalIntegrations } from "./GlobalIntegrations";
 import { NewIntegrations } from "./NewIntegrations";
 import { ProjectIntegrations } from "./ProjectIntegrations";
 import { useAppDispatch } from "../../../hooks";
 import { push } from "../../../features/Pages/pagesSlice";
+import { Button } from "../../ui";
+import styles from "./DisplayIntegrations.module.css";
 
 type IntegrationsListProps = {
   globalIntegrations?: IntegrationWithIconRecord[];
@@ -31,20 +36,22 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
   const dispatch = useAppDispatch();
 
   return (
-    <Flex direction="column" width="100%" gap="4">
-      <Flex align="center" justify="between">
-        <Text my="2">
-          Integrations allow Refact.ai Agent to interact with other services and
-          tools
-        </Text>
+    <SettingsSection
+      title="Integrations"
+      description="Connect Refact.ai Agent to command-line tools, MCP servers, and workspace services."
+      actions={
         <Button
-          variant="outline"
-          size="2"
+          variant="soft"
+          size="sm"
+          rightIcon={Store}
           onClick={() => dispatch(push({ name: "mcp marketplace" }))}
         >
           Browse MCP Marketplace
         </Button>
-      </Flex>
+      }
+      width="wide"
+      className={styles.settingsSection}
+    >
       <GlobalIntegrations
         globalIntegrations={globalIntegrations}
         handleIntegrationShowUp={handleIntegrationShowUp}
@@ -53,10 +60,16 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
         groupedProjectIntegrations={groupedProjectIntegrations}
         handleIntegrationShowUp={handleIntegrationShowUp}
       />
-      <NewIntegrations
-        availableIntegrationsToConfigure={availableIntegrationsToConfigure}
-        handleIntegrationShowUp={handleIntegrationShowUp}
-      />
-    </Flex>
+      <SettingsGroup title="Add new integration">
+        <p className={styles.groupDescription}>
+          Configure another integration or MCP command-line server from the
+          available templates.
+        </p>
+        <NewIntegrations
+          availableIntegrationsToConfigure={availableIntegrationsToConfigure}
+          handleIntegrationShowUp={handleIntegrationShowUp}
+        />
+      </SettingsGroup>
+    </SettingsSection>
   );
 };

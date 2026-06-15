@@ -6,7 +6,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
+use refact_core::model_caps::{
+    predefined_cloud_tokenizer_for_model, resolve_model_caps, ModelCapabilities,
+};
 use refact_core::llm_types::WireFormat;
 use crate::config::{is_legacy_refact_model, resolve_env_var};
 use crate::llm_http_retry::{
@@ -292,7 +294,8 @@ available:
                             supports_thinking_budget: false,
                             supports_adaptive_thinking_budget: false,
                             supports_cache_control: true,
-                            tokenizer: None,
+                            tokenizer: predefined_cloud_tokenizer_for_model(self.name(), &id)
+                                .map(str::to_string),
                             enabled,
                             is_custom: false,
                             pricing,

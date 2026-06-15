@@ -1,5 +1,6 @@
 import React, { useCallback } from "react";
-import { Flex, TextField, Text, Switch } from "@radix-ui/themes";
+
+import { Field, FieldSwitch, FieldText } from "../../../components/ui";
 import { MessageListEditor } from "./MessageListEditor";
 import {
   ConfigPatch,
@@ -7,6 +8,7 @@ import {
   safeBoolean,
   safeMessageArray,
 } from "./configUtils";
+import styles from "./editors.module.css";
 
 type CodeLensFormProps = {
   config: Record<string, unknown>;
@@ -30,54 +32,42 @@ export const CodeLensForm: React.FC<CodeLensFormProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="4">
-      <Flex direction="column" gap="2">
-        <Text size="2" weight="medium">
-          Label
-        </Text>
-        <TextField.Root
+    <div className={styles.formStack}>
+      <Field
+        label="Label"
+        helper="Text shown in the code lens above functions/classes."
+      >
+        <FieldText
           value={label}
-          onChange={(e) => patch(["label"], e.target.value)}
+          onChange={(value) => patch(["label"], value)}
           placeholder="Display label in editor"
         />
-        <Text size="1" color="gray">
-          Text shown in the code lens above functions/classes
-        </Text>
-      </Flex>
+      </Field>
 
-      <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Flex align="center" gap="2">
-            <Switch
-              checked={autoSubmit}
-              onCheckedChange={(checked) => patch(["auto_submit"], checked)}
-            />
-            <Text size="2">Auto Submit</Text>
-          </Flex>
-          <Text size="1" color="gray">
-            Automatically send message when clicked
-          </Text>
-        </Flex>
+      <div className={styles.switchGrid}>
+        <Field
+          label="Auto Submit"
+          helper="Automatically send message when clicked."
+        >
+          <FieldSwitch
+            checked={autoSubmit}
+            onChange={(checked) => patch(["auto_submit"], checked)}
+          />
+        </Field>
 
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Flex align="center" gap="2">
-            <Switch
-              checked={newTab}
-              onCheckedChange={(checked) => patch(["new_tab"], checked)}
-            />
-            <Text size="2">New Tab</Text>
-          </Flex>
-          <Text size="1" color="gray">
-            Open in a new chat tab
-          </Text>
-        </Flex>
-      </Flex>
+        <Field label="New Tab" helper="Open in a new chat tab.">
+          <FieldSwitch
+            checked={newTab}
+            onChange={(checked) => patch(["new_tab"], checked)}
+          />
+        </Field>
+      </div>
 
       <MessageListEditor
         value={messages}
         onChange={(msgs) => patch(["messages"], msgs)}
         label="Messages"
       />
-    </Flex>
+    </div>
   );
 };

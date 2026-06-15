@@ -1,0 +1,44 @@
+#refact-chat,
+[data-element="app-root"] {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
+
+/*
+ * The GUI is a fixed 100vh app shell: the page itself must never scroll.
+ * Transient layout work (portals, streaming growth, measurement passes)
+ * otherwise flashes a window scrollbar for a frame or two. Scoped via :has
+ * so harnesses without the app root (Storybook) keep page scrolling.
+ */
+html:has([data-element="app-root"]),
+body:has([data-element="app-root"]) {
+  overflow: clip;
+  overscroll-behavior: none;
+}
+
+.scrollX {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.rf-min-w-0 {
+  min-width: 0;
+}
+
+.rf-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rf-wrap-anywhere {
+  overflow-wrap: anywhere;
+}
+
+.rf-container-fluid {
+  width: 100%;
+  min-width: 0;
+}

@@ -1,7 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { Badge, Button, Flex, Spinner, Text, TextArea } from "@radix-ui/themes";
 import { integrationsApi } from "../../../services/refact/integrations";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
+import {
+  Badge,
+  Button,
+  FieldTextarea,
+  Flex,
+  Spinner,
+  Surface,
+  Text,
+} from "../../ui";
 import styles from "./MCPOAuth.module.css";
 
 type MCPOAuthProps = {
@@ -97,7 +105,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
       try {
         await oauthCancel({ session_id: sessionId }).unwrap();
       } catch {
-        // ignore error, clean up locally
+        setError(null);
       }
     }
     setSessionId(null);
@@ -123,11 +131,18 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
 
   if (status.authenticated) {
     return (
-      <div className={styles.container}>
+      <Surface
+        animated="rise"
+        className={styles.container}
+        radius="card"
+        variant="glass"
+      >
         <Flex direction="column" gap="2">
-          <Flex align="center" justify="between">
-            <Flex align="center" gap="2">
-              <Badge aria-label="Authenticated">Authenticated</Badge>
+          <Flex align="center" justify="between" gap="2" wrap="wrap">
+            <Flex align="center" gap="2" wrap="wrap">
+              <Badge aria-label="Authenticated" tone="success">
+                Authenticated
+              </Badge>
               {expiryDate && (
                 <Text size="1" color="gray">
                   Expires: {expiryDate.toLocaleString()}
@@ -135,9 +150,8 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
               )}
             </Flex>
             <Button
-              variant="ghost"
-              color="red"
-              size="1"
+              variant="danger"
+              size="sm"
               disabled={isWorking}
               onClick={() => void handleLogout()}
             >
@@ -145,51 +159,55 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
             </Button>
           </Flex>
           {error && (
-            <Text size="1" color="red">
+            <Text as="p" size="1" color="red">
               {error}
             </Text>
           )}
         </Flex>
-      </div>
+      </Surface>
     );
   }
 
   if (waitingForCallback && sessionId && authorizeUrl) {
     return (
-      <div className={styles.container}>
+      <Surface
+        animated="rise"
+        className={styles.container}
+        radius="card"
+        variant="glass"
+      >
         <Flex direction="column" gap="2">
           <Flex align="center" gap="2">
-            <Spinner size="1" />
+            <Spinner size="sm" />
             <Text size="2" weight="medium">
               Waiting for authorization...
             </Text>
           </Flex>
-          <Text size="1" color="gray">
+          <Text as="p" size="1" color="gray">
             Complete the login in the browser window that opened.
           </Text>
           <Text size="2" weight="medium">
             Or enter the authorization code manually:
           </Text>
-          <TextArea
+          <FieldTextarea
             placeholder="Paste authorization code here..."
             value={code}
-            onChange={(e) => setCode(e.target.value)}
+            onChange={setCode}
             rows={2}
             aria-label="Authorization code"
           />
-          <Flex gap="2">
+          <Flex gap="2" wrap="wrap">
             <Button
-              size="2"
-              variant="solid"
+              size="md"
+              variant="primary"
               disabled={isWorking || !code.trim()}
               onClick={() => void handleExchangeCode()}
             >
               {isWorking ? "Submitting..." : "Submit Code"}
             </Button>
             <Button
-              size="2"
+              size="md"
               variant="ghost"
-              color="gray"
               onClick={() => void handleCancel()}
             >
               Cancel
@@ -211,29 +229,34 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
             </Text>
           </Flex>
           {error && (
-            <Text size="1" color="red">
+            <Text as="p" size="1" color="red">
               {error}
             </Text>
           )}
         </Flex>
-      </div>
+      </Surface>
     );
   }
 
   return (
-    <div className={styles.container}>
+    <Surface
+      animated="rise"
+      className={styles.container}
+      radius="card"
+      variant="glass"
+    >
       <Flex direction="column" gap="2">
-        <Flex align="center" justify="between">
+        <Flex align="center" justify="between" gap="2" wrap="wrap">
           <Flex align="center" gap="2">
             {isExpired ? (
-              <Badge>Session expired</Badge>
+              <Badge tone="warning">Session expired</Badge>
             ) : (
-              <Badge>Not authenticated</Badge>
+              <Badge tone="muted">Not authenticated</Badge>
             )}
           </Flex>
           <Button
-            size="2"
-            variant="solid"
+            size="md"
+            variant="primary"
             disabled={isWorking}
             onClick={() => void handleStartOAuth()}
           >
@@ -241,16 +264,16 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
           </Button>
         </Flex>
         {isExpired && (
-          <Text size="1" color="gray">
+          <Text as="p" size="1" color="gray">
             Session expired, please re-login
           </Text>
         )}
         {error && (
-          <Text size="1" color="red">
+          <Text as="p" size="1" color="red">
             {error}
           </Text>
         )}
       </Flex>
-    </div>
+    </Surface>
   );
 };

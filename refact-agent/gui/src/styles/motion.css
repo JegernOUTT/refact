@@ -1,0 +1,286 @@
+:root {
+}
+
+.rf-enter,
+.rf-enter-rise,
+.rf-popover-motion {
+  opacity: 1;
+}
+
+.rf-enter-rise {
+  transform: translateY(0);
+}
+
+.rf-popover-motion {
+  transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
+  transform-origin: var(--radix-popover-content-transform-origin, center);
+}
+
+.rf-expand-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+}
+
+.rf-expand-grid[data-state="open"],
+.rf-expand-grid[data-open="true"],
+.rf-expand-grid.is-open {
+  grid-template-rows: 1fr;
+}
+
+.rf-expand-grid > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rf-pressable {
+  transform: translateY(0) scale(1);
+}
+
+.rf-active-pulse,
+.rf-status-pulse {
+  opacity: 1;
+}
+
+.rf-text-shimmer {
+  --rf-shimmer-text-base: var(--rf-color-muted);
+  --rf-shimmer-text-glow: var(--rf-color-fg);
+}
+
+.rf-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: var(--rf-surface-2);
+}
+
+.rf-shimmer::after {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-surface-3),
+    transparent
+  );
+  content: "";
+  opacity: 0.72;
+  pointer-events: none;
+  transform: translateX(-100%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rf-enter {
+    animation: rf-fade var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .rf-enter-rise {
+    animation: rf-fade-rise var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .rf-stagger > * {
+    animation-delay: 0s;
+  }
+
+  .rf-stagger > :nth-child(2) {
+    animation-delay: var(--rf-stagger);
+  }
+
+  .rf-stagger > :nth-child(3) {
+    animation-delay: calc(var(--rf-stagger) * 2);
+  }
+
+  .rf-stagger > :nth-child(4) {
+    animation-delay: calc(var(--rf-stagger) * 3);
+  }
+
+  .rf-stagger > :nth-child(5) {
+    animation-delay: calc(var(--rf-stagger) * 4);
+  }
+
+  .rf-stagger > :nth-child(6) {
+    animation-delay: calc(var(--rf-stagger) * 5);
+  }
+
+  .rf-stagger > :nth-child(7) {
+    animation-delay: calc(var(--rf-stagger) * 6);
+  }
+
+  .rf-stagger > :nth-child(8) {
+    animation-delay: calc(var(--rf-stagger) * 7);
+  }
+
+  .rf-stagger > :nth-child(9) {
+    animation-delay: calc(var(--rf-stagger) * 8);
+  }
+
+  .rf-stagger > :nth-child(10) {
+    animation-delay: calc(var(--rf-stagger) * 9);
+  }
+
+  .rf-stagger > :nth-child(11) {
+    animation-delay: calc(var(--rf-stagger) * 10);
+  }
+
+  .rf-stagger > :nth-child(12) {
+    animation-delay: calc(var(--rf-stagger) * 11);
+  }
+
+  .rf-popover-motion {
+    animation: rf-scale-fade var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .rf-expand-grid {
+    transition: grid-template-rows var(--rf-collapse-duration)
+      var(--rf-ease-entrance);
+  }
+
+  .rf-pressable {
+    transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .rf-pressable:hover {
+    transform: translateY(-1px) scale(1);
+  }
+
+  .rf-pressable:active {
+    transform: translateY(0) scale(0.98);
+  }
+
+  .rf-active-pulse,
+  .rf-status-pulse {
+    animation: rf-soft-pulse calc(var(--rf-dur-slow) * 4)
+      var(--rf-ease-standard) infinite alternate;
+  }
+
+  .rf-text-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--rf-shimmer-text-base) 0%,
+      var(--rf-shimmer-text-base) 38%,
+      var(--rf-shimmer-text-glow) 50%,
+      var(--rf-shimmer-text-base) 62%,
+      var(--rf-shimmer-text-base) 100%
+    );
+    background-size: 250% 100%;
+    background-position: 100% 0;
+    animation: rf-text-shimmer 2.4s linear infinite;
+    color: transparent;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .rf-spin {
+    animation: rf-spin 1.2s linear infinite;
+  }
+
+  .rf-shimmer::after {
+    animation: rf-shimmer var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rf-enter,
+  .rf-enter-rise,
+  .rf-popover-motion,
+  .rf-active-pulse,
+  .rf-status-pulse,
+  .rf-text-shimmer,
+  .rf-spin,
+  .rf-shimmer::after,
+  .rf-stagger > * {
+    animation: none;
+    transition: none;
+  }
+
+  .rf-expand-grid,
+  .rf-pressable {
+    transition: none;
+  }
+
+  .rf-pressable:hover,
+  .rf-pressable:active {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .rf-shimmer::after {
+    opacity: 0;
+  }
+}
+
+@keyframes rf-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rf-fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rf-scale-fade {
+  from {
+    opacity: 0;
+    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
+  }
+}
+
+@keyframes rf-soft-pulse {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0.55;
+  }
+}
+
+@keyframes rf-text-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes rf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes rf-shimmer {
+  0% {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+
+  20%,
+  80% {
+    opacity: 0.72;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}

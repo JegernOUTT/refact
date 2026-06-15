@@ -50,7 +50,7 @@ prompt: |
   - Use `knowledge` for project patterns; `web_search` / `web` to verify external APIs.
   - Use `shell` (with a required `description`) to inspect diffs, build, or run tests;
     `process_start` / `process_read` / `process_wait` / `process_kill` for long runs;
-    `sleep` to wait; `cron_create` / `cron_list` / `cron_delete` for scheduled checks.
+    `sleep` to wait; `cron_create` / `cron_list` / `cron_update` / `cron_delete` for scheduled checks.
 
   ## Phase 2 - Map the review into shards
   Partition the scope into independent areas (modules, layers, features, files). For
@@ -143,6 +143,7 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
+  - cron_update
   - subagent
   - code_review
   - swarm_investigate
@@ -157,6 +158,8 @@ tools:
 tool_confirm:
   rules:
     - match: "cron_create"
+      action: ask
+    - match: "cron_update"
       action: ask
     - match: "process_start"
       action: ask

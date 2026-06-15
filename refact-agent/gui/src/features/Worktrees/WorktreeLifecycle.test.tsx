@@ -769,7 +769,13 @@ describe("Worktree lifecycle GUI", () => {
     expect(worktreeTitles.length).toBeGreaterThan(0);
     expect(screen.getByText("agent-wt")).toBeInTheDocument();
 
-    await user.click(worktreeTitles[0]);
+    const kanbanTitle = worktreeTitles.find((title) =>
+      title.closest("[class*='kanbanCard']"),
+    );
+    if (!kanbanTitle) {
+      throw new Error("Kanban card title not found");
+    }
+    await user.click(kanbanTitle);
 
     expect(await screen.findByText("Worktree")).toBeInTheDocument();
     expect(

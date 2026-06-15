@@ -1,3 +1,16 @@
+.list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
 .file {
   display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
 }

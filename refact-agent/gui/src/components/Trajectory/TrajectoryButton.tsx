@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { HoverCard, Popover, Text } from "@radix-ui/themes";
+import { HoverCard, Popover, Text } from "../LongTailPrimitives";
 import { ArchiveIcon } from "@radix-ui/react-icons";
 import { TrajectoryPopoverContent } from "./TrajectoryPopover";
 import styles from "./TrajectoryButton.module.css";
@@ -30,8 +30,8 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
       <HoverCard.Root openDelay={300}>
-        <HoverCard.Trigger>
-          <Popover.Trigger>
+        <HoverCard.Trigger asChild>
+          <Popover.Trigger asChild>
             <button
               type="button"
               className={styles.iconButton}

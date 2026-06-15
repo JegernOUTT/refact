@@ -46,25 +46,17 @@ import { Toolbar } from "../components/Toolbar";
 import { Tab } from "../components/Toolbar/Toolbar";
 import { PageWrapper } from "../components/PageWrapper";
 import { ThreadHistory } from "./ThreadHistory";
-import { Integrations } from "./Integrations";
-import { Providers } from "./Providers";
-import { integrationsApi } from "../services/refact";
+
 import { LoginPage } from "./Login";
 import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
-import { Customization } from "./Customization";
-import { Extensions } from "./Extensions";
-import { DefaultModels } from "./DefaultModels";
-import { MCPMarketplace } from "./MCPMarketplace";
-import { SkillsMarketplace } from "./SkillsMarketplace";
-import { CommandsMarketplace } from "./CommandsMarketplace";
-import { SubagentsMarketplace } from "./SubagentsMarketplace";
-import { MarketplaceHub } from "./MarketplaceHub";
+
 import { StatsDashboard } from "./StatsDashboard";
 import { Dashboard } from "./Dashboard";
+import { SettingsHub, isSettingsPage } from "./Settings";
 import { BuddyHome } from "./Buddy/BuddyHome";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
-import { SchedulerPanel } from "./Scheduler";
+
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
 import { SplashScreen } from "./Splash";
 import { selectBackendLastOkAt, selectBackendStatus } from "./Connection";
@@ -77,7 +69,6 @@ import {
 } from "./Buddy/reportBuddyFrontendError";
 
 import styles from "./App.module.css";
-import classNames from "classnames";
 import { usePatchesAndDiffsEventsForIDE } from "../hooks/usePatchesAndDiffEventsForIDE";
 import { hasAnyUsableActiveProvider } from "./Login/providerAccess";
 import {
@@ -135,12 +126,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useAllChatsSubscription();
   useGetPing();
   useBrowserOnlineStatus();
-
-  const [isPaddingApplied, setIsPaddingApplied] = useState<boolean>(false);
-
-  const handlePaddingShift = useCallback((state: boolean) => {
-    setIsPaddingApplied(state);
-  }, []);
 
   const config = useConfig();
 
@@ -364,11 +349,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     dispatch(pop());
   }, [dispatch]);
 
-  const goBackFromIntegrations = useCallback(() => {
-    dispatch(pop());
-    dispatch(integrationsApi.util.resetApiState());
-  }, [dispatch]);
-
   const handleInternalLink = useCallback(
     (url: string): boolean => {
       const parsed = parseRefactLink(url);
@@ -391,6 +371,19 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     },
     [backgroundAgents, currentThread?.id, currentThread?.link_type, dispatch],
   );
+
+  const pageWrapperStyle = useMemo<React.CSSProperties | undefined>(() => {
+    if (renderedPage.name === "history") {
+      return {
+        paddingTop: 0,
+        paddingRight: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+      };
+    }
+
+    return undefined;
+  }, [renderedPage.name]);
 
   const activeTab: Tab | undefined = useMemo(() => {
     if (desiredPage.name === "chat") {
@@ -474,10 +467,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       align="stretch"
       direction="column"
       style={style}
-      className={classNames(styles.rootFlex, {
-        [styles.integrationsPagePadding]:
-          renderedPage.name === "integrations page" && isPaddingApplied,
-      })}
+      className={styles.rootFlex}
       data-element="app-root"
     >
       {showStartupSplash ? (
@@ -491,14 +481,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
-          <PageWrapper
-            host={config.host}
-            style={{
-              padding: renderedPage.name === "history" ? 0 : undefined,
-              paddingRight:
-                renderedPage.name === "integrations page" ? 0 : undefined,
-            }}
-          >
+          <PageWrapper host={config.host} style={pageWrapperStyle}>
             {renderedPage.name === "login page" && <LoginPage />}
             {pageSwitching && <ChatLoading />}
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
@@ -511,20 +494,12 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 />
               </InternalLinkProvider>
             )}
-            {!pageSwitching && renderedPage.name === "integrations page" && (
-              <Integrations
-                backFromIntegrations={goBackFromIntegrations}
-                tabbed={config.tabbed}
+            {!pageSwitching && isSettingsPage(renderedPage) && (
+              <SettingsHub
+                page={renderedPage}
+                onBack={goBack}
                 host={config.host}
-                onCloseIntegrations={goBackFromIntegrations}
-                handlePaddingShift={handlePaddingShift}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "providers page" && (
-              <Providers
-                backFromProviders={goBack}
                 tabbed={config.tabbed}
-                host={config.host}
               />
             )}
             {!pageSwitching && renderedPage.name === "thread history page" && (
@@ -548,24 +523,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "knowledge graph" && (
               <KnowledgeWorkspace />
             )}
-            {!pageSwitching && renderedPage.name === "customization" && (
-              <Customization
-                backFromCustomization={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-                initialKind={renderedPage.kind}
-                initialConfigId={renderedPage.configId}
-                draftId={renderedPage.draftId}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "default models" && (
-              <DefaultModels
-                backFromDefaultModels={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-                draftId={renderedPage.draftId}
-              />
-            )}
+
             {!pageSwitching && renderedPage.name === "stats dashboard" && (
               <StatsDashboard
                 backFromDashboard={goBack}
@@ -573,56 +531,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 host={config.host}
               />
             )}
-            {!pageSwitching && renderedPage.name === "extensions" && (
-              <Extensions
-                backFromExtensions={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-                initialTab={renderedPage.tab}
-                initialItemId={renderedPage.itemId}
-                draftId={renderedPage.draftId}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "mcp marketplace" && (
-              <MCPMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "skills marketplace" && (
-              <SkillsMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "commands marketplace" && (
-              <CommandsMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching &&
-              renderedPage.name === "subagents marketplace" && (
-                <SubagentsMarketplace
-                  backFromMarketplace={goBack}
-                  tabbed={config.tabbed}
-                  host={config.host}
-                />
-              )}
-            {!pageSwitching && renderedPage.name === "marketplace hub" && (
-              <MarketplaceHub
-                back={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
+
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
-            {!pageSwitching && renderedPage.name === "scheduler" && (
-              <SchedulerPanel onBack={goBack} />
-            )}
           </PageWrapper>
           <ProcessCompletedToasts />
         </>
@@ -638,7 +548,7 @@ export const App = () => {
       <Provider store={store}>
         <Theme>
           <AbortControllerProvider>
-            <BuddyErrorBoundary>
+            <BuddyErrorBoundary showThreadReportPanel>
               <InnerApp />
             </BuddyErrorBoundary>
           </AbortControllerProvider>

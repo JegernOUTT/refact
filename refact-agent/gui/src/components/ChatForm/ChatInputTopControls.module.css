@@ -1,21 +1,24 @@
-/* Use shared iconButton with variants */
-.iconButton {
-  composes: iconButton from "../shared/iconButton.module.css";
+.controlsGroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
-.active {
-  composes: active from "../shared/iconButton.module.css";
+.accent > span > svg {
+  color: var(--rf-color-accent);
 }
 
-.danger {
-  composes: danger from "../shared/iconButton.module.css";
+.dangerIcon > span > svg {
+  color: var(--rf-color-danger);
 }
 
 .divider {
-  color: var(--gray-8);
-  font-size: 12px;
+  margin: 0 var(--rf-space-1);
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-2);
   user-select: none;
-  margin: 0 var(--space-1);
 }
 
 .projectInfoControl {
@@ -24,44 +27,14 @@
 }
 
 .selectedLinesGroup {
-  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  height: var(--rf-control-h-sm);
 }
 
 @container (max-width: 340px) {
   .projectInfoControl {
     display: none;
   }
-}
-
-.lockButton,
-.helpButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--gray-10);
-  cursor: pointer;
-  transition: filter 0.15s ease;
-  flex-shrink: 0;
-}
-
-.lockButton svg,
-.helpButton svg {
-  width: 14px;
-  height: 14px;
-}
-
-.lockButton:hover:not(:disabled),
-.helpButton:hover:not(:disabled) {
-  filter: brightness(1.5);
-}
-
-.lockButton:disabled,
-.helpButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }

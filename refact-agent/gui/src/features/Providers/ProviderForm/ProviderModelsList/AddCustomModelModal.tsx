@@ -1,18 +1,19 @@
 import { type FC, useCallback, useEffect, useMemo, useState } from "react";
+
 import {
   Button,
-  Checkbox,
   Dialog,
-  Flex,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-
+  FieldError,
+  FieldStack,
+  FieldText,
+  Switch,
+} from "../../../../components/ui";
 import {
   useAddCustomModelMutation,
   type AddCustomModelRequest,
   type AvailableModel,
 } from "../../../../services/refact";
+import styles from "./ModelCard.module.css";
 
 export type AddCustomModelModalProps = {
   providerName: string;
@@ -49,6 +50,22 @@ function parseReasoningEffortOptions(value: string): string[] | undefined {
   return options.length > 0 ? options : undefined;
 }
 
+function getSaveErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const data = record.data;
+    if (typeof data === "object" && data !== null) {
+      const dataRecord = data as Record<string, unknown>;
+      if (typeof dataRecord.detail === "string") return dataRecord.detail;
+      if (typeof dataRecord.error === "string") return dataRecord.error;
+    }
+    if (typeof data === "string") return data;
+    if (typeof record.error === "string") return record.error;
+    if (typeof record.message === "string") return record.message;
+  }
+  return "Failed to save custom model. Please try again.";
+}
+
 export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   providerName,
   isOpen,
@@ -73,6 +90,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   const [outputPrice, setOutputPrice] = useState("");
   const [cacheReadPrice, setCacheReadPrice] = useState("");
   const [cacheCreationPrice, setCacheCreationPrice] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const isEditing = Boolean(initialModel);
 
@@ -95,6 +113,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     setOutputPrice(toInputValue(model?.pricing?.generated));
     setCacheReadPrice(toInputValue(model?.pricing?.cache_read));
     setCacheCreationPrice(toInputValue(model?.pricing?.cache_creation));
+    setSaveError(null);
   }, []);
 
   useEffect(() => {
@@ -161,13 +180,14 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
         : null,
     };
 
+    setSaveError(null);
+
     try {
       await addCustomModel({ providerName, model }).unwrap();
       resetForm();
       onClose();
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error("Failed to add custom model:", e);
+    } catch (error) {
+      setSaveError(getSaveErrorMessage(error));
     }
   }, [
     addCustomModel,
@@ -192,240 +212,163 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     onClose,
   ]);
 
+  const title = isEditing
+    ? isEditingCustomModel
+      ? "Edit Custom Model"
+      : "Edit Model Capabilities"
+    : "Add Custom Model";
+  const description = isEditing
+    ? `Adjust the saved capability overrides for ${
+        initialModel?.display_name ?? initialModel?.id ?? "this model"
+      }.`
+    : `Define a custom model for ${providerName}. You can set its capabilities manually.`;
+
   return (
-    <Dialog.Root open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content style={{ maxWidth: 450 }}>
-        <Dialog.Title>
-          {isEditing
-            ? isEditingCustomModel
-              ? "Edit Custom Model"
-              : "Edit Model Capabilities"
-            : "Add Custom Model"}
-        </Dialog.Title>
-        <Dialog.Description size="2" mb="4">
-          {isEditing
-            ? `Adjust the saved capability overrides for ${
-                initialModel?.display_name ?? initialModel?.id ?? "this model"
-              }.`
-            : `Define a custom model for ${providerName}. You can set its capabilities manually.`}
-        </Dialog.Description>
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <Dialog.Content maxWidth="450px">
+        <Dialog.Title>{title}</Dialog.Title>
+        <Dialog.Description>{description}</Dialog.Description>
 
-        <Flex direction="column" gap="3">
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Model ID *
-            </Text>
-            <TextField.Root
-              placeholder="e.g., my-custom-model"
-              value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
-              disabled={isEditing}
+        <div className={styles.modalStack}>
+          <FieldStack
+            label="Model ID"
+            required
+            helper={
+              isEditing && !isEditingCustomModel
+                ? "This saves overrides for the provider/model.dev model without changing its ID."
+                : undefined
+            }
+            control={
+              <FieldText
+                placeholder="e.g., my-custom-model"
+                value={modelId}
+                onChange={setModelId}
+                disabled={isEditing}
+              />
+            }
+          />
+          <FieldStack
+            label="Context Length"
+            required
+            control={
+              <FieldText
+                type="number"
+                placeholder="4096"
+                value={nCtx}
+                onChange={setNCtx}
+              />
+            }
+          />
+          <FieldStack
+            label="Max Output Tokens"
+            helper="Optional"
+            control={
+              <FieldText
+                type="number"
+                placeholder="e.g., 8192"
+                value={maxOutputTokens}
+                onChange={setMaxOutputTokens}
+              />
+            }
+          />
+
+          <div className={styles.modalGroup}>
+            <div className={styles.modalGroupTitle}>Capabilities</div>
+            <Switch
+              label="Supports Tools (function calling)"
+              checked={supportsTools}
+              onCheckedChange={setSupportsTools}
             />
-            {isEditing && !isEditingCustomModel && (
-              <Text as="span" size="1" color="gray">
-                This saves overrides for the provider/model.dev model without
-                changing its ID.
-              </Text>
-            )}
-          </Flex>
+            <Switch
+              label="Supports Images/Vision"
+              checked={supportsMultimodality}
+              onCheckedChange={setSupportsMultimodality}
+            />
+            <Switch
+              label="Supports Thinking Budget"
+              checked={supportsThinkingBudget}
+              onCheckedChange={setSupportsThinkingBudget}
+            />
+            <Switch
+              label="Supports Adaptive Thinking Budget"
+              checked={supportsAdaptiveThinkingBudget}
+              onCheckedChange={setSupportsAdaptiveThinkingBudget}
+            />
+            <Switch
+              label="Supports Prompt Caching"
+              checked={supportsPromptCache}
+              onCheckedChange={setSupportsPromptCache}
+            />
+          </div>
 
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Context Length *
-            </Text>
-            <TextField.Root
+          <FieldStack
+            label="Reasoning Effort Options"
+            helper="Comma-separated values for providers that support named reasoning levels."
+            control={
+              <FieldText
+                placeholder="low, medium, high"
+                value={reasoningEffortOptions}
+                onChange={setReasoningEffortOptions}
+              />
+            }
+          />
+          <FieldStack
+            label="Tokenizer"
+            helper="Use openai/anthropic for provider cloud token counting, hf://..., URL, or file path. fake is for testing only."
+            control={
+              <FieldText
+                placeholder="anthropic"
+                value={tokenizer}
+                onChange={setTokenizer}
+              />
+            }
+          />
+
+          <div className={styles.modalGroup}>
+            <div className={styles.modalGroupTitle}>Pricing per 1M Tokens</div>
+            <FieldText
               type="number"
-              placeholder="4096"
-              value={nCtx}
-              onChange={(e) => setNCtx(e.target.value)}
+              placeholder="Prompt, e.g. 1.25"
+              value={promptPrice}
+              onChange={setPromptPrice}
             />
-          </Flex>
-
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Max Output Tokens (optional)
-            </Text>
-            <TextField.Root
+            <FieldText
               type="number"
-              placeholder="e.g., 8192"
-              value={maxOutputTokens}
-              onChange={(e) => setMaxOutputTokens(e.target.value)}
+              placeholder="Output, e.g. 10"
+              value={outputPrice}
+              onChange={setOutputPrice}
             />
-          </Flex>
-
-          <Flex direction="column" gap="2">
-            <Text as="label" size="2" weight="medium">
-              Capabilities
-            </Text>
-
-            <Flex align="center" gap="2">
-              <Checkbox
-                id="supports_tools"
-                checked={supportsTools}
-                onCheckedChange={(checked) =>
-                  setSupportsTools(checked === true)
-                }
-              />
-              <Text as="label" htmlFor="supports_tools" size="2">
-                Supports Tools (function calling)
-              </Text>
-            </Flex>
-
-            <Flex align="center" gap="2">
-              <Checkbox
-                id="supports_multimodality"
-                checked={supportsMultimodality}
-                onCheckedChange={(checked) =>
-                  setSupportsMultimodality(checked === true)
-                }
-              />
-              <Text as="label" htmlFor="supports_multimodality" size="2">
-                Supports Images/Vision
-              </Text>
-            </Flex>
-
-            <Flex align="center" gap="2">
-              <Checkbox
-                id="supports_thinking_budget"
-                checked={supportsThinkingBudget}
-                onCheckedChange={(checked) =>
-                  setSupportsThinkingBudget(checked === true)
-                }
-              />
-              <Text as="label" htmlFor="supports_thinking_budget" size="2">
-                Supports Thinking Budget
-              </Text>
-            </Flex>
-
-            <Flex align="center" gap="2">
-              <Checkbox
-                id="supports_adaptive_thinking_budget"
-                checked={supportsAdaptiveThinkingBudget}
-                onCheckedChange={(checked) =>
-                  setSupportsAdaptiveThinkingBudget(checked === true)
-                }
-              />
-              <Text
-                as="label"
-                htmlFor="supports_adaptive_thinking_budget"
-                size="2"
-              >
-                Supports Adaptive Thinking Budget
-              </Text>
-            </Flex>
-
-            <Flex align="center" gap="2">
-              <Checkbox
-                id="supports_cache_control"
-                checked={supportsPromptCache}
-                onCheckedChange={(checked) =>
-                  setSupportsPromptCache(checked === true)
-                }
-              />
-              <Text as="label" htmlFor="supports_cache_control" size="2">
-                Supports Prompt Caching
-              </Text>
-            </Flex>
-          </Flex>
-
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Reasoning Effort Options (optional)
-            </Text>
-            <TextField.Root
-              placeholder="low, medium, high"
-              value={reasoningEffortOptions}
-              onChange={(e) => setReasoningEffortOptions(e.target.value)}
+            <FieldText
+              type="number"
+              placeholder="Cache Read optional"
+              value={cacheReadPrice}
+              onChange={setCacheReadPrice}
             />
-            <Text as="span" size="1" color="gray">
-              Comma-separated values for providers that support named reasoning
-              levels.
-            </Text>
-          </Flex>
-
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Tokenizer (optional)
-            </Text>
-            <TextField.Root
-              placeholder="hf://Xenova/claude-tokenizer"
-              value={tokenizer}
-              onChange={(e) => setTokenizer(e.target.value)}
+            <FieldText
+              type="number"
+              placeholder="Cache Creation optional"
+              value={cacheCreationPrice}
+              onChange={setCacheCreationPrice}
             />
-            <Text as="span" size="1" color="gray">
-              HuggingFace tokenizer path for accurate token counting
-            </Text>
-          </Flex>
-
-          <Flex direction="column" gap="2">
-            <Text as="label" size="2" weight="medium">
-              Pricing per 1M Tokens (optional)
-            </Text>
-
-            <Flex direction="column" gap="1">
-              <Text as="label" size="1" color="gray">
-                Prompt
-              </Text>
-              <TextField.Root
-                type="number"
-                placeholder="e.g., 1.25"
-                value={promptPrice}
-                onChange={(e) => setPromptPrice(e.target.value)}
-              />
-            </Flex>
-
-            <Flex direction="column" gap="1">
-              <Text as="label" size="1" color="gray">
-                Output
-              </Text>
-              <TextField.Root
-                type="number"
-                placeholder="e.g., 10"
-                value={outputPrice}
-                onChange={(e) => setOutputPrice(e.target.value)}
-              />
-            </Flex>
-
-            <Flex direction="column" gap="1">
-              <Text as="label" size="1" color="gray">
-                Cache Read
-              </Text>
-              <TextField.Root
-                type="number"
-                placeholder="optional"
-                value={cacheReadPrice}
-                onChange={(e) => setCacheReadPrice(e.target.value)}
-              />
-            </Flex>
-
-            <Flex direction="column" gap="1">
-              <Text as="label" size="1" color="gray">
-                Cache Creation
-              </Text>
-              <TextField.Root
-                type="number"
-                placeholder="optional"
-                value={cacheCreationPrice}
-                onChange={(e) => setCacheCreationPrice(e.target.value)}
-              />
-            </Flex>
-
-            {pricingRequested && !isPricingValid && (
-              <Text as="span" size="1" color="red">
+            {pricingRequested && !isPricingValid ? (
+              <span className={styles.noticeDanger}>
                 Enter valid non-negative prompt and output prices to save
                 pricing.
-              </Text>
-            )}
-          </Flex>
-        </Flex>
+              </span>
+            ) : null}
+          </div>
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
+          {saveError ? <FieldError>{saveError}</FieldError> : null}
+        </div>
+
+        <div className={styles.modalActions}>
+          <Dialog.Close asChild>
+            <Button variant="soft" disabled={isLoading}>
               Cancel
             </Button>
           </Dialog.Close>
           <Button
+            variant="primary"
             onClick={() => void handleSubmit()}
             disabled={!isValid || isLoading}
           >
@@ -437,8 +380,8 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
                 ? "Save Changes"
                 : "Add Model"}
           </Button>
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

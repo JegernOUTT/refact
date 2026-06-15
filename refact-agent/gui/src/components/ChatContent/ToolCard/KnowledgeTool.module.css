@@ -1,9 +1,13 @@
 .query {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
+}
+
+/* While running, let the title shimmer own the color so the whole line
+   animates uniformly, matching every other tool card. */
+[data-status="running"] .query {
+  color: inherit;
 }
 
 .resultContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
+  composes: resultPanel from "./ToolCardBody.module.css";
 }

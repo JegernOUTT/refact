@@ -1,4 +1,30 @@
 .disabledButton {
-  cursor: not-allowed;
-  backdrop-filter: blur(1000px);
+  pointer-events: none;
+}
+
+.content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-4);
+  line-height: var(--rf-line);
+}
+
+.description {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
 }

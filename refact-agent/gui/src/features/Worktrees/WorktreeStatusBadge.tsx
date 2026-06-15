@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge } from "@radix-ui/themes";
+import { Badge, StatusDot, type StatusDotStatus } from "../../components/ui";
 import type { WorktreeMeta, WorktreeRecordView } from "../../services/refact";
 import styles from "./Worktrees.module.css";
 
@@ -37,6 +37,21 @@ function DiffStats({
   );
 }
 
+function statusBadge(
+  label: string,
+  tone: React.ComponentProps<typeof Badge>["tone"],
+  status: StatusDotStatus,
+  additions?: number | null,
+  deletions?: number | null,
+) {
+  return (
+    <Badge tone={tone} className={styles.statusBadge}>
+      <StatusDot status={status} size="small" />
+      {label} <DiffStats additions={additions} deletions={deletions} />
+    </Badge>
+  );
+}
+
 export const WorktreeStatusBadge: React.FC<WorktreeStatusBadgeProps> = ({
   worktree,
   record,
@@ -51,27 +66,15 @@ export const WorktreeStatusBadge: React.FC<WorktreeStatusBadgeProps> = ({
     worktree?.deleted === true ||
     status?.deleted === true
   ) {
-    return (
-      <Badge size="1" color="red" variant="soft">
-        deleted
-      </Badge>
-    );
+    return statusBadge("deleted", "danger", "error");
   }
 
   if (lifecycle === "missing" || status?.path_exists === false) {
-    return (
-      <Badge size="1" color="red" variant="soft">
-        missing
-      </Badge>
-    );
+    return statusBadge("missing", "danger", "error");
   }
 
   if (lifecycle === "conflicted" || status?.conflicted === true) {
-    return (
-      <Badge size="1" color="amber" variant="soft">
-        conflicted
-      </Badge>
-    );
+    return statusBadge("conflicted", "warning", "warning");
   }
 
   if (
@@ -79,26 +82,14 @@ export const WorktreeStatusBadge: React.FC<WorktreeStatusBadgeProps> = ({
     worktree?.stale === true ||
     status?.stale === true
   ) {
-    return (
-      <Badge size="1" color="amber" variant="soft">
-        stale
-      </Badge>
-    );
+    return statusBadge("stale", "warning", "warning");
   }
 
   if (status?.dirty === true) {
-    return (
-      <Badge size="1" color="amber" variant="soft">
-        dirty <DiffStats additions={additions} deletions={deletions} />
-      </Badge>
-    );
+    return statusBadge("dirty", "warning", "warning", additions, deletions);
   }
 
-  return (
-    <Badge size="1" color="green" variant="soft">
-      worktree <DiffStats additions={additions} deletions={deletions} />
-    </Badge>
-  );
+  return statusBadge("worktree", "success", "success", additions, deletions);
 };
 
 WorktreeStatusBadge.displayName = "WorktreeStatusBadge";

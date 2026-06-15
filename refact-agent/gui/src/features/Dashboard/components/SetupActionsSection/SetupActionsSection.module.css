@@ -1,7 +1,7 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-section-gap);
   flex-shrink: 0;
 }
 
@@ -16,10 +16,10 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   width: 100%;
   text-align: left;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .headerToggle:hover {
@@ -35,31 +35,31 @@
 .buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
-  padding-bottom: var(--space-1);
+  gap: var(--rf-space-2);
+  padding-bottom: var(--rf-space-1);
 }
 
 .button {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a6);
-  background: var(--gray-a2);
-  color: var(--gray-12);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg-strong);
   cursor: pointer;
   transition:
-    background var(--motion-fast) ease,
-    border-color var(--motion-fast) ease;
+    background var(--rf-dur-fast) ease,
+    border-color var(--rf-dur-fast) ease;
 }
 
 .button:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a7);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
 }
 
 .button:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }

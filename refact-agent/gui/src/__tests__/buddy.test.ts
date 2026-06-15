@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import React from "react";
 import { http, HttpResponse } from "msw";
-import { fireEvent, render, screen, waitFor } from "../utils/test-utils";
+import {
+  createDefaultChatState,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "../utils/test-utils";
 import {
   executeBuddyAction,
   executeBuddyNavigation,
@@ -60,10 +66,14 @@ import {
 } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import {
+  stepAnimFrame,
   triggerSignalAnimation,
   updateSceneAnimation,
 } from "../features/Buddy/canvas/animLoop";
-import { createInitialAnimState } from "../features/Buddy/state";
+import {
+  createInitialAnimState,
+  createInitialSemanticState,
+} from "../features/Buddy/state";
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
 import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
@@ -98,7 +108,13 @@ import {
   setIsWaitingForResponse,
   setPreventSend,
   setThreadPauseReasons,
+  applyChatEvent,
 } from "../features/Chat/Thread/actions";
+import { CHAT_COMPANION_OPEN_QUIET_MS } from "../features/Buddy/buddyChatCompanionPolicy";
+import type {
+  ChatEventEnvelope,
+  QueuedItem,
+} from "../services/refact/chatSubscription";
 import {
   addBuddyCrashBreadcrumb,
   beginBuddyCrashSession,
@@ -381,6 +397,39 @@ function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
   };
 }
 
+function makeChatThreadSnapshot(args?: {
+  queuedItems?: QueuedItem[];
+  withUserMessage?: boolean;
+}): ChatEventEnvelope {
+  return {
+    chat_id: "chat-a",
+    seq: "1",
+    type: "snapshot",
+    thread: {
+      id: "chat-a",
+      title: "Chat A",
+      model: "gpt-test",
+      mode: "AGENT",
+      tool_use: "agent",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: true,
+      checkpoints_enabled: true,
+      is_title_generated: false,
+    },
+    runtime: {
+      state: "idle",
+      paused: false,
+      error: null,
+      queue_size: args?.queuedItems?.length ?? 0,
+      pause_reasons: [],
+      queued_items: args?.queuedItems ?? [],
+    },
+    background_agents: [],
+    messages: args?.withUserMessage ? [{ role: "user", content: "Hello" }] : [],
+  };
+}
+
 const noopCanvasContext = {
   clearRect: vi.fn(),
   fillRect: vi.fn(),
@@ -395,6 +444,7 @@ const noopCanvasContext = {
   arc: vi.fn(),
   ellipse: vi.fn(),
   fill: vi.fn(),
+  clip: vi.fn(),
   moveTo: vi.fn(),
   lineTo: vi.fn(),
   stroke: vi.fn(),
@@ -434,7 +484,7 @@ function setupBuddyCompanionHandlers() {
       HttpResponse.json({
         logs: "logs",
         internal_context: "context",
-        repo_owner: "smallcloudai",
+        repo_owner: "JegernOUTT",
         repo_name: "refact",
       }),
     ),
@@ -817,6 +867,7 @@ describe("Buddy chat notification freshness", () => {
     const store = setUpStore();
     const runtime = makeChatRuntimeEvent({
       id: "runtime-description",
+      signal_type: "speech_chat_reaction",
       title: "Setup ready",
       description: "Connect GitHub to enable issue sync.",
       controls: [],
@@ -842,6 +893,7 @@ describe("Buddy chat notification freshness", () => {
     const store = setUpStore();
     const runtime = makeChatRuntimeEvent({
       id: "runtime-speech-text",
+      signal_type: "speech_chat_reaction",
       title: "Hidden title",
       description: "Hidden description",
       speech_text: "  Server says this instead.  ",
@@ -867,7 +919,7 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-noisy-prefix",
       title: "generic: LLM error",
-      signal_type: "ordinary_status",
+      signal_type: "speech_chat_reaction",
       status: "completed",
       description: "LLM error: upstream returned 429",
       controls: [],
@@ -892,7 +944,7 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-context-window",
       title: "generic: LLM error",
-      signal_type: "ordinary_status",
+      signal_type: "speech_chat_reaction",
       status: "completed",
       description:
         "LLM error: Your input exceeds the context window of this model.",
@@ -1190,6 +1242,7 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const epochRuntime = makeChatRuntimeEvent({
         id: "runtime-epoch-fresh",
+        signal_type: "speech_chat_reaction",
         title: "Epoch gremlin status",
         status: "completed",
         priority: "normal",
@@ -1421,6 +1474,7 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const runtime = makeChatRuntimeEvent({
         id: "runtime-impression-once",
+        signal_type: "speech_chat_reaction",
         title: "Impression once",
         created_at: "2024-01-01T00:00:00Z",
       });
@@ -1469,6 +1523,14 @@ describe("Buddy chat notification freshness", () => {
         id: "runtime-actionable-no-ambient",
         title: "Actionable runtime",
         created_at: "2024-01-01T00:00:00Z",
+        controls: [
+          {
+            id: "open-actionable-runtime",
+            label: "Open",
+            action: "open_buddy",
+            style: "primary",
+          },
+        ],
       });
       store.dispatch(
         setBuddySnapshot(makeSnapshot({ runtime_queue: [actionableRuntime] })),
@@ -1648,6 +1710,259 @@ describe("Buddy chat notification freshness", () => {
       );
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  test("queued user messages hide the chat companion bubble until the queue drains", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-queue-busy",
+      title: "Queue busy notice",
+      controls: [
+        {
+          id: "dismiss-queue-busy",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: "runtime-queue-busy",
+          style: "ghost",
+        },
+      ],
+    });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+    store.dispatch(
+      applyChatEvent(
+        makeChatThreadSnapshot({
+          queuedItems: [
+            {
+              client_request_id: "queued-1",
+              priority: false,
+              command_type: "user_message",
+              preview: "queued message",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(container, "runtime:runtime-queue-busy");
+
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "2",
+        type: "queue_updated",
+        queue_size: 0,
+        queued_items: [],
+      }),
+    );
+    await expectCompanionNotification(container, "runtime:runtime-queue-busy");
+  });
+
+  test("error runtime event with the same dedupe key is shown only once across re-emissions", async () => {
+    const store = setUpStore();
+    const firstError = makeChatRuntimeEvent({
+      id: "runtime-error-first",
+      signal_type: "chat_error",
+      title: "LLM error",
+      description: "upstream returned 429",
+      status: "failed",
+      dedupe_key: "llm_error:overloaded",
+      controls: [
+        {
+          id: "dismiss-error-first",
+          label: "Dismiss",
+          action: "dismiss_runtime_event",
+          action_param: "runtime-error-first",
+          style: "ghost",
+        },
+      ],
+    });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [firstError] })),
+    );
+
+    const rendered = renderBuddyChatCompanion(store, "chat-a");
+    await expectCompanionNotification(
+      rendered.container,
+      "runtime:runtime-error-first",
+    );
+    await waitFor(() => {
+      expect(
+        "content:runtime:llm_error_overloaded" in
+          selectSeenNotificationIds(store.getState()),
+      ).toBe(true);
+    });
+
+    rendered.unmount();
+    store.dispatch(
+      enqueueRuntimeEvent({
+        ...firstError,
+        id: "runtime-error-second",
+        created_at: new Date().toISOString(),
+      }),
+    );
+    const remounted = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(
+      remounted.container,
+      "runtime:runtime-error-second",
+    );
+  });
+
+  test("regenerated suggestion with the same type and title is shown only once", async () => {
+    const store = setUpStore();
+    const firstSuggestion: BuddySuggestion = {
+      id: "quest-suggestion-start_setup-100",
+      suggestion_type: "quest_start_setup",
+      title: "Warm up this workspace",
+      description: "Kick off setup so Buddy can help proactively.",
+      created_at: new Date().toISOString(),
+      dismissed: false,
+      controls: [],
+    };
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(addBuddySuggestion(firstSuggestion));
+
+    const rendered = renderBuddyChatCompanion(store, "chat-a");
+    await expectCompanionNotification(
+      rendered.container,
+      "suggestion:quest-suggestion-start_setup-100",
+    );
+    await waitFor(() => {
+      expect(
+        "content:suggestion:quest_start_setup:warm up this workspace" in
+          selectSeenNotificationIds(store.getState()),
+      ).toBe(true);
+    });
+
+    rendered.unmount();
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot({
+          state: {
+            ...makeState(),
+            suggestion_state: [
+              {
+                ...firstSuggestion,
+                id: "quest-suggestion-start_setup-200",
+                created_at: new Date().toISOString(),
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const remounted = renderBuddyChatCompanion(store, "chat-a");
+    await new Promise((resolve) => window.setTimeout(resolve, 30));
+    expectNoCompanionNotificationNow(
+      remounted.container,
+      "suggestion:quest-suggestion-start_setup-200",
+    );
+  });
+
+  test("opening a chat with history keeps the companion quiet for the open window", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      store.dispatch(
+        applyChatEvent(makeChatThreadSnapshot({ withUserMessage: true })),
+      );
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(
+        addBuddySuggestion({
+          id: "quiet-window-suggestion",
+          suggestion_type: "setup",
+          title: "Configure linting",
+          description: "Set up the linter for this repo.",
+          created_at: "2024-01-01T00:00:00Z",
+          dismissed: false,
+          controls: [],
+        }),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+
+      // Recomputing the gate inside the quiet window keeps the bubble hidden.
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS - 1_000);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-inside", kind: "actionable" }),
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+
+      // After the open window elapses the suggestion is allowed through.
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS + 1);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-after", kind: "actionable" }),
+      );
+      await expectCompanionNotification(
+        container,
+        "suggestion:quiet-window-suggestion",
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("companion stays quiet when the chat snapshot arrives after mount", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      store.dispatch(createChatWithId({ id: "chat-a" }));
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(
+        addBuddySuggestion({
+          id: "late-snapshot-suggestion",
+          suggestion_type: "setup",
+          title: "Configure linting",
+          description: "Set up the linter for this repo.",
+          created_at: "2024-01-01T00:00:00Z",
+          dismissed: false,
+          controls: [],
+        }),
+      );
+
+      // Thread exists but its snapshot has not arrived: history is unknown,
+      // so nothing may show yet.
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+
+      // The snapshot reveals existing user history: the open-chat quiet
+      // window arms from this moment.
+      store.dispatch(
+        applyChatEvent(makeChatThreadSnapshot({ withUserMessage: true })),
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+      expectNoCompanionNotificationNow(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+
+      nowSpy.mockReturnValue(CHAT_COMPANION_OPEN_QUIET_MS + 1);
+      store.dispatch(
+        recordChatBubbleImpression({ id: "nudge-late", kind: "actionable" }),
+      );
+      await expectCompanionNotification(
+        container,
+        "suggestion:late-snapshot-suggestion",
+      );
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 });
@@ -2884,11 +3199,8 @@ describe("BuddyPanel hero layout", () => {
       path.join(buddyDir, "BuddyPanel.tsx"),
       "utf8",
     );
-    const hero = fs.readFileSync(path.join(buddyDir, "BuddyHero.tsx"), "utf8");
     expect(panel).toContain("getSignalDef(activeRuntime.signal_type)");
-    expect(hero).toContain("getSignalDef(nowPlaying.signal_type)");
     expect(panel).not.toContain("SIGNALS[activeRuntime.signal_type]");
-    expect(hero).not.toContain("SIGNALS[nowPlaying.signal_type]");
   });
 });
 
@@ -3039,7 +3351,7 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `smallcloudai/refact` on GitHub.",
+      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
     );
     expect(prompt).not.toContain("attacker");
     expect(prompt).not.toContain("ignore previous instructions");
@@ -3055,10 +3367,10 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `smallcloudai/refact` on GitHub.",
+      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
     );
     expect(prompt).toContain(
-      "use GitHub MCP remote browsing for `smallcloudai/refact` when helpful",
+      "use GitHub MCP remote browsing for `JegernOUTT/refact` when helpful",
     );
   });
 });
@@ -3923,6 +4235,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
   test("BuddyPage discriminated union type check", () => {
     const pages: BuddyPage[] = [
       { type: "buddy" },
+      { type: "settings" },
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
       { type: "worktrees" },
@@ -3930,6 +4243,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
     ];
     const types = pages.map((p) => p.type);
     expect(types).toContain("buddy");
+    expect(types).toContain("settings");
     expect(types).toContain("task_workspace");
     expect(types).toContain("knowledge_graph");
     expect(types).toContain("worktrees");
@@ -3950,6 +4264,7 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
     const cases: [BuddyPage, string][] = [
       [{ type: "buddy" }, "buddy"],
       [{ type: "stats" }, "stats dashboard"],
+      [{ type: "settings" }, "general settings"],
       [{ type: "customization" }, "customization"],
       [{ type: "providers" }, "providers page"],
       [{ type: "default_models" }, "default models"],
@@ -4685,7 +5000,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test("fresh persistent active progress event beats fresh chat reaction", async () => {
+  test("persistent progress chatter never bubbles while fresh chat reactions show", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -4720,11 +5035,11 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       await expectCompanionNotification(
         container,
-        "runtime:fresh-persistent-progress",
+        "runtime:reaction-under-progress",
       );
       expectNoCompanionNotificationNow(
         container,
-        "runtime:reaction-under-progress",
+        "runtime:fresh-persistent-progress",
       );
     } finally {
       vi.useRealTimers();
@@ -4862,7 +5177,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     },
   );
 
-  test("high-priority completed task event has no default investigate controls", async () => {
+  test("high-priority completed task chatter stays out of the chat companion", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -4883,7 +5198,7 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       const { container } = renderBuddyChatCompanion(store, "chat-a");
 
-      await expectCompanionNotification(
+      await expectNoCompanionNotification(
         container,
         "runtime:runtime-task-completed-high",
       );
@@ -5876,7 +6191,7 @@ describe("restoreChat buddy_meta handling", () => {
         HttpResponse.json({
           logs: "logs",
           internal_context: "context",
-          repo_owner: "smallcloudai",
+          repo_owner: "JegernOUTT",
           repo_name: "refact",
         }),
       ),
@@ -6058,5 +6373,114 @@ describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
       expect.objectContaining({ source: "react_error_boundary" }),
     );
     spy.mockRestore();
+  });
+
+  test("BuddyErrorBoundary_renders_thread_report_panel", async () => {
+    const threadId = "crashed-thread";
+    server.use(
+      http.get("*/v1/trajectories/:id/path", () =>
+        HttpResponse.json({ path: `/tmp/${threadId}.json` }),
+      ),
+    );
+
+    const state = createDefaultChatState();
+    state.current_thread_id = threadId;
+    const runtime = Object.values(state.threads)[0];
+    runtime.thread.id = threadId;
+    runtime.thread.messages = [
+      {
+        role: "user",
+        content: "hello",
+      },
+    ];
+    state.threads = { [threadId]: runtime };
+
+    const CrashingChild = () => {
+      throw new Error("render crash");
+    };
+
+    render(
+      React.createElement(
+        BuddyErrorBoundary,
+        { showThreadReportPanel: true },
+        React.createElement(CrashingChild),
+      ),
+      {
+        preloadedState: {
+          chat: state,
+        },
+      },
+    );
+
+    expect(
+      await screen.findByText("The chat frontend crashed."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(threadId)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /open github issue/i }),
+    ).toHaveAttribute(
+      "href",
+      expect.stringContaining(
+        "https://github.com/JegernOUTT/refact/issues/new",
+      ),
+    );
+    expect(screen.getByTestId("copy-crash-thread-json")).toBeInTheDocument();
+  });
+});
+
+describe("buddy expression FX", () => {
+  test("raises the anime vein pop after consecutive errors", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "chat_error", () => undefined, semantic);
+    expect(anim.veinTimer).toBe(0);
+    triggerSignalAnimation(anim, "chat_error", () => undefined, semantic);
+    expect(anim.veinTimer).toBeGreaterThan(0);
+  });
+
+  test("raises the gold aura on win streaks and stage up", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    expect(anim.auraTimer).toBe(0);
+    triggerSignalAnimation(anim, "chat_completed", () => undefined, semantic);
+    expect(anim.auraTimer).toBeGreaterThan(0);
+
+    const stageAnim = createInitialAnimState();
+    triggerSignalAnimation(stageAnim, "stage_up", () => undefined, semantic);
+    expect(stageAnim.auraTimer).toBeGreaterThanOrEqual(360);
+  });
+
+  test("puffs cheeks on task failure", () => {
+    const anim = createInitialAnimState();
+    const semantic = createInitialSemanticState();
+    triggerSignalAnimation(anim, "task_failed", () => undefined, semantic);
+    expect(anim.cheekPuffTimer).toBeGreaterThan(0);
+  });
+
+  test("applies storm environment pressure when the env tick fires", () => {
+    const anim = createInitialAnimState();
+    anim.envTickCooldown = 0;
+    const semantic = createInitialSemanticState();
+    const patches: unknown[] = [];
+    stepAnimFrame(anim, semantic, (event) => patches.push(event), {
+      phase: "night",
+      weather: "storm",
+      season: "winter",
+    });
+    expect(anim.shiverTimer).toBeGreaterThan(0);
+    expect(anim.envTickCooldown).toBeGreaterThan(0);
+    expect(patches.length).toBeGreaterThan(0);
+  });
+
+  test("keeps stepping without an environment context", () => {
+    const anim = createInitialAnimState();
+    anim.envTickCooldown = 0;
+    const semantic = createInitialSemanticState();
+    stepAnimFrame(anim, semantic, () => undefined);
+    expect(anim.envTickCooldown).toBeGreaterThan(0);
+    expect(anim.frame).toBe(1);
   });
 });

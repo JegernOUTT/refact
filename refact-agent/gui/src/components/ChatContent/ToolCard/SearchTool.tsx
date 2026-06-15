@@ -1,5 +1,5 @@
+import { Search } from "lucide-react";
 import React, { useMemo } from "react";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -166,7 +166,7 @@ export const SearchTool: React.FC<SearchToolProps> = ({
 
   return (
     <ToolCard
-      icon={<MagnifyingGlassIcon />}
+      icon={<Search />}
       summary={summary}
       meta={meta}
       status={status}

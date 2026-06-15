@@ -5,7 +5,6 @@ import React, {
   useRef,
   useEffect,
 } from "react";
-import { Box, type BoxProps } from "@radix-ui/themes";
 import {
   useScrollContext,
   scrollAreaWithAnchorReducer,
@@ -42,64 +41,65 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(
 );
 ScrollArea.displayName = "ScrollAreaWithAnchor";
 
-const Provider: React.FC<ScrollAreaProps> = forwardRef<
-  HTMLDivElement,
-  ScrollAreaProps
->(({ children, ...props }, ref) => {
-  const scrollRef = React.useRef<HTMLDivElement>(null);
-  useImperativeHandle<HTMLDivElement | null, HTMLDivElement | null>(
-    ref,
-    () => scrollRef.current,
-  );
-  const innerRef = React.useRef<HTMLDivElement>(null);
-  const [state, dispatch] = React.useReducer(scrollAreaWithAnchorReducer, {
-    scrollRef: scrollRef,
-    innerRef: innerRef,
-    bottomRef: null,
-    anchorRef: null,
-    anchorProps: null,
-    scrolled: false,
-    mode: "user-message",
-  });
+const Provider = forwardRef<HTMLDivElement, ScrollAreaProps>(
+  ({ children, ...props }, ref) => {
+    const scrollRef = React.useRef<HTMLDivElement>(null);
+    useImperativeHandle<HTMLDivElement | null, HTMLDivElement | null>(
+      ref,
+      () => scrollRef.current,
+    );
+    const innerRef = React.useRef<HTMLDivElement>(null);
+    const [state, dispatch] = React.useReducer(scrollAreaWithAnchorReducer, {
+      scrollRef: scrollRef,
+      innerRef: innerRef,
+      bottomRef: null,
+      anchorRef: null,
+      anchorProps: null,
+      scrolled: false,
+      mode: "user-message",
+    });
 
-  const handleScroll = useCallback(
-    (event: React.UIEvent<HTMLDivElement>) => {
-      props.onScroll?.(event);
-    },
-    [props],
-  );
+    const handleScroll = useCallback(
+      (event: React.UIEvent<HTMLDivElement>) => {
+        props.onScroll?.(event);
+      },
+      [props],
+    );
 
-  const handleWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
-      if (event.deltaY < 0) {
-        dispatch({ type: "set_mode", payload: "manual" });
-        dispatch({ type: "set_scrolled", payload: true });
-      }
-      props.onWheel?.(event);
-    },
-    [props],
-  );
+    const handleWheel = useCallback(
+      (event: React.WheelEvent<HTMLDivElement>) => {
+        if (event.deltaY < 0) {
+          dispatch({ type: "set_mode", payload: "manual" });
+          dispatch({ type: "set_scrolled", payload: true });
+        }
+        props.onWheel?.(event);
+      },
+      [props],
+    );
 
-  return (
-    <ScrollAreaWithAnchorContext.Provider value={{ state, dispatch }}>
-      <BaseScrollArea
-        ref={scrollRef}
-        {...props}
-        onWheel={handleWheel}
-        onScroll={handleScroll}
-      >
-        <Box ref={innerRef}>
-          {children}
-          <BottomSpace mt="-2" />
-        </Box>
-        <FollowButton />
-      </BaseScrollArea>
-    </ScrollAreaWithAnchorContext.Provider>
-  );
-});
+    return (
+      <ScrollAreaWithAnchorContext.Provider value={{ state, dispatch }}>
+        <BaseScrollArea
+          ref={scrollRef}
+          {...props}
+          onWheel={handleWheel}
+          onScroll={handleScroll}
+        >
+          <div ref={innerRef}>
+            {children}
+            <BottomSpace />
+          </div>
+          <FollowButton />
+        </BaseScrollArea>
+      </ScrollAreaWithAnchorContext.Provider>
+    );
+  },
+);
 Provider.displayName = "ScrollAreaWithAnchor.Provider";
 
-const BottomSpace: React.FC<BoxProps> = (props) => {
+const BottomSpace: React.FC<React.ComponentPropsWithoutRef<"div">> = (
+  props,
+) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const { state, dispatch } = useScrollContext();
   const height = useSpaceCalculator(
@@ -143,11 +143,11 @@ const BottomSpace: React.FC<BoxProps> = (props) => {
     state.scrolled,
   ]);
 
-  return <Box {...props} height={height + "px"} ref={bottomRef} />;
+  return <div {...props} style={{ height: `${height}px` }} ref={bottomRef} />;
 };
 
 export type ScrollAnchorProps = React.PropsWithChildren<
-  ScrollIntoViewOptions & BoxProps
+  ScrollIntoViewOptions & React.ComponentPropsWithoutRef<"div">
 >;
 
 export const ScrollAnchor: React.FC<ScrollAnchorProps> = ({
@@ -174,5 +174,5 @@ export const ScrollAnchor: React.FC<ScrollAnchorProps> = ({
     anchorRef.current?.scrollIntoView({ behavior, block, inline });
   }, [behavior, block, dispatch, inline, state.mode, state.scrolled]);
 
-  return <Box {...props} ref={anchorRef} />;
+  return <div {...props} ref={anchorRef} />;
 };

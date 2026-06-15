@@ -1,0 +1,151 @@
+.panel {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--rf-panel-pad);
+}
+
+.scrollList {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Error rows are flat list rows with a tone-colored accent bar on the left
+ * edge instead of loud full borders. */
+.listRow {
+  position: relative;
+  display: grid;
+  box-sizing: border-box;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--rf-row-gap);
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-row-pad);
+  padding-left: calc(var(--rf-space-2) + 2px);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+}
+
+.listRow::before {
+  content: "";
+  position: absolute;
+  inset-block: var(--rf-space-1);
+  inset-inline-start: 0;
+  width: 2px;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-warning);
+}
+
+.listRow[data-priority="critical"]::before {
+  background: var(--rf-color-danger);
+}
+
+.listRow[data-acknowledged="true"] {
+  opacity: 0.62;
+}
+
+.listRow[data-acknowledged="true"]::before {
+  background: var(--rf-border);
+}
+
+.listIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding-top: var(--rf-space-2xs);
+}
+
+.listContent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.listTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+  max-width: 100%;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: 12px;
+}
+
+.listSubtitle {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--rf-color-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.listMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rf-color-muted);
+  font-size: 10px;
+}
+
+.errorActions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.errorActions > * {
+  min-width: 0;
+}
+
+.emptyText {
+  padding: var(--rf-space-2) var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .panel {
+    padding: var(--rf-panel-pad-compact);
+  }
+}
+
+@media (max-width: 520px) {
+  .listRow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .errorActions {
+    grid-column: 2;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}

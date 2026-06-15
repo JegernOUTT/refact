@@ -1,21 +1,17 @@
-.sleepCard {
-  border-left: 2px solid var(--accent-9);
-  padding-left: var(--space-2);
-}
-
 .summarySuccess {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .summaryInterrupted {
-  color: var(--amber-11);
+  color: var(--rf-color-warning);
 }
 
 .countdown {
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a4);
+  padding: var(--rf-space-2);
+  border: 1px solid var(--rf-border);
   border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
+  box-shadow: var(--rf-elev-panel);
 }
 
 .countdownText {
@@ -24,19 +20,19 @@
 }
 
 .description {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .tickStream {
   min-height: 22px;
-  padding-top: var(--space-1);
+  padding-top: var(--rf-space-1);
 }
 
 .tickDot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent-9);
+  background: var(--rf-color-accent);
   animation: tickBlip 1.4s ease-in-out infinite;
 }
 
@@ -59,4 +55,14 @@
   .tickDot {
     animation: none;
   }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .countdown {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .countdown {
+  background: var(--rf-surface-glass);
 }

@@ -1,22 +1,14 @@
 import React, { useCallback, useState, type ReactNode } from "react";
 import {
-  Button,
-  Checkbox,
-  Dialog,
-  Flex,
-  Popover,
-  Separator,
-  Text,
-} from "@radix-ui/themes";
-import {
-  CopyIcon,
-  DoubleArrowRightIcon,
-  ExitIcon,
-  FileTextIcon,
-  OpenInNewWindowIcon,
-  PlusIcon,
-  TrashIcon,
-} from "@radix-ui/react-icons";
+  Copy,
+  ExternalLink,
+  FileText,
+  GitMerge,
+  LogOut,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import { Button, Dialog, Popover } from "../../components/ui";
 import {
   useDeleteWorktreeMutation,
   type MergeWorktreeResponse,
@@ -88,13 +80,7 @@ function ActionButton({
       <span className={styles.actionIcon} aria-hidden="true">
         {icon}
       </span>
-      <Text
-        size="1"
-        weight={primary ? "medium" : "regular"}
-        className={styles.actionLabel}
-      >
-        {label}
-      </Text>
+      <span className={styles.actionLabel}>{label}</span>
     </button>
   );
 }
@@ -230,90 +216,73 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         side="top"
         align="start"
         sideOffset={8}
+        scrollable={false}
       >
         <div className={styles.menu}>
-          <Flex
-            align="center"
-            justify="between"
-            className={styles.sectionHeader}
-          >
-            <Text size="2" weight="bold">
-              Worktrees
-            </Text>
+          <div className={styles.menuHeader}>
+            <span className={styles.titleText}>Worktrees</span>
             {currentWorktree && currentRecord && (
               <WorktreeStatusBadge
                 worktree={currentWorktree}
                 record={currentRecord}
               />
             )}
-          </Flex>
-          <Text size="1" color="gray" className={styles.menuHint}>
+          </div>
+          <p className={styles.menuHint}>
             Paths warn/remap; shell uses scoped cwd; shared refs affect all
             chats.
-          </Text>
+          </p>
 
           {hasFeedback && (
-            <Flex direction="column" gap="1" className={styles.feedback}>
-              {feedback && (
-                <Text size="1" color="gray">
-                  {feedback}
-                </Text>
-              )}
+            <div className={styles.feedbackStack}>
+              {feedback && <p className={styles.feedbackText}>{feedback}</p>}
               {localFeedback && (
-                <Text size="1" color="gray">
-                  {localFeedback}
-                </Text>
+                <p className={styles.feedbackText}>{localFeedback}</p>
               )}
-            </Flex>
+            </div>
           )}
 
           <div className={styles.actionGrid}>
             <ActionButton
               label="Create"
               title="Create worktree"
-              icon={<PlusIcon />}
+              icon={<Plus />}
               onClick={onCreate}
               primary
             />
             <ActionButton
               label={detachLabel}
               title={detachTitle}
-              icon={<ExitIcon />}
+              icon={<LogOut />}
               onClick={onDetach}
               disabled={!currentWorktree}
             />
             <ActionButton
               label="Open"
               title="Open worktree in new window"
-              icon={<OpenInNewWindowIcon />}
+              icon={<ExternalLink />}
               onClick={onOpenInNewWindow}
               disabled={!currentWorktree}
             />
             <ActionButton
               label="Copy"
               title="Copy workspace path"
-              icon={<CopyIcon />}
+              icon={<Copy />}
               onClick={onCopyPath}
               disabled={!canCopyPath}
             />
           </div>
 
-          <Separator size="4" />
+          <div className={styles.separator} />
 
           <div className={styles.section}>
-            <Text size="1" color="gray" className={styles.sectionHeader}>
-              Existing
-            </Text>
+            <span className={styles.sectionHeader}>Existing</span>
             <div className={styles.list}>
               {isLoading && (
-                <Text size="1" color="gray" className={styles.sectionHeader}>
-                  Loading...
-                </Text>
+                <span className={styles.emptyText}>Loading...</span>
               )}
               {!isLoading && records.length === 0 && (
-                <Text size="1" color="gray" className={styles.sectionHeader}>
-                  None yet
-                </Text>
+                <span className={styles.emptyText}>None yet</span>
               )}
               {records.map((record) => {
                 const selected = currentWorktree?.id === record.meta.id;
@@ -336,55 +305,47 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                     aria-current={selected ? "true" : undefined}
                     title={`Use ${title}`}
                   >
-                    <Flex
-                      direction="column"
-                      gap="1"
-                      className={styles.itemTitle}
-                    >
-                      <Flex align="center" gap="2" wrap="wrap">
-                        <Text size="1" weight="medium">
-                          {title}
-                        </Text>
+                    <span className={styles.itemTitle}>
+                      <span className={styles.itemHeader}>
+                        <span className={styles.itemName}>{title}</span>
                         <WorktreeStatusBadge
                           worktree={record.meta}
                           record={record}
                         />
-                      </Flex>
-                      <Text size="1" color="gray" className={styles.path}>
-                        {record.meta.root}
-                      </Text>
-                      <Text size="1" color="gray">
+                      </span>
+                      <span className={styles.path}>{record.meta.root}</span>
+                      <span className={styles.metaText}>
                         {referencesLabel(record)}
                         {usedBy ? ` · used by ${usedBy}` : ""}
-                      </Text>
-                    </Flex>
+                      </span>
+                    </span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          <Separator size="4" />
+          <div className={styles.separator} />
 
           <div className={styles.reviewActions}>
             <ActionButton
               label="Diff"
               title="View worktree diff"
-              icon={<FileTextIcon />}
+              icon={<FileText />}
               onClick={() => setDiffOpen(true)}
               disabled={!worktreeAvailable}
             />
             <ActionButton
               label="Merge"
               title="Merge worktree"
-              icon={<DoubleArrowRightIcon />}
+              icon={<GitMerge />}
               onClick={() => setMergeOpen(true)}
               disabled={!worktreeAvailable}
             />
             <ActionButton
               label="Delete"
               title="Delete or discard worktree"
-              icon={<TrashIcon />}
+              icon={<Trash2 />}
               onClick={() => setDeleteOpen(true)}
               disabled={!worktreeAvailable}
               danger={worktreeAvailable}
@@ -392,10 +353,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
           </div>
 
           {sharedCount > 1 ? (
-            <Text size="1" color="gray" className={styles.feedback}>
+            <p className={styles.feedbackText}>
               Shared by {sharedCount} references. Delete and discard actions can
               affect other chats.
-            </Text>
+            </p>
           ) : null}
         </div>
       </Popover.Content>
@@ -421,77 +382,70 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         closeOnNonInteractiveContentClick
       />
 
-      <Dialog.Root open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <Dialog.Content
-          maxWidth="420px"
-          {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}
-        >
-          <Dialog.Title>Delete worktree</Dialog.Title>
-          <Dialog.Description size="2" color="gray">
-            Delete or discard the selected worktree from disk.
-          </Dialog.Description>
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <Dialog.Content maxWidth="420px">
+          <div
+            {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}
+          >
+            <Dialog.Title>Delete worktree</Dialog.Title>
+            <Dialog.Description>
+              Delete or discard the selected worktree from disk.
+            </Dialog.Description>
 
-          <Flex direction="column" gap="3" mt="3">
-            <div className={styles.dialogOverlayText}>
-              <Text size="2" weight="medium">
-                {currentWorktree ? displayName(currentWorktree) : "No worktree"}
-              </Text>
-              {currentWorktree && (
-                <Text size="1" color="gray" className={styles.path}>
-                  {currentWorktree.root}
-                </Text>
+            <div className={styles.modalFields}>
+              <div className={styles.dialogOverlayText}>
+                <span className={styles.labelText}>
+                  {currentWorktree
+                    ? displayName(currentWorktree)
+                    : "No worktree"}
+                </span>
+                {currentWorktree && (
+                  <span className={styles.path}>{currentWorktree.root}</span>
+                )}
+              </div>
+
+              {sharedCount > 1 && (
+                <p className={styles.warningBox}>
+                  This worktree is shared by {sharedCount} references. Deleting
+                  it may affect other chats that use the same worktree.
+                </p>
               )}
-            </div>
 
-            {sharedCount > 1 && (
-              <Text size="2" color="amber" className={styles.warningBox}>
-                This worktree is shared by {sharedCount} references. Deleting it
-                may affect other chats that use the same worktree.
-              </Text>
-            )}
-
-            <Text as="label" size="2">
-              <Flex align="center" gap="2">
-                <Checkbox
+              <label className={styles.checkboxRow}>
+                <input
+                  type="checkbox"
                   checked={deleteBranch}
-                  onCheckedChange={(checked) =>
-                    setDeleteBranch(checked === true)
+                  onChange={(event) =>
+                    setDeleteBranch(event.currentTarget.checked)
                   }
                   disabled={deleteState.isLoading}
                 />
                 Delete git branch too
-              </Flex>
-            </Text>
+              </label>
 
-            {localFeedback && localFeedback.startsWith("Delete failed") && (
-              <Text size="2" color="red" className={styles.warningBox}>
-                {localFeedback}
-              </Text>
-            )}
-          </Flex>
+              {localFeedback && localFeedback.startsWith("Delete failed") && (
+                <p className={styles.errorBox}>{localFeedback}</p>
+              )}
+            </div>
 
-          <Flex className={styles.modalActions}>
-            <Dialog.Close>
+            <div className={styles.modalActions}>
+              <Dialog.Close asChild>
+                <Button variant="soft" disabled={deleteState.isLoading}>
+                  Cancel
+                </Button>
+              </Dialog.Close>
               <Button
-                type="button"
-                variant="soft"
-                color="gray"
-                disabled={deleteState.isLoading}
+                variant="danger"
+                onClick={() => void handleDelete()}
+                disabled={!currentWorktree || deleteState.isLoading}
+                loading={deleteState.isLoading}
               >
-                Cancel
+                {deleteState.isLoading ? "Deleting..." : "Delete worktree"}
               </Button>
-            </Dialog.Close>
-            <Button
-              type="button"
-              color="red"
-              onClick={() => void handleDelete()}
-              disabled={!currentWorktree || deleteState.isLoading}
-            >
-              {deleteState.isLoading ? "Deleting..." : "Delete worktree"}
-            </Button>
-          </Flex>
+            </div>
+          </div>
         </Dialog.Content>
-      </Dialog.Root>
+      </Dialog>
     </>
   );
 };

@@ -8,10 +8,6 @@ export interface ChatPage {
   name: "chat";
 }
 
-export interface DocumentationSettingsPage {
-  name: "documentation settings";
-}
-
 export interface ChatThreadHistoryPage {
   name: "thread history page";
   // causes a bug with other pages
@@ -92,6 +88,11 @@ export interface SubagentsMarketplacePage {
 
 export interface MarketplaceHubPage {
   name: "marketplace hub";
+  tab?: "skills" | "commands" | "subagents" | "mcp" | "extensions";
+}
+
+export interface GeneralSettingsPage {
+  name: "general settings";
 }
 
 export interface BuddyPage {
@@ -111,7 +112,6 @@ export interface IntegrationsSetupPage {
 export type Page =
   | ChatPage
   | HistoryList
-  | DocumentationSettingsPage
   | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage
@@ -130,7 +130,8 @@ export type Page =
   | CommandsMarketplacePage
   | SubagentsMarketplacePage
   | MarketplaceHubPage
-  | BuddyPage;
+  | BuddyPage
+  | GeneralSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

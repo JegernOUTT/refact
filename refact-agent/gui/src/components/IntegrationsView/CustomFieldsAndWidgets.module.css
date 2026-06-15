@@ -1,0 +1,22 @@
+.fieldWrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.label {
+  display: block;
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 500;
+  line-height: var(--rf-line);
+}
+
+.description {
+  display: block;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+  opacity: 0.85;
+}

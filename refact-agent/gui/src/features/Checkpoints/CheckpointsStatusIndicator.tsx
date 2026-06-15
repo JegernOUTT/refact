@@ -1,29 +1,17 @@
-import { Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import { FileChangedStatus } from "./types";
+import styles from "./CheckpointsStatusIndicator.module.css";
 
 export const CheckpointsStatusIndicator = ({
   status,
 }: {
   status: FileChangedStatus;
 }) => {
-  const colors = {
-    ADDED: "#22C55E",
-    MODIFIED: "#F59E0B",
-    DELETED: "#EF4444",
-  };
-
   const shortenedStatus = status.split("")[0];
 
   return (
-    <Text
-      size="1"
-      weight="medium"
-      ml="auto"
-      style={{
-        color: colors[status],
-      }}
-    >
+    <span className={classNames(styles.status, styles[status])}>
       {shortenedStatus}
-    </Text>
+    </span>
   );
 };

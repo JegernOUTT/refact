@@ -1,39 +1,39 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
-  Flex,
-  Button,
-  Tabs,
-  Text,
-  Badge,
-  IconButton,
-  Dialog,
-  TextField,
-  SegmentedControl,
-  Card,
-  Callout,
-} from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  PlusIcon,
-  TrashIcon,
-  GlobeIcon,
-  FileIcon,
-  CodeIcon,
-  MixerHorizontalIcon,
-  ExternalLinkIcon,
-  InfoCircledIcon,
-} from "@radix-ui/react-icons";
+  ArrowLeft,
+  Plus,
+  Trash2,
+  Globe,
+  File,
+  Code,
+  SlidersHorizontal,
+  ExternalLink,
+  Info,
+} from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 
-import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
-import { Spinner } from "../../components/Spinner";
+import {
+  Badge,
+  Button,
+  Dialog,
+  FieldText,
+  Icon,
+  IconButton,
+  SegmentedControl,
+  Spinner,
+  Tabs,
+  VirtualizedGrid,
+} from "../../components/ui";
+import { SettingsSection } from "../Settings/SettingsSection";
 import {
   useGetRegistryQuery,
   useGetConfigQuery,
   useSaveConfigMutation,
   useCreateConfigMutation,
   useDeleteConfigMutation,
+} from "../../services/refact/customization";
+import type {
   ConfigItem,
   ConfigKind,
 } from "../../services/refact/customization";
@@ -49,8 +49,8 @@ import {
   applyPatch,
   isPlainObject,
   sanitizeObject,
-  ConfigPatch,
   validateConfigId,
+  type ConfigPatch,
 } from "./components/configUtils";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
@@ -65,6 +65,7 @@ export type CustomizationProps = {
   initialKind?: ConfigKind;
   initialConfigId?: string;
   draftId?: string;
+  embedded?: boolean;
 };
 
 const KIND_LABELS: Record<ConfigKind, string> = {
@@ -74,24 +75,36 @@ const KIND_LABELS: Record<ConfigKind, string> = {
   code_lens: "Code Lens",
 };
 
+const KIND_ORDER: ConfigKind[] = [
+  "modes",
+  "subagents",
+  "toolbox_commands",
+  "code_lens",
+];
+
+const CONFIG_ROW_GAP = 4;
+
 const ConfigList: React.FC<{
   items: ConfigItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string, scope: "global" | "local") => void;
-  onCreate: () => void;
-}> = ({ items, selectedId, onSelect, onDelete, onCreate }) => {
+}> = ({ items, selectedId, onSelect, onDelete }) => {
+  if (items.length === 0) {
+    return <span className={styles.emptyText}>No configs found</span>;
+  }
   return (
-    <Flex direction="column" gap="1" className={styles.configList}>
-      <Button variant="soft" onClick={onCreate} size="1">
-        <PlusIcon /> New
-      </Button>
-      {items.map((item) => (
+    <VirtualizedGrid
+      items={items}
+      columns={1}
+      gap={CONFIG_ROW_GAP}
+      getItemKey={(item) => item.id}
+      aria-label="Configurations"
+      renderItem={(item) => (
         <div
-          key={item.id}
           role="button"
           tabIndex={0}
-          className={`${styles.compactConfigItem} ${
+          className={`${styles.configRow} rf-pressable ${
             selectedId === item.id ? styles.selected : ""
           }`}
           onClick={() => onSelect(item.id)}
@@ -102,64 +115,47 @@ const ConfigList: React.FC<{
             }
           }}
         >
-          <Flex direction="column" gap="0" style={{ minWidth: 0, flex: 1 }}>
-            <Text
-              size="1"
-              weight="medium"
-              style={{
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {item.title}
-            </Text>
-            <Flex align="center" gap="1">
-              <Text
-                size="1"
-                color="gray"
-                style={{
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {item.id}
-              </Text>
-              <Badge
-                size="1"
-                color={item.scope === "global" ? "blue" : "green"}
-                variant="soft"
-              >
-                {item.scope === "global" ? "G" : "L"}
-              </Badge>
-            </Flex>
-          </Flex>
+          <div className={styles.rowInfo}>
+            <span className={styles.rowTitle}>{item.title}</span>
+            <span className={styles.rowId}>{item.id}</span>
+          </div>
+          <Badge
+            className={styles.scopeBadge}
+            tone={item.scope === "global" ? "accent" : "success"}
+          >
+            {item.scope === "global" ? "G" : "L"}
+          </Badge>
           <IconButton
-            size="1"
+            aria-label={`Delete ${item.id}`}
+            icon={Trash2}
             variant="ghost"
-            color="red"
+            size="sm"
+            className={styles.deleteBtn}
             onClick={(e) => {
               e.stopPropagation();
               onDelete(item.id, item.scope);
             }}
-          >
-            <TrashIcon />
-          </IconButton>
+          />
         </div>
-      ))}
-      {items.length === 0 && (
-        <Text size="1" color="gray">
-          No configs found
-        </Text>
       )}
-    </Flex>
+    />
   );
 };
 
 type EditorView = "form" | "yaml";
 
 const jsYamlPromise = import("js-yaml");
+
+async function parseYamlConfig(
+  yamlStr: string,
+): Promise<Record<string, unknown>> {
+  const jsYaml = await jsYamlPromise;
+  const parsed = jsYaml.load(yamlStr);
+  if (!isPlainObject(parsed)) {
+    throw new Error("Config must be an object");
+  }
+  return sanitizeObject(parsed) as Record<string, unknown>;
+}
 
 export const ConfigEditor: React.FC<{
   kind: ConfigKind;
@@ -200,15 +196,11 @@ export const ConfigEditor: React.FC<{
       const version = ++syncVersionRef.current;
       void (async () => {
         try {
-          const jsYaml = await jsYamlPromise;
+          const parsed = await parseYamlConfig(draft.yaml_or_json);
           if (version !== syncVersionRef.current) return;
-          const parsed = jsYaml.load(draft.yaml_or_json);
-          if (isPlainObject(parsed)) {
-            const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
-            setConfigJson(sanitized);
-            setYaml(draft.yaml_or_json);
-            setYamlParseError(null);
-          }
+          setConfigJson(parsed);
+          setYaml(draft.yaml_or_json);
+          setYamlParseError(null);
         } catch {
           // ignore parse error; fall back to server data
         }
@@ -246,15 +238,9 @@ export const ConfigEditor: React.FC<{
   const syncYamlToJson = useCallback(
     async (yamlStr: string, version: number) => {
       try {
-        const jsYaml = await jsYamlPromise;
+        const parsed = await parseYamlConfig(yamlStr);
         if (version !== syncVersionRef.current) return;
-        const parsed = jsYaml.load(yamlStr);
-        if (!isPlainObject(parsed)) {
-          setYamlParseError("Config must be an object");
-          return;
-        }
-        const sanitized = sanitizeObject(parsed) as Record<string, unknown>;
-        setConfigJson(sanitized);
+        setConfigJson(parsed);
         setYamlParseError(null);
       } catch (e) {
         if (version !== syncVersionRef.current) return;
@@ -315,7 +301,27 @@ export const ConfigEditor: React.FC<{
 
   const handleSave = useCallback(async () => {
     setSaveError(null);
-    if (!configJson) {
+    if (yamlSyncTimeoutRef.current) {
+      clearTimeout(yamlSyncTimeoutRef.current);
+      yamlSyncTimeoutRef.current = null;
+    }
+
+    let configToSave = configJson;
+    if (view === "yaml") {
+      const version = ++syncVersionRef.current;
+      try {
+        configToSave = await parseYamlConfig(yaml);
+        if (version !== syncVersionRef.current) return;
+        setConfigJson(configToSave);
+        setYamlParseError(null);
+      } catch (e) {
+        if (version !== syncVersionRef.current) return;
+        setYamlParseError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+
+    if (!configToSave) {
       setSaveError("No config to save");
       return;
     }
@@ -323,7 +329,7 @@ export const ConfigEditor: React.FC<{
       const result = await saveConfig({
         kind,
         id: configId,
-        config: configJson,
+        config: configToSave,
         scope: targetScope,
         draft_id: draftId,
       }).unwrap();
@@ -335,93 +341,102 @@ export const ConfigEditor: React.FC<{
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     }
-  }, [configJson, kind, configId, saveConfig, onSaved, targetScope, draftId]);
+  }, [
+    configJson,
+    view,
+    kind,
+    configId,
+    saveConfig,
+    onSaved,
+    targetScope,
+    draftId,
+    yaml,
+  ]);
 
-  if (isLoading || draftLoading) return <Spinner spinning />;
-  if (error) return <Text color="red">Error loading config</Text>;
-  if (!configJson) return <Text color="gray">Loading...</Text>;
+  if (isLoading || draftLoading) return <Spinner />;
+  if (error)
+    return <span className={styles.errorText}>Error loading config</span>;
+  if (!configJson) return <span className={styles.mutedText}>Loading...</span>;
 
   const canSaveToLocal = configItem.local_path !== "";
   const scopeChanged = targetScope !== configItem.scope;
 
   return (
-    <Flex direction="column" gap="2" className={styles.configEditor}>
+    <div className={`${styles.configEditor} rf-enter-rise`}>
       {draftExpired && (
-        <Callout.Root color="orange">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>Draft expired</Callout.Text>
-        </Callout.Root>
+        <div className={styles.callout}>
+          <Icon icon={Info} size="sm" tone="warning" />
+          <span>Draft expired</span>
+        </div>
       )}
       {draft && <BuddyDraftPreview draft={draft} />}
-      <Flex
-        justify="between"
-        align="center"
-        wrap="wrap"
-        gap="2"
-        className={styles.editorHeader}
-      >
-        <Text size="2" weight="bold">
-          {configId}
-        </Text>
-        <Flex gap="1" align="center">
-          <SegmentedControl.Root
-            size="1"
+      <div className={styles.editorHeader}>
+        <span className={styles.configTitle}>{configId}</span>
+        <div className={styles.editorActions}>
+          <SegmentedControl
+            aria-label="Editor view"
+            className={styles.editorToggle}
+            size="sm"
             value={view}
             onValueChange={(v) => setView(v as EditorView)}
-          >
-            <SegmentedControl.Item value="form">
-              <MixerHorizontalIcon width={12} height={12} />
-            </SegmentedControl.Item>
-            <SegmentedControl.Item value="yaml">
-              <CodeIcon width={12} height={12} />
-            </SegmentedControl.Item>
-          </SegmentedControl.Root>
+            options={[
+              {
+                value: "form",
+                label: <Icon icon={SlidersHorizontal} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Form editor",
+              },
+              {
+                value: "yaml",
+                label: <Icon icon={Code} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "YAML editor",
+              },
+            ]}
+          />
           <Button
-            size="1"
+            size="sm"
             onClick={() => void handleSave()}
-            disabled={isSaving || !!yamlParseError}
+            disabled={isSaving}
           >
             {isSaving ? "..." : "Save"}
           </Button>
-        </Flex>
-      </Flex>
-      {saveError && (
-        <Text size="1" color="red">
-          {saveError}
-        </Text>
-      )}
+        </div>
+      </div>
+      {saveError && <span className={styles.errorText}>{saveError}</span>}
       {yamlParseError && (
-        <Text size="1" color="red">
-          YAML: {yamlParseError}
-        </Text>
+        <span className={styles.errorText}>YAML: {yamlParseError}</span>
       )}
-      <Flex align="center" gap="2" wrap="wrap" className={styles.scopeRow}>
+      <div className={styles.scopeRow}>
         {canSaveToLocal ? (
-          <SegmentedControl.Root
-            size="1"
+          <SegmentedControl
+            aria-label="Save scope"
+            className={styles.scopeToggle}
+            size="sm"
             value={targetScope}
             onValueChange={(v) => setTargetScope(v as "global" | "local")}
-          >
-            <SegmentedControl.Item value="global">
-              <GlobeIcon width={10} height={10} />
-            </SegmentedControl.Item>
-            <SegmentedControl.Item value="local">
-              <FileIcon width={10} height={10} />
-            </SegmentedControl.Item>
-          </SegmentedControl.Root>
+            options={[
+              {
+                value: "global",
+                label: <Icon icon={Globe} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Global scope",
+              },
+              {
+                value: "local",
+                label: <Icon icon={File} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Project scope",
+              },
+            ]}
+          />
         ) : (
-          <Badge size="1" color="blue" variant="soft">
-            <GlobeIcon width={10} height={10} />
+          <Badge tone="accent">
+            <Icon icon={Globe} size="sm" />
           </Badge>
         )}
-        {scopeChanged && (
-          <Badge size="1" color="orange">
-            → {targetScope}
-          </Badge>
-        )}
-      </Flex>
+        {scopeChanged && <Badge tone="warning">→ {targetScope}</Badge>}
+      </div>
       {view === "form" ? (
         <div className={styles.formContainer}>
           <FormEditor
@@ -438,7 +453,7 @@ export const ConfigEditor: React.FC<{
           spellCheck={false}
         />
       )}
-    </Flex>
+    </div>
   );
 };
 
@@ -505,63 +520,65 @@ const CreateConfigDialog: React.FC<{
   }, [kind, id, scope, createConfig, onOpenChange, onCreated]);
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 400 }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
         <Dialog.Title>Create {KIND_LABELS[kind]}</Dialog.Title>
-        <Flex direction="column" gap="3">
-          <TextField.Root
+        <div className={styles.dialogBody}>
+          <FieldText
             placeholder="Config ID (e.g., my_mode)"
             value={id}
-            onChange={(e) => setId(e.target.value)}
+            onChange={setId}
           />
-          <Flex direction="column" gap="1">
-            <Text size="1">Save to:</Text>
+          <div className={styles.scopeField}>
+            <span className={styles.scopeLabel}>Save to:</span>
             {hasProjectRoot ? (
-              <SegmentedControl.Root
-                size="1"
+              <SegmentedControl
+                aria-label="Config save scope"
+                className={styles.dialogScopeToggle}
                 value={scope}
                 onValueChange={(v) => setScope(v as "global" | "local")}
-              >
-                <SegmentedControl.Item value="global">
-                  <Flex align="center" gap="1">
-                    <GlobeIcon width={12} height={12} />
-                    Global (~/.config/refact/)
-                  </Flex>
-                </SegmentedControl.Item>
-                <SegmentedControl.Item value="local">
-                  <Flex align="center" gap="1">
-                    <FileIcon width={12} height={12} />
-                    Project (.refact/)
-                  </Flex>
-                </SegmentedControl.Item>
-              </SegmentedControl.Root>
+                options={[
+                  {
+                    value: "global",
+                    label: (
+                      <span className={styles.scopeOption}>
+                        <Icon icon={Globe} size="sm" />
+                        Global (~/.config/refact/)
+                      </span>
+                    ),
+                  },
+                  {
+                    value: "local",
+                    label: (
+                      <span className={styles.scopeOption}>
+                        <Icon icon={File} size="sm" />
+                        Project (.refact/)
+                      </span>
+                    ),
+                  },
+                ]}
+              />
             ) : (
-              <Badge size="1" color="blue" variant="soft">
-                <Flex align="center" gap="1">
-                  <GlobeIcon width={10} height={10} />
+              <Badge tone="accent">
+                <span className={styles.scopeOption}>
+                  <Icon icon={Globe} size="sm" />
                   Global only (no project open)
-                </Flex>
+                </span>
               </Badge>
             )}
-          </Flex>
-          {error && (
-            <Text size="2" color="red">
-              {error}
-            </Text>
-          )}
-        </Flex>
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
-              Cancel
-            </Button>
-          </Dialog.Close>
+          </div>
+          {error && <span className={styles.errorText}>{error}</span>}
+        </div>
+        <div className={styles.dialogFooter}>
+          <Button variant="soft" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
           <Button onClick={() => void handleCreate()} disabled={isLoading}>
             {isLoading ? "Creating..." : "Create"}
           </Button>
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 
@@ -618,6 +635,7 @@ export const Customization: React.FC<CustomizationProps> = ({
   initialKind = "modes",
   initialConfigId,
   draftId,
+  embedded,
 }) => {
   const dispatch = useAppDispatch();
   const [activeKind, setActiveKind] = useState<ConfigKind>(initialKind);
@@ -625,6 +643,10 @@ export const Customization: React.FC<CustomizationProps> = ({
     initialConfigId ?? null,
   );
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    scope: "global" | "local";
+  } | null>(null);
 
   const { data: registry, isLoading, refetch } = useGetRegistryQuery(undefined);
   const [deleteConfig] = useDeleteConfigMutation();
@@ -655,7 +677,6 @@ export const Customization: React.FC<CustomizationProps> = ({
 
   const handleDelete = useCallback(
     async (id: string, scope: "global" | "local") => {
-      if (!confirm(`Delete ${id} from ${scope}?`)) return;
       await deleteConfig({ kind: activeKind, id, scope });
       if (selectedConfigId === id) {
         setSelectedConfigId(null);
@@ -670,127 +691,133 @@ export const Customization: React.FC<CustomizationProps> = ({
     setSelectedConfigId(null);
   }, []);
 
-  if (isLoading) return <Spinner spinning />;
+  if (isLoading) return <Spinner />;
 
-  return (
-    <PageWrapper host={host} noPadding>
-      {host === "vscode" && !tabbed ? (
-        <Flex gap="2" pb="2">
-          <Button variant="surface" onClick={backFromCustomization}>
-            <ArrowLeftIcon width="16" height="16" />
-            Back
-          </Button>
-        </Flex>
-      ) : (
+  const activeIndex = KIND_ORDER.indexOf(activeKind);
+  const activeItems = getItemsForKind(activeKind);
+  const selectedItem = selectedConfigId
+    ? activeItems.find((item) => item.id === selectedConfigId)
+    : undefined;
+  const showEditor = Boolean(selectedConfigId && selectedItem);
+
+  const backButton = !embedded ? (
+    host === "vscode" && !tabbed ? (
+      <div className={styles.backRow}>
         <Button
-          mr="auto"
-          variant="outline"
+          variant="soft"
           onClick={backFromCustomization}
-          mb="2"
+          leftIcon={ArrowLeft}
         >
           Back
         </Button>
+      </div>
+    ) : (
+      <div className={styles.backRow}>
+        <Button
+          variant="ghost"
+          onClick={backFromCustomization}
+          leftIcon={ArrowLeft}
+        >
+          Back
+        </Button>
+      </div>
+    )
+  ) : null;
+
+  const actions = (
+    <>
+      {activeKind === "subagents" && (
+        <Button
+          size="sm"
+          variant="ghost"
+          rightIcon={ExternalLink}
+          onClick={() => dispatch(push({ name: "subagents marketplace" }))}
+        >
+          Marketplace
+        </Button>
       )}
+      <Button
+        size="sm"
+        variant="soft"
+        leftIcon={Plus}
+        onClick={() => setCreateDialogOpen(true)}
+      >
+        New {KIND_LABELS[activeKind]}
+      </Button>
+    </>
+  );
+
+  const subNav = (
+    <Tabs.List
+      activeIndex={activeIndex}
+      className={styles.kindTabs}
+      itemCount={KIND_ORDER.length}
+    >
+      {KIND_ORDER.map((kind) => (
+        <Tabs.Trigger key={kind} value={kind}>
+          <span className={styles.tabTriggerContent}>
+            <span className={styles.tabText}>{KIND_LABELS[kind]}</span>
+            <Badge className={styles.tabCount} tone="muted">
+              {getItemsForKind(kind).length}
+            </Badge>
+          </span>
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
+  );
+
+  const inner = (
+    <div className={`${styles.pageShell} rf-enter`}>
+      {backButton}
 
       {registry?.errors && registry.errors.length > 0 && (
-        <Card mb="3" style={{ backgroundColor: "var(--red-3)" }}>
-          <Text size="2" color="red">
+        <div className={styles.errorBanner}>
+          <span className={styles.errorText}>
             {registry.errors.length} config error(s):{" "}
             {registry.errors.map((e) => e.error).join(", ")}
-          </Text>
-        </Card>
+          </span>
+        </div>
       )}
 
-      <Tabs.Root value={activeKind} onValueChange={handleTabChange}>
-        <Tabs.List size="1">
-          {(Object.keys(KIND_LABELS) as ConfigKind[]).map((kind) => (
-            <Tabs.Trigger key={kind} value={kind}>
-              {KIND_LABELS[kind]} ({getItemsForKind(kind).length})
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
-
-        <div className={styles.panelContainer}>
-          {(() => {
-            if (!selectedConfigId) {
-              return (
-                <ScrollArea scrollbars="vertical" className={styles.listPanel}>
-                  {activeKind === "subagents" && (
-                    <Flex justify="end" p="2">
-                      <Button
-                        size="1"
-                        variant="outline"
-                        onClick={() =>
-                          dispatch(push({ name: "subagents marketplace" }))
-                        }
-                      >
-                        <ExternalLinkIcon />
-                        Browse Subagents Marketplace
-                      </Button>
-                    </Flex>
-                  )}
-                  <ConfigList
-                    items={getItemsForKind(activeKind)}
-                    selectedId={selectedConfigId}
-                    onSelect={setSelectedConfigId}
-                    onDelete={(id, scope) => void handleDelete(id, scope)}
-                    onCreate={() => setCreateDialogOpen(true)}
-                  />
-                </ScrollArea>
-              );
-            }
-            const selectedItem = getItemsForKind(activeKind).find(
-              (i) => i.id === selectedConfigId,
-            );
-            if (!selectedItem) {
-              return (
-                <ScrollArea scrollbars="vertical" className={styles.listPanel}>
-                  {activeKind === "subagents" && (
-                    <Flex justify="end" p="2">
-                      <Button
-                        size="1"
-                        variant="outline"
-                        onClick={() =>
-                          dispatch(push({ name: "subagents marketplace" }))
-                        }
-                      >
-                        <ExternalLinkIcon />
-                        Browse Subagents Marketplace
-                      </Button>
-                    </Flex>
-                  )}
-                  <ConfigList
-                    items={getItemsForKind(activeKind)}
-                    selectedId={selectedConfigId}
-                    onSelect={setSelectedConfigId}
-                    onDelete={(id, scope) => void handleDelete(id, scope)}
-                    onCreate={() => setCreateDialogOpen(true)}
-                  />
-                </ScrollArea>
-              );
-            }
-            return (
-              <div className={styles.editorPanel}>
-                <Button
-                  variant="ghost"
-                  size="1"
-                  onClick={() => setSelectedConfigId(null)}
-                  className={styles.backButton}
-                >
-                  <ArrowLeftIcon /> Back to list
-                </Button>
-                <ConfigEditor
-                  kind={activeKind}
-                  configId={selectedConfigId}
-                  configItem={selectedItem}
-                  onSaved={() => void refetch()}
-                  draftId={draftId}
-                />
-              </div>
-            );
-          })()}
-        </div>
-      </Tabs.Root>
+      <Tabs value={activeKind} onValueChange={handleTabChange}>
+        <SettingsSection
+          title="Customization"
+          description="Tune modes, subagents, toolbox commands, and code lens actions."
+          actions={actions}
+          subNav={subNav}
+          width={showEditor ? "wide" : "default"}
+        >
+          {selectedConfigId && selectedItem ? (
+            <div className={styles.editorPanel}>
+              <Button
+                variant="ghost"
+                size="sm"
+                leftIcon={ArrowLeft}
+                onClick={() => setSelectedConfigId(null)}
+                className={styles.backToListBtn}
+              >
+                Back to list
+              </Button>
+              <ConfigEditor
+                kind={activeKind}
+                configId={selectedConfigId}
+                configItem={selectedItem}
+                onSaved={() => void refetch()}
+                draftId={draftId}
+              />
+            </div>
+          ) : (
+            <div className={styles.listPanel}>
+              <ConfigList
+                items={activeItems}
+                selectedId={selectedConfigId}
+                onSelect={setSelectedConfigId}
+                onDelete={(id, scope) => setDeleteTarget({ id, scope })}
+              />
+            </div>
+          )}
+        </SettingsSection>
+      </Tabs>
 
       <CreateConfigDialog
         kind={activeKind}
@@ -802,6 +829,44 @@ export const Customization: React.FC<CustomizationProps> = ({
           getAllItems().some((i) => i.local_path !== "")
         }
       />
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
+          <Dialog.Title>Delete configuration?</Dialog.Title>
+          <Dialog.Description>
+            {deleteTarget
+              ? `Delete ${deleteTarget.id} from ${deleteTarget.scope}?`
+              : "Delete this configuration?"}
+          </Dialog.Description>
+          <div className={styles.dialogFooter}>
+            <Button variant="soft" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (!deleteTarget) return;
+                const { id, scope } = deleteTarget;
+                setDeleteTarget(null);
+                void handleDelete(id, scope);
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog>
+    </div>
+  );
+
+  if (embedded) return inner;
+  return (
+    <PageWrapper host={host} noPadding>
+      {inner}
     </PageWrapper>
   );
 };

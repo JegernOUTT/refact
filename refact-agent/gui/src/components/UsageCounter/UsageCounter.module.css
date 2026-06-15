@@ -18,30 +18,65 @@
   margin-right: var(--space-2);
 }
 
+.tokenDetailsPopover {
+  --rf-overlay-popover-min: 0;
+
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.tokenDetailsTabsList {
+  --rf-control-h: var(--rf-control-h-sm);
+  width: 100%;
+}
+
+.tokenDetailsTabsList [role="tab"] {
+  padding-inline: var(--rf-space-2);
+}
+
+.providerIndicatorTrigger {
+  cursor: default;
+  padding: 0;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  opacity: 0.7;
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.providerIndicatorTrigger:hover {
+  color: var(--rf-color-fg);
+  opacity: 0.85;
+}
+
 .circularProgress {
   transform: rotate(-90deg);
 }
 
 .circularProgressBg {
   fill: none;
-  stroke: var(--gray-a5);
+  stroke: var(--rf-surface-3);
 }
 
 .circularProgressFill {
   fill: none;
-  stroke: var(--accent-9);
+  stroke: var(--rf-color-accent);
   transition: stroke-dashoffset 0.3s ease;
 }
 
 .circularProgressFillWarning {
   fill: none;
-  stroke: var(--yellow-9);
+  stroke: var(--rf-color-warning);
   transition: stroke-dashoffset 0.3s ease;
 }
 
 .circularProgressFillOverflown {
   fill: none;
-  stroke: var(--red-9);
+  stroke: var(--rf-color-danger);
   transition: stroke-dashoffset 0.3s ease;
 }
 
@@ -53,13 +88,13 @@
 }
 
 .isWarning {
-  --base-card-surface-box-shadow: 0 0 0 1px var(--yellow-8);
-  --base-card-surface-hover-box-shadow: 0 0 0 1px var(--yellow-9);
-  --base-card-surface-active-box-shadow: 0 0 0 1px var(--yellow-8);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--rf-color-warning);
+  --base-card-surface-hover-box-shadow: 0 0 0 1px var(--rf-color-warning);
+  --base-card-surface-active-box-shadow: 0 0 0 1px var(--rf-color-warning);
 }
 
 .isOverflown {
-  --base-card-surface-box-shadow: 0 0 0 1px var(--red-8);
-  --base-card-surface-hover-box-shadow: 0 0 0 1px var(--red-9);
-  --base-card-surface-active-box-shadow: 0 0 0 1px var(--red-8);
+  --base-card-surface-box-shadow: 0 0 0 1px var(--rf-color-danger);
+  --base-card-surface-hover-box-shadow: 0 0 0 1px var(--rf-color-danger);
+  --base-card-surface-active-box-shadow: 0 0 0 1px var(--rf-color-danger);
 }

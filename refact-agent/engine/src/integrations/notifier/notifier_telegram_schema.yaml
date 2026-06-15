@@ -1,0 +1,19 @@
+fields:
+  bot_token:
+    f_type: string_long
+    f_desc: "Telegram bot token from BotFather."
+    f_default: ""
+    f_extra: {"password": true}
+  default_chat_id:
+    f_type: string_short
+    f_desc: "Default Telegram chat id used when delivery.target is not set."
+    f_default: ""
+description: |
+  Sends scheduled job output through the Telegram Bot API.
+available:
+  on_your_laptop_possible: true
+  when_isolated_possible: true
+confirmation:
+  not_applicable: true
+  ask_user_default: []
+  deny_default: []

@@ -10,13 +10,16 @@ describe("SETUP_MODES", () => {
     expect(SETUP_MODES.some((m) => m.mode === "setup")).toBe(true);
   });
 
-  test("contains all five specific setup modes", () => {
+  test("contains all specific setup modes", () => {
     const modes = SETUP_MODES.map((m) => m.mode);
     expect(modes).toContain("setup_skills");
     expect(modes).toContain("setup_agents_md");
     expect(modes).toContain("setup_mcp");
     expect(modes).toContain("setup_commands");
     expect(modes).toContain("setup_subagents");
+    expect(modes).toContain("setup_modes");
+    expect(modes).toContain("setup_hooks");
+    expect(modes).toContain("setup_knowledge");
   });
 
   test("every entry has a non-empty label and mode", () => {

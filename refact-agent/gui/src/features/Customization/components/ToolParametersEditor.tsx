@@ -1,15 +1,15 @@
 import React, { useCallback } from "react";
+import { Plus, Trash2 } from "lucide-react";
+
 import {
-  Flex,
   Button,
-  TextField,
-  Select,
+  Field,
+  FieldSelect,
+  FieldSwitch,
+  FieldText,
   IconButton,
-  Text,
-  Table,
-  Checkbox,
-} from "@radix-ui/themes";
-import { PlusIcon, TrashIcon } from "@radix-ui/react-icons";
+} from "../../../components/ui";
+import styles from "./editors.module.css";
 
 export type ToolParameter = {
   name: string;
@@ -34,6 +34,11 @@ const PARAM_TYPES = [
   "array",
   "object",
 ];
+
+const PARAM_TYPE_OPTIONS = PARAM_TYPES.map((type) => ({
+  value: type,
+  label: type,
+}));
 
 export const ToolParametersEditor: React.FC<ToolParametersEditorProps> = ({
   parameters,
@@ -86,92 +91,59 @@ export const ToolParametersEditor: React.FC<ToolParametersEditorProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="2">
-      <Flex justify="between" align="center">
-        <Text size="2" weight="medium">
-          {label}
-        </Text>
-        <Button size="1" variant="soft" onClick={addParameter}>
-          <PlusIcon /> Add Parameter
-        </Button>
-      </Flex>
-      {parameters.length === 0 ? (
-        <Text size="1" color="gray">
-          No parameters defined
-        </Text>
-      ) : (
-        <Table.Root size="1">
-          <Table.Header>
-            <Table.Row>
-              <Table.ColumnHeaderCell>Name</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell>Type</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell>Description</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell>Required</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell width="60px"></Table.ColumnHeaderCell>
-            </Table.Row>
-          </Table.Header>
-          <Table.Body>
+    <Field label={label}>
+      <div className={styles.tableEditorStack}>
+        {parameters.length === 0 ? (
+          <p className={styles.emptyText}>No parameters defined</p>
+        ) : (
+          <div className={styles.parameterGrid}>
             {parameters.map((param, index) => (
-              <Table.Row key={index}>
-                <Table.Cell>
-                  <TextField.Root
-                    size="1"
+              <div className={styles.parameterRow} key={index}>
+                <Field label="Name">
+                  <FieldText
                     value={param.name}
-                    onChange={(e) =>
-                      updateParameter(index, "name", e.target.value)
-                    }
+                    onChange={(value) => updateParameter(index, "name", value)}
                     placeholder="param_name"
                   />
-                </Table.Cell>
-                <Table.Cell>
-                  <Select.Root
+                </Field>
+                <Field label="Type">
+                  <FieldSelect
+                    options={PARAM_TYPE_OPTIONS}
                     value={param.type}
-                    onValueChange={(v) => updateParameter(index, "type", v)}
-                  >
-                    <Select.Trigger />
-                    <Select.Content>
-                      {PARAM_TYPES.map((t) => (
-                        <Select.Item key={t} value={t}>
-                          {t}
-                        </Select.Item>
-                      ))}
-                    </Select.Content>
-                  </Select.Root>
-                </Table.Cell>
-                <Table.Cell>
-                  <TextField.Root
-                    size="1"
+                    onChange={(value) => updateParameter(index, "type", value)}
+                  />
+                </Field>
+                <Field label="Description">
+                  <FieldText
                     value={param.description}
-                    onChange={(e) =>
-                      updateParameter(index, "description", e.target.value)
+                    onChange={(value) =>
+                      updateParameter(index, "description", value)
                     }
                     placeholder="Description"
                   />
-                </Table.Cell>
-                <Table.Cell>
-                  <Checkbox
+                </Field>
+                <Field label="Required">
+                  <FieldSwitch
                     checked={required.includes(param.name)}
                     disabled={!param.name}
-                    onCheckedChange={(checked) =>
-                      toggleRequired(param.name, checked === true)
-                    }
+                    onChange={(checked) => toggleRequired(param.name, checked)}
                   />
-                </Table.Cell>
-                <Table.Cell>
-                  <IconButton
-                    size="1"
-                    variant="ghost"
-                    color="red"
-                    onClick={() => removeParameter(index)}
-                  >
-                    <TrashIcon />
-                  </IconButton>
-                </Table.Cell>
-              </Table.Row>
+                </Field>
+                <IconButton
+                  aria-label={`Remove parameter ${index + 1}`}
+                  icon={Trash2}
+                  size="sm"
+                  variant="danger"
+                  onClick={() => removeParameter(index)}
+                />
+              </div>
             ))}
-          </Table.Body>
-        </Table.Root>
-      )}
-    </Flex>
+          </div>
+        )}
+        <Button leftIcon={Plus} size="sm" variant="soft" onClick={addParameter}>
+          Add Parameter
+        </Button>
+      </div>
+    </Field>
   );
 };

@@ -244,6 +244,139 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 
 **Rules**: Use Radix primitives (`Flex`, `Box`, `Text`, `Card`, `Button`). Use design tokens (`var(--space-3)`, `var(--accent-9)`). CSS Modules for custom styles. No inline styles, no magic numbers, no hardcoded colors, no global CSS.
 
+### Responsive doctrine
+
+- App-level horizontal overflow safety belongs in `src/styles/responsive.css` and the app root only; do not add global `*`, `body`, or `html` overflow clamps.
+- `.scrollX` is the only sanctioned horizontal-overflow escape hatch for code, diff, table, and kanban islands.
+- Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
+- Do not relayout feature surfaces while adding responsive infrastructure; feature migrations need their own characterization/parity tests.
+- Scrollbar styling (width/color) may be global, but `scrollbar-gutter: stable` must never use universal or broad selectors; it is a per-scroll-container opt-in because `stable` reserves a phantom inline-end gutter on every `overflow: hidden` element, including truncating labels.
+
+## Design System (Refact UI)
+
+Refact UI rules are contributor contracts. Any change that introduces a new design-system rule, primitive, token, or guardrail MUST update this section in the same PR/card.
+
+### Architecture and boundary
+
+- Reusable kit code lives in `src/components/ui/*`; design tokens and shared global utilities live in `src/styles/*`.
+- `src/components/ui/**` and `src/styles/**` MUST NOT import from `features`, `services`, or `app`. This is enforced by `npm run lint:boundaries` through the scoped ESLint override in `.eslintrc.cjs`.
+- Connected widgets must split into presentational kit pieces in `src/components/ui/*` and feature-connected wrappers in the owning feature folder.
+- Core presentational primitives live in `src/components/ui/*`: `Surface` is panel-less by default, `Card` is reserved for restrained containment/selected/overlay use, and `Badge`/`Chip`/`StatusDot` provide the shared label/status language.
+- Settings scaffolding primitives live in `src/components/ui/*`: `Field`/`FieldRow`/`FieldStack` own label, helper, error, and controlled-control layout; `FieldText`, `FieldTextarea`, `FieldSelect`, `FieldSwitch`, and `FieldSlider` stay controlled and presentational so parents can implement either blur-save via `onCommit` or submit-save by gathering state. Field text inputs, textareas, selects, and sliders fill their control block by default; `--rf-input-max` is an opt-in cap for compact contexts. `SaveStatus` is the shared idle/saving/saved/error indicator. `SettingsShell` owns only the responsive two-pane section shell and narrow section selector; `SettingItem` owns row/stack setting copy plus control layout and optional save status, with only row-layout controls capped compactly. Do not import features, services, or app code into these primitives.
+- Settings content sections use the settings-specific `features/Settings/SettingsSection` primitive, not ad hoc page wrappers. It owns the section header (`title`, one-line `description`, optional right-aligned `actions`, optional `subNav`) and a fluid full-width body (`width="default"` and `width="wide"` both resolve to 100%; readability comes from `SettingItem` row layout and the `68ch` description cap, not a section clamp). `subNav` is a plain full-width slot — content placed there (tabs, segmented controls, buttons) brings its own chrome; the slot itself adds no glass panel. Use `SettingsGroup` inside it for uppercase muted group labels plus `SettingItem` rows. Primary section actions belong in the header `actions` slot; embedded sections must not nest another `SettingsShell`.
+- Table/list primitives live in `src/components/ui/*`: `DataTable` owns generic tabular display with narrow stacked-card rendering by default and uses explicit `wide` mode only for intentional `.scrollX` islands; `EditableTable` owns controlled editable cell grids with add/remove, Enter-to-advance down the active column, and per-cell validation display; `VirtualList` is the thin generic `react-virtuoso` wrapper for long lists with optional header/footer. They stay pure and generic, use kit controls, and must not migrate feature table behavior directly.
+- Tool shell primitives live in `src/components/ui/*`: `ToolCard` owns the pure presentational tool-card shell with title, optional Lucide icon, status tone, actions slot, and controlled/uncontrolled collapse. It stays panel-less/glass by default, uses `rf-expand-grid` for collapse motion, and wide code/diff previews must use explicit `.scrollX` islands instead of nested vertical scrolling.
+- ToolCard `.body` is the canonical outer body contract for chat tool padding and indentation. The shell owns outer left offset and vertical rhythm; feature tool bodies should avoid competing padded wrapper shells unless they are true inner panels or scroll islands.
+
+- Redesign the skin, keep the behavior: do not rewrite Redux selectors, RTK Query services, SSE contracts, virtualization, backend contracts, or tool execution logic as part of visual migration. Risky surfaces migrate only after characterization/parity tests pass.
+
+### Tokens are the only visual truth
+
+- Use `var(--rf-*)` tokens for colors, spacing, radii, shadows, typography, sizing, z-index, blur, and motion. Components must not introduce hardcoded colors, spacing, or radii.
+- `src/styles/tokens.css` is canonical. It defines primitive tokens, semantic light/dark values, and theme adapters including `[data-host="jetbrains"]`; the Theme root carries both `data-host` and `data-appearance` so these selectors activate deterministically.
+- The accent token binds to Radix via `--rf-color-accent: var(--accent-9, ...)`; `color-mix(...)` token overrides must keep static fallback values declared first for older engines.
+- Canvas, chart, graph, or third-party theme code must read tokens through `useToken` / `useTokens` instead of duplicating visual constants.
+- Legacy aliases such as `--z-*` and `--motion-*` may remain only as adapters to `--rf-*` tokens.
+
+### Surface model
+
+- Panel-less by default: inline content, especially tool cards and transcript content, should not gain boxes, fills, or heavy borders.
+- Kit Menu, Select, and Combobox item rows follow the ModelSelector row language: transparent idle rows, no per-row border/box/radius, `--rf-surface-1` hover, and `--rf-color-accent-soft` selected tint with accent-colored marker. Preserve the glass overlay container and keep overlay content as the single scroll owner.
+- Neutral-gray glass is the shared inline panel treatment. Use `Surface variant="glass"` when JSX can use the kit primitive, or `.rf-glass-panel` for global/module CSS surfaces that need the same recipe. Both read from `--rf-surface-glass` and `--rf-elev-panel`, with blur driven by `--rf-blur-overlay`.
+- Glassy panel backgrounds must stay neutral gray, never periwinkle or blue. `--rf-color-accent-soft` is reserved for selected/active states and must not be used as a panel or card fill.
+- Surfaces are reserved for overlays, fields, selected/active state, and true containment. When used, keep them barely visible with tokenized borders/backgrounds.
+- JCEF/JetBrains (`[data-host="jetbrains"]`) forces solid overlay/glass surfaces and disables blur for performance. `prefers-reduced-transparency: reduce` also resolves overlay/glass surfaces to solid readable panels.
+
+### Motion
+
+- Prefer CSS-only motion. Chat transcript hot paths must not use JS animation.
+- Animate `transform` and `opacity` first; `grid-template-rows` is allowed for expand/collapse.
+- Motion must use `--rf-dur-*`, `--rf-ease-*`, and `--rf-stagger`, and must honor both `prefers-reduced-motion` and `prefers-reduced-transparency`.
+- Shared utilities live in `src/styles/motion.css`: `.rf-enter`, `.rf-enter-rise`, `.rf-stagger`, `.rf-popover-motion`, `.rf-expand-grid`, `.rf-pressable`, `.rf-status-pulse`, and `.rf-shimmer`.
+- Use `useReducedMotion()` only for rare JS-side decisions that cannot be expressed in CSS.
+
+### Icons
+
+- Use Lucide outline icons through the `<Icon>` wrapper.
+- Icons inherit `currentColor` and use `strokeWidth={1.5}`. State is communicated by icon color only; do not add icon fills.
+- Do not use emoji as icons. Data/content emoji are exempt, such as UserInput `🗜️` detection and TaskDocuments `★` content markers.
+
+### Responsiveness doctrine
+
+- No stray page-level horizontal scroll ever. The Playwright gate checks dashboard and chat at `240`, `360`, `768`, and `1280` px.
+- Every shrinkable flex/grid child gets `min-width: 0`; grids use `minmax(0, 1fr)` where columns must shrink.
+- Do not put `min-width: <N>px` on layout containers, cards, or tables.
+- Do not use `nowrap` without truncation.
+- Overlays clamp with viewport-aware sizing such as `width: min(ideal, calc(100vw - 2 * gutter))` and `max-height: min(ideal, calc(100dvh - gutter))`; narrow layouts should become a Sheet.
+- `overflow-x` belongs only inside explicit `.scrollX` islands for code, diffs, tables, and kanban-like content.
+- Prefer container queries for component layout changes.
+- App-level horizontal overflow safety belongs in `src/styles/responsive.css` and the app root only; do not add global `*`, `body`, or `html` overflow clamps.
+- Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
+
+### Overlays
+
+- Use five overlay primitives only: Tooltip, Popover, Menu, Dialog, and Sheet.
+- Overlay implementations must provide viewport clamping, focus trap/restore, Escape handling, and Portal-into-theme-root behavior.
+- Overlay blur uses `--rf-blur-overlay` and must have a reduced-transparency fallback; JetBrains host mode disables blur.
+- The stabilized UI kit overlay set is exported from `src/components/ui`: `Dialog`, `Menu`, `Popover`, `Sheet`, and `Tooltip`. They share `open`, `defaultOpen`, `onOpenChange`, anchored `side`/`align`/`sideOffset`/`collisionPadding` where applicable, `modal` where applicable, and content `maxWidth`/`maxHeight` props.
+- Overlay content clamps with `width: min(ideal, calc(100vw - 2 * var(--rf-space-3)))` and `max-height: min(ideal, calc(100dvh - var(--rf-space-5)))`; vertical overflow stays inside the overlay and horizontal overflow must use explicit `.scrollX` islands.
+- `Popover` is responsive by default and renders as a bottom `Sheet` below the narrow viewport threshold; callers may set `responsive={false}` or `forceSheet` for deterministic behavior.
+
+### Model selector
+
+- `ModelSelector` in `src/components/ui/ModelSelector` is the reusable presentational selector for model picking. It accepts only prop data and callbacks: `models`, `value`, `onSelect`, optional `groups`, `allowUnset`, `disabled`, `onAddNewModel`, and `variant: "popover" | "inline"`.
+- `unsetLabel?: string` customizes the empty-state row and trigger label when `allowUnset` is enabled; it defaults to `No model selected`.
+- `triggerSize?: "sm" | "md" | "lg"` lets connected compact wrappers keep small triggers while the selector internals stay shared.
+- `ModelOption` carries render-ready fields only: `value`, `displayName`, optional `group`, `disabled`, `pricing: { prompt, output }`, `contextWindow`, `badges: Array<"default" | "reasoning" | "light" | "buddy" | "task-agent" | "chat2">`, and `capabilities: ReactNode`.
+- The kit selector must stay pure: no caps hooks, Redux, RTK Query, services, provider utilities, or feature imports. Connected feature code owns enrichment, grouping, pricing formatting, capability icons, and persistence.
+- Use `variant="popover"` for compact pickers backed by the kit `Popover` responsive Sheet behavior, and `variant="inline"` for settings surfaces that render the searchable list directly.
+- Model rows are panel-less and glass-friendly: no per-row bordered/card boxes, transparent idle rows, subtle `--rf-surface-1` hover tint, and selected state as `--rf-color-accent-soft` background + accent name + check icon only.
+- Model names must truncate with ellipsis before badges wrap; badge chips stay in a compact grouped flex container so labels such as `Task Agent` fit on the name line in normal widths and wrap as a group only when unavoidable.
+- `ModelSelector` popovers and settings compositions must have exactly one vertical scroll owner. Use `Popover.Content scrollable={false}` when an inner selector/list owns scrolling; keep search and footer actions pinned outside the `.scrollArea`.
+- `Popover.Content` supports `scrollable={false}` for flex-column, overflow-hidden overlay content. Use it for composed popovers/sheets that need sticky top/bottom regions with a single inner scroller.
+
+### Sizing contract
+
+| Item        | Values                                                                 |
+| ----------- | ---------------------------------------------------------------------- |
+| Controls    | default `30px`, small `26px`, large `36px`                             |
+| Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`       |
+| Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px` |
+| Spacing     | scale tokens documented below                                          |
+| Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`           |
+| Lines/rings | hairline `1px`, focus ring `2px`                                       |
+| Type        | `11.5 / 12.5 / 13.5 / 15 / 19px`                                       |
+| Layout      | nav `220px` with `180px` min, content max `640px`                      |
+| Overlays    | popover `210–360px`, dialog `340px`, tooltip max `280px`               |
+
+Canonical spacing rhythm:
+
+- Full spacing scale: `--rf-space-2xs: 2px`, `--rf-space-1: 4px`, `--rf-space-xs: 6px`, `--rf-space-2: 8px`, `--rf-space-3: 12px`, `--rf-space-4: 16px`, `--rf-space-5: 22px`, `--rf-space-6: 32px`.
+
+- Semantic spacing tokens resolve to the `--rf-space-*` scale and are the preferred contract tokens for layout surfaces.
+- Panel/card inner padding uses `--rf-panel-pad`; compact panels use `--rf-panel-pad-compact`; card-specific APIs may use the `--rf-card-pad` alias.
+- Inter-card and section gaps use `--rf-section-gap`.
+- Rows use `--rf-row-pad` padding and `--rf-row-gap` internal gap.
+- Tight label/value stacks use `--rf-space-2xs`.
+- Chip and badge padding uses `var(--rf-space-2xs) var(--rf-space-xs)`; pill chips use `var(--rf-space-1) var(--rf-space-2)`.
+- Header title-to-subtitle gaps use `--rf-space-2xs` or `--rf-space-1`; header-to-body gaps use `--rf-space-2`.
+- Canvas and sprite pixel coordinates in BuddyWorld/BuddyCanvas, plus BuddyDemo showcase layouts, are exempt from spacing-token normalization.
+
+### Guardrails and verification
+
+These scripts exist in `refact-agent/gui/package.json` and are the current merged guardrails:
+
+| Command                   | Purpose                                                                                                                 |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `npm run types`           | TypeScript `tsc --noEmit`                                                                                               |
+| `npm run lint`            | Strict ESLint over TS/TSX with zero warnings                                                                            |
+| `npm run lint:css`        | Stylelint scoped to `src/components/ui/**/*.css` and `src/styles/*.css` for now; global CSS expansion belongs to DS-704 |
+| `npm run lint:boundaries` | ESLint boundary check for `src/components/ui/**/*.{ts,tsx}` and `src/styles/**/*.{ts,tsx}`                              |
+| `npm run test`            | Vitest unit suite excluding integration tests                                                                           |
+| `npm run build`           | TypeScript and Vite chat/events builds                                                                                  |
+| `npm run build-storybook` | Storybook static build                                                                                                  |
+| `npm run test:e2e`        | Playwright no-horizontal-scroll gate via `tests/e2e/no-horizontal-scroll.spec.ts`                                       |
+
 ## IDE Integration (postMessage)
 
 **Host modes**: `web` | `vscode` | `jetbrains` | `ide`

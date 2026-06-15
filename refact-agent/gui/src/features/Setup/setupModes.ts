@@ -10,6 +10,9 @@ export const SETUP_MODES: SetupMode[] = [
   { label: "Find MCPs", mode: "setup_mcp" },
   { label: "Create Commands", mode: "setup_commands" },
   { label: "Create Subagents", mode: "setup_subagents" },
+  { label: "Create Modes", mode: "setup_modes" },
+  { label: "Create Hooks", mode: "setup_hooks" },
+  { label: "Seed Knowledge", mode: "setup_knowledge" },
 ];
 
 export const SETUP_MODE_IDS = new Set(SETUP_MODES.map((m) => m.mode));

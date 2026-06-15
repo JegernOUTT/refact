@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -8,9 +9,11 @@ import React, {
 import { CheckIcon, CopyIcon } from "@radix-ui/react-icons";
 import { Box, Button, Container, Flex, Text } from "@radix-ui/themes";
 import classNames from "classnames";
+import { ClipboardList } from "lucide-react";
 import { useAppSelector, useCopyToClipboard } from "../../../hooks";
 import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
+import { Icon } from "../../ui";
 import styles from "./PlanBanner.module.css";
 import { getPlanMetadata } from "../../../services/refact/types";
 import { PlanHistoryModal } from "./PlanHistoryModal";
@@ -72,6 +75,7 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
   const [copied, setCopied] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const copyTimerRef = useRef<number | null>(null);
+  const bodyId = useId();
   const metadata = useMemo(
     () => (plan ? getPlanMetadata(plan) : undefined),
     [plan],
@@ -149,13 +153,22 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
             align="center"
             gap="2"
             className={styles.header}
-            onClick={handleToggle}
             data-testid="plan-banner-header"
           >
-            <span className={styles.icon}>📋</span>
-            <Text size="1" className={styles.title}>
-              {title}
-            </Text>
+            <button
+              type="button"
+              className={styles.toggleButton}
+              onClick={handleToggle}
+              aria-expanded={!collapsed}
+              aria-controls={bodyId}
+            >
+              <span className={styles.icon}>
+                <Icon icon={ClipboardList} size="sm" />
+              </span>
+              <Text size="1" className={styles.title}>
+                {title}
+              </Text>
+            </button>
             <span className={styles.actions}>
               <button
                 type="button"
@@ -181,7 +194,11 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
             </span>
           </Flex>
           {!collapsed && (
-            <Box className={styles.body} data-testid="plan-banner-body">
+            <Box
+              id={bodyId}
+              className={styles.body}
+              data-testid="plan-banner-body"
+            >
               <Markdown>{planText}</Markdown>
             </Box>
           )}

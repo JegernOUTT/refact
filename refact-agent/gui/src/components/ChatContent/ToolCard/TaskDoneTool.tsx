@@ -1,5 +1,5 @@
+import { CircleCheck } from "lucide-react";
 import React from "react";
-import { CheckCircledIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
 
@@ -34,7 +34,7 @@ export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
       <span data-testid="task-done-tool" hidden />
       <ReportToolCard
         toolCall={toolCall}
-        icon={<CheckCircledIcon />}
+        icon={<CircleCheck />}
         defaultSummary="Task completed"
         variant="taskDone"
         extractReport={extractTaskDoneReport}

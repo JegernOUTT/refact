@@ -1,20 +1,15 @@
 import React, { useState, useCallback } from "react";
 import { useStoredOpen } from "./useStoredOpen";
 import { Flex, Box, Text } from "@radix-ui/themes";
-import classNames from "classnames";
 import ReactMarkDown from "react-markdown";
-import {
-  FileIcon,
-  ArchiveIcon,
-  ReaderIcon,
-  LightningBoltIcon,
-} from "@radix-ui/react-icons";
+import { Archive, BookOpen, FileText, Zap } from "lucide-react";
+import { Icon } from "../ui";
 import { ChatContextFile } from "../../services/refact";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { filename } from "../../utils";
 import { useEventsBusForIDE, useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
-import { useDelayedUnmount } from "../shared/useDelayedUnmount";
+import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./ContextFiles.module.css";
 
 // Re-export Markdown for backward compatibility
@@ -156,8 +151,7 @@ const FileItem: React.FC<{
   const storeKey = `ctxfile:${file.file_name}:${file.line1 || 0}-${
     file.line2 || 0
   }`;
-  const [isOpen, toggleOpen] = useStoredOpen(storeKey, false);
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+  const [isOpen, , setIsOpen] = useStoredOpen(storeKey, false);
   const extension = getExtensionFromName(file.file_name);
 
   const displayName =
@@ -169,9 +163,12 @@ const FileItem: React.FC<{
 
   const relevance = file.usefulness ? Math.round(file.usefulness) : null;
 
-  const handleToggle = useCallback(() => {
-    toggleOpen();
-  }, [toggleOpen]);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      setIsOpen(open);
+    },
+    [setIsOpen],
+  );
 
   const handleFileClick = useCallback(
     (e: React.MouseEvent) => {
@@ -185,40 +182,30 @@ const FileItem: React.FC<{
   );
 
   return (
-    <div className={styles.fileItem}>
-      <Flex
-        className={styles.fileHeader}
-        align="center"
-        gap="2"
-        onClick={handleToggle}
-      >
+    <AnimatedCollapsible
+      className={styles.fileItem}
+      header={
         <Text size="1" className={styles.fileName} onClick={handleFileClick}>
           {displayName}
         </Text>
-        {relevance !== null && (
+      }
+      actions={
+        relevance !== null ? (
           <Text size="1" className={styles.relevance}>
             {relevance}%
           </Text>
-        )}
-      </Flex>
-
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.fileContent}>
-              <ShikiCodeBlock showLineNumbers={false}>
-                {`\`\`\`${extension}\n${file.file_content}\n\`\`\``}
-              </ShikiCodeBlock>
-            </Box>
-          </div>
-        </div>
-      )}
-    </div>
+        ) : null
+      }
+      open={isOpen}
+      onOpenChange={handleOpenChange}
+      variant="compact"
+    >
+      <Box className={styles.fileContent}>
+        <ShikiCodeBlock showLineNumbers={false}>
+          {`\`\`\`${extension}\n${file.file_content}\n\`\`\``}
+        </ShikiCodeBlock>
+      </Box>
+    </AnimatedCollapsible>
   );
 };
 
@@ -275,7 +262,7 @@ const FilesContent: React.FC<{
       <Flex direction="column" gap="2">
         {memories.length > 0 && (
           <FileSection
-            icon={<ReaderIcon />}
+            icon={<Icon icon={BookOpen} size="sm" tone="muted" />}
             title="Knowledge"
             files={memories}
             onOpenFile={onOpenFile}
@@ -284,7 +271,7 @@ const FilesContent: React.FC<{
         )}
         {trajectories.length > 0 && (
           <FileSection
-            icon={<ArchiveIcon />}
+            icon={<Icon icon={Archive} size="sm" tone="muted" />}
             title="Past Conversations"
             files={trajectories}
             onOpenFile={onOpenFile}
@@ -293,7 +280,7 @@ const FilesContent: React.FC<{
         )}
         {other.length > 0 && (
           <FileSection
-            icon={<FileIcon />}
+            icon={<Icon icon={FileText} size="sm" tone="muted" />}
             title="Related"
             files={other}
             onOpenFile={onOpenFile}
@@ -315,7 +302,7 @@ const FilesContent: React.FC<{
       <Flex direction="column" gap="2">
         {instructions.length > 0 && (
           <FileSection
-            icon={<ReaderIcon />}
+            icon={<Icon icon={BookOpen} size="sm" tone="muted" />}
             title="Instructions"
             files={instructions}
             onOpenFile={onOpenFile}
@@ -324,7 +311,7 @@ const FilesContent: React.FC<{
         )}
         {ideSettings.length > 0 && (
           <FileSection
-            icon={<ArchiveIcon />}
+            icon={<Icon icon={Archive} size="sm" tone="muted" />}
             title="IDE Settings"
             files={ideSettings}
             onOpenFile={onOpenFile}
@@ -333,7 +320,7 @@ const FilesContent: React.FC<{
         )}
         {other.length > 0 && (
           <FileSection
-            icon={<FileIcon />}
+            icon={<Icon icon={FileText} size="sm" tone="muted" />}
             title="Other"
             files={other}
             onOpenFile={onOpenFile}
@@ -388,18 +375,19 @@ const _ContextFiles: React.FC<{
 
   const isControlled = controlledOpen !== undefined;
   const isOpen = isControlled ? controlledOpen : internalOpen;
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
 
-  const handleToggle = useCallback(() => {
-    if (isControlled && onOpenChange) {
-      onOpenChange(!controlledOpen);
-    } else {
-      setInternalOpen((prev) => !prev);
-    }
-  }, [isControlled, onOpenChange, controlledOpen]);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      if (isControlled && onOpenChange) {
+        onOpenChange(open);
+      } else {
+        setInternalOpen(open);
+      }
+    },
+    [isControlled, onOpenChange],
+  );
 
   if (!Array.isArray(files) || files.length === 0) return null;
-
   const variant: ContextVariant =
     toolCallId === "knowledge_enrichment"
       ? "enrichment"
@@ -411,15 +399,14 @@ const _ContextFiles: React.FC<{
 
   const icon =
     variant === "enrichment" ? (
-      <LightningBoltIcon />
+      <Icon icon={Zap} size="sm" tone="accent" />
     ) : variant === "project_context" ? (
-      <ArchiveIcon />
+      <Icon icon={Archive} size="sm" tone="muted" />
     ) : variant === "memories_context" ? (
-      <LightningBoltIcon />
+      <Icon icon={Zap} size="sm" tone="accent" />
     ) : (
-      <FileIcon />
+      <Icon icon={FileText} size="sm" tone="muted" />
     );
-
   const label =
     variant === "enrichment"
       ? `Memories (${files.length})`
@@ -432,38 +419,26 @@ const _ContextFiles: React.FC<{
               .join(", ");
 
   return (
-    <div className={styles.card}>
-      <Flex
-        className={styles.header}
-        align="center"
-        gap="2"
-        onClick={handleToggle}
-      >
-        <span className={styles.icon}>{icon}</span>
+    <AnimatedCollapsible
+      className={styles.card}
+      header={
         <Text size="1" className={styles.summary}>
           {label}
         </Text>
-      </Flex>
-
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              <FilesContent
-                files={files}
-                onOpenFile={handleOpenFile}
-                variant={variant}
-              />
-            </Box>
-          </div>
-        </div>
-      )}
-    </div>
+      }
+      icon={<span className={styles.icon}>{icon}</span>}
+      open={isOpen}
+      onOpenChange={handleOpenChange}
+      variant="compact"
+    >
+      <Box className={styles.content}>
+        <FilesContent
+          files={files}
+          onOpenFile={handleOpenFile}
+          variant={variant}
+        />
+      </Box>
+    </AnimatedCollapsible>
   );
 };
 

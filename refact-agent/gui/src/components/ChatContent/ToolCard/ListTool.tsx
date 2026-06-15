@@ -1,5 +1,5 @@
+import { Archive } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { ArchiveIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -89,7 +89,7 @@ export const ListTool: React.FC<ListToolProps> = ({
 
   return (
     <ToolCard
-      icon={<ArchiveIcon />}
+      icon={<Archive />}
       summary={summary}
       meta={meta}
       status={status}

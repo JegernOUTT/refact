@@ -49,18 +49,18 @@ function MyComponent() {
 
 Matches KnowledgeGraph.tsx colors:
 
-- 📄 **code** - Blue (#3B82F6)
-- 🎯 **decision** - Purple (#8B5CF6)
-- ⭐ **preference** - Green (#10B981)
-- 🔄 **pattern** - Amber (#F59E0B)
-- 📚 **lesson** - Cyan (#06B6D4)
+- 📄 **code** - `--rf-color-info`
+- 🎯 **decision** - `--rf-color-accent`
+- ⭐ **preference** - `--rf-color-success`
+- 🔄 **pattern** - `--rf-color-warning`
+- 📚 **lesson** - `--rf-color-info`
 
 ## Layout
 
 - **Mobile/Small**: 2 columns (min-width: 768px)
 - **Desktop**: 3 columns (min-width: 1200px)
 - **Card min-height**: 120px
-- **Gap**: `var(--space-3)` (12px)
+- **Gap**: `var(--rf-space-3)` (12px)
 
 ## Styling
 

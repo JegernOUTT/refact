@@ -2,6 +2,8 @@ import React from "react";
 import { Flex, Container, Box } from "@radix-ui/themes";
 import styles from "./ChatLoading.module.css";
 
+const skeletonWidths = ["85%", "70%", "90%", "60%"];
+
 export const ChatLoading: React.FC = () => {
   return (
     <Container>
@@ -11,7 +13,7 @@ export const ChatLoading: React.FC = () => {
         justify="center"
         gap="4"
         py="9"
-        className={styles.container}
+        className={`${styles.container} rf-enter-rise`}
       >
         <Box className={styles.dotsContainer}>
           <Box className={styles.dot} />
@@ -20,10 +22,13 @@ export const ChatLoading: React.FC = () => {
         </Box>
 
         <Flex direction="column" gap="3" className={styles.skeletonContainer}>
-          <Box className={styles.skeletonLine} style={{ width: "85%" }} />
-          <Box className={styles.skeletonLine} style={{ width: "70%" }} />
-          <Box className={styles.skeletonLine} style={{ width: "90%" }} />
-          <Box className={styles.skeletonLine} style={{ width: "60%" }} />
+          {skeletonWidths.map((width) => (
+            <Box
+              key={width}
+              className={styles.skeletonLine}
+              style={{ width }}
+            />
+          ))}
         </Flex>
       </Flex>
     </Container>

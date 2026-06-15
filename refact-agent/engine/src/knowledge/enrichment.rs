@@ -76,11 +76,7 @@ fn format_enrichment_card(m: &crate::memories::MemoRecord) -> String {
             path.display()
         ));
     }
-    let snippet: String = m.content.chars().take(900).collect();
-    out.push_str(&snippet);
-    if m.content.chars().count() > 900 {
-        out.push_str("\n\n[TRUNCATED]\n");
-    }
+    out.push_str(&m.content);
     out
 }
 
@@ -575,7 +571,6 @@ fn push_enrichment_item(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_else(|| path_str.clone());
-    let content: String = content.chars().take(900).collect();
     let line_count = content.lines().count().max(1);
 
     seen_paths.insert(path_str.clone());

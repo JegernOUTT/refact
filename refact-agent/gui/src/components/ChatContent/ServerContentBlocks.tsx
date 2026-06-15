@@ -1,13 +1,13 @@
 import React, { useMemo } from "react";
 import { useStoredOpen } from "./useStoredOpen";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
+import { Search } from "lucide-react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import { Link } from "../Link";
 import { ToolCard } from "./ToolCard";
 import { normalizeToolName } from "../../utils/toolNameAliases";
+import { Icon } from "../ui";
 import styles from "./ToolCard/OpenAIResponsesTool.module.css";
-import scrollbarStyles from "../shared/scrollbar.module.css";
-
+import chatStyles from "./ChatContent.module.css";
 type ServerToolUse = {
   type: "server_tool_use";
   id: string;
@@ -115,7 +115,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
 
   return (
     <ToolCard
-      icon={<MagnifyingGlassIcon />}
+      icon={<Icon icon={Search} size="sm" tone="muted" />}
       summary={summary}
       status="success"
       isOpen={isOpen}
@@ -123,9 +123,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
     >
       {results.length > 0 && (
         <Box>
-          <Text size="1" color="gray">
-            Results ({results.length})
-          </Text>
+          <Text size="1">Results ({results.length})</Text>
           <Box className={styles.resultList}>
             {results.map((r, idx) => {
               const title = r.title ?? "(no title)";
@@ -149,7 +147,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
                       </Text>
                     )}
                     {safeUrl && (
-                      <Text size="1" color="gray" className={styles.inlineCode}>
+                      <Text size="1" className={styles.inlineCode}>
                         {safeUrl}
                       </Text>
                     )}
@@ -161,9 +159,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
         </Box>
       )}
       {results.length === 0 && !group.result && (
-        <Text size="1" color="gray">
-          Waiting for results…
-        </Text>
+        <Text size="1">Waiting for results…</Text>
       )}
     </ToolCard>
   );
@@ -190,18 +186,9 @@ export const ServerContentBlocks: React.FC<ServerContentBlocksProps> = ({
       ))}
       {ungrouped.length > 0 && (
         <Box mt="2">
-          <Text size="1" color="gray">
-            Server blocks ({ungrouped.length})
-          </Text>
-          <pre
-            style={{
-              fontSize: "var(--font-size-1)",
-              color: "var(--gray-11)",
-              overflowX: "auto",
-              maxHeight: 200,
-            }}
-            className={scrollbarStyles.scrollbarThin}
-          >
+          <Text size="1">Server blocks ({ungrouped.length})</Text>
+
+          <pre className={`scrollX ${chatStyles.serverBlocksRaw}`}>
             {JSON.stringify(ungrouped, null, 2)}
           </pre>
         </Box>

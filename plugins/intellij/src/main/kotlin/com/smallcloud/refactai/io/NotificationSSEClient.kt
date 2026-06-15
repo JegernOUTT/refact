@@ -74,7 +74,7 @@ class NotificationSSEClient(private val project: Project) : Disposable {
             return
         }
 
-        val sseUrl = baseUrl.resolve("/v1/sidebar/subscribe")
+        val sseUrl = baseUrl.resolve("v1/sidebar/subscribe")
         logger.info("Connecting to SSE: $sseUrl")
 
         val connection = (sseUrl.toURL().openConnection() as HttpURLConnection).apply {

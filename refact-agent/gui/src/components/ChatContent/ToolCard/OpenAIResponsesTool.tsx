@@ -1,14 +1,14 @@
-import React, { useMemo } from "react";
 import {
-  CubeIcon,
-  FileTextIcon,
-  MagnifyingGlassIcon,
-  LapTimerIcon,
-  DesktopIcon,
-  SpeakerLoudIcon,
-  ImageIcon,
-  ExclamationTriangleIcon,
-} from "@radix-ui/react-icons";
+  Cuboid,
+  FileText,
+  Search,
+  Timer,
+  Monitor,
+  Volume2,
+  Image,
+  TriangleAlert,
+} from "lucide-react";
+import React, { useMemo } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -39,22 +39,22 @@ function parseJsonOrNull(text: string): unknown {
 function getToolIcon(toolName: string): React.ReactNode {
   switch (toolName) {
     case "openai_web_search_call":
-      return <MagnifyingGlassIcon />;
+      return <Search />;
     case "openai_file_search_call":
-      return <FileTextIcon />;
+      return <FileText />;
     case "openai_code_interpreter_call":
-      return <LapTimerIcon />;
+      return <Timer />;
     case "openai_computer_call":
     case "openai_computer_call_output":
-      return <DesktopIcon />;
+      return <Monitor />;
     case "openai_audio":
-      return <SpeakerLoudIcon />;
+      return <Volume2 />;
     case "openai_image_generation_call":
-      return <ImageIcon />;
+      return <Image />;
     case "openai_refusal":
-      return <ExclamationTriangleIcon />;
+      return <TriangleAlert />;
     default:
-      return <CubeIcon />;
+      return <Cuboid />;
   }
 }
 
@@ -180,14 +180,14 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
       <Box className={styles.content}>
         {content ? <Markdown>{content}</Markdown> : null}
 
-        {parsedArgs != null && typeof parsedArgs === "object" && (
-          <Box mb="2">{renderOpenAiResponsesPayload(toolName, parsedArgs)}</Box>
-        )}
+        {parsedArgs != null &&
+          typeof parsedArgs === "object" &&
+          renderOpenAiResponsesPayload(toolName, parsedArgs)}
 
-        <Text size="1" color="gray">
-          Raw JSON
-        </Text>
-        <ShikiCodeBlock showLineNumbers={false}>{rawJson}</ShikiCodeBlock>
+        <Box className={styles.sectionLabel}>Raw JSON</Box>
+        <Box className={styles.rawJson}>
+          <ShikiCodeBlock showLineNumbers={false}>{rawJson}</ShikiCodeBlock>
+        </Box>
       </Box>
     </ToolCard>
   );
@@ -210,7 +210,7 @@ function renderOpenAiResponsesPayload(
           <Text size="1" color="gray">
             Results ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.slice(0, 20).map((r, idx) => {
               const rr = r as Record<string, unknown>;
               const title =
@@ -223,7 +223,10 @@ function renderOpenAiResponsesPayload(
                     ? rr.description
                     : "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Flex direction="column" gap="1">
                     <Text size="2" weight="medium">
                       {title}
@@ -259,7 +262,7 @@ function renderOpenAiResponsesPayload(
           <Text size="1" color="gray">
             Matches ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.slice(0, 50).map((r, idx) => {
               const rr = r as Record<string, unknown>;
               const filename =
@@ -275,7 +278,10 @@ function renderOpenAiResponsesPayload(
                     ? rr.content
                     : "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Text size="2" weight="medium" className={styles.inlineCode}>
                     {filename}
                   </Text>

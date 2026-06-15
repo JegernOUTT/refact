@@ -1,31 +1,30 @@
 .content {
-  margin-top: 8px;
+  composes: bodyStack from "./ToolCardBody.module.css";
 }
 
 .inlineCode {
-  font-family: var(--code-font-family);
-  color: var(--gray-12);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-muted);
 }
 
 .resultList {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  overflow-y: auto;
-  margin-top: var(--space-1);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
+  composes: resultList from "./ToolCardBody.module.css";
 }
 
 .resultItem {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
-}
-
-.resultItem:last-child {
-  border-bottom: none;
+  composes: resultItem from "./ToolCardBody.module.css";
 }
 
 .codeBox {
-  border-radius: var(--radius-2);
-  overflow: hidden;
+  composes: resultPanel from "./ToolCardBody.module.css";
+}
+
+.rawJson {
+  composes: resultPanel from "./ToolCardBody.module.css";
+}
+
+.sectionLabel {
+  composes: sectionLabel from "./ToolCardBody.module.css";
 }

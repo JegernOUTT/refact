@@ -1,12 +1,37 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+  min-width: 0;
+}
+
 .chartsRow {
-  flex-wrap: wrap;
-  gap: var(--space-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: var(--rf-space-4);
+  min-width: 0;
 }
 
 .chartBox {
-  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
   min-width: 0;
   overflow: hidden;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.chartCanvas {
+  width: 100%;
+  height: 220px;
+}
+
+.chartCanvasTall {
+  width: 100%;
+  height: 280px;
 }
 
 .tableWrapper {
@@ -15,44 +40,63 @@
 
 .table {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
 .th {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-5);
-  color: var(--gray-11);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border-strong);
+  color: var(--rf-color-muted);
   cursor: pointer;
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   user-select: none;
   white-space: nowrap;
 }
 
 .th:hover {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
 }
 
 .td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-4);
-  color: var(--gray-12);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.emptyText,
+.sectionTitle {
+  margin: 0;
 }
 
 .emptyText {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
+  font: var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .sectionTitle {
-  color: var(--gray-12);
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .sortButton {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  padding: 0;
   width: 100%;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
   text-align: left;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chartBox {
+    backdrop-filter: none;
+  }
 }

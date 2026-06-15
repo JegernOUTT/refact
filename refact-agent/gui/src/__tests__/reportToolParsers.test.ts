@@ -3,6 +3,10 @@ import {
   isSkillReportContent,
   parseSkillReport,
 } from "../components/ChatContent/skillReportUtils";
+import {
+  extractApplyReport,
+  extractProbeReport,
+} from "../components/ChatContent/ToolCard/compressReportParsers";
 import { isIdeHost } from "../utils/isIdeHost";
 
 describe("isSkillReportContent", () => {
@@ -45,45 +49,97 @@ describe("parseSkillReport", () => {
 });
 
 describe("CompressReportTool parsers", () => {
-  // Test the extractProbeReport and extractApplyReport parsers indirectly
-  // by verifying their input format expectations
+  const probePayload = {
+    type: "ctx_probe",
+    messages_count: 42,
+    total_tokens: 15000,
+    role_tokens: { system: 2000, user: 5000 },
+    potential_gains: {
+      duplicate_context_tokens: 500,
+      tool_output_tokens: 3000,
+      memory_tokens: 0,
+      project_info_tokens: 0,
+    },
+  };
 
-  it("probe JSON has expected structure", () => {
-    const probeJson = {
-      type: "compress_chat_probe",
-      messages_count: 42,
-      total_tokens: 15000,
-      role_tokens: { system: 2000, user: 5000, assistant: 8000 },
-      potential_gains: {
-        duplicate_context_tokens: 500,
-        tool_output_tokens: 3000,
-        memory_tokens: 200,
-        project_info_tokens: 100,
-      },
-    };
-    expect(probeJson.type).toBe("compress_chat_probe");
-    expect(probeJson.messages_count).toBeGreaterThan(0);
-    expect(probeJson.total_tokens).toBeGreaterThan(0);
-    expect(Object.keys(probeJson.role_tokens).length).toBeGreaterThan(0);
+  const applyPayload = {
+    type: "ctx_apply",
+    before_message_count: 50,
+    after_message_count: 30,
+    before_tokens: 15000,
+    after_tokens: 8000,
+    context_files_dropped: 3,
+    context_messages_dropped: 2,
+    memories_dropped: 1,
+    tool_outputs_truncated: 5,
+    tool_outputs_dropped: 0,
+    project_info_dropped: 1,
+    dedup_context_files: 2,
+  };
+
+  it("extracts engine-shaped probe reports", () => {
+    const result = extractProbeReport(JSON.stringify(probePayload));
+
+    expect(result).not.toBeNull();
+    expect(result?.summary).toContain("42 messages");
+    expect(result?.markdown).toContain("Token Distribution");
+    expect(result?.markdown).toContain("Duplicate context files");
+    expect(result?.markdown).toContain("Tool outputs");
+    expect(result?.markdown).not.toContain("Memories");
+    expect(result?.markdown).not.toContain("Project info");
   });
 
-  it("apply JSON has expected structure", () => {
-    const applyJson = {
-      type: "compress_chat_apply",
-      before_message_count: 50,
-      after_message_count: 30,
-      before_tokens: 15000,
-      after_tokens: 8000,
-      context_files_dropped: 3,
-      context_messages_dropped: 2,
-      memories_dropped: 1,
-      tool_outputs_truncated: 5,
-      tool_outputs_dropped: 0,
-      project_info_dropped: 1,
-      dedup_context_files: 2,
-    };
-    expect(applyJson.type).toBe("compress_chat_apply");
-    expect(applyJson.before_tokens).toBeGreaterThan(applyJson.after_tokens);
+  it("extracts legacy probe reports", () => {
+    expect(
+      extractProbeReport(
+        JSON.stringify({ ...probePayload, type: "compress_chat_probe" }),
+      ),
+    ).not.toBeNull();
+  });
+
+  it("returns null for invalid probe reports", () => {
+    expect(
+      extractProbeReport(
+        JSON.stringify({ ...probePayload, type: "something_else" }),
+      ),
+    ).toBeNull();
+    expect(extractProbeReport("not valid json {{{")).toBeNull();
+    expect(
+      extractProbeReport(
+        JSON.stringify({
+          type: "ctx_probe",
+          messages_count: 42,
+          total_tokens: 15000,
+          role_tokens: { system: 2000 },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("extracts engine-shaped apply reports", () => {
+    const result = extractApplyReport(JSON.stringify(applyPayload));
+
+    expect(result).not.toBeNull();
+    expect(result?.summary).toContain("15.0k → 8.0k tokens");
+    expect(result?.markdown).toContain("Compression Applied");
+  });
+
+  it("extracts legacy apply reports", () => {
+    expect(
+      extractApplyReport(
+        JSON.stringify({ ...applyPayload, type: "compress_chat_apply" }),
+      ),
+    ).not.toBeNull();
+  });
+
+  it("returns null for invalid apply reports", () => {
+    expect(
+      extractApplyReport(
+        JSON.stringify({ ...applyPayload, type: "something_else" }),
+      ),
+    ).toBeNull();
+    const missingBeforeTokens = { ...applyPayload, before_tokens: undefined };
+    expect(extractApplyReport(JSON.stringify(missingBeforeTokens))).toBeNull();
   });
 });
 

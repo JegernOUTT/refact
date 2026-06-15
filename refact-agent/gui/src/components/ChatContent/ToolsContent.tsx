@@ -1,6 +1,16 @@
+import {
+  CircleCheck,
+  CircleX,
+  File,
+  LoaderCircle,
+  Settings,
+  Rows3,
+} from "lucide-react";
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { Container, Flex, Text, Box, Spinner } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Container, Flex, Text, Box } from "@radix-ui/themes";
+import { Icon } from "../ui";
 import {
   ChatContextFile,
   DiffChunk,
@@ -38,14 +48,8 @@ import {
   formatToolDisplayName,
 } from "../../utils/toolNameAliases";
 import { useCollapsibleStore, useStoredOpen } from "./useStoredOpen";
-import {
-  CheckCircledIcon,
-  CrossCircledIcon,
-  FileIcon,
-  GearIcon,
-  RowsIcon,
-} from "@radix-ui/react-icons";
 import { AnimatedText } from "../Text";
+import { toolCallArgsToString } from "./toolCallArgs";
 import {
   ReadTool,
   ListTool,
@@ -87,6 +91,7 @@ import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
+import styles from "./ToolsContent.module.css";
 
 function finalReportSuccess(content: string): boolean | null {
   try {
@@ -117,9 +122,9 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
   const status = isError ? "error" : "success";
   const statusIcon =
     status === "error" ? (
-      <CrossCircledIcon data-testid="final-report-tool-error-icon" />
+      <CircleX data-testid="final-report-tool-error-icon" />
     ) : (
-      <CheckCircledIcon data-testid="final-report-tool-success-icon" />
+      <CircleCheck data-testid="final-report-tool-success-icon" />
     );
 
   return (
@@ -151,22 +156,6 @@ function parseProgressEntry(entry: string): { step?: string; text: string } {
   if (!m) return { text: entry };
   const [, step, text] = m;
   return { step, text };
-}
-
-function toolCallArgsToString(toolCallArgs: string) {
-  try {
-    const json = JSON.parse(toolCallArgs) as unknown as Parameters<
-      typeof Object.entries
-    >;
-    if (Array.isArray(json)) {
-      return json.join(", ");
-    }
-    return Object.entries(json)
-      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-      .join(", ");
-  } catch {
-    return toolCallArgs;
-  }
 }
 
 const EXEC_TOOL_NAMES = new Set([
@@ -414,6 +403,23 @@ const ToolUsageDisplay: React.FC<{
   );
 };
 
+const AnimatedCollapsibleContent: React.FC<{
+  open: boolean;
+  children: React.ReactNode;
+}> = ({ open, children }) => {
+  return (
+    <Collapsible.Content forceMount asChild>
+      <div
+        className={classNames("rf-expand-grid", styles.toolGroupGrid)}
+        data-open={open}
+        hidden={false}
+      >
+        <div className={styles.toolGroupBody}>{children}</div>
+      </div>
+    </Collapsible.Content>
+  );
+};
+
 // Use this for a single tool results
 export const SingleModelToolContent: React.FC<{
   toolCalls: ToolCall[];
@@ -523,7 +529,7 @@ export const SingleModelToolContent: React.FC<{
             waiting={busy}
           />
         </Collapsible.Trigger>
-        <Collapsible.Content>
+        <AnimatedCollapsibleContent open={open}>
           {toolCalls.map((toolCall) => {
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (toolCall === null) {
@@ -539,7 +545,7 @@ export const SingleModelToolContent: React.FC<{
               </Box>
             );
           })}
-        </Collapsible.Content>
+        </AnimatedCollapsibleContent>
       </Collapsible.Root>
     </Container>
   );
@@ -1434,7 +1440,9 @@ function processToolCalls(
       <CompressReportTool
         key={`compress-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
-        toolType={headName}
+        toolType={
+          headName === "compress_chat_probe" ? "ctx_probe" : "ctx_apply"
+        }
       />
     );
     return processToolCalls(
@@ -1649,7 +1657,7 @@ const MultiModalToolContent: React.FC<{
             waiting={busy}
           />
         </Collapsible.Trigger>
-        <Collapsible.Content>
+        <AnimatedCollapsibleContent open={open}>
           <Box py="2">
             {toolCalls.map((toolCall, i) => {
               const result = toolResults.find(
@@ -1681,7 +1689,7 @@ const MultiModalToolContent: React.FC<{
               );
             })}
           </Box>
-        </Collapsible.Content>
+        </AnimatedCollapsibleContent>
       </Collapsible.Root>
       {hasImages && (
         <Flex py="2" gap="2" wrap="wrap">
@@ -1720,9 +1728,9 @@ type ToolUsageSummaryProps = {
   waiting: boolean;
 };
 
-function getFileIcon(path: string): React.ReactNode {
-  if (path.endsWith("/") || !path.includes(".")) return <RowsIcon />;
-  return <FileIcon />;
+function getFile(path: string): React.ReactNode {
+  if (path.endsWith("/") || !path.includes(".")) return <Rows3 />;
+  return <File />;
 }
 
 function truncatePath(path: string, maxLen = 50): string {
@@ -1752,16 +1760,26 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
     const currentStep = (subchatLog ?? []).slice(-1)[0];
 
     return (
-      <AnimatedText as="div" weight="light" size="1" animating={waiting}>
+      <AnimatedText
+        as="div"
+        weight="light"
+        size="1"
+        animating={waiting}
+        className={styles.toolUsageSummary}
+      >
         <Flex gap="2" align="end" onClick={onClick} ref={ref} my="2">
           <Flex
             gap="1"
             align="start"
             direction="column"
-            style={{ cursor: "pointer" }}
+            className={styles.toolUsageSummaryBody}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : <GearIcon />}
+              {waiting ? (
+                <Icon icon={LoaderCircle} size="sm" tone="accent" />
+              ) : (
+                <Settings />
+              )}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -1780,7 +1798,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             )}
             {shownAttachedFiles?.map((file, index) => (
               <Text weight="light" size="1" key={index} ml="4" as="div">
-                {getFileIcon(file)} {truncatePath(file)}
+                {getFile(file)} {truncatePath(file)}
               </Text>
             ))}
             {currentStep &&
@@ -1790,7 +1808,9 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
                   <Flex direction="column" gap="1" ml="4" mt="1">
                     {parsed.step && (
                       <Flex align="center" gap="1">
-                        {waiting && <Spinner size="1" />}
+                        {waiting && (
+                          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+                        )}
                         <Text weight="light" size="1">
                           {parsed.step}:
                         </Text>

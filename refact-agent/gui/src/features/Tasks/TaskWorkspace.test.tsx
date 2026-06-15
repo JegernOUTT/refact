@@ -1,10 +1,27 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { http, HttpResponse } from "msw";
-import { cleanup, render, screen, waitFor } from "../../utils/test-utils";
+import { delay, http, HttpResponse } from "msw";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
-import { resolveCardWorktree } from "./TaskWorkspaceWorktree";
+import {
+  isActionableWorktree,
+  resolveCardWorktree,
+} from "./TaskWorkspaceWorktree";
+import type { CardWorktreeTarget } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
 import { taskSseEventReceived } from "./tasksSlice";
+import { switchToThread } from "../Chat/Thread";
+import {
+  loadTaskWorkspaceTab,
+  setProjectStorageNamespace,
+} from "../../utils/chatUiPersistence";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
 import type {
   BoardCard,
@@ -25,6 +42,30 @@ const PLANNER_ID = "planner-test-1";
 const LEGACY_PATH = "/tmp/refact/legacy/wt-path";
 const LEGACY_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
+
+function readCssBlock(source: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
+  if (match?.index === undefined) {
+    throw new Error(`Missing CSS block for ${selector}`);
+  }
+  const start = source.indexOf("{", match.index);
+  const end = source.indexOf("\n}", start);
+  if (start === -1 || end === -1) {
+    throw new Error(`Malformed CSS block for ${selector}`);
+  }
+  return source.slice(start + 1, end);
+}
+
+function expectCardWorktreeTarget(
+  target: CardWorktreeTarget | null,
+): asserts target is CardWorktreeTarget {
+  expect(target).not.toBeNull();
+}
 
 type MockWorktreePanelProps = {
   open: boolean;
@@ -190,6 +231,7 @@ function makeMeta(overrides: Partial<WorktreeMeta> = {}): WorktreeMeta {
 function makeRecord(
   metaOverrides: Partial<WorktreeMeta> = {},
   statusOverrides: Partial<WorktreeRecordView["status"]> = {},
+  references: WorktreeRecordView["references"] = [],
 ): WorktreeRecordView {
   const meta = makeMeta(metaOverrides);
   const referenceCount = meta.reference_count ?? 1;
@@ -197,7 +239,7 @@ function makeRecord(
     meta,
     created_at: "2026-04-30T00:00:00Z",
     updated_at: "2026-04-30T00:00:00Z",
-    references: [],
+    references,
     reference_count: referenceCount,
     referencing_chat_ids: [],
     status: {
@@ -288,6 +330,9 @@ function taskWorkspaceHandlers(
     http.get("*/v1/tasks/task-1/trajectories/planner", () =>
       HttpResponse.json([]),
     ),
+    http.get("*/v1/tasks/task-1/trajectories/agents", () =>
+      HttpResponse.json([]),
+    ),
     http.get("*/v1/worktrees", () =>
       HttpResponse.json(makeWorktreeList(records)),
     ),
@@ -297,6 +342,29 @@ function taskWorkspaceHandlers(
     ),
     http.get("*/v1/caps", () =>
       HttpResponse.json({ chat_models: [], completion_models: [] }),
+    ),
+    http.get("*/v1/voice/status", () =>
+      HttpResponse.json({ enabled: false, available: false }),
+    ),
+    http.get("*/v1/chats/:id/skills-status", () =>
+      HttpResponse.json({ enabled: false, skills: [] }),
+    ),
+    http.get("*/v1/buddy/opportunities", () =>
+      HttpResponse.json({ opportunities: [] }),
+    ),
+    http.get("*/v1/task/:id/memories", () =>
+      HttpResponse.json({
+        since: "",
+        new_count: 0,
+        memories: [],
+        warnings: [],
+      }),
+    ),
+    http.get("*/v1/task/:id/memories/facets", () =>
+      HttpResponse.json({ namespaces: [], tags: [] }),
+    ),
+    http.get("*/v1/task/:id/documents", () =>
+      HttpResponse.json({ task_id: TASK_ID, documents: [] }),
     ),
     http.post("*/v1/buddy/diagnostics/collect", () => HttpResponse.json({})),
     http.get("*/v1/worktrees/:id/diff", ({ params }) => {
@@ -375,7 +443,13 @@ async function openCardDetail(card: BoardCard) {
   await waitFor(() =>
     expect(screen.getAllByText(card.id).length).toBeGreaterThan(0),
   );
-  return titles[0];
+  const kanbanTitle = titles.find((title) =>
+    title.closest("[class*='kanbanCard']"),
+  );
+  if (!kanbanTitle) {
+    throw new Error(`Kanban card title not found for ${card.title}`);
+  }
+  return kanbanTitle;
 }
 
 function openedIds(props: MockWorktreePanelProps[]): string[] {
@@ -390,6 +464,12 @@ beforeEach(() => {
   worktreeDiffPanelProps.length = 0;
   mergeWorktreeModalProps.length = 0;
 });
+
+function clearWorkspaceStorage() {
+  localStorage.clear();
+  sessionStorage.clear();
+  setProjectStorageNamespace(undefined);
+}
 
 describe("PlannerItem waiting chips", () => {
   it("renders waiting card chips when session_state === 'waiting_user_input'", () => {
@@ -507,12 +587,104 @@ describe("PlannerItem waiting chips", () => {
     );
 
     const item = screen.getByRole("button", {
-      name: /Open planner chat/,
+      name: /Open chat/,
     });
     item.focus();
     await user.keyboard("{Enter}");
 
     expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("renders a mode badge for non-planner chats", () => {
+    const planner = { ...makePlanner(), mode: "agent" };
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.getByText("agent")).toBeInTheDocument();
+  });
+
+  it("does not render a mode badge for task_planner chats", () => {
+    const planner = { ...makePlanner(), mode: "task_planner" };
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.queryByText("task_planner")).not.toBeInTheDocument();
+  });
+});
+
+describe("PlannerItem linked cards", () => {
+  it("renders linked card badges for cards whose agent the chat spawned", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        linkedCardIds={["G-1", "G-2"]}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(
+      screen.getByTestId(`planner-linked-cards-${planner.id}`),
+    ).toBeInTheDocument();
+    expect(screen.getByText("G-1")).toBeInTheDocument();
+    expect(screen.getByText("G-2")).toBeInTheDocument();
+  });
+
+  it("caps linked card badges at 4 with '+N'", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        linkedCardIds={["G-1", "G-2", "G-3", "G-4", "G-5", "G-6"]}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(screen.getByText("G-4")).toBeInTheDocument();
+    expect(screen.queryByText("G-5")).not.toBeInTheDocument();
+    expect(screen.getByText("+2")).toBeInTheDocument();
+  });
+
+  it("does not render the linked cards row when there are none", () => {
+    const planner = makePlanner();
+
+    render(
+      <PlannerItem
+        planner={planner}
+        isSelected={false}
+        onSelect={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+      { preloadedState: makePreloadedState("idle") },
+    );
+
+    expect(
+      screen.queryByTestId(`planner-linked-cards-${planner.id}`),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -556,6 +728,59 @@ describe("TaskWorkspace worktree resolution", () => {
     expect(target?.id).not.toBe(LEGACY_PATH);
   });
 
+  it("resolves_worktree_by_attached_references_when_meta_is_missing", () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_chat_id: "agent-chat-from-reference",
+    });
+    const record = makeRecord(
+      {
+        id: "wt-reference",
+        task_id: null,
+        card_id: null,
+      },
+      {},
+      [
+        {
+          kind: "task_agent",
+          task_id: TASK_ID,
+          card_id: CARD_ID,
+          chat_id: "agent-chat-from-reference",
+        },
+      ],
+    );
+
+    const target = resolveCardWorktree(TASK_ID, card, [record]);
+
+    expect(target).toMatchObject({
+      id: "wt-reference",
+      record,
+      legacy: false,
+    });
+    expectCardWorktreeTarget(target);
+    expect(isActionableWorktree(target)).toBe(true);
+  });
+
+  it("unresolved_registry_id_is_stale_and_not_actionable", () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_worktree_name: "missing-wt",
+      agent_branch: "refact/task/stale-id",
+    });
+
+    const target = resolveCardWorktree(TASK_ID, card, []);
+
+    expect(target).toMatchObject({
+      id: "missing-wt",
+      legacy: false,
+      stale: true,
+    });
+    expect(target?.record).toBeUndefined();
+    expect(target?.label).toBe("missing-wt");
+    expectCardWorktreeTarget(target);
+    expect(isActionableWorktree(target)).toBe(false);
+  });
+
   it("resolves_worktree_by_branch_for_legacy_cards", () => {
     const card = makeCard({
       agent_worktree: LEGACY_PATH,
@@ -586,6 +811,74 @@ describe("TaskWorkspace worktree resolution", () => {
 });
 
 describe("TaskWorkspace worktree actions", () => {
+  it("renders_server_defined_kanban_columns_and_card_detail_fields", async () => {
+    const card = makeCard({
+      title: "Current server column card",
+      column: "blocked",
+      priority: "P0",
+      depends_on: ["T-0", "T-7"],
+      instructions: "Follow the **server** card instructions.",
+      assignee: "agent-2",
+      agent_chat_id: "agent-blocked",
+      status_updates: [
+        { timestamp: "2026-01-02T00:00:00Z", message: "Waiting on review" },
+      ],
+      final_report: "Final parity report",
+      comments: [
+        {
+          id: "comment-1",
+          author_role: "planner",
+          author_id: PLANNER_ID,
+          timestamp: "2026-01-02T00:00:00Z",
+          body: "Planner comment body",
+          reply_to: null,
+        },
+      ],
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({
+          ...makeBoard(card),
+          columns: [
+            { id: "blocked", title: "Blocked by Review" },
+            { id: "qa", title: "QA Ready" },
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState("planner-test-1"),
+    });
+
+    expect(await screen.findByText("Blocked by Review")).toBeInTheDocument();
+    expect(screen.getByText("QA Ready")).toBeInTheDocument();
+    expect(screen.getByText(card.title)).toBeInTheDocument();
+    expect(screen.getByText("P0")).toBeInTheDocument();
+    expect(screen.getByText("Agent")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(2);
+
+    await user.click(await openCardDetail(card));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /Current server column card/,
+    });
+    expect(dialog).toHaveTextContent(card.id);
+    expect(dialog).toHaveTextContent("blocked");
+    expect(dialog).toHaveTextContent("Dependencies");
+    expect(dialog).toHaveTextContent("T-0");
+    expect(dialog).toHaveTextContent("T-7");
+    expect(dialog).toHaveTextContent("Instructions");
+    expect(dialog).toHaveTextContent("Follow the server card instructions.");
+    expect(dialog).toHaveTextContent("Final Report");
+    expect(dialog).toHaveTextContent("Final parity report");
+    expect(dialog).toHaveTextContent("Updates");
+    expect(dialog).toHaveTextContent("Waiting on review");
+    expect(dialog).toHaveTextContent("Planner comment body");
+  });
+
   it("legacy_target_disables_diff_merge_open_delete_buttons", async () => {
     const card = makeCard({ agent_worktree: LEGACY_PATH });
     server.use(...taskWorkspaceHandlers(card, []));
@@ -634,6 +927,61 @@ describe("TaskWorkspace worktree actions", () => {
     expect(
       screen.getByRole("button", { name: "Discard/Delete" }),
     ).toBeDisabled();
+  });
+
+  it("unresolved_registry_id_renders_label_only_without_worktree_actions", async () => {
+    const card = makeCard({
+      agent_worktree: LEGACY_PATH,
+      agent_worktree_name: "missing-wt",
+      agent_branch: "refact/task/missing-wt",
+    });
+    const openCalls: string[] = [];
+    const deleteCalls: string[] = [];
+    server.use(...taskWorkspaceHandlers(card, [], openCalls, deleteCalls));
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+
+    expect(screen.getAllByTitle("Worktree: missing-wt").length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getByText("This worktree appears stale, missing, or deleted."),
+    ).toBeInTheDocument();
+    const buttons = [
+      screen.getByRole("button", { name: "View Diff" }),
+      screen.getByRole("button", { name: "Merge" }),
+      screen.getByRole("button", { name: "Open" }),
+      screen.getByRole("button", { name: "Discard/Delete" }),
+    ];
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+    }
+    await user.click(buttons[0]);
+    await user.click(buttons[1]);
+    await user.click(buttons[2]);
+    await user.click(buttons[3]);
+    expect(openedIds(worktreeDiffPanelProps)).toEqual([]);
+    expect(openedIds(mergeWorktreeModalProps)).toEqual([]);
+    expect(openCalls).toEqual([]);
+    expect(deleteCalls).toEqual([]);
+  });
+
+  it("worktree_merge_and_delete_refresh_inventory_summary", async () => {
+    const source = await readGuiSource("services/refact/worktrees.ts");
+    const mutationInvalidatesSummary = (endpoint: string) => {
+      const match = new RegExp(
+        `${endpoint}: builder\\.mutation[\\s\\S]*?invalidatesTags:[\\s\\S]*?\\],`,
+      ).exec(source);
+      if (!match) throw new Error(`Missing invalidation block for ${endpoint}`);
+      return match[0].includes('id: "SUMMARY"');
+    };
+
+    expect(mutationInvalidatesSummary("mergeWorktree")).toBe(true);
+    expect(mutationInvalidatesSummary("deleteWorktree")).toBe(true);
   });
 
   it("worktree_id_passed_to_apis_is_never_a_filesystem_path", async () => {
@@ -770,6 +1118,336 @@ describe("TaskWorkspace worktree actions", () => {
         ...openedIds(mergeWorktreeModalProps),
       ]).not.toContain(LEGACY_PATH);
     }
+  });
+});
+
+describe("TaskWorkspace layout and chat surfaces", () => {
+  beforeEach(() => {
+    clearWorkspaceStorage();
+  });
+
+  it("persists_workspace_tab_choice_round_trip", async () => {
+    setProjectStorageNamespace("ds-204-layout");
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const { user, unmount } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
+
+    await waitFor(() => expect(loadTaskWorkspaceTab(TASK_ID)).toBe("memories"));
+
+    unmount();
+    server.resetHandlers();
+    server.use(...taskWorkspaceHandlers(card, []));
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Memories" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+  });
+
+  it("defaults_to_board_tab_for_fresh_tasks_without_planners", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    expect(screen.getByRole("tab", { name: /^Board/ })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(
+      screen.getByRole("button", { name: "New task planner" }),
+    ).toBeVisible();
+  });
+
+  it("defaults_to_chat_tab_when_saved_planners_exist", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Saved planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+    );
+
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(card.title)).not.toBeInTheDocument();
+  });
+
+  it("board_tab_shows_running_and_waiting_badges", async () => {
+    const card = makeCard({ column: "doing", agent_chat_id: "agent-T-1" });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Waiting planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+            session_state: "waiting_user_input",
+            waiting_for_card_ids: [CARD_ID],
+          },
+        ]),
+      ),
+    );
+
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    const boardTab = await screen.findByRole("tab", { name: /^Board/ });
+    await waitFor(() =>
+      expect(within(boardTab).getByTitle(/running agent/)).toHaveTextContent(
+        "1",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        within(boardTab).getByTitle(/waiting for input/),
+      ).toHaveTextContent("1"),
+    );
+  });
+
+  it("board_rail_shows_linked_card_badge_for_agent_spawned_by_chat", async () => {
+    const card = makeCard({ column: "doing", agent_chat_id: "agent-T-1" });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Spawning planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+      http.get("*/v1/tasks/task-1/trajectories/agents", () =>
+        HttpResponse.json([
+          {
+            id: "agent-T-1",
+            title: "Agent T-1",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+            parent_id: PLANNER_ID,
+          },
+        ]),
+      ),
+    );
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
+    const linkedCards = await screen.findByTestId(
+      `planner-linked-cards-${PLANNER_ID}`,
+    );
+    expect(within(linkedCards).getByText(CARD_ID)).toBeInTheDocument();
+  });
+
+  it("planner_and_agents_overflow_inside_single_panel_scroll_owners", async () => {
+    const planners = Array.from({ length: 18 }, (_, index) => ({
+      id: `planner-overflow-${index}`,
+      title: `Overflow planner ${index}`,
+      created_at: `2026-01-01T00:${String(index).padStart(2, "0")}:00Z`,
+      updated_at: `2026-01-01T00:${String(index).padStart(2, "0")}:00Z`,
+    }));
+    const cards = Array.from({ length: 24 }, (_, index) =>
+      makeCard({
+        id: `T-${index}`,
+        title: `Overflow agent ${index}`,
+        column: index % 3 === 0 ? "doing" : index % 3 === 1 ? "done" : "failed",
+        agent_chat_id: `agent-overflow-${index}`,
+      }),
+    );
+    server.use(...taskWorkspaceHandlers(cards[0], []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json(planners),
+      ),
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({ ...makeBoard(cards[0]), cards }),
+      ),
+    );
+
+    const { user } = render(
+      <div style={{ height: 360 }}>
+        <TaskWorkspace taskId={TASK_ID} />
+      </div>,
+      {
+        preloadedState: workspacePreloadedState("planner-overflow-0"),
+      },
+    );
+
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
+    await screen.findByText("Overflow planner 1");
+    await waitFor(() =>
+      expect(screen.getAllByText("Overflow agent 23").length).toBeGreaterThan(
+        1,
+      ),
+    );
+
+    const plannerScrollOwners = screen.getAllByTestId(
+      "planner-panel-scroll-owner",
+    );
+    const agentsScrollOwners = screen.getAllByTestId(
+      "agents-panel-scroll-owner",
+    );
+    expect(plannerScrollOwners).toHaveLength(1);
+    expect(agentsScrollOwners).toHaveLength(1);
+    expect(plannerScrollOwners[0].parentElement?.className).toContain(
+      "panelScrollArea",
+    );
+    expect(agentsScrollOwners[0].parentElement?.className).toContain(
+      "panelScrollArea",
+    );
+    expect(plannerScrollOwners[0].querySelector("div")).not.toBeNull();
+    expect(agentsScrollOwners[0].querySelector("div")).not.toBeNull();
+
+    const css = await readGuiSource("features/Tasks/Tasks.module.css");
+    const boardRail = readCssBlock(css, ".boardRail");
+    const panelList = readCssBlock(css, ".panelList");
+    const panelContent = readCssBlock(css, ".panelContent");
+    const panelScrollArea = readCssBlock(css, ".panelScrollArea");
+
+    expect(boardRail).toContain("min-height: 0");
+    expect(boardRail).toContain("min-width: 0");
+    expect(panelList).toContain("min-height: 0");
+    expect(panelContent).toContain("min-height: 0");
+    expect(panelScrollArea).toContain("flex: 1 1 0");
+    expect(panelScrollArea).toContain("min-height: 0");
+    expect(panelScrollArea).toContain("overflow: hidden");
+  });
+
+  it("selects_planner_and_agent_chats_and_renders_workspace_tabs", async () => {
+    const card = makeCard({
+      title: "Agent selectable card",
+      column: "doing",
+      agent_chat_id: "agent-T-1",
+      assignee: "agent-1",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Planner Restored",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...workspacePreloadedState(PLANNER_ID),
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task with worktree",
+              plannerChats: [
+                {
+                  id: PLANNER_ID,
+                  title: "Planner Restored",
+                  createdAt: "2026-01-01T00:00:00Z",
+                  updatedAt: "2026-01-02T00:00:00Z",
+                },
+              ],
+              activeChat: { type: "planner", chatId: PLANNER_ID },
+            },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(screen.getByRole("tab", { name: /^Board/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Memories" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Documents" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toHaveTextContent("Planner");
+
+    await user.click(screen.getByRole("tab", { name: /^Board/ }));
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+          ?.activeChat,
+      ).toEqual({ type: "agent", cardId: CARD_ID, chatId: "agent-T-1" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(
+      screen.getByText(/Agent: T-1 Agent selectable card/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Switch chat" }));
+    await user.click(screen.getByRole("button", { name: /Open chat/ }));
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+          ?.activeChat,
+      ).toEqual({ type: "planner", chatId: PLANNER_ID }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Switch chat" }),
+    ).toHaveTextContent("Planner");
+
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
+    await screen.findByText(/memories shown/i);
+    await user.click(screen.getByRole("tab", { name: "Documents" }));
+    await screen.findByText(/No documents yet/);
   });
 });
 
@@ -914,6 +1592,157 @@ describe("TaskWorkspace SSE invalidation", () => {
     await screen.findByText("Planning complete! You can now spawn agents.");
   });
 
+  it("task_comments_changed_event_refetches_board_comments", async () => {
+    const card = makeCard({ comments: [] });
+    const updatedCard = makeCard({
+      comments: [
+        {
+          id: "comment-2",
+          author_role: "agents",
+          author_id: "agent-2",
+          timestamp: "2026-01-03T00:00:00Z",
+          body: "External agent comment",
+          reply_to: null,
+        },
+      ],
+    });
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json(makeBoard(returnUpdated ? updatedCard : card)),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+    expect(
+      screen.queryByText("External agent comment"),
+    ).not.toBeInTheDocument();
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_comments_changed",
+        task_id: TASK_ID,
+        card_id: CARD_ID,
+      }),
+    );
+
+    await screen.findByText("External agent comment");
+  });
+
+  it("task_document_changed_event_refetches_open_documents_panel", async () => {
+    const card = makeCard();
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/task/:id/documents", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          documents: returnUpdated
+            ? [
+                {
+                  slug: "main-plan",
+                  name: "Main Plan",
+                  kind: "plan",
+                  pinned: true,
+                  version: 1,
+                  updated_at: "2026-01-03T00:00:00Z",
+                  created_at: "2026-01-03T00:00:00Z",
+                  author_role: "planner",
+                  relevant_cards: [],
+                },
+              ]
+            : [],
+        }),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("tab", { name: "Documents" }));
+    await screen.findByText(/No documents yet/);
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_document_changed",
+        task_id: TASK_ID,
+        slug: "main-plan",
+      }),
+    );
+
+    await screen.findByText("Main Plan");
+  });
+
+  it("task_memories_changed_event_refetches_open_memories_panel", async () => {
+    const card = makeCard();
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/task/:id/memories", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          since: "",
+          new_count: returnUpdated ? 1 : 0,
+          memories: returnUpdated
+            ? [
+                {
+                  filename: "decision.md",
+                  created_at: "2026-01-03T00:00:00Z",
+                  created_at_known: true,
+                  title: "External memory",
+                  content: "Remember the refresh path.",
+                  tags: ["refresh-tag"],
+                  kind: "decision",
+                  namespace: "task",
+                  pinned: false,
+                  status: "active",
+                },
+              ]
+            : [],
+          warnings: [],
+        }),
+      ),
+      http.get("*/v1/task/:id/memories/facets", () =>
+        HttpResponse.json({
+          task_id: TASK_ID,
+          namespaces: ["task"],
+          tags: returnUpdated ? ["refresh-tag"] : [],
+          kinds: ["decision"],
+          total_count: returnUpdated ? 1 : 0,
+          pinned_count: 0,
+        }),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    await user.click(screen.getByRole("tab", { name: "Memories" }));
+    await screen.findByText(/No memories match/);
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_memories_changed",
+        task_id: TASK_ID,
+      }),
+    );
+
+    await screen.findByText("External memory");
+    await screen.findByText(/Show all 1 tags/);
+  });
+
   it("visibilitychange_to_visible_invalidates_board", async () => {
     const card = makeCard();
     let boardFetchCount = 0;
@@ -963,8 +1792,10 @@ describe("TaskWorkspace planner CRUD", () => {
       preloadedState: workspacePreloadedState(),
     });
 
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
     const deleteBtn = await screen.findByRole("button", {
-      name: "Delete planner chat",
+      name: "Delete chat",
       hidden: true,
     });
     await user.click(deleteBtn);
@@ -973,7 +1804,7 @@ describe("TaskWorkspace planner CRUD", () => {
       expect(screen.getByText(/Delete failed/)).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("button", { name: "Delete planner chat", hidden: true }),
+      screen.getByRole("button", { name: "Delete chat", hidden: true }),
     ).toBeInTheDocument();
   });
 
@@ -998,8 +1829,10 @@ describe("TaskWorkspace planner CRUD", () => {
       preloadedState: workspacePreloadedState(),
     });
 
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+
     const deleteBtn = await screen.findByRole("button", {
-      name: "Delete planner chat",
+      name: "Delete chat",
       hidden: true,
     });
     await user.click(deleteBtn);
@@ -1022,11 +1855,11 @@ describe("TaskWorkspace planner CRUD", () => {
     await screen.findAllByText(makeCard().title);
 
     await waitFor(() =>
-      expect(screen.getByText("No planner chats yet")).toBeInTheDocument(),
+      expect(screen.getByText("No chats yet")).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("button", {
-        name: "Delete planner chat",
+        name: "Delete chat",
         hidden: true,
       }),
     ).not.toBeInTheDocument();
@@ -1049,9 +1882,221 @@ describe("TaskWorkspace planner CRUD", () => {
 
     await screen.findAllByText(makeCard().title);
 
-    await user.click(screen.getByRole("button", { name: "New planner" }));
+    await user.click(screen.getByRole("button", { name: "New task planner" }));
 
     await screen.findByText(/Create failed/);
+  });
+});
+
+describe("TaskWorkspace planner restore race", () => {
+  it("prunes_stale_persisted_planner_without_switching_to_missing_runtime", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    try {
+      const preloaded = workspacePreloadedState("unrelated-chat");
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: {
+          ...preloaded,
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task with worktree",
+                plannerChats: [
+                  {
+                    id: "planner-missing-runtime",
+                    title: "Persisted planner",
+                    createdAt: "2026-01-01T00:00:00Z",
+                    updatedAt: "2026-01-02T00:00:00Z",
+                  },
+                ],
+                activeChat: {
+                  type: "planner",
+                  chatId: "planner-missing-runtime",
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      await waitFor(() =>
+        expect(
+          store
+            .getState()
+            .tasksUI.openTasks.find((task) => task.id === TASK_ID),
+        ).toMatchObject({ plannerChats: [], activeChat: null }),
+      );
+      expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+      expect(
+        warnSpy.mock.calls.some(([message]) =>
+          String(message).includes("[switchToThread] No runtime"),
+        ),
+      ).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("hydrates_persisted_active_agent_before_switching", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const card = makeCard({
+      title: "Persisted active agent",
+      column: "doing",
+      agent_chat_id: "agent-T-1",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    try {
+      const preloaded = workspacePreloadedState("unrelated-chat");
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: {
+          ...preloaded,
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task with worktree",
+                plannerChats: [],
+                activeChat: {
+                  type: "agent",
+                  cardId: CARD_ID,
+                  chatId: "agent-T-1",
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      await waitFor(() =>
+        expect(store.getState().chat.threads["agent-T-1"]).toMatchObject({
+          thread: {
+            id: "agent-T-1",
+            title: "Agent: T-1 Persisted active agent",
+            is_task_chat: true,
+            mode: "task_agent",
+          },
+        }),
+      );
+      await waitFor(() =>
+        expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+      );
+      expect(
+        warnSpy.mock.calls.some(([message]) =>
+          String(message).includes("[switchToThread] No runtime"),
+        ),
+      ).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("re_pins_active_chat_when_global_thread_switches_away", async () => {
+    const card = makeCard({
+      title: "Persisted active agent",
+      column: "doing",
+      agent_chat_id: "agent-T-1",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const preloaded = workspacePreloadedState("unrelated-chat");
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...preloaded,
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task with worktree",
+              plannerChats: [],
+              activeChat: {
+                type: "agent",
+                cardId: CARD_ID,
+                chatId: "agent-T-1",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+    );
+
+    store.dispatch(switchToThread({ id: "unrelated-chat" }));
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+    );
+    expect(
+      store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+        ?.activeChat,
+    ).toEqual({ type: "agent", cardId: CARD_ID, chatId: "agent-T-1" });
+  });
+
+  it("waits_for_current_task_ui_before_restoring_saved_planner_selection", async () => {
+    const card = makeCard();
+    const taskPromise = delay(50).then(() =>
+      HttpResponse.json({ meta: makeTask() }),
+    );
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1", () => taskPromise),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: "planner-fast",
+            title: "Fast saved planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-03T00:00:00Z",
+            session_state: "waiting_user_input",
+            waiting_for_card_ids: [CARD_ID],
+          },
+        ]),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...workspacePreloadedState("unrelated-chat"),
+        tasksUI: { openTasks: [] },
+      },
+    });
+
+    expect(
+      store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID),
+    ).toBeUndefined();
+    expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+
+    await user.click(await screen.findByRole("tab", { name: /^Board/ }));
+    await screen.findByText("Fast saved planner");
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID),
+      ).toMatchObject({
+        id: TASK_ID,
+        plannerChats: [
+          expect.objectContaining({
+            id: "planner-fast",
+            sessionState: "waiting_user_input",
+            waitingForCardIds: [CARD_ID],
+          }),
+        ],
+        activeChat: { type: "planner", chatId: "planner-fast" },
+      }),
+    );
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("planner-fast"),
+    );
   });
 });
 
@@ -1100,5 +2145,174 @@ describe("TaskWorkspace CardDetail dialog", () => {
 
     await user.tab();
     expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe("TaskWorkspace new-chat mode picker", () => {
+  const RICH_MODES = {
+    modes: [
+      {
+        id: "agent",
+        title: "Agent",
+        description: "Autonomous task execution with the full toolset enabled",
+        tools_count: 57,
+        thread_defaults: {
+          include_project_info: true,
+          checkpoints_enabled: true,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 1, tags: ["coding", "autonomous"] },
+      },
+      {
+        id: "explore",
+        title: "Explore",
+        description: "Read-only context gathering with quick tools",
+        tools_count: 20,
+        thread_defaults: {
+          include_project_info: true,
+          checkpoints_enabled: false,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 2, tags: ["read-only"] },
+      },
+      {
+        id: "task_planner",
+        title: "Task Planner",
+        description: "Plan and manage a task",
+        tools_count: 0,
+        thread_defaults: {
+          include_project_info: false,
+          checkpoints_enabled: false,
+          auto_approve_editing_tools: false,
+          auto_approve_dangerous_commands: false,
+        },
+        ui: { order: 999, tags: ["tasks"] },
+      },
+    ],
+    errors: [],
+  };
+
+  function configWithModes(base: ReturnType<typeof workspacePreloadedState>) {
+    return { ...base.config, dev: true };
+  }
+
+  it("renders rich mode rows and excludes planner/agent modes", async () => {
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/chat-modes", () => HttpResponse.json(RICH_MODES)),
+    );
+
+    const preloaded = workspacePreloadedState();
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: { ...preloaded, config: configWithModes(preloaded) },
+    });
+
+    await user.click(await screen.findByRole("button", { name: "New chat" }));
+
+    // Rich row content reused from the chat composer's ModeSelect:
+    // title + description + tags + tool count (not a bare title + tools list).
+    expect(
+      await screen.findByText(
+        "Autonomous task execution with the full toolset enabled",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Read-only context gathering with quick tools"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("coding")).toBeInTheDocument();
+    expect(screen.getByText("read-only")).toBeInTheDocument();
+    expect(screen.getByText(/57 tools/)).toBeInTheDocument();
+
+    // task_planner / task_agent must not appear in the new-chat menu.
+    expect(screen.queryByText("Task Planner")).toBeNull();
+  });
+
+  it("stays on the just-created chat and does not bounce to an older planner", async () => {
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      // The saved-planner list lags behind and never returns the new chat,
+      // emulating the window before the trajectory index catches up.
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([
+          {
+            id: "planner-existing",
+            title: "Existing planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-05T00:00:00Z",
+          },
+        ]),
+      ),
+      http.get("*/v1/chat-modes", () => HttpResponse.json(RICH_MODES)),
+      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({
+          chat_id: "planner-new",
+          mode: body.mode ?? "agent",
+        });
+      }),
+    );
+
+    const preloaded = workspacePreloadedState("planner-existing");
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: {
+        ...preloaded,
+        config: configWithModes(preloaded),
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task",
+              plannerChats: [
+                {
+                  id: "planner-existing",
+                  title: "Existing planner",
+                  createdAt: "2026-01-01T00:00:00Z",
+                  updatedAt: "2026-01-05T00:00:00Z",
+                },
+              ],
+              activeChat: { type: "planner", chatId: "planner-existing" },
+            },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("planner-existing"),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "New chat" }));
+    const agentRow = await screen.findByText(
+      "Autonomous task execution with the full toolset enabled",
+    );
+    const agentButton = agentRow.closest("button");
+    if (!agentButton) throw new Error("Agent mode row button not found");
+    await user.click(agentButton);
+
+    await waitFor(() =>
+      expect(store.getState().chat.threads["planner-new"]?.thread.mode).toBe(
+        "agent",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((t) => t.id === TASK_ID)
+          ?.activeChat,
+      ).toEqual({ type: "planner", chatId: "planner-new" }),
+    );
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe("planner-new"),
+    );
+
+    // The new chat must remain in the list (not removed by reconciliation).
+    expect(
+      store
+        .getState()
+        .tasksUI.openTasks.find((t) => t.id === TASK_ID)
+        ?.plannerChats.some((p) => p.id === "planner-new"),
+    ).toBe(true);
   });
 });

@@ -1,0 +1,5 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","title":"Original","model":"gpt-old","mode":"agent"},"runtime":{"state":"idle"},"messages":[{"message_id":"u1","role":"user","content":"first"},{"message_id":"a1","role":"assistant","content":"old answer"},{"message_id":"u2","role":"user","content":"remove me"},{"message_id":"a2","role":"assistant","content":"truncate me"}]}
+{"chat_id":"chat-fixture","seq":"1","type":"thread_updated","title":"Renamed","model":"gpt-new","mode":"ask","boost_reasoning":true,"reasoning_effort":"high","auto_approve_editing_tools":true}
+{"chat_id":"chat-fixture","seq":"2","type":"message_updated","message_id":"a1","message":{"message_id":"a1","role":"assistant","content":"edited answer"}}
+{"chat_id":"chat-fixture","seq":"3","type":"message_removed","message_id":"u2"}
+{"chat_id":"chat-fixture","seq":"4","type":"messages_truncated","from_index":2}

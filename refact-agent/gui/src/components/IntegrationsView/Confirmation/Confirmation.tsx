@@ -37,6 +37,11 @@ export const Confirmation: FC<ConfirmationProps> = ({
       ? confirmationByUser
       : confirmationFromValues;
 
+  const confirmationObjectForUpdate =
+    confirmationByUser ??
+    confirmationFromValues ??
+    transformedDefaultConfirmationObject;
+
   return (
     <Flex direction="column" width="100%" gap="4" mt="4">
       <Heading as="h4" size="3">
@@ -55,9 +60,8 @@ export const Confirmation: FC<ConfirmationProps> = ({
               initialData={values}
               tableName={key}
               onToolConfirmation={(tableName, data) => {
-                // Update the nested confirmation field
                 onChange("confirmation", {
-                  ...confirmationObjectToRender,
+                  ...confirmationObjectForUpdate,
                   [tableName]: data,
                 });
               }}

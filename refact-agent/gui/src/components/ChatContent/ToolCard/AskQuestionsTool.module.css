@@ -1,7 +1,104 @@
 .content {
-  padding: var(--space-2) 0;
+  min-width: 0;
+  color: var(--rf-color-muted);
 }
 
 .questionItem {
-  padding: var(--space-2) 0;
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+}
+
+.singleSelectGroup {
+  min-width: 0;
+}
+
+.singleSelectOption {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.singleSelectOption:hover {
+  background: color-mix(in oklab, var(--rf-surface-glass) 44%, transparent);
+}
+
+.singleSelectOptionSelected {
+  color: var(--rf-color-fg);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+}
+
+.singleSelectInput {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.singleSelectOption:has(.singleSelectInput:focus-visible) {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.singleSelectIndicator {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  margin-top: 0.15em;
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+}
+
+.singleSelectInput:checked + .singleSelectIndicator {
+  border-color: var(--rf-color-accent);
+}
+
+.singleSelectInput:checked + .singleSelectIndicator::after {
+  position: absolute;
+  inset: calc(var(--rf-icon-sm) / 4);
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  content: "";
+}
+
+.singleSelectLabel {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .singleSelectOption {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .singleSelectOption:hover {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .singleSelectOption:hover {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
+}
+
+.additionalAnswer {
+  font-style: italic;
 }

@@ -1,26 +1,24 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Box,
   Button,
-  Callout,
-  Checkbox,
   Dialog,
+  ErrorState,
+  Field,
+  FieldSelect,
+  FieldText,
+  FieldTextarea,
   Flex,
-  Select,
   Spinner,
-  Text,
-  TextArea,
-  TextField,
-} from "@radix-ui/themes";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+} from "../../../components/ui";
+import { Checkbox } from "../../../components/Checkbox";
 import {
   type CreateTaskDocumentRequest,
   type TaskDocumentKind,
   useCreateTaskDocumentMutation,
   useGetTaskDocumentQuery,
-  usePinTaskDocumentMutation,
   useUpdateTaskDocumentMutation,
 } from "../../../services/refact/taskDocumentsApi";
+import styles from "./TaskDocuments.module.css";
 
 const DOCUMENT_KINDS: TaskDocumentKind[] = [
   "plan",
@@ -73,9 +71,8 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     useCreateTaskDocumentMutation();
   const [updateDocument, { isLoading: isUpdating }] =
     useUpdateTaskDocumentMutation();
-  const [pinDocument, { isLoading: isPinning }] = usePinTaskDocumentMutation();
 
-  const isSaving = isCreating || isUpdating || isPinning;
+  const isSaving = isCreating || isUpdating;
 
   useEffect(() => {
     if (!open) return;
@@ -102,40 +99,28 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     }
   }, [open, isEditMode, existingDoc, slug]);
 
-  const handleSlugChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const value = event.target.value;
-      setFormSlug(value);
-      if (value && !SLUG_PATTERN.test(value)) {
-        setSlugError(
-          "Slug must start with a-z or 0-9 and contain only a-z, 0-9, _, -",
-        );
-      } else if (value && value.length < SLUG_MIN_LENGTH) {
-        setSlugError("Slug must be at least 3 characters");
-      } else {
-        setSlugError(null);
-      }
-    },
-    [],
-  );
+  const handleSlugChange = useCallback((value: string) => {
+    setFormSlug(value);
+    if (value && !SLUG_PATTERN.test(value)) {
+      setSlugError(
+        "Slug must start with a-z or 0-9 and contain only a-z, 0-9, _, -",
+      );
+    } else if (value && value.length < SLUG_MIN_LENGTH) {
+      setSlugError("Slug must be at least 3 characters");
+    } else {
+      setSlugError(null);
+    }
+  }, []);
 
-  const handleNameChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const value = event.target.value;
-      setName(value);
-      setNameError(value.trim().length === 0 ? "Name is required" : null);
-    },
-    [],
-  );
+  const handleNameChange = useCallback((value: string) => {
+    setName(value);
+    setNameError(value.trim().length === 0 ? "Name is required" : null);
+  }, []);
 
-  const handleContentChange = useCallback(
-    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const value = event.target.value;
-      setContent(value);
-      setContentError(value.trim().length === 0 ? "Content is required" : null);
-    },
-    [],
-  );
+  const handleContentChange = useCallback((value: string) => {
+    setContent(value);
+    setContentError(value.trim().length === 0 ? "Content is required" : null);
+  }, []);
 
   const handleSave = useCallback(async () => {
     setMutationError(null);
@@ -145,10 +130,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
           setMutationError("Document is still loading. Please wait.");
           return;
         }
-        await updateDocument({ taskId, slug, content }).unwrap();
-        if (pinned !== existingDoc.pinned) {
-          await pinDocument({ taskId, slug, pinned }).unwrap();
-        }
+        await updateDocument({ taskId, slug, content, pinned }).unwrap();
       } else {
         if (
           !formSlug ||
@@ -180,7 +162,6 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     content,
     existingDoc,
     pinned,
-    pinDocument,
     formSlug,
     name,
     kind,
@@ -197,121 +178,92 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     : isSlugValid && isNameValid && isContentValid;
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="600px">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content
+        className={styles.editorDialog}
+        maxHeight="calc(100dvh - var(--rf-space-5))"
+        maxWidth="600px"
+      >
         <Dialog.Title>
           {isEditMode ? "Edit document" : "New document"}
         </Dialog.Title>
         {isEditMode && !isEditDocumentReady ? (
-          <Flex justify="center" p="6">
-            <Spinner aria-label="Loading document" />
-          </Flex>
+          <div className={styles.loadingState}>
+            <Spinner label="Loading document" />
+          </div>
         ) : (
-          <Flex direction="column" gap="3" mt="2">
-            <Box>
-              <Text size="2" weight="medium" as="div" mb="1">
-                Slug
-              </Text>
-              <TextField.Root
+          <Flex direction="column" gap="3" className={styles.editorForm}>
+            <Field label="Slug" error={slugError}>
+              <FieldText
                 value={formSlug}
                 onChange={handleSlugChange}
                 readOnly={isEditMode}
                 placeholder="my-doc"
                 aria-label="Slug"
               />
-              {slugError && (
-                <Text size="1" color="red" as="div" mt="1">
-                  {slugError}
-                </Text>
-              )}
-            </Box>
-            <Box>
-              <Text size="2" weight="medium" as="div" mb="1">
-                Name
-              </Text>
-              <TextField.Root
+            </Field>
+            <Field label="Name" error={!isEditMode ? nameError : null}>
+              <FieldText
                 value={name}
                 onChange={handleNameChange}
                 placeholder="Document name"
                 aria-label="Name"
                 readOnly={isEditMode}
               />
-              {!isEditMode && nameError && (
-                <Text size="1" color="red" as="div" mt="1">
-                  {nameError}
-                </Text>
-              )}
-            </Box>
-            <Box>
-              <Text size="2" weight="medium" as="div" mb="1">
-                Kind
-              </Text>
-              <Select.Root
+            </Field>
+            <Field label="Kind">
+              <FieldSelect
                 value={kind}
-                onValueChange={(v) => setKind(v as TaskDocumentKind)}
+                options={DOCUMENT_KINDS.map((documentKind) => ({
+                  value: documentKind,
+                  label: documentKind,
+                }))}
+                onChange={(value) => setKind(value as TaskDocumentKind)}
                 disabled={isEditMode}
-              >
-                <Select.Trigger aria-label="Kind" />
-                <Select.Content>
-                  {DOCUMENT_KINDS.map((k) => (
-                    <Select.Item key={k} value={k}>
-                      {k}
-                    </Select.Item>
-                  ))}
-                </Select.Content>
-              </Select.Root>
-            </Box>
-            <Text as="label" size="2">
-              <Flex align="center" gap="2">
-                <Checkbox
-                  checked={pinned}
-                  onCheckedChange={(checked) => setPinned(checked === true)}
-                />
-                Pinned
-              </Flex>
-            </Text>
-            <Box>
-              <Text size="2" weight="medium" as="div" mb="1">
-                Content
-              </Text>
-              <TextArea
+                aria-label="Kind"
+              />
+            </Field>
+            <Checkbox
+              checked={pinned}
+              onCheckedChange={(checked) => setPinned(checked === true)}
+            >
+              Pinned
+            </Checkbox>
+            <Field label="Content" error={contentError}>
+              <FieldTextarea
                 value={content}
                 onChange={handleContentChange}
                 placeholder="Write markdown content here..."
                 aria-label="Content"
                 rows={12}
+                className={styles.editorTextarea}
               />
-              {contentError && (
-                <Text size="1" color="red" as="div" mt="1">
-                  {contentError}
-                </Text>
-              )}
-            </Box>
+            </Field>
             {mutationError && (
-              <Callout.Root color="red" size="1">
-                <Callout.Icon>
-                  <ExclamationTriangleIcon />
-                </Callout.Icon>
-                <Callout.Text>{mutationError}</Callout.Text>
-              </Callout.Root>
+              <ErrorState
+                title={mutationError}
+                variant="compact"
+                className={styles.errorState}
+              />
             )}
-            <Flex justify="end" gap="2">
-              <Dialog.Close>
-                <Button variant="soft" color="gray" disabled={isSaving}>
+            <Flex justify="end" gap="2" wrap="wrap">
+              <Dialog.Close asChild>
+                <Button variant="plain" disabled={isSaving}>
                   Cancel
                 </Button>
               </Dialog.Close>
               <Button
                 onClick={() => void handleSave()}
                 disabled={isSaving || !isEditDocumentReady || !canSave}
+                loading={isSaving}
               >
-                {isSaving ? "Saving..." : "Save"}
+                Save
               </Button>
             </Flex>
           </Flex>
         )}
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 

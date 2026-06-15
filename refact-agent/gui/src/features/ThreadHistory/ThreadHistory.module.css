@@ -1,14 +1,20 @@
-.calloutContainer {
-  position: absolute;
-  left: 50%;
-  top: 30px;
-  transform: translateX(-50%);
-  width: max-content;
-  z-index: 1;
-  display: flex;
-  justify-content: center;
+.root {
+  min-width: 0;
+}
 
-  @media screen and (max-width: 380px) {
-    width: fit-content;
-  }
+.header {
+  display: flex;
+  padding-bottom: var(--rf-space-3);
+}
+
+.errorText {
+  margin: 0;
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-3);
+}
+
+.calloutContainer {
+  position: fixed;
+  right: var(--rf-space-3);
+  bottom: var(--rf-space-3);
 }

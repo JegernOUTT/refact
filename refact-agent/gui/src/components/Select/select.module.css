@@ -10,72 +10,29 @@
 }
 
 .content {
-  /* JB doesn't support dvw yet */
-  max-width: 50vw;
-  max-width: 80dvw;
-  max-height: 300px;
-  z-index: var(--z-dropdown, 100);
+  max-width: min(
+    var(--rf-overlay-popover-max),
+    calc(100vw - 2 * var(--rf-space-3))
+  );
+  max-height: min(
+    calc(var(--rf-control-h) * 10),
+    calc(100dvh - var(--rf-space-5))
+  );
+  z-index: var(--rf-z-popover);
 }
 
-/* Show only plain text in trigger, hide rich content */
-:global(.rt-SelectTrigger) .dropdown_only {
+.trigger_only {
+  display: inline;
+}
+
+.dropdown_only {
   display: none;
 }
 
-/* Show only rich content in dropdown, hide plain text */
-:global(.rt-SelectContent) .trigger_only {
+.content .trigger_only {
   display: none;
 }
 
-/* Fix Radix Themes Select - remove inner scrollbars */
-:global(.rt-SelectContent) {
-  max-height: 400px;
-  z-index: var(--z-dropdown, 100);
-}
-
-:global(.rt-SelectContent [data-radix-scroll-area-viewport]) {
-  max-height: 380px !important;
-}
-
-:global(.rt-SelectItem) {
-  height: unset !important;
-  min-height: unset !important;
-  overflow: visible !important;
-  padding: 6px 8px 6px 28px !important;
-  position: relative;
-}
-
-/* Fix checkmark indicator positioning - vertically centered */
-:global(.rt-SelectItem .rt-SelectItemIndicator),
-:global(.rt-SelectItem [data-state]) {
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-:global(.rt-SelectViewport) {
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
-}
-
-/* Remove any nested scrollbars */
-:global(.rt-SelectItem *) {
-  overflow: visible !important;
-}
-
-:global(.rt-ScrollAreaScrollbar[data-orientation="horizontal"]) {
-  display: none !important;
-}
-
-/* Compact group labels */
-:global(.rt-SelectLabel) {
-  padding: 6px 8px 4px !important;
-  font-size: 11px !important;
-  opacity: 0.7;
-}
-
-/* Separator styling */
-:global(.rt-SelectSeparator) {
-  margin: 4px 0 !important;
+.content .dropdown_only {
+  display: inline;
 }

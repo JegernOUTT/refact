@@ -1,4 +1,19 @@
+.page {
+  padding: 0;
+  margin-top: 0;
+}
+
 .scrollArea :global(.rt-ScrollAreaViewport > *) {
   min-height: 100%;
   height: auto;
+}
+
+.content {
+  display: flex;
+  width: inherit;
+  min-height: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: space-between;
 }

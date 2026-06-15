@@ -1,8 +1,10 @@
 import React, { useCallback, useMemo } from "react";
 import { Markdown } from "../Markdown";
 
-import { Box, Flex, Text, Card } from "@radix-ui/themes";
+import { Box, Flex, Text } from "@radix-ui/themes";
+import { Globe2 } from "lucide-react";
 import { Link } from "../Link";
+import { Icon } from "../ui";
 import {
   ChatContextFile,
   DiffChunk,
@@ -16,8 +18,7 @@ import { fallbackCopying } from "../../utils/fallbackCopying";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
 import { ServerContentBlocks } from "./ServerContentBlocks";
-import { GlobeIcon } from "@radix-ui/react-icons";
-import scrollbarStyles from "../shared/scrollbar.module.css";
+import styles from "./ChatContent.module.css";
 
 type ChatInputProps = {
   message: string | null;
@@ -131,14 +132,12 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
       )}
       {/* Server-executed tools indicator with citations */}
       {(serverToolNames.length > 0 || (citations && citations.length > 0)) && (
-        <Card my="3" style={{ backgroundColor: "var(--gray-a2)" }}>
-          <Flex direction="column" gap="2" p="2">
+        <div className={styles.serverSourcesCard}>
+          <Flex direction="column" gap="2">
             {serverToolNames.length > 0 && (
               <Flex gap="2" align="center">
-                <Text size="2" color="gray">
-                  <GlobeIcon />
-                </Text>
-                <Text size="2" color="gray">
+                <Icon icon={Globe2} size="sm" tone="muted" />
+                <Text size="2" className={styles.serverSourcesText}>
                   {serverToolNames.join(", ")}
                 </Text>
               </Flex>
@@ -147,10 +146,13 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
               <Flex
                 direction="column"
                 gap="1"
-                className={scrollbarStyles.scrollbarThin}
-                style={{ maxHeight: "150px", overflowY: "auto" }}
+                className={styles.serverSourcesList}
               >
-                <Text size="1" weight="medium" color="gray">
+                <Text
+                  size="1"
+                  weight="medium"
+                  className={styles.serverSourcesText}
+                >
                   Sources:
                 </Text>
                 {citations
@@ -182,7 +184,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
               </Flex>
             )}
           </Flex>
-        </Card>
+        </div>
       )}
 
       {serverExecutedTools && serverExecutedTools.length > 0 && (

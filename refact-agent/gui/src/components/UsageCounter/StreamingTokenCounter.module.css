@@ -1,6 +1,6 @@
 .inlineContainer {
   font-variant-numeric: tabular-nums;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .tokenValue {

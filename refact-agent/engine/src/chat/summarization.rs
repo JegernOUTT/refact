@@ -10,13 +10,19 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
 use crate::chat::diagnostics::{
     filter_ui_only_messages, is_ui_only_message, safe_provider_error_diagnostic,
 };
-use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
+use crate::chat::history_limit::{
+    compress_duplicate_context_files, compute_context_budget, pressure_for_used_tokens,
+    ContextPressure,
+};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
-use refact_chat_history::trajectory_ops::{COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE};
+use refact_chat_history::trajectory_ops::{
+    build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
+    should_preserve_tool, COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE, TOOLS_TO_PRESERVE,
+};
 
 pub const MAX_SEGMENT_SUMMARY_ATTEMPTS: usize = 2;
 const SEGMENT_SUMMARY_OVERHEAD_TOKENS: usize = 1024;
@@ -273,22 +279,7 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
     segments
 }
 
-fn canonical_source_value(message: &ChatMessage) -> Value {
-    let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("message_id");
-        obj.remove("id");
-    }
-    value
-}
-
-pub fn source_hash_for_messages(messages: &[ChatMessage]) -> String {
-    let canonical: Vec<Value> = messages.iter().map(canonical_source_value).collect();
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
+pub use refact_chat_history::source_hash::source_hash_for_messages;
 
 fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
     messages
@@ -297,34 +288,67 @@ fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
         .collect()
 }
 
-fn ensure_source_message_ids(messages: &mut [ChatMessage], segment: SummarySegment) {
+fn ensure_source_message_ids(messages: &mut [ChatMessage], segment: SummarySegment) -> bool {
+    let mut changed = false;
     for message in &mut messages[segment.start..=segment.end] {
         if message.message_id.is_empty() {
             message.message_id = Uuid::new_v4().to_string();
+            changed = true;
         }
     }
+    changed
 }
 
 fn segment_is_existing_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
     segment.start == segment.end && is_segment_summary(&messages[segment.start])
 }
 
-fn segment_has_source_preserving_summary_after(
-    messages: &[ChatMessage],
-    segment: SummarySegment,
-) -> bool {
-    let Some(summary) = messages.get(segment.end + 2) else {
-        return false;
-    };
-    if !is_segment_summary(summary) {
+fn source_preserving_summary_metadata(message: &ChatMessage) -> Option<&Value> {
+    if !is_segment_summary(message) {
+        return None;
+    }
+    let metadata = message.extra.get("compression")?;
+    (metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE))
+        .then_some(metadata)
+}
+
+/// Union of all message ids covered by source-preserving summaries in this
+/// chat. Coverage is id-based on purpose: engine-side compaction mutates the
+/// source messages in place, so content hashes cannot be used to decide
+/// whether a segment was already summarized.
+fn summarized_source_id_union(messages: &[ChatMessage]) -> HashSet<String> {
+    let mut union = HashSet::new();
+    for message in messages {
+        let Some(metadata) = source_preserving_summary_metadata(message) else {
+            continue;
+        };
+        union.extend(compression_metadata_string_array(
+            Some(metadata),
+            "summarized_source_message_ids",
+        ));
+    }
+    union
+}
+
+fn ranges_already_summarized(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
+    let union = summarized_source_id_union(messages);
+    if union.is_empty() {
         return false;
     }
-    let source_hash = source_hash_for_messages(&messages[segment.start..=segment.end]);
-    summary.extra.get("compression").is_some_and(|metadata| {
-        metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE)
-            && metadata.get("source_hash").and_then(|value| value.as_str())
-                == Some(source_hash.as_str())
-    })
+    let mut any_message = false;
+    for range in ranges {
+        for message in &messages[range.start..=range.end] {
+            if message.message_id.is_empty() || !union.contains(&message.message_id) {
+                return false;
+            }
+            any_message = true;
+        }
+    }
+    any_message
+}
+
+fn segment_already_summarized(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    ranges_already_summarized(messages, std::slice::from_ref(&segment))
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -585,7 +609,7 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_has_source_preserving_summary_after(messages, segment)
+        && !segment_already_summarized(messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -665,7 +689,7 @@ fn segment_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> boo
         && !tail_has_pending_tool_calls(candidate)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_has_source_preserving_summary_after(messages, segment)
+        && !segment_already_summarized(messages, segment)
 }
 
 fn source_messages_for_ranges(
@@ -676,20 +700,6 @@ fn source_messages_for_ranges(
         .iter()
         .flat_map(|range| messages[range.start..=range.end].iter().cloned())
         .collect()
-}
-
-fn source_hash_has_existing_summary(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
-    let source_messages = source_messages_for_ranges(messages, ranges);
-    let source_hash = source_hash_for_messages(&source_messages);
-    messages.iter().any(|message| {
-        is_segment_summary(message)
-            && message.extra.get("compression").is_some_and(|metadata| {
-                metadata.get("insert_mode").and_then(|value| value.as_str())
-                    == Some(SUMMARY_INSERT_MODE)
-                    && metadata.get("source_hash").and_then(|value| value.as_str())
-                        == Some(source_hash.as_str())
-            })
-    })
 }
 
 fn estimated_tokens_for_ranges(messages: &[ChatMessage], ranges: &[SummarySegment]) -> usize {
@@ -753,17 +763,21 @@ fn candidate_source_message_ids(
 fn ensure_candidate_source_message_ids(
     messages: &mut [ChatMessage],
     candidate: &CompressionCandidate,
-) {
+) -> bool {
+    let mut changed = false;
     for range in &candidate.ranges {
-        ensure_source_message_ids(messages, *range);
+        changed |= ensure_source_message_ids(messages, *range);
     }
+    changed
 }
 
-fn ensure_all_candidate_source_message_ids(messages: &mut [ChatMessage]) {
+fn ensure_all_candidate_source_message_ids(messages: &mut [ChatMessage]) -> bool {
     let candidates = compression_candidates(messages);
+    let mut changed = false;
     for candidate in candidates {
-        ensure_candidate_source_message_ids(messages, &candidate);
+        changed |= ensure_candidate_source_message_ids(messages, &candidate);
     }
+    changed
 }
 
 fn source_messages_for_candidate(
@@ -777,13 +791,37 @@ fn source_hash_for_candidate(messages: &[ChatMessage], candidate: &CompressionCa
     source_hash_for_messages(&source_messages_for_candidate(messages, candidate))
 }
 
-fn find_candidate_by_source_hash(
-    messages: &[ChatMessage],
-    source_hash: &str,
-) -> Option<CompressionCandidate> {
-    compression_candidates(messages)
-        .into_iter()
-        .find(|candidate| source_hash_for_candidate(messages, candidate) == source_hash)
+fn source_preserving_pair_summarized_ids(message: &ChatMessage) -> Option<HashSet<String>> {
+    let metadata = if message.role == COMPRESSION_REPORT_ROLE {
+        let metadata = message.extra.get("compression_report")?;
+        (metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE))
+            .then_some(metadata)?
+    } else {
+        source_preserving_summary_metadata(message)?
+    };
+    let ids: HashSet<String> =
+        compression_metadata_string_array(Some(metadata), "summarized_source_message_ids")
+            .into_iter()
+            .collect();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// A new summary whose source set covers an older summary's sources supersedes
+/// it: drop the older summary message and its paired visual report so the chat
+/// does not accumulate duplicate summary cards and the model context keeps a
+/// single authoritative summary per segment.
+fn remove_superseded_summary_pairs(
+    messages: &mut Vec<ChatMessage>,
+    new_source_ids: &HashSet<String>,
+) -> usize {
+    let len_before = messages.len();
+    messages.retain(
+        |message| match source_preserving_pair_summarized_ids(message) {
+            Some(ids) => !ids.is_subset(new_source_ids),
+            None => true,
+        },
+    );
+    len_before - messages.len()
 }
 
 fn candidate_has_complete_tool_result_pair(
@@ -828,7 +866,7 @@ fn make_compression_candidate(
         || ranges
             .iter()
             .any(|segment| !segment_is_eligible(messages, *segment))
-        || source_hash_has_existing_summary(messages, &ranges)
+        || ranges_already_summarized(messages, &ranges)
     {
         return None;
     }
@@ -953,7 +991,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
-                && !segment_has_source_preserving_summary_after(messages, *segment)
+                && !segment_already_summarized(messages, *segment)
         })
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
@@ -999,6 +1037,7 @@ fn recent_provider_usage_input_tokens(messages: &[ChatMessage]) -> Option<usize>
     })
 }
 
+#[cfg(test)]
 pub(crate) fn estimated_context_pressure(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
@@ -1014,9 +1053,10 @@ pub(crate) fn estimated_context_pressure(
     max_pressure(visible_pressure, provider_pressure)
 }
 
-fn estimated_provider_context_pressure(
+pub(crate) fn estimated_provider_context_pressure_with_usage(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
+    usage_stale: bool,
 ) -> ContextPressure {
     let provider_messages =
         crate::chat::linearize::apply_summarization_linearize(messages.to_vec());
@@ -1025,7 +1065,10 @@ fn estimated_provider_context_pressure(
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
         .collect();
     let provider_pressure = compute_context_budget(&provider_messages, effective_n_ctx).pressure;
-    let usage_pressure = recent_provider_usage_input_tokens(messages)
+    if usage_stale {
+        return provider_pressure;
+    }
+    let usage_pressure = recent_provider_usage_input_tokens(&provider_messages)
         .map(|used_tokens| pressure_for_used_tokens(used_tokens, effective_n_ctx))
         .unwrap_or(ContextPressure::Low);
     max_pressure(provider_pressure, usage_pressure)
@@ -1060,43 +1103,7 @@ fn bounded_redacted_tool_arguments(arguments: &str) -> String {
     }
 }
 
-fn is_redaction_boundary(ch: char) -> bool {
-    ch.is_whitespace()
-        || matches!(
-            ch,
-            ',' | ';' | ')' | ']' | '}' | '"' | '\'' | '`' | '<' | '>'
-        )
-}
-
-fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
-    if text.len() <= scan_cap {
-        return (text, false);
-    }
-
-    let prefix = refact_core::string_utils::safe_truncate(text, scan_cap);
-    if prefix
-        .chars()
-        .last()
-        .map(is_redaction_boundary)
-        .unwrap_or(true)
-        || text[prefix.len()..]
-            .chars()
-            .next()
-            .map(is_redaction_boundary)
-            .unwrap_or(false)
-    {
-        return (prefix, true);
-    }
-
-    let end = prefix
-        .char_indices()
-        .rev()
-        .find(|(_, ch)| is_redaction_boundary(*ch))
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .unwrap_or(0);
-
-    (&prefix[..end], true)
-}
+use refact_core::string_utils::bounded_redaction_window;
 
 fn omitted_long_token_marker(omitted_chars: usize) -> String {
     format!("[long token omitted chars={}]", omitted_chars)
@@ -1449,6 +1456,7 @@ async fn summarize_segment_text(
         max_new_tokens,
         temperature: Some(0.0),
         reasoning_effort: None,
+        cache_control: crate::llm::params::CacheControl::Ephemeral,
         parent_tool_call_id: None,
         parent_subchat_tx: None,
         abort_flag: None,
@@ -1657,7 +1665,7 @@ fn structured_summary_from_raw(
 ) -> StructuredSummaryDecision {
     parse_structured_summary_decision(&raw_summary, source_messages).unwrap_or_else(|| {
         StructuredSummaryDecision {
-            summary: raw_summary,
+            summary: refact_core::string_utils::redact_sensitive(&raw_summary),
             ..Default::default()
         }
     })
@@ -2011,25 +2019,26 @@ fn insert_source_preserving_report_and_summary(
     insert_idx
 }
 
-fn insert_candidate_report_and_summary(
+fn insert_report_and_summary_after_sources(
     messages: &mut Vec<ChatMessage>,
-    candidate: &CompressionCandidate,
+    source_ids: &HashSet<String>,
     source_messages: &[ChatMessage],
     summary: ChatMessage,
     benefit: CompressionBenefit,
-) {
+) -> usize {
     let summary = refresh_segment_summary_metadata(summary, source_messages);
     let report =
         make_segment_compression_report_message_with_benefit(&summary, source_messages, benefit);
-    let insert_idx = candidate
-        .ranges
+    let insert_idx = messages
         .iter()
-        .map(|range| range.end)
-        .max()
-        .map(|end| end + 1)
+        .rposition(|message| {
+            !message.message_id.is_empty() && source_ids.contains(&message.message_id)
+        })
+        .map(|idx| idx + 1)
         .unwrap_or(messages.len())
         .min(messages.len());
     messages.splice(insert_idx..insert_idx, [report, summary]);
+    insert_idx
 }
 
 pub async fn summarize_oldest_segment_with_resolved_model(
@@ -2044,6 +2053,11 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     let Some(segment) = first_eligible_segment(messages) else {
         return Err(SegmentSummaryFailure::NoMessagesToSummarize);
     };
+    if estimated_tokens_for_ranges(messages, std::slice::from_ref(&segment))
+        < MIN_SOURCE_TOKENS_FOR_COMPRESSION
+    {
+        return Ok(false);
+    }
     ensure_source_message_ids(messages, segment);
     let goal_hint = messages[..segment.start]
         .iter()
@@ -2093,6 +2107,7 @@ fn emit_compression_status(
     session.runtime.compression_reason = reason;
     if !is_compressing {
         session.active_compression_attempt = None;
+        session.compression_attempt_started_at_ms = None;
     }
     let state = session.runtime.state;
     let error = session.runtime.error.clone();
@@ -2105,6 +2120,69 @@ fn emit_compression_status(
     });
 }
 
+fn set_compression_status_quiet(
+    session: &mut ChatSession,
+    phase: CompressionPhase,
+    reason: Option<CompressionReason>,
+) {
+    debug_assert!(!matches!(
+        phase,
+        CompressionPhase::Checking | CompressionPhase::Running
+    ));
+    if compression_attempt_active(session) {
+        return;
+    }
+    session.is_compressing = false;
+    session.runtime.is_compressing = false;
+    session.compression_phase = Some(phase);
+    session.compression_reason = reason;
+    session.runtime.compression_phase = Some(phase);
+    session.runtime.compression_reason = reason;
+    session.active_compression_attempt = None;
+}
+
+fn compression_reason_outcome_text(reason: CompressionReason) -> &'static str {
+    match reason {
+        CompressionReason::AutoCompactDisabled => "automatic compaction is disabled for this chat",
+        CompressionReason::SessionCompactionDisabled => {
+            "compaction is structurally disabled for this session"
+        }
+        CompressionReason::MaxAttemptsReached => {
+            "the automatic compaction attempt limit was reached"
+        }
+        CompressionReason::PendingToolCalls => "tool calls are still awaiting results",
+        CompressionReason::NoEligibleSegment => {
+            "no eligible conversation segment could be summarized"
+        }
+        CompressionReason::EffectiveContextUnknown => "the model context size is unknown",
+        CompressionReason::ProviderLengthStop | CompressionReason::ContextLengthStop => {
+            "the provider rejected the request as too large"
+        }
+        CompressionReason::PressureLow => "context pressure is low",
+        CompressionReason::NoSummaryModel => "no summarization model is available",
+        CompressionReason::InputTooLarge => "the segment is too large for the summarizer",
+        CompressionReason::TransientFailure => "the summarizer failed transiently",
+        CompressionReason::SourceChanged => "the conversation changed while summarizing",
+        CompressionReason::InsufficientSavings => "summarization would not free enough context",
+    }
+}
+
+fn append_compression_outcome_event(session: &mut ChatSession, reason: CompressionReason) {
+    let text = compression_reason_outcome_text(reason);
+    let outcome_event = event(
+        EventSubkind::SystemNotice,
+        "chat.summarizer",
+        json!({ "failure": text, "skip_reason": reason }),
+        format!("Context compression failed: {}", text),
+    );
+    let index = session.messages.len();
+    session.messages.push(outcome_event);
+    let message = session.messages[index].clone();
+    session.emit(ChatEvent::MessageAdded { message, index });
+    session.increment_version();
+    session.touch();
+}
+
 fn reserve_compression_attempt(
     session: &mut ChatSession,
     reason: Option<CompressionReason>,
@@ -2115,6 +2193,7 @@ fn reserve_compression_attempt(
     }
     session.compression_attempt_generation = next;
     session.active_compression_attempt = Some(next);
+    session.compression_attempt_started_at_ms = Some(epoch_ms_now());
     emit_compression_status(session, CompressionPhase::Checking, reason);
     next
 }
@@ -2182,8 +2261,17 @@ fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason)
     emit_compression_status(session, CompressionPhase::Failed, Some(reason));
 }
 
+const COMPRESSION_ATTEMPT_STALE_MS: u64 = 15 * 60 * 1000;
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn compression_attempt_active(session: &ChatSession) -> bool {
-    session.is_compressing
+    let flags_active = session.is_compressing
         || session.runtime.is_compressing
         || matches!(
             session.compression_phase,
@@ -2192,7 +2280,16 @@ fn compression_attempt_active(session: &ChatSession) -> bool {
         || matches!(
             session.runtime.compression_phase,
             Some(CompressionPhase::Checking | CompressionPhase::Running)
-        )
+        );
+    if !flags_active {
+        return false;
+    }
+    if let Some(started_at_ms) = session.compression_attempt_started_at_ms {
+        if epoch_ms_now().saturating_sub(started_at_ms) > COMPRESSION_ATTEMPT_STALE_MS {
+            return false;
+        }
+    }
+    true
 }
 
 fn compression_failure_reason(failure: &SegmentSummaryFailure) -> CompressionReason {
@@ -2269,6 +2366,7 @@ fn finalize_applied_if_owned(session: &mut ChatSession, attempt: u64) -> bool {
     true
 }
 
+#[cfg(test)]
 fn finish_source_changed_candidate(
     session: &mut ChatSession,
     attempt: u64,
@@ -2324,6 +2422,7 @@ fn apply_resolved_segment_summary(
     session.tier1_compaction_disabled = false;
     session.thread.previous_response_id = None;
     session.cache_guard_force_next = true;
+    session.provider_usage_stale = true;
     emit_compression_applied(session);
     session.increment_version();
     session.touch();
@@ -2352,7 +2451,138 @@ pub async fn apply_segment_summarization_with_reason(
     force: bool,
     reason: Option<CompressionReason>,
 ) -> bool {
-    let (attempt, raw_messages) = {
+    if force {
+        run_reserved_segment_summarization(gcx, session_arc, thread, true, reason, None).await
+    } else {
+        let Some(resolved_model) = proactive_gate_quiet(gcx.clone(), session_arc, thread).await
+        else {
+            return false;
+        };
+        run_reserved_segment_summarization(
+            gcx,
+            session_arc,
+            thread,
+            false,
+            reason,
+            Some(resolved_model),
+        )
+        .await
+    }
+}
+
+async fn proactive_gate_quiet(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    thread: &crate::chat::types::ThreadParams,
+) -> Option<(String, usize)> {
+    let (raw_messages, usage_stale) = {
+        let mut session = session_arc.lock().await;
+        if compression_attempt_active(&session) {
+            return None;
+        }
+        if !should_attempt_segment_summarization(thread, false) {
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Skipped,
+                Some(CompressionReason::AutoCompactDisabled),
+            );
+            return None;
+        }
+        if session.tier1_compaction_disabled {
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Skipped,
+                Some(CompressionReason::SessionCompactionDisabled),
+            );
+            return None;
+        }
+        if session.tier1_compact_attempts >= MAX_SEGMENT_SUMMARY_ATTEMPTS {
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Skipped,
+                Some(CompressionReason::MaxAttemptsReached),
+            );
+            return None;
+        }
+        if matches!(
+            session.runtime.state,
+            SessionState::Generating | SessionState::ExecutingTools
+        ) || session.draft_message.is_some()
+        {
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Skipped,
+                Some(CompressionReason::NoEligibleSegment),
+            );
+            return None;
+        }
+        if current_tail_has_active_pending_tool_calls(&session.messages) {
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Skipped,
+                Some(CompressionReason::PendingToolCalls),
+            );
+            return None;
+        }
+        (session.messages.clone(), session.provider_usage_stale)
+    };
+
+    if compression_candidates(&raw_messages).is_empty() {
+        let mut session = session_arc.lock().await;
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::NoEligibleSegment),
+        );
+        return None;
+    }
+
+    let (model, model_n_ctx) = match resolve_summary_model(gcx, &thread.model).await {
+        Ok(value) => value,
+        Err(failure) => {
+            let mut session = session_arc.lock().await;
+            if failure.is_structural() {
+                session.tier1_compaction_disabled = true;
+            }
+            set_compression_status_quiet(
+                &mut session,
+                CompressionPhase::Failed,
+                Some(compression_failure_reason(&failure)),
+            );
+            warn!(
+                "Proactive segment summarization unavailable: {}",
+                safe_segment_summary_failure_for_log(&failure)
+            );
+            return None;
+        }
+    };
+
+    let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
+    let pressure =
+        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
+    if !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
+        let mut session = session_arc.lock().await;
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+        return None;
+    }
+
+    Some((model, model_n_ctx))
+}
+
+async fn run_reserved_segment_summarization(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    thread: &crate::chat::types::ThreadParams,
+    force: bool,
+    reason: Option<CompressionReason>,
+    resolved_model: Option<(String, usize)>,
+) -> bool {
+    let forced_context_limit = force && reason == Some(CompressionReason::ContextLengthStop);
+    let (attempt, raw_messages, known_insufficient_hashes, usage_stale) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
             return false;
@@ -2362,7 +2592,10 @@ pub async fn apply_segment_summarization_with_reason(
             return false;
         }
         let attempt = reserve_compression_attempt(&mut session, reason);
-        ensure_all_candidate_source_message_ids(&mut session.messages);
+        if ensure_all_candidate_source_message_ids(&mut session.messages) {
+            session.increment_version();
+            session.touch();
+        }
         if session.tier1_compaction_disabled && !force {
             emit_compression_skipped(&mut session, CompressionReason::SessionCompactionDisabled);
             return false;
@@ -2383,34 +2616,46 @@ pub async fn apply_segment_summarization_with_reason(
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
             return false;
         }
-        (attempt, session.messages.clone())
+        (
+            attempt,
+            session.messages.clone(),
+            session.compression_insufficient_hashes.clone(),
+            session.provider_usage_stale,
+        )
     };
 
     if compression_candidates(&raw_messages).is_empty() {
         let mut session = session_arc.lock().await;
-        emit_compression_skipped_if_owned(
+        if emit_compression_skipped_if_owned(
             &mut session,
             attempt,
             CompressionReason::NoEligibleSegment,
-        );
+        ) && forced_context_limit
+        {
+            append_compression_outcome_event(&mut session, CompressionReason::NoEligibleSegment);
+        }
         return false;
     }
-    let (model, model_n_ctx) = match resolve_summary_model(gcx.clone(), &thread.model).await {
-        Ok(value) => value,
-        Err(failure) => {
-            let mut session = session_arc.lock().await;
-            if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
-                let failure_for_log = safe_segment_summary_failure_for_log(&failure);
-                warn!(
-                    "Segment summarization failed before subchat: {}",
-                    failure_for_log
-                );
+    let (model, model_n_ctx) = match resolved_model {
+        Some(value) => value,
+        None => match resolve_summary_model(gcx.clone(), &thread.model).await {
+            Ok(value) => value,
+            Err(failure) => {
+                let mut session = session_arc.lock().await;
+                if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
+                    let failure_for_log = safe_segment_summary_failure_for_log(&failure);
+                    warn!(
+                        "Segment summarization failed before subchat: {}",
+                        failure_for_log
+                    );
+                }
+                return false;
             }
-            return false;
-        }
+        },
     };
     let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
-    let pressure = estimated_context_pressure(&raw_messages, effective_n_ctx);
+    let pressure =
+        estimated_provider_context_pressure_with_usage(&raw_messages, effective_n_ctx, usage_stale);
     if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
         let mut session = session_arc.lock().await;
         emit_compression_skipped_if_owned(&mut session, attempt, CompressionReason::PressureLow);
@@ -2424,7 +2669,8 @@ pub async fn apply_segment_summarization_with_reason(
         }
     }
 
-    let mut tried_source_hashes = HashSet::new();
+    let mut tried_source_hashes: HashSet<String> = known_insufficient_hashes;
+    let mut insufficient_hashes_to_record: Vec<String> = Vec::new();
     let mut applied_count = 0usize;
     let mut saw_insufficient_savings = false;
 
@@ -2446,7 +2692,11 @@ pub async fn apply_segment_summarization_with_reason(
 
         if applied_count > 0
             && !matches!(
-                estimated_provider_context_pressure(&pass_messages, effective_n_ctx),
+                estimated_provider_context_pressure_with_usage(
+                    &pass_messages,
+                    effective_n_ctx,
+                    usage_stale
+                ),
                 ContextPressure::High | ContextPressure::Critical
             )
         {
@@ -2455,6 +2705,9 @@ pub async fn apply_segment_summarization_with_reason(
 
         let candidates: Vec<CompressionCandidate> = compression_candidates(&pass_messages)
             .into_iter()
+            .filter(|candidate| {
+                candidate.estimated_source_tokens >= MIN_SOURCE_TOKENS_FOR_COMPRESSION
+            })
             .filter(|candidate| {
                 let source_hash = source_hash_for_candidate(&pass_messages, candidate);
                 !tried_source_hashes.contains(&source_hash)
@@ -2496,6 +2749,7 @@ pub async fn apply_segment_summarization_with_reason(
                 Ok(summary) => summary,
                 Err(failure) => {
                     let mut session = session_arc.lock().await;
+                    record_insufficient_hashes(&mut session, &mut insufficient_hashes_to_record);
                     if applied_count > 0 {
                         if finalize_applied_if_owned(&mut session, attempt) {
                             return true;
@@ -2526,16 +2780,28 @@ pub async fn apply_segment_summarization_with_reason(
             );
             if !compression_benefit_is_sufficient(benefit) {
                 saw_insufficient_savings = true;
+                insufficient_hashes_to_record.push(source_hash.clone());
                 continue;
             }
 
+            let source_id_set: HashSet<String> = source_messages
+                .iter()
+                .filter(|message| !message.message_id.is_empty())
+                .map(|message| message.message_id.clone())
+                .collect();
             let mut session = session_arc.lock().await;
             if !owns_compression_attempt(&session, attempt) {
                 return applied_count > 0;
             }
-            let Some(current_candidate) =
-                find_candidate_by_source_hash(&session.messages, &source_hash)
-            else {
+            let current_source: Vec<ChatMessage> = session
+                .messages
+                .iter()
+                .filter(|message| {
+                    !message.message_id.is_empty() && source_id_set.contains(&message.message_id)
+                })
+                .cloned()
+                .collect();
+            if current_source.is_empty() {
                 if applied_count > 0 {
                     if finalize_applied_if_owned(&mut session, attempt) {
                         return true;
@@ -2548,10 +2814,7 @@ pub async fn apply_segment_summarization_with_reason(
                     CompressionReason::SourceChanged,
                 );
                 return false;
-            };
-            ensure_candidate_source_message_ids(&mut session.messages, &current_candidate);
-            let current_source =
-                source_messages_for_candidate(&session.messages, &current_candidate);
+            }
             let current_preserved_source_messages =
                 preserved_source_messages_from_summary(&summary, &current_source);
             let current_benefit = effective_compression_benefit(
@@ -2561,19 +2824,33 @@ pub async fn apply_segment_summarization_with_reason(
             );
             if !compression_benefit_is_sufficient(current_benefit) {
                 saw_insufficient_savings = true;
+                insufficient_hashes_to_record.push(source_hash.clone());
                 continue;
             }
-            insert_candidate_report_and_summary(
+            let superseded_removed =
+                remove_superseded_summary_pairs(&mut session.messages, &source_id_set);
+            let report_idx = insert_report_and_summary_after_sources(
                 &mut session.messages,
-                &current_candidate,
+                &source_id_set,
                 &current_source,
                 summary,
                 current_benefit,
             );
+            if superseded_removed > 0 {
+                // Removals shift indices; resync the UI with a full snapshot.
+                let snapshot = session.snapshot();
+                session.emit(snapshot);
+            } else {
+                for index in report_idx..(report_idx + 2).min(session.messages.len()) {
+                    let message = session.messages[index].clone();
+                    session.emit(ChatEvent::MessageAdded { message, index });
+                }
+            }
             session.tier1_compact_attempts += 1;
             session.tier1_compaction_disabled = false;
             session.thread.previous_response_id = None;
             session.cache_guard_force_next = true;
+            session.provider_usage_stale = true;
             session.increment_version();
             session.touch();
             applied_count += 1;
@@ -2587,6 +2864,7 @@ pub async fn apply_segment_summarization_with_reason(
     }
 
     let mut session = session_arc.lock().await;
+    record_insufficient_hashes(&mut session, &mut insufficient_hashes_to_record);
     if applied_count > 0 {
         if !finalize_applied_if_owned(&mut session, attempt) {
             return false;
@@ -2603,9 +2881,224 @@ pub async fn apply_segment_summarization_with_reason(
         } else {
             CompressionReason::NoEligibleSegment
         };
-        emit_compression_skipped_if_owned(&mut session, attempt, reason);
+        if emit_compression_skipped_if_owned(&mut session, attempt, reason) && forced_context_limit
+        {
+            append_compression_outcome_event(&mut session, reason);
+        }
         false
     }
+}
+
+const MAX_REMEMBERED_INSUFFICIENT_HASHES: usize = 256;
+
+fn record_insufficient_hashes(session: &mut ChatSession, hashes: &mut Vec<String>) {
+    if hashes.is_empty() {
+        return;
+    }
+    if session.compression_insufficient_hashes.len() + hashes.len()
+        > MAX_REMEMBERED_INSUFFICIENT_HASHES
+    {
+        session.compression_insufficient_hashes.clear();
+    }
+    session
+        .compression_insufficient_hashes
+        .extend(hashes.drain(..));
+}
+
+const DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT: usize = 4;
+const DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS: usize = 600;
+const DETERMINISTIC_TOOL_OUTPUT_MARKER: &str =
+    "[tool output truncated by automatic context compaction]";
+
+fn first_changed_index(before: &[ChatMessage], after: &[ChatMessage]) -> Option<usize> {
+    let common_len = before.len().min(after.len());
+    for idx in 0..common_len {
+        if serde_json::to_value(&before[idx]).ok() != serde_json::to_value(&after[idx]).ok() {
+            return Some(idx);
+        }
+    }
+    (before.len() != after.len()).then_some(common_len)
+}
+
+fn deterministic_truncate_tool_output(content: &str) -> String {
+    let scan_cap =
+        DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS.saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
+    let (window, _) = bounded_redaction_window(content, scan_cap);
+    let redacted = refact_core::string_utils::redact_sensitive(window);
+    let preview =
+        refact_core::string_utils::safe_truncate(&redacted, DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS);
+    format!(
+        "{}\n{}",
+        DETERMINISTIC_TOOL_OUTPUT_MARKER,
+        preview.trim_end()
+    )
+}
+
+fn deterministic_truncation_eligible(
+    message: &ChatMessage,
+    tool_call_names: &std::collections::HashMap<String, String>,
+) -> bool {
+    if !matches!(message.role.as_str(), "tool" | "diff")
+        || message.preserve == Some(true)
+        || message.tool_call_id.starts_with("srvtoolu_")
+        || is_ui_only_message(message)
+    {
+        return false;
+    }
+    if let Some(name) = tool_call_names.get(&message.tool_call_id) {
+        if should_preserve_tool(name) {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) struct DeterministicCompactionOutcome {
+    pub messages: Vec<ChatMessage>,
+    pub context_files_deduped: usize,
+    pub tool_outputs_truncated: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+}
+
+/// Ids of messages that source-preserving summaries currently remove from the
+/// provider wire (summarized minus explicitly preserved). Deterministic
+/// compaction skips these: truncating them frees no wire tokens and only
+/// destroys visible history.
+fn actively_suppressed_source_ids(messages: &[ChatMessage]) -> HashSet<String> {
+    let mut suppressed = summarized_source_id_union(messages);
+    if suppressed.is_empty() {
+        return suppressed;
+    }
+    for message in messages {
+        let Some(metadata) = source_preserving_summary_metadata(message) else {
+            continue;
+        };
+        for id in compression_metadata_string_array(Some(metadata), "preserved_source_message_ids")
+        {
+            suppressed.remove(&id);
+        }
+    }
+    suppressed
+}
+
+pub(crate) fn deterministic_compaction(
+    messages: &[ChatMessage],
+) -> Option<DeterministicCompactionOutcome> {
+    let tokens_before = crate::chat::trajectory_ops::approx_token_count(messages);
+    let mut updated = messages.to_vec();
+    let tool_call_names: std::collections::HashMap<String, String> = updated
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .map(|tool_call| (tool_call.id.clone(), tool_call.function.name.clone()))
+        .collect();
+    let suppressed_ids = actively_suppressed_source_ids(&updated);
+
+    let mut protected_recent = HashSet::new();
+    let mut recent_seen = 0usize;
+    for idx in (0..updated.len()).rev() {
+        if deterministic_truncation_eligible(&updated[idx], &tool_call_names)
+            && !suppressed_ids.contains(&updated[idx].message_id)
+        {
+            protected_recent.insert(idx);
+            recent_seen += 1;
+            if recent_seen >= DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+                break;
+            }
+        }
+    }
+
+    let mut tool_outputs_truncated = 0usize;
+    for (idx, message) in updated.iter_mut().enumerate() {
+        if !deterministic_truncation_eligible(message, &tool_call_names)
+            || protected_recent.contains(&idx)
+            || suppressed_ids.contains(&message.message_id)
+        {
+            continue;
+        }
+        let content = message.content.content_text_only();
+        if content.len() <= DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS * 2 {
+            continue;
+        }
+        message.content = ChatContent::SimpleText(deterministic_truncate_tool_output(&content));
+        tool_outputs_truncated += 1;
+    }
+
+    let context_files_deduped = compress_duplicate_context_files(&mut updated)
+        .map(|(count, _)| count)
+        .unwrap_or(0);
+
+    if tool_outputs_truncated == 0 && context_files_deduped == 0 {
+        return None;
+    }
+
+    let tokens_after = crate::chat::trajectory_ops::approx_token_count(&updated);
+    Some(DeterministicCompactionOutcome {
+        messages: updated,
+        context_files_deduped,
+        tool_outputs_truncated,
+        tokens_before,
+        tokens_after,
+    })
+}
+
+pub async fn apply_deterministic_compaction_for_recovery(
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+) -> bool {
+    let mut session = session_arc.lock().await;
+    if compression_attempt_active(&session) {
+        return false;
+    }
+    if matches!(
+        session.runtime.state,
+        SessionState::Generating | SessionState::ExecutingTools
+    ) || session.draft_message.is_some()
+    {
+        return false;
+    }
+    let Some(outcome) = deterministic_compaction(&session.messages) else {
+        return false;
+    };
+    let mut messages = outcome.messages;
+    let mut fingerprint_hasher = Sha256::new();
+    fingerprint_hasher.update(b"deterministic_compaction");
+    for (before, after) in session.messages.iter().zip(messages.iter()) {
+        if serde_json::to_value(before).ok() != serde_json::to_value(after).ok() {
+            fingerprint_hasher.update(before.message_id.as_bytes());
+            fingerprint_hasher.update(b"\n");
+        }
+    }
+    let op_fingerprint = hex::encode(fingerprint_hasher.finalize());
+    let report = build_compression_report_message_with_fingerprint(
+        outcome.context_files_deduped,
+        0,
+        outcome.tool_outputs_truncated,
+        outcome.tokens_before,
+        outcome.tokens_after,
+        &op_fingerprint,
+    );
+    let boundary = first_changed_index(&session.messages, &messages).unwrap_or(messages.len());
+    insert_compression_report_at_boundary(&mut messages, report, boundary);
+    session.messages = messages;
+    session.thread.previous_response_id = None;
+    session.cache_guard_force_next = true;
+    session.provider_usage_stale = true;
+    session.tier1_compact_attempts = 0;
+    session.compression_insufficient_hashes.clear();
+    emit_compression_applied(&mut session);
+    session.increment_version();
+    session.touch();
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+    info!(
+        "Deterministic compaction applied: {} tool outputs truncated, {} duplicate context files compressed, ~{} -> ~{} tokens",
+        outcome.tool_outputs_truncated,
+        outcome.context_files_deduped,
+        outcome.tokens_before,
+        outcome.tokens_after,
+    );
+    true
 }
 
 #[cfg(test)]
@@ -3283,10 +3776,15 @@ mod tests {
             let mut applied = 0;
             let mut tried = HashSet::new();
             for _ in 0..MAX_COMPRESSION_PASSES {
-                let candidate = compression_candidates(&messages)
-                    .into_iter()
-                    .find(|candidate| tried.insert(source_hash_for_candidate(&messages, candidate)))
-                    .unwrap();
+                let Some(candidate) =
+                    compression_candidates(&messages)
+                        .into_iter()
+                        .find(|candidate| {
+                            tried.insert(source_hash_for_candidate(&messages, candidate))
+                        })
+                else {
+                    break;
+                };
                 ensure_candidate_source_message_ids(&mut messages, &candidate);
                 let source = source_messages_for_candidate(&messages, &candidate);
                 let summary = make_segment_summary_message(
@@ -3297,9 +3795,14 @@ mod tests {
                 let benefit = effective_compression_benefit(&source, &summary, &[]);
 
                 assert!(compression_benefit_is_sufficient(benefit));
-                insert_candidate_report_and_summary(
+                let source_id_set: HashSet<String> = source
+                    .iter()
+                    .filter(|message| !message.message_id.is_empty())
+                    .map(|message| message.message_id.clone())
+                    .collect();
+                insert_report_and_summary_after_sources(
                     &mut messages,
-                    &candidate,
+                    &source_id_set,
                     &source,
                     summary,
                     benefit,
@@ -3307,13 +3810,136 @@ mod tests {
                 applied += 1;
             }
 
-            assert_eq!(applied, MAX_COMPRESSION_PASSES);
+            // Id-based coverage lets the top-ranked batch candidate absorb every
+            // closed run in one pass; later passes correctly find nothing left.
+            assert!(applied >= 1);
+            assert!(compression_candidates(&messages).is_empty());
             assert_eq!(
                 messages
                     .iter()
                     .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
                     .count(),
-                MAX_COMPRESSION_PASSES
+                applied
+            );
+        }
+
+        #[test]
+        fn coverage_by_ids_survives_source_mutation_and_prevents_resummarization() {
+            let mut messages = vec![user("start")];
+            for idx in 0..3 {
+                messages.push(long_assistant(&format!("large {idx}"), 1_500));
+                messages.push(user(&format!("next {idx}")));
+            }
+            let candidate = compression_candidates(&messages)
+                .into_iter()
+                .find(|candidate| candidate.ranges == vec![SummarySegment { start: 1, end: 1 }])
+                .unwrap();
+            ensure_candidate_source_message_ids(&mut messages, &candidate);
+            let source = source_messages_for_candidate(&messages, &candidate);
+            let summary = make_segment_summary_message(
+                short_summary_text().to_string(),
+                &source,
+                "test-model",
+            );
+            let benefit = effective_compression_benefit(&source, &summary, &[]);
+            let source_id_set: HashSet<String> = source
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &source_id_set,
+                &source,
+                summary,
+                benefit,
+            );
+            let summarized_id = messages[1].message_id.clone();
+
+            // Deterministic compaction-style in-place mutation of the source.
+            messages[1].content = ChatContent::SimpleText(
+                "[tool output truncated by automatic context compaction]".to_string(),
+            );
+
+            // The mutated source stays covered: no candidate re-summarizes it.
+            for candidate in compression_candidates(&messages) {
+                let candidate_source = source_messages_for_candidate(&messages, &candidate);
+                assert!(!candidate_source
+                    .iter()
+                    .any(|message| message.message_id == summarized_id));
+            }
+        }
+
+        #[test]
+        fn superseding_summary_removes_covered_summary_pair() {
+            let mut messages = vec![
+                user("start"),
+                long_assistant("large 0", 1_500),
+                user("next 0"),
+                long_assistant("large 1", 1_500),
+                user("next 1"),
+            ];
+            let first = compression_candidates(&messages)
+                .into_iter()
+                .find(|candidate| candidate.ranges == vec![SummarySegment { start: 1, end: 1 }])
+                .unwrap();
+            ensure_candidate_source_message_ids(&mut messages, &first);
+            let source = source_messages_for_candidate(&messages, &first);
+            let first_ids: HashSet<String> = source
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            let summary = make_segment_summary_message(
+                short_summary_text().to_string(),
+                &source,
+                "test-model",
+            );
+            let benefit = effective_compression_benefit(&source, &summary, &[]);
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &first_ids,
+                &source,
+                summary,
+                benefit,
+            );
+
+            ensure_all_candidate_source_message_ids(&mut messages);
+            let both: Vec<ChatMessage> = messages
+                .iter()
+                .filter(|message| message.role == "assistant" && !is_segment_summary(message))
+                .cloned()
+                .collect();
+            assert_eq!(both.len(), 2);
+            let both_ids: HashSet<String> = both
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect();
+            assert!(both_ids.iter().all(|id| !id.is_empty()));
+            let summary2 =
+                make_segment_summary_message(short_summary_text().to_string(), &both, "test-model");
+            let benefit2 = effective_compression_benefit(&both, &summary2, &[]);
+            let removed = remove_superseded_summary_pairs(&mut messages, &both_ids);
+            insert_report_and_summary_after_sources(
+                &mut messages,
+                &both_ids,
+                &both,
+                summary2,
+                benefit2,
+            );
+
+            assert_eq!(removed, 2);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| is_segment_summary(message))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
+                    .count(),
+                1
             );
         }
 
@@ -6451,5 +7077,325 @@ mod tests {
         assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
         assert!(log_error.contains("[REDACTED"));
         assert!(!log_error.contains(far_tail));
+    }
+    fn tool_with_id_and_name(call_id: &str, name: &str, text: &str) -> Vec<ChatMessage> {
+        vec![
+            assistant_with_named_tool_call(call_id, name),
+            tool_with_id(call_id, text),
+        ]
+    }
+
+    #[test]
+    fn deterministic_compaction_truncates_old_tool_outputs_and_keeps_recent() {
+        let big = format!(
+            "api_key=sk-abcdefghijklmnop {}",
+            "tool output line ".repeat(400)
+        );
+        let mut messages = vec![user("start")];
+        for idx in 0..6 {
+            messages.extend(tool_with_id_and_name(&format!("call_{idx}"), "shell", &big));
+        }
+
+        let outcome = deterministic_compaction(&messages).expect("must compact");
+
+        assert_eq!(outcome.tool_outputs_truncated, 2);
+        assert!(outcome.tokens_after < outcome.tokens_before);
+        let truncated: Vec<&ChatMessage> = outcome
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "tool"
+                    && message
+                        .content
+                        .content_text_only()
+                        .starts_with(DETERMINISTIC_TOOL_OUTPUT_MARKER)
+            })
+            .collect();
+        assert_eq!(truncated.len(), 2);
+        for message in &truncated {
+            let text = message.content.content_text_only();
+            assert!(
+                !text.contains("sk-abcdefghijklmnop"),
+                "secret leaked: {text}"
+            );
+        }
+        let untouched = outcome
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool" && message.content.content_text_only() == big)
+            .count();
+        assert_eq!(untouched, 4);
+    }
+
+    #[test]
+    fn deterministic_compaction_preserves_protected_tool_outputs() {
+        let big = "important output ".repeat(400);
+        let mut preserved_by_flag = tool_with_id_and_name("call_flag", "shell", &big);
+        preserved_by_flag[1].preserve = Some(true);
+        let mut messages = vec![user("start")];
+        for tool_name in TOOLS_TO_PRESERVE {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_{}", tool_name.replace('-', "_")),
+                tool_name,
+                &big,
+            ));
+        }
+        messages.extend(preserved_by_flag);
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_recent_{idx}"),
+                "shell",
+                &big,
+            ));
+        }
+
+        assert!(deterministic_compaction(&messages).is_none());
+    }
+
+    #[test]
+    fn deterministic_compaction_recent_window_ignores_preserved_outputs() {
+        let big = "tool output line ".repeat(400);
+        let mut messages = vec![user("start")];
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_eligible_{idx}"),
+                "shell",
+                &big,
+            ));
+        }
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("srvtoolu_{idx}"),
+                "shell",
+                &big,
+            ));
+        }
+
+        // Server-executed results may not consume the recent-window slots: the four
+        // eligible outputs are the four most recent eligible ones, so nothing is left
+        // to truncate.
+        assert!(deterministic_compaction(&messages).is_none());
+    }
+
+    #[test]
+    fn deterministic_compaction_truncates_spoofed_marker_content() {
+        let spoofed = format!(
+            "{} {}",
+            DETERMINISTIC_TOOL_OUTPUT_MARKER,
+            "raw tool output that merely begins with the marker ".repeat(200)
+        );
+        let mut messages = vec![user("start")];
+        messages.extend(tool_with_id_and_name("call_spoofed", "shell", &spoofed));
+        for idx in 0..DETERMINISTIC_TOOL_OUTPUT_KEEP_RECENT {
+            messages.extend(tool_with_id_and_name(
+                &format!("call_recent_{idx}"),
+                "shell",
+                &"tool output line ".repeat(400),
+            ));
+        }
+
+        let outcome = deterministic_compaction(&messages).expect("spoofed content must compact");
+        assert_eq!(outcome.tool_outputs_truncated, 1);
+        let truncated = outcome
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id == "call_spoofed")
+            .expect("spoofed message still present");
+        assert!(
+            truncated.content.content_text_only().len()
+                < DETERMINISTIC_TOOL_OUTPUT_MAX_CHARS * 2 + DETERMINISTIC_TOOL_OUTPUT_MARKER.len()
+        );
+    }
+
+    #[test]
+    fn provider_pressure_ignores_usage_hidden_by_summarization() {
+        let mut source = assistant("old heavy answer");
+        source.message_id = "hidden-src-1".to_string();
+        source.usage = Some(usage(95_000, 10, 95_010, None, None));
+        let summary = make_segment_summary_message(
+            "compact continuation summary".to_string(),
+            std::slice::from_ref(&source),
+            "test-model",
+        );
+        let with_summary = vec![user("start"), source.clone(), summary, user("next")];
+        let without_summary = vec![user("start"), source, user("next")];
+
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&with_summary, 100_000, false),
+            ContextPressure::Low
+        );
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&without_summary, 100_000, false),
+            ContextPressure::Critical
+        );
+    }
+
+    #[test]
+    fn provider_pressure_with_stale_usage_uses_estimate_only() {
+        let messages = vec![
+            user("start"),
+            assistant_with_usage(usage(95_000, 10, 95_010, None, None)),
+            user("next"),
+        ];
+
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&messages, 100_000, true),
+            ContextPressure::Low
+        );
+        assert_eq!(
+            estimated_provider_context_pressure_with_usage(&messages, 100_000, false),
+            ContextPressure::Critical
+        );
+    }
+
+    #[test]
+    fn quiet_status_does_not_clobber_active_attempt() {
+        let mut session = ChatSession::new("quiet-guard".to_string());
+        let attempt = reserve_compression_attempt(&mut session, None);
+
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+
+        assert!(owns_compression_attempt(&session, attempt));
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+        assert!(session.is_compressing);
+    }
+
+    #[test]
+    fn compression_attempt_active_expires_after_staleness_window() {
+        let mut session = ChatSession::new("stale-attempt".to_string());
+        let _attempt = reserve_compression_attempt(&mut session, None);
+        assert!(compression_attempt_active(&session));
+
+        session.compression_attempt_started_at_ms =
+            Some(epoch_ms_now().saturating_sub(COMPRESSION_ATTEMPT_STALE_MS + 1));
+        assert!(!compression_attempt_active(&session));
+
+        set_compression_status_quiet(
+            &mut session,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert!(!session.is_compressing);
+    }
+
+    #[test]
+    fn deterministic_compaction_is_idempotent() {
+        let big = "tool output line ".repeat(400);
+        let mut messages = vec![user("start")];
+        for idx in 0..6 {
+            messages.extend(tool_with_id_and_name(&format!("call_{idx}"), "shell", &big));
+        }
+
+        let first = deterministic_compaction(&messages).expect("first pass compacts");
+        assert!(deterministic_compaction(&first.messages).is_none());
+    }
+
+    #[test]
+    fn deterministic_compaction_returns_none_without_candidates() {
+        let messages = vec![user("start"), assistant("short answer")];
+        assert!(deterministic_compaction(&messages).is_none());
+    }
+
+    #[tokio::test]
+    async fn deterministic_recovery_applies_report_and_resets_cache_state() {
+        let big = "tool output line ".repeat(400);
+        let mut session = ChatSession::new("deterministic-recovery".to_string());
+        session.messages = vec![user("start")];
+        for idx in 0..6 {
+            session
+                .messages
+                .extend(tool_with_id_and_name(&format!("call_{idx}"), "shell", &big));
+        }
+        session.thread.previous_response_id = Some("resp-1".to_string());
+        session.cache_guard_force_next = false;
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        assert!(apply_deterministic_compaction_for_recovery(&session_arc).await);
+
+        let session = session_arc.lock().await;
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.role == COMPRESSION_REPORT_ROLE));
+        assert!(session.thread.previous_response_id.is_none());
+        assert!(session.cache_guard_force_next);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        drop(session);
+
+        assert!(!apply_deterministic_compaction_for_recovery(&session_arc).await);
+    }
+
+    #[test]
+    fn compression_outcome_event_is_visible_failure_notice() {
+        let mut session = ChatSession::new("compression-outcome".to_string());
+
+        append_compression_outcome_event(&mut session, CompressionReason::NoEligibleSegment);
+
+        assert_eq!(session.messages.len(), 1);
+        let message = &session.messages[0];
+        assert_eq!(message.role, crate::chat::internal_roles::EVENT_ROLE);
+        assert!(message
+            .content
+            .content_text_only()
+            .starts_with("Context compression failed:"));
+        assert_eq!(message.extra["event"]["subkind"], json!("system_notice"));
+        assert_eq!(message.extra["event"]["source"], json!("chat.summarizer"));
+    }
+
+    #[test]
+    fn record_insufficient_hashes_caps_set_size() {
+        let mut session = ChatSession::new("insufficient-hashes".to_string());
+        for idx in 0..MAX_REMEMBERED_INSUFFICIENT_HASHES {
+            session
+                .compression_insufficient_hashes
+                .insert(format!("hash-{idx}"));
+        }
+
+        let mut new_hashes = vec!["fresh-hash".to_string()];
+        record_insufficient_hashes(&mut session, &mut new_hashes);
+
+        assert!(new_hashes.is_empty());
+        assert_eq!(session.compression_insufficient_hashes.len(), 1);
+        assert!(session
+            .compression_insufficient_hashes
+            .contains("fresh-hash"));
+    }
+
+    #[tokio::test]
+    async fn proactive_low_pressure_skip_is_quiet() {
+        let gcx = make_test_gcx().await;
+        let light_model = "global-light-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            light_model.to_string(),
+            chat_model_record(light_model, 1_000_000),
+        );
+        caps.defaults.chat_light_model = light_model.to_string();
+        install_caps(gcx.clone(), caps).await;
+        let mut session = ChatSession::new("proactive-quiet".to_string());
+        session.messages = vec![
+            user("first"),
+            assistant(&"old answer ".repeat(100)),
+            user("second"),
+        ];
+        let thread = session.thread.clone();
+        let mut rx = session.subscribe();
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        assert!(!apply_segment_summarization(gcx, &session_arc, &thread, false).await);
+
+        let session = session_arc.lock().await;
+        assert!(!session.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::PressureLow)
+        );
+        assert!(rx.try_recv().is_err());
     }
 }

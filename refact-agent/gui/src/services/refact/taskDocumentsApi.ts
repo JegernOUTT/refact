@@ -66,6 +66,7 @@ export interface UpdateTaskDocumentRequest {
   taskId: string;
   slug: string;
   content: string;
+  pinned?: boolean;
 }
 
 export interface DeleteTaskDocumentRequest {
@@ -169,6 +170,7 @@ export const taskDocumentMutationInvalidation = {
   pinTaskDocument: (taskId: string, slug: string): TaskDocumentsTag[] => [
     taskDocumentListTag(taskId),
     taskDocumentDetailTag(taskId, slug),
+    taskDocumentHistoryTag(taskId, slug),
   ],
   deleteTaskDocument: (taskId: string, slug: string): TaskDocumentsTag[] => [
     taskDocumentListTag(taskId),
@@ -293,7 +295,12 @@ export const taskDocumentsApi = createApi({
       TaskDocumentDetail,
       UpdateTaskDocumentRequest
     >({
-      queryFn: async ({ taskId, slug, content }, api, _opts, baseQuery) => {
+      queryFn: async (
+        { taskId, slug, content, pinned },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildApiUrlFromState(
@@ -303,7 +310,7 @@ export const taskDocumentsApi = createApi({
             )}/documents/${encodeURIComponent(slug)}`,
           ),
           method: "PUT",
-          body: { content },
+          body: { content, pinned },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskDocumentDetail };

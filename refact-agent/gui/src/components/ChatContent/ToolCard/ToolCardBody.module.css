@@ -1,0 +1,102 @@
+.bodyStack {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.section {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sectionLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.resultPanel {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  min-width: 0;
+  max-width: 100%;
+  max-height: var(--rf-toolbody-max-h, 300px);
+  padding: var(--rf-space-2);
+  overflow-x: auto;
+  overflow-y: auto;
+  color: var(--rf-color-muted);
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  line-height: var(--rf-line);
+}
+
+.resultPanelCompact {
+  --rf-toolbody-max-h: 220px;
+}
+
+.resultPanelTall {
+  --rf-toolbody-max-h: 480px;
+}
+
+.resultList {
+  --rf-toolbody-list-max-h: var(--rf-toolbody-max-h, 300px);
+
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  max-height: var(--rf-toolbody-list-max-h);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.resultItem {
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  line-height: var(--rf-line);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .resultPanel,
+  .resultItem {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resultPanel,
+  .resultItem {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .resultPanel,
+  .resultItem {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .resultPanel,
+:global(.radix-themes[data-host="jetbrains"]) .resultItem {
+  background: var(--rf-surface-glass);
+}

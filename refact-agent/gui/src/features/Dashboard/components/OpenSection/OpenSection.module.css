@@ -1,7 +1,7 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-section-gap);
   flex-shrink: 0;
 }
 
@@ -16,10 +16,10 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   width: 100%;
   text-align: left;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .headerToggle:hover {
@@ -40,11 +40,12 @@
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .grid[data-breakpoint="medium"],
 .grid[data-breakpoint="wide"] {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }

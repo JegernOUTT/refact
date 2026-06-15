@@ -1,8 +1,7 @@
 import React from "react";
-import { Button } from "@radix-ui/themes";
+import { Button, Spinner } from "../ui";
 import { type ChatLink } from "../../services/refact/links";
 import { useAppSelector, useLinksFromLsp } from "../../hooks";
-import { Spinner } from "@radix-ui/themes";
 import { TruncateRight } from "../Text/TruncateRight";
 
 import styles from "./ChatLinks.module.css";
@@ -27,8 +26,8 @@ export const ChatLinks: React.FC = () => {
 
   if (linksResult.isLoading || linksResult.isFetching) {
     return (
-      <Button variant="surface" disabled>
-        <Spinner loading />
+      <Button variant="soft" disabled>
+        <Spinner size="sm" label="Checking for actions" />
         Checking for actions
       </Button>
     );
@@ -55,13 +54,7 @@ export const ChatLinkButton: React.FC<{
   const handleClick = React.useCallback(() => onClick(link), [link, onClick]);
   return (
     <Button
-      // variant="classic"
-      // variant="solid"
-      // variant="outline"
-      // variant="soft"
-      // variant="ghost"
-
-      variant="surface"
+      variant="soft"
       title={title}
       onClick={handleClick}
       className={styles.chat_link_button}

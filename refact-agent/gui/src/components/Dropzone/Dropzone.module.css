@@ -1,4 +1,18 @@
-/* Use shared iconButton */
-.iconButton {
-  composes: iconButton from "../shared/iconButton.module.css";
+.hiddenInput {
+  display: none;
+}
+
+.fileList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.fileChip {
+  max-width: 100%;
+}
+
+.fileChipIcon {
+  flex-shrink: 0;
 }

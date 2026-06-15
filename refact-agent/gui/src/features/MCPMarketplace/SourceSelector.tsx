@@ -1,10 +1,6 @@
 import React from "react";
-import { Badge, Flex } from "@radix-ui/themes";
-import {
-  ExclamationTriangleIcon,
-  GearIcon,
-  IdCardIcon,
-} from "@radix-ui/react-icons";
+import { AlertTriangle, IdCard, Settings } from "lucide-react";
+import { Badge, Icon } from "../../components/ui";
 import type { MarketplaceSource } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
 
@@ -24,11 +20,12 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({
   const totalCount = sources.reduce((acc, s) => acc + (s.server_count ?? 0), 0);
 
   return (
-    <Flex gap="2" wrap="wrap" align="center">
+    <div className={styles.sourceSelector}>
       <Badge
-        color={selectedSource === null ? "blue" : "gray"}
-        variant={selectedSource === null ? "solid" : "soft"}
+        tone={selectedSource === null ? "accent" : "muted"}
         className={styles.sourceTab}
+        role="button"
+        tabIndex={0}
         onClick={() => onSelectSource(null)}
       >
         All ({totalCount})
@@ -36,38 +33,43 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({
       {sources.map((source) => (
         <Badge
           key={source.id}
-          color={
+          tone={
             source.status === "error"
-              ? "red"
-              : !source.enabled
-                ? "gray"
-                : selectedSource === source.id
-                  ? "blue"
-                  : "gray"
+              ? "danger"
+              : selectedSource === source.id
+                ? "accent"
+                : "muted"
           }
-          variant={selectedSource === source.id ? "solid" : "soft"}
-          className={styles.sourceTab}
+          className={
+            source.enabled ? styles.sourceTab : styles.sourceTabDisabled
+          }
+          role="button"
+          tabIndex={source.enabled ? 0 : -1}
           onClick={() =>
             source.enabled &&
             onSelectSource(selectedSource === source.id ? null : source.id)
           }
-          style={{ opacity: source.enabled ? 1 : 0.5 }}
         >
           {source.label}
           {source.server_count !== undefined && ` (${source.server_count})`}
-          {source.status === "error" && <ExclamationTriangleIcon />}
-          {source.needs_api_key && !source.has_api_key && <IdCardIcon />}
+          {source.status === "error" && (
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+          )}
+          {source.needs_api_key && !source.has_api_key && (
+            <Icon icon={IdCard} size="sm" tone="warning" />
+          )}
         </Badge>
       ))}
       <Badge
-        color="gray"
-        variant="soft"
+        tone="muted"
         className={styles.sourceTab}
+        role="button"
+        tabIndex={0}
         onClick={onOpenSettings}
         title="Manage marketplace sources"
       >
-        <GearIcon />
+        <Icon icon={Settings} size="sm" tone="muted" />
       </Badge>
-    </Flex>
+    </div>
   );
 };

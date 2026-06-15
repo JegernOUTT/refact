@@ -1,32 +1,31 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
-  background: var(--gray-a1);
+  gap: var(--rf-space-2);
   min-width: 0;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  background: transparent;
   transition:
-    background var(--motion-fast) ease,
-    border-color var(--motion-fast) ease;
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a6);
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
 }
 
 .header {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .priorityBadge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
@@ -36,56 +35,48 @@
 }
 
 .priorityCritical {
-  background: var(--red-a3);
-  color: var(--red-11);
+  background: color-mix(in srgb, var(--rf-color-danger) 18%, transparent);
+  color: var(--rf-color-danger);
 }
 
 .priorityHigh {
-  background: var(--orange-a3);
-  color: var(--orange-11);
+  background: color-mix(in srgb, var(--rf-color-warning) 18%, transparent);
+  color: var(--rf-color-warning);
 }
 
 .priorityNormal {
-  background: var(--blue-a3);
-  color: var(--blue-11);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
 }
 
 .priorityLow {
-  background: var(--gray-a3);
-  color: var(--gray-11);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
 }
 
 .summary {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .humor {
   font-style: italic;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.actions > * {
+  min-width: 0;
 }
 
 .actionError {
-  color: var(--red-11);
-}
-
-/* Action buttons reuse the page-wide chip pill so every clickable
- * control on the Buddy home — care, project setup, persona footer,
- * recent errors, opportunity cards — shares one visual language. */
-.actionButton {
-  composes: chip from "./BuddyHome.module.css";
-}
-
-.actionButtonPrimary {
-  composes: chipPrimary from "./BuddyHome.module.css";
-}
-
-.actionButtonGhost {
-  composes: chipGhost from "./BuddyHome.module.css";
+  color: var(--rf-color-danger);
+  overflow-wrap: anywhere;
 }

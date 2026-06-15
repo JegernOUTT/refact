@@ -9,11 +9,11 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
   cursor: pointer;
 }
 
@@ -21,8 +21,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: var(--space-1) 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) 0;
 }
 
 .scene {
@@ -50,14 +50,14 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: var(--rf-space-1);
   width: 100%;
 }
 
 .nameRow {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   justify-content: center;
   width: 100%;
 }
@@ -71,8 +71,8 @@
 .stageBadge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 1px 5px;
+  gap: var(--rf-space-2xs);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
@@ -82,7 +82,7 @@
 .xpBarInline {
   flex: 1;
   height: 3px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 2px;
   overflow: hidden;
   min-width: 20px;
@@ -91,35 +91,39 @@
 .xpFillInline {
   height: 100%;
   border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
+  background: linear-gradient(
+    90deg,
+    var(--rf-color-accent),
+    var(--rf-color-accent)
+  );
   transition: width 0.5s ease;
 }
 
 .xpText {
   font-size: 10px;
-  color: var(--gray-9);
+  color: var(--rf-color-muted);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .needsMini {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   font-size: 10px;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .questPill {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--rf-space-1);
   max-width: 100%;
-  padding: 2px 8px;
+  padding: var(--rf-space-2xs) var(--rf-space-2);
   border-radius: 9999px;
-  border: 1px solid var(--accent-a5);
-  background: var(--accent-a2);
+  border: 1px solid var(--rf-border-strong);
+  background: var(--rf-color-accent-soft);
   font-size: 10px;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .questText {
@@ -130,23 +134,23 @@
 }
 
 .questMeta {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   flex-shrink: 0;
 }
 
 .careRow {
   display: flex;
-  gap: 4px;
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
   justify-content: center;
 }
 
 .careButton {
-  border: 1px solid var(--gray-a4);
-  background: var(--gray-a2);
-  color: var(--gray-12);
+  border: 1px solid var(--rf-border);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
   border-radius: 9999px;
-  padding: 2px 6px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   font-size: 10px;
   cursor: pointer;
 }
@@ -154,11 +158,11 @@
 .statusBubble {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  background: var(--rf-surface-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
   font-size: 10px;
   max-width: 100%;
   width: 100%;
@@ -176,12 +180,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .progressBar {
   height: 2px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 2px;
   overflow: hidden;
   width: 40px;
@@ -191,6 +195,6 @@
 .progressBar > div {
   height: 100%;
   border-radius: 2px;
-  background: var(--accent-9);
+  background: var(--rf-color-accent);
   transition: width 0.3s ease;
 }

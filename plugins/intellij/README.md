@@ -1,6 +1,6 @@
 # Refact JetBrains Plugin
 
-This JetBrains plugin is part of the [smallcloudai/refact](https://github.com/smallcloudai/refact) monorepo.
+This JetBrains plugin is part of the [JegernOUTT/refact](https://github.com/JegernOUTT/refact) monorepo.
 
 ## Development
 
@@ -17,4 +17,4 @@ This code was migrated from the archived standalone JetBrains plugin repository.
 
 ## Issues
 
-Please report issues in the monorepo: <https://github.com/smallcloudai/refact/issues>.
+Please report issues in the monorepo: <https://github.com/JegernOUTT/refact/issues>.

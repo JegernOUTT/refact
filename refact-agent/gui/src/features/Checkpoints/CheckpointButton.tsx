@@ -1,5 +1,5 @@
-import { ResetIcon } from "@radix-ui/react-icons";
-import { IconButton } from "@radix-ui/themes";
+import { RotateCcw } from "lucide-react";
+import { IconButton } from "../../components/ui";
 import { Checkpoint } from "./types";
 import { useCheckpoints } from "../../hooks/useCheckpoints";
 import { useAppSelector, useIsOnline } from "../../hooks";
@@ -22,15 +22,14 @@ export const CheckpointButton = ({
 
   return (
     <IconButton
-      size="1"
+      size="sm"
       variant="ghost"
+      aria-label={isPreviewing ? "Reverting" : "Revert agent changes"}
       title={isPreviewing ? "Reverting..." : "Revert agent changes"}
       onClick={() => void handlePreview(checkpoints, messageIndex)}
       loading={isPreviewing}
       disabled={!isOnline || isStreaming || isWaiting}
-      style={{ width: 20, height: 20 }}
-    >
-      <ResetIcon width={12} height={12} />
-    </IconButton>
+      icon={RotateCcw}
+    />
   );
 };

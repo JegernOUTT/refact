@@ -14,6 +14,7 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | IDE metadata | `.idea/` | IntelliJ project config | keep local/editor files out of commits; `.idea/workspace.xml` is ignored by `.gitignore` |
 | Agent notes | `.agents/` | onboarding notes | checked for repo-specific guidance when present |
 | Codex workspace | `.codex/` | Codex config/data | checked for repo-specific guidance when present |
+| GitHub metadata | `.github/` | repo-level GitHub config | `PULL_REQUEST_TEMPLATE.md` mirrors the minimum pre-commit checks (engine/GUI/plugins); `FUNDING.yml` lists the maintainer |
 | Root `.gitignore` | `.gitignore` | repository ignore rules | includes local editor and build output exclusions; check before adding new generated files |
 | JetBrains local release helper | `build-jb-plugin-local.sh` | shell script | local JetBrains packaging helper; root `.gitignore` excludes copied `/refact-*.zip` archives |
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { FocusEvent, KeyboardEvent } from "react";
-import { TextField } from "@radix-ui/themes";
+import { FieldText } from "../../ui";
 
 type DefaultCellProps = {
   initialValue: string;
@@ -21,8 +21,8 @@ export const DefaultCell = ({
 }: DefaultCellProps) => {
   const [value, setValue] = useState(initialValue);
 
-  const onBlur = (_event: FocusEvent<HTMLInputElement>) => {
-    onChange(value);
+  const handleBlur = (event: FocusEvent<HTMLInputElement>) => {
+    onChange(event.target.value);
   };
 
   useEffect(() => {
@@ -30,15 +30,14 @@ export const DefaultCell = ({
   }, [initialValue]);
 
   return (
-    <TextField.Root
+    <FieldText
       value={value}
-      size="1"
+      onChange={setValue}
+      onBlur={handleBlur}
+      onKeyDown={onKeyPress}
       data-row-index={dataRowIndex}
       data-field={dataField}
       data-next-row={dataNextRow}
-      onChange={(e) => setValue(e.target.value)}
-      onBlur={onBlur}
-      onKeyDown={onKeyPress}
     />
   );
 };

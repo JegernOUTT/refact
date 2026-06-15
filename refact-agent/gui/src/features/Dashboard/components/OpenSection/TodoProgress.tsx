@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
-import { Text } from "@radix-ui/themes";
-import { CheckboxIcon } from "@radix-ui/react-icons";
+import { DashboardText as Text } from "../DashboardPrimitives";
+import { CheckSquare } from "lucide-react";
+import { Icon } from "../../../../components/ui";
 import type { TodoItem, TodoStatus } from "../../../Chat/Thread/types";
 import type { DashboardBreakpoint } from "../../types";
 import styles from "./TodoProgress.module.css";
@@ -35,8 +36,8 @@ export const TodoProgress: React.FC<TodoProgressProps> = ({
   if (breakpoint === "narrow") {
     return (
       <div className={styles.compact}>
-        <Text size="1" color="gray">
-          <CheckboxIcon /> {done}/{total}
+        <Text size="1" tone="muted">
+          <Icon icon={CheckSquare} size="sm" tone="muted" /> {done}/{total}
         </Text>
         <div className={styles.miniBar}>
           {sorted.slice(0, 12).map((t) => (
@@ -66,7 +67,7 @@ export const TodoProgress: React.FC<TodoProgressProps> = ({
         </div>
       ))}
       {remaining > 0 && (
-        <Text size="1" color="gray">
+        <Text size="1" tone="muted">
           +{remaining} more
         </Text>
       )}

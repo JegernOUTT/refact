@@ -1,6 +1,7 @@
+import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { CheckCircledIcon, ResetIcon } from "@radix-ui/react-icons";
-import { Flex, Box, Spinner } from "@radix-ui/themes";
+import { Flex, Box } from "@radix-ui/themes";
+import { Icon } from "../../ui";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
   selectManyDiffMessageByIds,
@@ -59,7 +60,7 @@ const FileEditItem: React.FC<FileEditItemProps> = ({
 }) => {
   return (
     <div className={styles.fileItem}>
-      <Box className={styles.diffContent}>
+      <Box className="scrollX">
         {diffs.map((diff, i) => (
           <DiffBlock
             key={i}
@@ -182,9 +183,9 @@ export const EditTool: React.FC<EditToolProps> = ({
       {
         label: "Apply diff",
         icon: dryRunResult.isLoading ? (
-          <Spinner size="1" />
+          <Icon icon={LoaderCircle} size="sm" tone="accent" />
         ) : (
-          <CheckCircledIcon />
+          <Icon icon={CircleCheck} size="sm" tone="success" />
         ),
         onClick: handleApplyDiff,
         disabled: dryRunResult.isLoading || !parsedToolCall,
@@ -194,7 +195,7 @@ export const EditTool: React.FC<EditToolProps> = ({
     if (replaceContent !== null && hasSelection) {
       actions.push({
         label: "Replace selection",
-        icon: <ResetIcon />,
+        icon: <Icon icon={RotateCcw} size="sm" />,
         onClick: handleReplace,
         disabled: !canPaste,
       });
@@ -214,7 +215,7 @@ export const EditTool: React.FC<EditToolProps> = ({
   if (!shouldRenderDiffs) return null;
 
   return isSingleFile ? (
-    <Box className={styles.diffContent}>
+    <Box className="scrollX">
       {allDiffs.map((diff, i) => (
         <DiffBlock
           key={i}

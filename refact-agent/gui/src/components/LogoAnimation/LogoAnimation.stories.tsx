@@ -4,16 +4,18 @@ import { LogoAnimation } from "./LogoAnimation";
 import { Theme } from "../Theme";
 import { Provider } from "react-redux";
 import { setUpStore } from "../../app/store";
-import { Card, Container } from "@radix-ui/themes";
+import { Surface } from "../ui";
 
 const App: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const store = setUpStore();
   return (
     <Provider store={store}>
       <Theme>
-        <Container p="8">
-          <Card>{children}</Card>
-        </Container>
+        <div style={{ padding: "var(--rf-space-6)" }}>
+          <Surface variant="surface-1" radius="card">
+            {children}
+          </Surface>
+        </div>
       </Theme>
     </Provider>
   );

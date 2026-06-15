@@ -1,4 +1,4 @@
-import { Box, Flex, Text, Badge, Link, Code } from "@radix-ui/themes";
+import { Box, Flex, Text, Badge, Link, Code } from "../LongTailPrimitives";
 import styles from "./BackgroundAgentCard.module.css";
 import type { BackgroundAgentSummary } from "../../services/refact/types";
 

@@ -1,5 +1,6 @@
 import React, { useId, useMemo, useState } from "react";
-import { Box, Flex } from "@radix-ui/themes";
+import type { LucideIcon } from "lucide-react";
+import { Archive, Brain, ChevronDown, ChevronUp, GitMerge } from "lucide-react";
 import {
   getAssistantCompressionMetadata,
   getCompressionReportMetadata,
@@ -10,6 +11,7 @@ import type {
   SummarizationTier,
 } from "../../services/refact/types";
 import { ToolMarkdown } from "../Markdown";
+import { Icon } from "../ui";
 import styles from "./SummarizationMessage.module.css";
 
 interface SummarizationMessageProps {
@@ -18,7 +20,7 @@ interface SummarizationMessageProps {
 
 type TierMeta = {
   label: string;
-  icon: string;
+  icon: LucideIcon;
   badgeClass: string;
 };
 
@@ -34,7 +36,7 @@ function metaForTier(
   if (isSegmentCompressionReport) {
     return {
       label: "Context compressed",
-      icon: "🗜️",
+      icon: Archive,
       badgeClass: styles.tierBadgeTier1,
     };
   }
@@ -43,31 +45,31 @@ function metaForTier(
     case "tier0_deterministic":
       return {
         label: "Deterministic compaction",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier0,
       };
     case "tier1_llm":
       return {
         label: "LLM summary",
-        icon: "🧠",
+        icon: Brain,
         badgeClass: styles.tierBadgeTier1,
       };
     case "tier1_merged":
       return {
         label: "Merged history summary",
-        icon: "🪡",
+        icon: GitMerge,
         badgeClass: styles.tierBadgeTier1Merged,
       };
     case "tier2_reactive":
       return {
         label: "Reactive compaction",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier2,
       };
     default:
       return {
         label: "Context compression",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier0,
       };
   }
@@ -215,14 +217,14 @@ function parseReactiveStats(content: string): StatCell[] | null {
 
 function StatsGrid({ stats }: { stats: StatCell[] }) {
   return (
-    <Box className={styles.statsGrid} data-testid="summarization-card-stats">
+    <div className={styles.statsGrid} data-testid="summarization-card-stats">
       {stats.map((s) => (
-        <Box key={s.label} className={styles.statCell}>
+        <div key={s.label} className={styles.statCell}>
           <span className={styles.statLabel}>{s.label}</span>
           <span className={styles.statValue}>{s.value}</span>
-        </Box>
+        </div>
       ))}
-    </Box>
+    </div>
   );
 }
 
@@ -235,6 +237,11 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const tier = message.summarization_tier;
   const contentText =
     typeof message.content === "string" ? message.content : "";
+  const hasContentText = contentText.trim().length > 0;
+  const pairedSummaryContent =
+    typeof message.paired_summary_content === "string"
+      ? message.paired_summary_content.trim()
+      : "";
   const compressionReport = getCompressionReportMetadata(message);
   const isSegmentCompressionReport =
     compressionReport?.compression_kind === "llm_segment_summary";
@@ -294,8 +301,8 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const toggleOpen = () => setOpen((v) => !v);
 
   return (
-    <Box className={cardClassName} data-testid="summarization-card">
-      <Flex
+    <div className={cardClassName} data-testid="summarization-card">
+      <div
         className={styles.header}
         onClick={toggleOpen}
         role="button"
@@ -310,9 +317,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         }}
         data-testid="summarization-card-header"
       >
-        <Flex className={styles.headerLeft}>
+        <div className={styles.headerLeft}>
           <span className={styles.icon} aria-hidden>
-            {meta.icon}
+            <Icon icon={meta.icon} size="sm" />
           </span>
           <span
             className={`${styles.tierBadge} ${meta.badgeClass}`}
@@ -332,11 +339,13 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           {showHeaderMetrics && tokenLabel && (
             <span className={styles.tokenLabel}>· {tokenLabel}</span>
           )}
-        </Flex>
-        <span className={styles.toggle}>{open ? "▲" : "▼"}</span>
-      </Flex>
+        </div>
+        <span className={styles.toggle}>
+          <Icon icon={open ? ChevronUp : ChevronDown} size="sm" tone="muted" />
+        </span>
+      </div>
       {hasReportSummary && (
-        <Box
+        <div
           className={styles.eventSummary}
           data-testid="summarization-card-summary"
         >
@@ -348,24 +357,33 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
             </p>
           )}
           <StatsGrid stats={reportSummaryStats} />
-        </Box>
+        </div>
       )}
       {open && (
-        <Box
+        <div
           id={bodyId}
           className={styles.body}
           data-testid="summarization-card-body"
         >
-          {hasMetadataReport ? (
-            <span>Details are shown in the compact report above.</span>
-          ) : contentText.length > 0 ? (
-            <ToolMarkdown>{contentText}</ToolMarkdown>
-          ) : (
-            <span>No details available.</span>
+          {hasContentText && <ToolMarkdown>{contentText}</ToolMarkdown>}
+          {pairedSummaryContent.length > 0 && (
+            <>
+              <p className={styles.description}>
+                <strong>Model summary</strong>
+              </p>
+              <ToolMarkdown>{pairedSummaryContent}</ToolMarkdown>
+            </>
           )}
+          {reportStats && reportStats.length > 0 && (
+            <StatsGrid stats={reportStats} />
+          )}
+          {!hasContentText &&
+            pairedSummaryContent.length === 0 &&
+            !reportStats &&
+            !bodyStats && <span>No details available.</span>}
           {bodyStats && bodyStats.length > 0 && <StatsGrid stats={bodyStats} />}
-        </Box>
+        </div>
       )}
-    </Box>
+    </div>
   );
 };

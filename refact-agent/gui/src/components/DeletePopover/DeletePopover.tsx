@@ -1,16 +1,8 @@
 import { FC } from "react";
-import {
-  Button,
-  Popover,
-  Box,
-  Flex,
-  Heading,
-  Text,
-  IconButton,
-} from "@radix-ui/themes";
+import { Trash2 } from "lucide-react";
 import classNames from "classnames";
+import { Button, ButtonGroup, IconButton, Popover } from "../ui";
 import styles from "./DeletePopover.module.css";
-import { TrashIcon } from "@radix-ui/react-icons";
 
 export type DeletePopoverProps = {
   isDisabled: boolean;
@@ -28,57 +20,48 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
   isDisabled,
 }) => {
   return (
-    <Popover.Root>
-      <Popover.Trigger>
+    <Popover>
+      <Popover.Trigger asChild>
         <IconButton
-          color="red"
-          variant="outline"
+          aria-label="Delete configuration data"
+          icon={Trash2}
+          variant="danger"
           type="button"
-          size="2"
-          title={"Delete configuration data"}
+          size="md"
+          title="Delete configuration data"
           className={classNames({
             [styles.disabledButton]: isDeleting || isDisabled,
           })}
           disabled={isDeleting || isDisabled}
-        >
-          <TrashIcon width={20} height={20} />
-        </IconButton>
+        />
       </Popover.Trigger>
-      <Popover.Content width="360px">
-        <Flex gap="3">
-          <Box flexGrow="1">
-            <Flex gap="4" justify="between" direction="column">
-              <Flex direction="column" gap="2">
-                <Heading as="h4" size="4">
-                  Destructive action
-                </Heading>
-                <Text size="2">
-                  Do you really want to delete {itemName}
-                  &apos;s configuration data?
-                </Text>
-              </Flex>
+      <Popover.Content maxWidth="360px">
+        <div className={styles.content}>
+          <div className={styles.copy}>
+            <h4 className={styles.title}>Destructive action</h4>
+            <p className={styles.description}>
+              Do you really want to delete {itemName}&apos;s configuration data?
+            </p>
+          </div>
 
-              <Flex gap="3">
-                <Popover.Close>
-                  <Button
-                    size="2"
-                    variant="solid"
-                    color="red"
-                    onClick={() => handleDelete(deleteBy)}
-                  >
-                    Delete
-                  </Button>
-                </Popover.Close>
-                <Popover.Close>
-                  <Button size="2" variant="soft" color="gray">
-                    Cancel
-                  </Button>
-                </Popover.Close>
-              </Flex>
-            </Flex>
-          </Box>
-        </Flex>
+          <ButtonGroup>
+            <Popover.Close asChild>
+              <Button
+                size="md"
+                variant="danger"
+                onClick={() => handleDelete(deleteBy)}
+              >
+                Delete
+              </Button>
+            </Popover.Close>
+            <Popover.Close asChild>
+              <Button size="md" variant="soft">
+                Cancel
+              </Button>
+            </Popover.Close>
+          </ButtonGroup>
+        </div>
       </Popover.Content>
-    </Popover.Root>
+    </Popover>
   );
 };

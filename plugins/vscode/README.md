@@ -1,6 +1,6 @@
 # Refact VS Code Plugin
 
-This VS Code extension is part of the [smallcloudai/refact](https://github.com/smallcloudai/refact) monorepo.
+This VS Code extension is part of the [JegernOUTT/refact](https://github.com/JegernOUTT/refact) monorepo.
 
 ## Development
 
@@ -21,7 +21,7 @@ npm run build
 npm pack
 ```
 
-The extension packages the local `refact-lsp` engine and `refact-chat-js` UI artifacts through the monorepo GitHub Actions workflows.
+The extension packages the local `refact` engine and `refact-chat-js` UI artifacts through the monorepo GitHub Actions workflows.
 
 ## Repository history
 
@@ -29,4 +29,4 @@ This code was migrated from the archived standalone VS Code plugin repository. H
 
 ## Issues
 
-Please report issues in the monorepo: <https://github.com/smallcloudai/refact/issues>.
+Please report issues in the monorepo: <https://github.com/JegernOUTT/refact/issues>.

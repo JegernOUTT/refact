@@ -4,9 +4,9 @@ import {
   HoverCard,
   Text,
   Box,
-  Tabs,
   Popover,
-} from "@radix-ui/themes";
+} from "../LongTailPrimitives";
+import { Tabs } from "../ui";
 import classNames from "classnames";
 import React, { useMemo, useState } from "react";
 
@@ -171,7 +171,7 @@ const UsdHoverContent: React.FC<{
   cacheCreationUsd,
 }) => {
   return (
-    <Flex direction="column" gap="2" p="1">
+    <Flex direction="column" gap="2">
       <Flex align="center" justify="between" width="100%" gap="4">
         <Text size="2" weight="bold">
           Total cost
@@ -215,7 +215,7 @@ const TokensHoverContent: React.FC<{
       : 0;
 
   return (
-    <Flex direction="column" gap="2" p="1">
+    <Flex direction="column" gap="2">
       <Flex align="center" justify="between" width="100%" gap="4">
         <Text size="2" weight="bold">
           Context usage
@@ -226,7 +226,7 @@ const TokensHoverContent: React.FC<{
       <TokenDisplay label="Maximum" value={maxContextTokens} />
       {(inputTokens > 0 || outputTokens > 0) && (
         <>
-          <Box my="1" style={{ borderTop: "1px solid var(--gray-a6)" }} />
+          <Box my="1" style={{ borderTop: "1px solid var(--rf-border)" }} />
           <Text size="1" weight="bold" color="gray">
             Total tokens
           </Text>
@@ -280,12 +280,14 @@ const DefaultHoverTriggerContent: React.FC<{
 }) => {
   const hasUsd = totalUsd !== undefined && totalUsd > 0;
   const showUsd = hasUsd;
+  const [tokenDetailsTab, setTokenDetailsTab] = useState("summary");
+  const tokenDetailsActiveIndex = tokenDetailsTab === "map" ? 1 : 0;
 
   return (
     <Flex align="center" gap="3">
       {showUsd && (
         <HoverCard.Root>
-          <HoverCard.Trigger>
+          <HoverCard.Trigger asChild>
             <Flex align="center" gap="1" style={{ cursor: "default" }}>
               <Text size="1">{formatUsd(totalUsd)}</Text>
             </Flex>
@@ -302,7 +304,7 @@ const DefaultHoverTriggerContent: React.FC<{
         </HoverCard.Root>
       )}
       <Popover.Root>
-        <Popover.Trigger>
+        <Popover.Trigger asChild>
           <Flex align="center" gap="1" style={{ cursor: "pointer" }}>
             <CircularProgress
               value={maxContextTokens > 0 ? currentSessionTokens : 0}
@@ -319,29 +321,33 @@ const DefaultHoverTriggerContent: React.FC<{
           size="1"
           side="top"
           align="center"
-          style={{ minWidth: "280px" }}
+          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+          maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
+          className={styles.tokenDetailsPopover}
         >
-          <Tabs.Root defaultValue="summary">
-            <Tabs.List size="1">
+          <Tabs value={tokenDetailsTab} onValueChange={setTokenDetailsTab}>
+            <Tabs.List
+              activeIndex={tokenDetailsActiveIndex}
+              itemCount={2}
+              className={styles.tokenDetailsTabsList}
+            >
               <Tabs.Trigger value="summary">Summary</Tabs.Trigger>
               <Tabs.Trigger value="map">Breakdown</Tabs.Trigger>
             </Tabs.List>
-            <Box pt="2">
-              <Tabs.Content value="summary">
-                <TokensHoverContent
-                  currentSessionTokens={currentSessionTokens}
-                  maxContextTokens={maxContextTokens}
-                  inputTokens={inputTokens}
-                  outputTokens={outputTokens}
-                  cacheReadTokens={cacheReadTokens}
-                  cacheCreationTokens={cacheCreationTokens}
-                />
-              </Tabs.Content>
-              <Tabs.Content value="map">
-                <TokensMapContent tokenMap={tokenMap} />
-              </Tabs.Content>
-            </Box>
-          </Tabs.Root>
+            <Tabs.Content value="summary">
+              <TokensHoverContent
+                currentSessionTokens={currentSessionTokens}
+                maxContextTokens={maxContextTokens}
+                inputTokens={inputTokens}
+                outputTokens={outputTokens}
+                cacheReadTokens={cacheReadTokens}
+                cacheCreationTokens={cacheCreationTokens}
+              />
+            </Tabs.Content>
+            <Tabs.Content value="map">
+              <TokensMapContent tokenMap={tokenMap} />
+            </Tabs.Content>
+          </Tabs>
         </Popover.Content>
       </Popover.Root>
     </Flex>
@@ -477,7 +483,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
   // For inline usage (chat form), keep the HoverCard with detailed info
   return (
     <HoverCard.Root open={open} onOpenChange={setOpen}>
-      <HoverCard.Trigger>
+      <HoverCard.Trigger asChild>
         <Card
           className={classNames(styles.usageCounterContainer, {
             [styles.usageCounterContainerInline]: isInline,

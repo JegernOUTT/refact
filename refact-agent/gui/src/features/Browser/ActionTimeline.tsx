@@ -46,7 +46,11 @@ const TimelineEntryItem = ({ entry }: TimelineEntryRowProps) => {
 
   return (
     <div
-      className={styles.timelineEntry}
+      className={classNames(
+        styles.timelineEntry,
+        "rf-enter-rise",
+        hasDetails && "rf-pressable",
+      )}
       onClick={handleClick}
       role="button"
       tabIndex={0}
@@ -137,7 +141,10 @@ export const ActionTimeline = ({ chatId }: ActionTimelineProps) => {
   );
 
   return (
-    <div className={styles.timelineContainer} data-testid="action-timeline">
+    <div
+      className={classNames(styles.timelineContainer, "rf-enter")}
+      data-testid="action-timeline"
+    >
       <div className={styles.timelineHeader}>
         <span className={styles.timelineTitle}>Timeline</span>
         <div className={styles.filterGroup}>
@@ -145,7 +152,7 @@ export const ActionTimeline = ({ chatId }: ActionTimelineProps) => {
             <button
               key={opt.value}
               type="button"
-              className={classNames(styles.filterButton, {
+              className={classNames(styles.filterButton, "rf-pressable", {
                 [styles.filterButtonActive]: filterSource === opt.value,
               })}
               onClick={() => handleSourceFilter(opt.value)}
@@ -157,7 +164,7 @@ export const ActionTimeline = ({ chatId }: ActionTimelineProps) => {
             <>
               <button
                 type="button"
-                className={classNames(styles.filterButton, {
+                className={classNames(styles.filterButton, "rf-pressable", {
                   [styles.filterButtonActive]: filterType === null,
                 })}
                 onClick={() => handleTypeFilter(null)}
@@ -168,7 +175,7 @@ export const ActionTimeline = ({ chatId }: ActionTimelineProps) => {
                 <button
                   key={t}
                   type="button"
-                  className={classNames(styles.filterButton, {
+                  className={classNames(styles.filterButton, "rf-pressable", {
                     [styles.filterButtonActive]: filterType === t,
                   })}
                   onClick={() => handleTypeFilter(t)}
@@ -180,7 +187,10 @@ export const ActionTimeline = ({ chatId }: ActionTimelineProps) => {
           )}
         </div>
       </div>
-      <div className={styles.timelineList} ref={listRef}>
+      <div
+        className={classNames(styles.timelineList, "rf-stagger")}
+        ref={listRef}
+      >
         {filtered.length === 0 ? (
           <div className={styles.emptyTimeline}>No timeline events</div>
         ) : (

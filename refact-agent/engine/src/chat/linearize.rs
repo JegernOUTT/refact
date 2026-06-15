@@ -44,11 +44,20 @@ fn source_preserving_summary_id_sets(
 ) -> (HashSet<String>, HashSet<String>) {
     let mut suppressed = HashSet::new();
     let mut preserved = HashSet::new();
-    for compression in messages
+    for message in messages
         .iter()
         .filter(|message| is_source_preserving_summary(message))
-        .filter_map(|message| message.extra.get("compression"))
     {
+        let Some(compression) = message.extra.get("compression") else {
+            continue;
+        };
+        // Suppression is membership-based on message ids. Engine-side compaction
+        // (tool-output truncation, context-file dedup, history repair) legitimately
+        // mutates source messages in place after summarization, so the stored
+        // `source_hash` is diagnostic metadata and must never gate suppression:
+        // a hash gate silently disables compression exactly when the context is
+        // under pressure, which explodes the request and forces duplicate
+        // re-summarization of the same segment.
         collect_compression_ids(
             compression,
             "summarized_source_message_ids",
@@ -114,7 +123,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
     let (source_preserving_suppressed_ids, source_preserving_preserved_ids) =
         source_preserving_summary_id_sets(&messages);
     if summaries.is_empty() {
-        return messages
+        let mut result: Vec<ChatMessage> = messages
             .into_iter()
             .filter(|message| !is_linearization_only_message(message))
             .filter(|message| {
@@ -125,6 +134,8 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
                 )
             })
             .collect();
+        detach_orphaned_context_files(&mut result);
+        return result;
     }
 
     let mut suppressed: HashSet<usize> = HashSet::new();
@@ -189,7 +200,29 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         result.push(msg.clone());
     }
 
+    detach_orphaned_context_files(&mut result);
     result
+}
+
+/// Preserved context files survive linearization while the assistant tool call
+/// that produced them is suppressed by a summary. Clear the dangling
+/// `tool_call_id` so downstream history repair does not drop them as orphaned
+/// tool results.
+fn detach_orphaned_context_files(messages: &mut [ChatMessage]) {
+    let live_call_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .map(|tool_call| tool_call.id.clone())
+        .collect();
+    for message in messages.iter_mut() {
+        if message.role == "context_file"
+            && !message.tool_call_id.is_empty()
+            && !live_call_ids.contains(&message.tool_call_id)
+        {
+            message.tool_call_id = String::new();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +290,8 @@ mod tests {
         summarized_ids: &[&str],
         preserved_ids: &[&str],
     ) -> ChatMessage {
+        // No `source_hash` on purpose: hash-less summaries follow the legacy
+        // trust-the-ids suppression path. Hash validation cases set it explicitly.
         let mut summary = summarization(content, None);
         summary.extra.insert(
             "compression".to_string(),
@@ -264,7 +299,6 @@ mod tests {
                 "schema_version": 3,
                 "kind": "llm_segment_summary",
                 "insert_mode": "source_preserving",
-                "source_hash": "hash",
                 "source_message_ids": summarized_ids,
                 "summarized_source_message_ids": summarized_ids,
                 "preserved_source_message_ids": preserved_ids,
@@ -275,9 +309,165 @@ mod tests {
         summary
     }
 
+    fn with_source_hash(mut summary: ChatMessage, source_hash: &str) -> ChatMessage {
+        if let Some(compression) = summary.extra.get_mut("compression") {
+            if let Some(obj) = compression.as_object_mut() {
+                obj.insert(
+                    "source_hash".to_string(),
+                    serde_json::Value::String(source_hash.to_string()),
+                );
+            }
+        }
+        summary
+    }
+
+    #[test]
+    fn keeps_summary_and_suppresses_sources_when_hash_matches() {
+        let source = with_id(assistant("heavy old answer"), "src-1");
+        let valid_hash =
+            crate::chat::summarization::source_hash_for_messages(std::slice::from_ref(&source));
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("compact summary", &["src-1"], &[]),
+                &valid_hash,
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"src-1"));
+        assert!(ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn suppresses_sources_even_when_content_mutated_after_summarization() {
+        let source = with_id(assistant("edited answer"), "src-1");
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("compact summary", &["src-1"], &[]),
+                "definitely-not-the-current-hash",
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        // Deterministic compaction and history repair mutate sources in place;
+        // a stale hash must not disable suppression or drop the summary.
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"src-1"));
+        assert!(ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn keeps_summary_visible_when_sources_are_missing() {
+        let summary = with_id(
+            with_source_hash(
+                source_preserving_summary("carried summary", &["gone-src"], &[]),
+                "some-hash",
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        // A summary carried without its sources (handoff/branch) stays on the wire
+        // as context; it simply suppresses nothing.
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(ids.contains(&"summary-1"));
+        assert!(ids.contains(&"u-1"));
+        assert!(ids.contains(&"u-2"));
+    }
+
     fn with_id(mut message: ChatMessage, id: &str) -> ChatMessage {
         message.message_id = id.to_string();
         message
+    }
+
+    #[test]
+    fn preserved_context_file_survives_and_detaches_from_suppressed_call() {
+        let mut call = assistant("calling cat");
+        call.tool_calls = Some(vec![crate::call_validation::ChatToolCall {
+            id: "call-1".to_string(),
+            function: crate::call_validation::ChatToolFunction {
+                name: "cat".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            index: None,
+            extra_content: None,
+        }]);
+        let call = with_id(call, "src-call");
+        let mut tool_result = ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText("paths found".to_string()),
+            tool_call_id: "call-1".to_string(),
+            ..Default::default()
+        };
+        tool_result.message_id = "src-tool".to_string();
+        let mut preserved_file = context_file("important file body");
+        preserved_file.tool_call_id = "call-1".to_string();
+        let preserved_file = with_id(preserved_file, "src-file");
+        let summary = with_id(
+            source_preserving_summary(
+                "summary of the work",
+                &["src-call", "src-tool", "src-file"],
+                &["src-file"],
+            ),
+            "summary-1",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            call,
+            tool_result,
+            preserved_file,
+            summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert!(!ids.contains(&"src-call"));
+        assert!(!ids.contains(&"src-tool"));
+        assert!(ids.contains(&"src-file"));
+        assert!(ids.contains(&"summary-1"));
+        let kept_file = result
+            .iter()
+            .find(|message| message.message_id == "src-file")
+            .unwrap();
+        assert!(kept_file.tool_call_id.is_empty());
     }
 
     fn context_file(text: &str) -> ChatMessage {

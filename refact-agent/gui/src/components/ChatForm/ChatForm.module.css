@@ -1,103 +1,87 @@
 .button {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
+}
+
+.chatFormShell {
+  margin-top: var(--rf-space-1);
+}
+
+.composerRoot {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.composerStack {
+  display: flex;
+  width: 100%;
+  flex: 1;
+  flex-direction: column;
+  align-self: stretch;
+}
+
+.helpText {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--rf-space-3);
+  color: var(--rf-color-fg);
 }
 
 .chatForm {
-  border: 1px solid var(--gray-a4);
-  border-radius: 6px;
   flex-shrink: 0;
   overflow: hidden;
-  background-color: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-card);
+  background: transparent;
 }
 
 .chatFormMain {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease;
-}
-
-.chatFormCollapsed {
-  border-color: var(--gray-a3);
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .chatFormCollapsed:hover,
-.chatFormCollapsed:focus-within {
-  border-color: var(--gray-a5);
-}
-
-.chatFormExpanded,
+.chatFormCollapsed:focus-within,
 .chatFormExpanded:focus-within {
-  border-color: var(--accent-a7);
+  border-color: var(--rf-border-strong);
 }
 
-/* Main chat input - transparent/subtle appearance */
-.chatFormMain {
-  background-color: transparent;
-  border: none;
+@media (prefers-reduced-transparency: reduce) {
+  .chatFormMain {
+    backdrop-filter: none;
+  }
+}
+
+/* Embedded composer: the parent dock group owns the glass panel chrome. */
+.chatFormEmbedded,
+.chatFormEmbedded:hover,
+.chatFormEmbedded:focus-within {
+  border-color: transparent;
+  background: transparent;
   box-shadow: none;
+  backdrop-filter: none;
 }
 
-/* Remove the blue focus border - keep border consistent */
-.chatFormMain:focus-within {
-  border-color: var(--gray-a3);
-  box-shadow: none;
-}
-
-.chatFormExpanded.chatFormMain:focus-within {
-  border-color: var(--accent-a7);
-}
-
-/* Remove Radix's internal focus ring/chrome that creates thick border effect */
-.chatFormMain :global(.rt-TextAreaRoot),
-.chatFormMain :global(.rt-TextAreaRoot:focus),
-.chatFormMain :global(.rt-TextAreaRoot:focus-within),
-.chatFormMain :global(.rt-TextAreaRoot:focus-visible) {
-  box-shadow: none !important;
-  outline: none !important;
-}
-
-.chatFormMain :global(.rt-TextAreaInput),
-.chatFormMain :global(.rt-TextAreaInput:focus),
-.chatFormMain :global(.rt-TextAreaInput:focus-visible) {
-  box-shadow: none !important;
-  outline: none !important;
-}
-
-/* Remove any ScrollArea focus rings */
-.chatFormMain :global(.rt-ScrollAreaViewportFocusRing) {
-  display: none !important;
-}
-
-/* Make TextArea transparent - override Radix variant-surface background */
-.chatForm :global(.rt-TextAreaRoot),
-.chatForm :global(.rt-TextAreaRoot.rt-variant-surface),
-.chatForm__form :global(.rt-TextAreaRoot),
-.chatForm__form :global(.rt-TextAreaRoot.rt-variant-surface),
-.textareaWrapper :global(.rt-TextAreaRoot),
-.textareaWrapper :global(.rt-TextAreaRoot.rt-variant-surface) {
-  background-color: transparent !important;
-  background: transparent !important;
-  --text-area-background-color: transparent !important;
-  --color-surface: transparent !important;
-  box-shadow: none !important;
-  border: none !important;
-}
-
-/* Thinner border for edit mode (RetryForm) - matches user message bubble style */
 .chatFormCompact {
-  border: 1px solid var(--gray-a3);
-  border-radius: var(--radius-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
 }
 
 .textareaWrapper {
   position: relative;
-  --chat-input-padding: var(--space-3);
+  --chat-input-padding: var(--rf-space-3);
 }
 
 .chatForm__form {
   transition:
-    min-height 220ms cubic-bezier(0.2, 0, 0, 1),
-    border-color 180ms ease;
+    min-height var(--rf-dur-med) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .expandedComposerContent {
@@ -110,7 +94,7 @@
 .expandedComposerContentInner {
   min-height: 0;
   overflow: hidden;
-  transition: max-height 220ms cubic-bezier(0.2, 0, 0, 1);
+  transition: max-height var(--rf-dur-med) var(--rf-ease-standard);
   will-change: max-height;
 }
 
@@ -119,11 +103,12 @@
 }
 
 .chatFormCollapsed .expandedComposerContentInner {
-  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
+  max-height: calc(2 * var(--rf-line) * var(--rf-text-3) + var(--rf-space-2));
 }
 
 .chatFormExpanded .expandedComposerContentInner {
-  max-height: 220px;
+  max-height: none;
+  overflow: visible;
 }
 
 .chatFormCollapsed .inputHeader {
@@ -131,44 +116,75 @@
 }
 
 .chatFormExpanded .inputHeader {
-  animation: composerHeaderFadeIn 160ms ease both;
+  animation: composerHeaderFadeIn var(--rf-dur-fast) var(--rf-ease-standard)
+    both;
 }
 
-.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
+.chatFormCollapsed .textareaWrapper textarea {
   min-height: 0;
-  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
-  padding: var(--space-1) var(--chat-input-padding);
-  overflow: hidden !important;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
+  max-height: calc(2 * var(--rf-line) * var(--rf-text-3) + var(--rf-space-2));
+  padding: var(--rf-space-1) var(--chat-input-padding);
+  display: block;
+  overflow: hidden;
   resize: none;
 }
 
-.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput::placeholder) {
+.chatFormCollapsed .textareaWrapper textarea::placeholder {
   opacity: 0.7;
 }
 
-.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaRoot) {
-  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
-}
-
-.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
+.chatFormCollapsed .textareaWrapper textarea {
   mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
-.collapsedStatusControl {
-  display: none;
+.actionControlsSwap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.controlsSwapItem {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 340px;
+  overflow: hidden;
+  /* At max-width: 0 the hidden set's text would wrap char-by-char into a
+     tall vertical stack and stretch the controls row; keep it one line. */
+  white-space: nowrap;
+  transition:
+    max-width var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-med) var(--rf-ease-standard),
+    visibility 0s linear;
+}
+
+:where(.controlsSwapItem > span) {
+  display: inline-flex;
+  min-width: 0;
   flex-shrink: 0;
 }
 
+.chatFormCollapsed .expandedActionsSet,
+.chatFormExpanded .collapsedStatusSet {
+  max-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    max-width var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    visibility 0s linear var(--rf-dur-med);
+}
+
 .inputHeader {
-  padding: var(--space-2) var(--chat-input-padding);
-  padding-bottom: var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-2) var(--chat-input-padding);
+  padding-bottom: var(--rf-space-2);
 }
 
 .inputHeader > *:empty {
@@ -178,7 +194,7 @@
 @keyframes composerHeaderFadeIn {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(var(--rf-space-1));
   }
   to {
     opacity: 1;
@@ -186,32 +202,36 @@
   }
 }
 
-.textareaWrapper :global(.rt-TextAreaInput) {
+.textareaWrapper textarea {
   min-height: 100px;
   padding: var(--chat-input-padding);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
-.chatFormExpanded .textareaWrapper :global(.rt-TextAreaInput) {
+.textareaWrapper textarea:focus,
+.textareaWrapper textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.chatFormExpanded .textareaWrapper textarea {
   display: block;
   max-height: 50vh;
   max-height: 50dvh;
-  -webkit-line-clamp: initial;
-  line-clamp: initial;
-}
-
-.chatFormExpanded .textareaWrapper :global(.rt-TextAreaInput) {
   mask-image: none;
 }
 
 .file_name_ellipsis_rtl {
   display: inline;
-  vertical-align: middle;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  direction: rtl;
   max-width: 100%;
-  line-height: var(--line-height-2, 20px);
+  overflow: hidden;
+  direction: rtl;
+  line-height: var(--rf-line);
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .file_name_ellipsis_ltr {
@@ -219,20 +239,20 @@
 }
 
 .removeFileButton {
-  background-color: transparent;
-  padding: 0;
   height: unset;
-  font-size: unset;
-  vertical-align: unset;
-  line-height: var(--line-height-1);
   margin: 0;
-  margin-right: var(--space-1);
+  margin-right: var(--rf-space-1);
+  padding: 0;
+  background-color: transparent;
+  font-size: unset;
+  line-height: var(--rf-line-tight);
+  vertical-align: unset;
 }
 
 .checkbox_container {
   display: flex;
+  gap: var(--rf-space-2);
   white-space: nowrap;
-  gap: var(--space-2);
 }
 
 .controls {
@@ -240,7 +260,7 @@
 }
 
 .data_list {
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .data_list__value {
@@ -259,40 +279,52 @@
 
 .bottomActionControls {
   flex: 0 0 auto;
-  margin-left: auto;
   max-width: max-content;
+  margin-left: auto;
 }
 
-.topStatusControls > span,
-.bottomActionControls > span,
-.bottomModelControl,
-.bottomModeControl,
-.bottomWorkspaceControl {
+:where(
+    .topStatusControls > span,
+    .bottomActionControls > span,
+    .bottomModelControl,
+    .bottomModeControl,
+    .bottomWorkspaceControl
+  ) {
   display: inline-flex;
   min-width: 0;
 }
 
-.topStatusControls > span,
-.bottomActionControls > span {
+:where(.topStatusControls > span, .bottomActionControls > span) {
   flex-shrink: 0;
 }
 
 .bottomControlsRow {
   overflow: hidden;
+  transition: padding var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .chatFormCollapsed .bottomControlsRow {
-  padding-top: var(--space-1);
-}
-
-.bottomControlsRow {
-  transition: padding 180ms ease;
+  padding-top: var(--rf-space-1);
 }
 
 .bottomModelControl,
 .bottomModeControl,
 .bottomWorkspaceControl {
   flex: 0 1 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chatFormMain,
+  .chatForm__form,
+  .expandedComposerContentInner,
+  .bottomControlsRow,
+  .controlsSwapItem {
+    transition: none;
+  }
+
+  .chatFormExpanded .inputHeader {
+    animation: none;
+  }
 }
 
 @container (max-width: 520px) {
@@ -337,6 +369,26 @@
 
 @container (max-width: 260px) {
   .hideTopCompressLast {
+    display: none;
+  }
+}
+
+@container (max-width: 500px) {
+  .chatFormCollapsed .bottomWorkspaceControl {
+    display: none;
+  }
+}
+
+@container (max-width: 440px) {
+  .chatFormCollapsed .bottomModeControl,
+  .hideCollapsedStatusFirst {
+    display: none;
+  }
+}
+
+@container (max-width: 380px) {
+  .chatFormCollapsed .bottomModelControl,
+  .hideCollapsedStatusSecond {
     display: none;
   }
 }

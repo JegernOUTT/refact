@@ -6,8 +6,8 @@ use crate::app_state::AppState;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
 use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest, EnqueueCommandOutcome};
+use crate::postprocessing::pp_command_output::OutputFilter;
 
-const SUMMARY_LIMIT: usize = 1500;
 const DEFERRED_RETRY_AFTER: TimeDelta = TimeDelta::seconds(10);
 
 pub async fn push_completion_to_parent(
@@ -118,7 +118,7 @@ fn already_pushed(record: &BackgroundAgent) -> bool {
 }
 
 fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::ChatMessage {
-    event(
+    let mut message = event(
         EventSubkind::SystemNotice,
         "agents.spawn",
         serde_json::json!({
@@ -140,7 +140,10 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "last_update_at": record.last_update_at,
         }),
         build_push_message(record),
-    )
+    );
+    message.preserve = Some(true);
+    message.output_filter = Some(OutputFilter::no_limits());
+    message
 }
 
 fn build_push_message(record: &BackgroundAgent) -> String {
@@ -180,24 +183,15 @@ fn build_push_message(record: &BackgroundAgent) -> String {
     match record.status {
         BgAgentStatus::Completed => {
             lines.push("Summary:".to_string());
-            lines.push(truncate_chars(
-                record.result_summary.as_deref().unwrap_or(""),
-                SUMMARY_LIMIT,
-            ));
+            lines.push(record.result_summary.as_deref().unwrap_or("").to_string());
         }
         BgAgentStatus::Failed => {
             lines.push("Error:".to_string());
-            lines.push(truncate_chars(
-                record.error.as_deref().unwrap_or(""),
-                SUMMARY_LIMIT,
-            ));
+            lines.push(record.error.as_deref().unwrap_or("").to_string());
         }
         BgAgentStatus::Cancelled => {
             lines.push("Reason:".to_string());
-            lines.push(truncate_chars(
-                record.error.as_deref().unwrap_or("cancelled"),
-                SUMMARY_LIMIT,
-            ));
+            lines.push(record.error.as_deref().unwrap_or("cancelled").to_string());
         }
         BgAgentStatus::Interrupted => {
             lines.push(
@@ -207,30 +201,16 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         }
         BgAgentStatus::Queued | BgAgentStatus::Running | BgAgentStatus::WaitingForApproval => {
             lines.push("Summary:".to_string());
-            lines.push(truncate_chars(
-                record.progress.as_deref().unwrap_or(""),
-                SUMMARY_LIMIT,
-            ));
+            lines.push(record.progress.as_deref().unwrap_or("").to_string());
         }
     }
 
     lines.push(String::new());
     lines.push(format!(
-        "(call agent_result(agent_id=\"{}\") for the full report, or open the child trajectory)",
+        "(call agent_result(agent_id=\"{}\", include_details=true) for stored payload/details, or open the child trajectory)",
         record.agent_id
     ));
     lines.join("\n")
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for ch in text.chars().take(max_chars) {
-        out.push(ch);
-    }
-    if text.chars().count() > max_chars {
-        out.push('…');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -290,5 +270,58 @@ mod tests {
         assert!(message.contains("[background subagent finished]"));
         assert!(!message.contains("Edited files:"));
         assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
+    }
+
+    #[tokio::test]
+    async fn push_message_preserves_long_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry =
+            crate::agents::registry::BackgroundAgentRegistry::new(temp.path().to_path_buf())
+                .await
+                .unwrap();
+        let (record, _, _) = registry
+            .create(CreateAgentRequest {
+                parent_chat_id: "parent".to_string(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Subagent,
+                config_name: "subagent".to_string(),
+                title: "Long report".to_string(),
+                prompt: "prompt".to_string(),
+                target_files: Vec::new(),
+                model: "model".to_string(),
+            })
+            .await
+            .unwrap();
+        let summary = "full-report-line\n".repeat(200);
+        let record = registry
+            .mark_completed(
+                &record.agent_id,
+                crate::agents::types::AgentCompletion {
+                    result_summary: summary.clone(),
+                    edited_files: Vec::new(),
+                    diff_summary: None,
+                    conflict_summary: None,
+                    child_chat_id: Some("child".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let message = build_push_message(&record);
+
+        assert!(message.contains(&summary));
+        assert!(!message.contains('…'));
+
+        let event = build_completion_event(&record);
+        assert!(event.content.content_text_only().contains(&summary));
+        assert_eq!(event.preserve, Some(true));
+        assert_eq!(
+            event
+                .output_filter
+                .as_ref()
+                .map(|filter| filter.limit_chars),
+            Some(usize::MAX)
+        );
     }
 }

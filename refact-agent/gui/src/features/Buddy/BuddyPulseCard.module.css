@@ -1,48 +1,49 @@
 .card {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-2) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--rf-space-2);
+  height: 100%;
   min-width: 0;
-}
-
-.label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
-.loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-2);
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--rf-panel-pad);
 }
 
 .humor {
-  color: var(--gray-11);
+  flex-shrink: 0;
+  min-width: 0;
+  color: var(--rf-color-muted);
   font-style: italic;
+  overflow-wrap: anywhere;
 }
 
 .rows {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .row {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   min-width: 0;
+  padding-block: var(--rf-space-2xs);
+}
+
+.row + .row {
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
 .rowLabel {
   flex-shrink: 0;
-  min-width: 80px;
+  min-width: 92px;
 }
 
 .rowValue {
@@ -51,4 +52,30 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rowDot {
+  vertical-align: middle;
+}
+
+@media (max-width: 360px) {
+  .card {
+    padding: var(--rf-panel-pad-compact);
+  }
+
+  .row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .rowLabel {
+    min-width: 0;
+  }
+
+  .rowValue {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }

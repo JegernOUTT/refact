@@ -1,8 +1,8 @@
-import { Box, TextField, TextArea, Text, Switch } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FieldSwitch, FieldText, FieldTextarea } from "../ui";
+import styles from "./CustomFieldsAndWidgets.module.css";
 
-// Custom Input Field
 export const CustomInputField = ({
   value,
   placeholder,
@@ -10,7 +10,6 @@ export const CustomInputField = ({
   id,
   name,
   size = "long",
-  color = "gray",
   onChange,
   wasInteracted = false,
 }: {
@@ -35,11 +34,11 @@ export const CustomInputField = ({
   placeholder?: string;
   size?: string;
   width?: string;
-  color?: TextField.RootProps["color"];
+  color?: string;
   onChange?: (value: string) => void;
 }) => {
   const wasInitialized = useRef(wasInteracted);
-  // a little hacky, but in this way we avoid of use of formData
+
   useEffect(() => {
     if (!wasInitialized.current && onChange) {
       onChange(value ?? "");
@@ -48,78 +47,55 @@ export const CustomInputField = ({
   }, [onChange, value]);
 
   return (
-    <Box width="100%">
+    <div className={styles.fieldWrap}>
       {size !== "multiline" ? (
-        <TextField.Root
+        <FieldText
           id={id}
           name={name}
           type={type}
-          size="2"
-          value={value}
-          variant="soft"
-          color={color}
+          value={value ?? ""}
           placeholder={placeholder}
-          onChange={(e) => onChange?.(e.target.value)}
+          onChange={(nextValue) => onChange?.(nextValue)}
         />
       ) : (
-        <TextArea
+        <FieldTextarea
           id={id}
           name={name}
-          size="2"
           rows={3}
-          value={value}
-          variant="soft"
-          color="gray"
+          value={value ?? ""}
           placeholder={placeholder}
+          onChange={(nextValue) => onChange?.(nextValue)}
         />
       )}
-    </Box>
+    </div>
   );
 };
 
 export const CustomLabel = ({
   label,
   htmlFor,
-  mt,
 }: {
   label: string;
   htmlFor?: string;
   mt?: string;
 }) => {
   return (
-    <Text
-      as="label"
-      htmlFor={htmlFor}
-      size="2"
-      weight="medium"
-      mt={mt ? mt : "0"}
-      style={{
-        display: "block",
-      }}
-    >
-      {label}
-    </Text>
+    <span className={styles.label}>
+      <label htmlFor={htmlFor}>{label}</label>
+    </span>
   );
 };
 
 export const CustomDescriptionField = ({
   children = "",
-  mb = "2",
 }: {
   children?: string;
   mb?: string;
 }) => {
   return (
-    <Text
-      size="1"
-      mb={{
-        initial: "0",
-        xs: mb,
-      }}
-      style={{ display: "block", opacity: 0.85 }}
-    >
+    <span className={styles.description}>
       <Markdown>{children}</Markdown>
-    </Text>
+    </span>
   );
 };
 
@@ -145,16 +121,14 @@ export const CustomBoolField = ({
   );
 
   return (
-    <Box>
-      <Switch
+    <div>
+      <FieldSwitch
         name={name}
         id={id}
-        size="2"
         checked={checked}
-        defaultChecked={value}
-        onCheckedChange={onCheckedChange}
+        onChange={onCheckedChange}
       />
       <input type="hidden" name={name} value={checked ? "on" : "off"} />
-    </Box>
+    </div>
   );
 };

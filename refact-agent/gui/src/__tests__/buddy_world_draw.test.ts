@@ -6,6 +6,7 @@ import {
   drawStarField,
   shouldDrawStarField,
 } from "../features/Buddy/buddyWorldDrawAtmosphere";
+import { drawLanterns } from "../features/Buddy/buddyWorldDrawDiorama";
 import {
   buildBuddyWorldState,
   type BuddyWorldState,
@@ -30,6 +31,7 @@ type MockCanvasContext = Pick<
   | "restore"
   | "save"
   | "stroke"
+  | "translate"
 > &
   Partial<CanvasRenderingContext2D>;
 
@@ -193,6 +195,9 @@ function makeCanvasContext(): RecordedCanvasContext {
     stroke: vi.fn(() =>
       drawOps.push(`stroke:${String(strokeStyleValue)}:${globalAlphaValue}`),
     ),
+    translate: vi.fn((x: number, y: number) => {
+      drawOps.push(`translate:${formatNumber(x)}:${formatNumber(y)}`);
+    }),
     font: "10px monospace",
     get fillStyle() {
       return fillStyleValue;
@@ -976,5 +981,471 @@ describe("drawBuddyWorld", () => {
     ).toBe(true);
     expect(fillRectStyleCount(ctx, "#FACC15")).toBeGreaterThanOrEqual(2);
     expectHealthyDraw(ctx);
+  });
+
+  it("pours deterministic scene-wide rain that reaches the meadow", () => {
+    const world = makeWorld({
+      now: new Date("2024-01-01T14:00:00"),
+      pulse: makePulse({
+        memory: { total: 12, orphan: 4, stale_conflicts: 1 },
+      }),
+    });
+    expect(world.weather).toBe("rain");
+
+    const ctx = drawWorld(world);
+    const repeatCtx = drawWorld(world);
+    const reducedCtx = drawWorldWithOptions(world, { reducedMotion: true });
+
+    const rainStreaks = ctx.drawOps
+      .map(parseFillRectOperation)
+      .filter((operation): operation is CanvasDrawOp => operation !== null)
+      .filter(
+        (operation) =>
+          operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+      );
+    const reducedStreaks = reducedCtx.drawOps
+      .map(parseFillRectOperation)
+      .filter((operation): operation is CanvasDrawOp => operation !== null)
+      .filter(
+        (operation) =>
+          operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+      );
+
+    expect(rainStreaks.length).toBeGreaterThanOrEqual(30);
+    expect(rainStreaks.some((operation) => operation.y > 260 * 0.82)).toBe(
+      true,
+    );
+    expect(rainStreaks.some((operation) => operation.y < 260 * 0.3)).toBe(true);
+    expect(rainStreaks.some((operation) => operation.x < 720 * 0.2)).toBe(true);
+    expect(rainStreaks.some((operation) => operation.x > 720 * 0.8)).toBe(true);
+    const splashOps = ctx.drawOps.filter(
+      (operation) =>
+        operation.startsWith("stroke:#BAE6FD:") ||
+        (operation.startsWith("fillRect:") && operation.includes("#BAE6FD")),
+    );
+    expect(splashOps.length).toBeGreaterThanOrEqual(3);
+    expect(fullCanvasOverlays(ctx)).toHaveLength(0);
+    expect(repeatCtx.drawOps).toEqual(ctx.drawOps);
+    expect(reducedStreaks.length).toBeLessThan(rainStreaks.length);
+    expectHealthyDraw(ctx);
+    expectHealthyDraw(reducedCtx);
+  });
+
+  it("pours heavier rain during provider storms than memory rain", () => {
+    const rainWorld = makeWorld({
+      now: new Date("2024-01-01T14:00:00"),
+      pulse: makePulse({
+        memory: { total: 12, orphan: 4, stale_conflicts: 1 },
+      }),
+    });
+    const stormWorld = makeWorld({
+      pulse: makePulse({
+        providers: { defaults_ok: true, broken_refs: 2, quota_warnings: 0 },
+      }),
+    });
+
+    const countStreaks = (world: BuddyWorldState) =>
+      drawWorld(world)
+        .drawOps.map(parseFillRectOperation)
+        .filter((operation): operation is CanvasDrawOp => operation !== null)
+        .filter(
+          (operation) =>
+            operation.color === "#7DD3FC" || operation.color === "#0EA5E9",
+        ).length;
+
+    expect(stormWorld.weather).toBe("storm");
+    expect(countStreaks(stormWorld)).toBeGreaterThan(countStreaks(rainWorld));
+  });
+
+  it("emits parallax translate bands for standard motion only", () => {
+    const world = makeWorld({ now: new Date("2024-01-01T23:00:00") });
+    const standardCtx = drawWorldWithOptions(world, { frame: 240 });
+    const reducedCtx = drawWorldWithOptions(world, {
+      frame: 240,
+      reducedMotion: true,
+    });
+    const translates = standardCtx.drawOps.filter((operation) =>
+      operation.startsWith("translate:"),
+    );
+
+    expect(translates.length).toBeGreaterThan(0);
+    expect(
+      reducedCtx.drawOps.some((operation) =>
+        operation.startsWith("translate:"),
+      ),
+    ).toBe(false);
+    expectHealthyDraw(standardCtx);
+    expectHealthyDraw(reducedCtx);
+  });
+
+  it("draws journey dust while the actor travels and accents after arrival", () => {
+    const world = makeWorld();
+    const baseCtx = drawWorld(world);
+    const travelingCtx = makeCanvasContext();
+    const arrivedCtx = makeCanvasContext();
+    const baseArgs = {
+      world,
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+    };
+
+    drawBuddyWorld({
+      ctx: travelingCtx,
+      ...baseArgs,
+      actor: {
+        xPercent: 58,
+        yPercent: 81,
+        intentKind: "warm_by_fire",
+        travel: {
+          fromXPercent: 33,
+          fromYPercent: 76,
+          startedAtMs: 0,
+          durationMs: 3_800,
+        },
+        nowMs: 1_900,
+      },
+    });
+    drawBuddyWorld({
+      ctx: arrivedCtx,
+      ...baseArgs,
+      actor: {
+        xPercent: 36,
+        yPercent: 82,
+        intentKind: "visit_pond",
+        travel: null,
+        nowMs: 9_000,
+      },
+    });
+
+    const dustOps = travelingCtx.drawOps.filter((operation) =>
+      operation.startsWith("fill:#D6CDBF"),
+    );
+    const rippleOps = arrivedCtx.drawOps.filter((operation) =>
+      operation.startsWith("stroke:#7DD3FC"),
+    );
+
+    expect(dustOps.length).toBeGreaterThan(0);
+    expect(rippleOps.length).toBeGreaterThan(0);
+    expect(
+      baseCtx.drawOps.some((operation) => operation.startsWith("fill:#D6CDBF")),
+    ).toBe(false);
+    expectHealthyDraw(travelingCtx);
+    expectHealthyDraw(arrivedCtx);
+  });
+
+  it("keeps actor drawing finite with hostile travel inputs", () => {
+    const world = makeWorld();
+    const ctx = makeCanvasContext();
+
+    drawBuddyWorld({
+      ctx,
+      world,
+      palette: PALETTES[0],
+      frame: Number.NaN,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: Number.POSITIVE_INFINITY,
+        yPercent: Number.NaN,
+        intentKind: "splash_puddles",
+        travel: {
+          fromXPercent: Number.NEGATIVE_INFINITY,
+          fromYPercent: Number.NaN,
+          startedAtMs: Number.NaN,
+          durationMs: 0,
+        },
+        nowMs: Number.POSITIVE_INFINITY,
+      },
+    });
+
+    expectHealthyDraw(ctx);
+  });
+
+  function drawActorWorld(args: {
+    intentKind: string;
+    heldMs: number;
+    xPercent?: number;
+    yPercent?: number;
+  }): RecordedCanvasContext {
+    const ctx = makeCanvasContext();
+    drawBuddyWorld({
+      ctx,
+      world: makeWorld(),
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: args.xPercent ?? 47,
+        yPercent: args.yPercent ?? 80,
+        intentKind: args.intentKind,
+        travel: null,
+        nowMs: 50_000,
+        intentStartedAtMs: 50_000 - args.heldMs,
+      },
+    });
+    return ctx;
+  }
+
+  it("draws progressive feed care props that finish with a heart", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "care_feed",
+      heldMs: 400,
+      xPercent: 38,
+      yPercent: 78,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "care_feed",
+      heldMs: 7_500,
+      xPercent: 38,
+      yPercent: 78,
+    });
+
+    const foodCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#FDBA74"))
+        .length;
+    const bowlCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#92400E"))
+        .length;
+
+    expect(foodCount(earlyCtx)).toBeGreaterThan(foodCount(lateCtx));
+    expect(bowlCount(earlyCtx)).toBeGreaterThan(0);
+    expect(bowlCount(lateCtx)).toBeGreaterThan(0);
+    expect(
+      earlyCtx.drawOps.some(
+        (operation) =>
+          operation.startsWith("fillText:♥") && operation.includes("#F472B6"),
+      ),
+    ).toBe(false);
+    expect(
+      lateCtx.drawOps.some(
+        (operation) =>
+          operation.startsWith("fillText:♥") && operation.includes("#F472B6"),
+      ),
+    ).toBe(true);
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("draws the fishing long action with a late catch payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "fish_at_pond",
+      heldMs: 2_000,
+      xPercent: 36,
+      yPercent: 82,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "fish_at_pond",
+      heldMs: 11_500,
+      xPercent: 36,
+      yPercent: 82,
+    });
+
+    const fishCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#FB923C"))
+        .length;
+
+    expect(
+      earlyCtx.drawOps.some((operation) =>
+        operation.startsWith("stroke:#6B4F3A"),
+      ),
+    ).toBe(true);
+    expect(
+      earlyCtx.drawOps.some((operation) =>
+        operation.startsWith("fill:#EF4444"),
+      ),
+    ).toBe(true);
+    expect(fishCount(lateCtx)).toBeGreaterThan(fishCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("builds the snow buddy in stages during play_in_snow", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "play_in_snow",
+      heldMs: 1_200,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "play_in_snow",
+      heldMs: 9_000,
+    });
+
+    const eyeCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter(
+        (operation) =>
+          operation.startsWith("fillRect:") && operation.includes("#1E293B"),
+      ).length;
+    const armCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("stroke:#6B4F3A"))
+        .length;
+
+    expect(eyeCount(lateCtx)).toBeGreaterThan(eyeCount(earlyCtx));
+    expect(armCount(lateCtx)).toBeGreaterThanOrEqual(armCount(earlyCtx) + 2);
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("renders staged accents deterministically for the same held duration", () => {
+    const firstCtx = drawActorWorld({
+      intentKind: "build_cairn",
+      heldMs: 6_500,
+    });
+    const secondCtx = drawActorWorld({
+      intentKind: "build_cairn",
+      heldMs: 6_500,
+    });
+
+    expect(secondCtx.drawOps).toEqual(firstCtx.drawOps);
+  });
+
+  it("grows the acorn pile during gather_acorns and lifts one as payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "gather_acorns",
+      heldMs: 1_000,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "gather_acorns",
+      heldMs: 12_000,
+    });
+
+    const acornCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#B45309"))
+        .length;
+
+    expect(acornCount(lateCtx)).toBeGreaterThan(acornCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("grows the ritual sprout during seed_ritual with a sparkle payoff", () => {
+    const earlyCtx = drawActorWorld({
+      intentKind: "seed_ritual",
+      heldMs: 1_500,
+    });
+    const lateCtx = drawActorWorld({
+      intentKind: "seed_ritual",
+      heldMs: 13_200,
+    });
+
+    const crownCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#34D399"))
+        .length;
+    const sparkleCount = (ctx: RecordedCanvasContext) =>
+      ctx.drawOps.filter((operation) => operation.startsWith("fill:#A7F3D0"))
+        .length;
+
+    expect(crownCount(earlyCtx)).toBe(0);
+    expect(crownCount(lateCtx)).toBeGreaterThan(0);
+    expect(sparkleCount(lateCtx)).toBeGreaterThan(sparkleCount(earlyCtx));
+    expectHealthyDraw(earlyCtx);
+    expectHealthyDraw(lateCtx);
+  });
+
+  it("keeps the ocarina and umbrella accents finite and deterministic", () => {
+    const ocarinaCtx = drawActorWorld({
+      intentKind: "play_ocarina",
+      heldMs: 8_000,
+    });
+    const ocarinaCtxRepeat = drawActorWorld({
+      intentKind: "play_ocarina",
+      heldMs: 8_000,
+    });
+    const umbrellaCtx = drawActorWorld({
+      intentKind: "leaf_umbrella_rain",
+      heldMs: 4_000,
+    });
+    const topCtx = drawActorWorld({
+      intentKind: "spin_top",
+      heldMs: 6_000,
+    });
+
+    expect(ocarinaCtxRepeat.drawOps).toEqual(ocarinaCtx.drawOps);
+    expect(
+      ocarinaCtx.drawOps.some((operation) =>
+        operation.startsWith("fillText:♪"),
+      ),
+    ).toBe(true);
+    expect(
+      umbrellaCtx.drawOps.some((operation) =>
+        operation.startsWith("fill:#4A7D40"),
+      ),
+    ).toBe(true);
+    expect(
+      topCtx.drawOps.some((operation) => operation.startsWith("fill:#C98A5B")),
+    ).toBe(true);
+    expectHealthyDraw(ocarinaCtx);
+    expectHealthyDraw(umbrellaCtx);
+    expectHealthyDraw(topCtx);
+  });
+
+  it("keeps staged care accents finite with hostile actor inputs", () => {
+    const ctx = makeCanvasContext();
+
+    drawBuddyWorld({
+      ctx,
+      world: makeWorld(),
+      palette: PALETTES[0],
+      frame: Number.POSITIVE_INFINITY,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+      actor: {
+        xPercent: Number.NaN,
+        yPercent: Number.NEGATIVE_INFINITY,
+        intentKind: "care_clean",
+        travel: null,
+        nowMs: Number.NaN,
+        intentStartedAtMs: Number.POSITIVE_INFINITY,
+      },
+    });
+
+    expectHealthyDraw(ctx);
+  });
+
+  it("lights lanterns per the world override count", () => {
+    const world = makeWorld();
+    const baseArgs = {
+      world,
+      palette: PALETTES[0],
+      frame: 120,
+      width: 720,
+      height: 260,
+      compact: false,
+      reducedMotion: false,
+    };
+
+    const litHeads = (ctx: RecordedCanvasContext): number =>
+      ctx.fillRectStyles.filter((style) => style === "#FDE68A").length;
+    const unlitHeads = (ctx: RecordedCanvasContext): number =>
+      ctx.fillRectStyles.filter((style) => style === "#475569").length;
+
+    const dayCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: dayCtx });
+    expect(litHeads(dayCtx)).toBe(0);
+    expect(unlitHeads(dayCtx)).toBe(3);
+
+    const overrideCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: overrideCtx }, 2);
+    expect(litHeads(overrideCtx)).toBe(2);
+    expect(unlitHeads(overrideCtx)).toBe(1);
+
+    const dousedCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: dousedCtx }, 0);
+    expect(litHeads(dousedCtx)).toBe(0);
+    expect(unlitHeads(dousedCtx)).toBe(3);
+
+    const hostileCtx = makeCanvasContext();
+    drawLanterns({ ...baseArgs, ctx: hostileCtx }, Number.NaN);
+    expect(litHeads(hostileCtx)).toBe(0);
+    expect(unlitHeads(hostileCtx)).toBe(3);
   });
 });

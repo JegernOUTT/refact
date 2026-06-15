@@ -1,0 +1,33 @@
+.root {
+  display: inline-flex;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.track {
+  stroke: var(--rf-surface-3);
+}
+
+.progress {
+  transition: stroke-dashoffset var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.success {
+  stroke: var(--rf-color-success);
+}
+
+.danger {
+  stroke: var(--rf-color-danger);
+}
+
+.tooltip {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress {
+    transition: none;
+  }
+}

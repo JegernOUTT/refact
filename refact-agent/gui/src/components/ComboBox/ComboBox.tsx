@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { useComboboxStore, Combobox } from "@ariakit/react";
-import { getAnchorRect, replaceRange } from "./utils";
+import { getAnchorRect, getTriggerOffset, replaceRange } from "./utils";
 import type { TextAreaProps } from "../TextArea/TextArea";
 import { Item } from "./Item";
 import { Portal } from "../Portal";
@@ -11,9 +11,29 @@ import { CommandCompletionResponse } from "../../services/refact";
 import { useAppSelector, useEventsBusForIDE } from "../../hooks";
 import { SlashCommandSuggestion } from "../SlashCommands";
 import { selectSubmitOption } from "../../features/Config/configSlice";
+import {
+  nextPlaceholder,
+  parseHintPlaceholders,
+  placeholderAt,
+  previousPlaceholder,
+  selectionIsPlaceholder,
+  type PlaceholderRange,
+} from "./argumentPlaceholders";
+
+const TRIGGER_CHARS = ["@", "/"];
 
 function isCompletionAcceptKey(key: string) {
-  return key === "Tab" || key === "Enter" || key === " " || key === "Space";
+  return key === "Tab" || key === "Enter";
+}
+
+function isSlashCommandCompletion(
+  commands: CommandCompletionResponse,
+  command: string,
+): boolean {
+  return (
+    command.startsWith("/") &&
+    commands.completion_details?.[command] !== undefined
+  );
 }
 
 export type ComboBoxProps = {
@@ -21,7 +41,7 @@ export type ComboBoxProps = {
   onChange: (value: string) => void;
   value: string;
   onSubmit: React.KeyboardEventHandler<HTMLTextAreaElement>;
-  onSubmitAcceptedValue?: (value: string) => void;
+  onArgumentPlaceholdersChange?: (placeholders: string[]) => void;
   placeholder?: string;
   render: (props: TextAreaProps) => React.ReactElement;
   requestCommandsCompletion: DebouncedState<
@@ -33,7 +53,7 @@ export type ComboBoxProps = {
 export const ComboBox: React.FC<ComboBoxProps> = ({
   commands,
   onSubmit,
-  onSubmitAcceptedValue,
+  onArgumentPlaceholdersChange,
   placeholder,
   onChange,
   value,
@@ -42,10 +62,16 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
   onHelpClick,
 }) => {
   const ref = React.useRef<HTMLTextAreaElement>(null);
-  const [moveCursorTo, setMoveCursorTo] = React.useState<number | null>(null);
+  const [pendingSelection, setPendingSelection] =
+    React.useState<PlaceholderRange | null>(null);
   const [lastPasteTimestamp, setLastPasteTimestamp] = React.useState(0);
   const shiftEnterToSubmit = useAppSelector(selectSubmitOption);
   const { escapeKeyPressed } = useEventsBusForIDE();
+
+  const argModeActiveRef = useRef(false);
+  const insertedPlaceholdersRef = useRef<string[]>([]);
+  const suppressOpenValueRef = useRef<string | null>(null);
+  const dismissedTriggerRef = useRef<number | null>(null);
 
   const combobox = useComboboxStore({
     defaultOpen: false,
@@ -62,17 +88,32 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
   }, [matches]);
 
   React.useEffect(() => {
-    if (moveCursorTo === null) return;
+    if (pendingSelection === null) return;
     if (ref.current) {
-      ref.current.setSelectionRange(moveCursorTo, moveCursorTo);
+      ref.current.focus();
+      ref.current.setSelectionRange(
+        pendingSelection.start,
+        pendingSelection.end,
+      );
     }
-    setMoveCursorTo(null);
-    return () => setMoveCursorTo(null);
-  }, [moveCursorTo]);
+    setPendingSelection(null);
+  }, [pendingSelection]);
 
   React.useLayoutEffect(() => {
-    combobox.setOpen(hasMatches);
-  }, [combobox, hasMatches, matches]);
+    let suppress = false;
+    if (
+      suppressOpenValueRef.current !== null &&
+      value === suppressOpenValueRef.current
+    ) {
+      suppress = true;
+    }
+    if (!suppress && dismissedTriggerRef.current !== null && ref.current) {
+      const triggerOffset = getTriggerOffset(ref.current, TRIGGER_CHARS);
+      if (triggerOffset === dismissedTriggerRef.current) suppress = true;
+      else dismissedTriggerRef.current = null;
+    }
+    combobox.setOpen(hasMatches && !suppress);
+  }, [combobox, hasMatches, matches, value]);
 
   React.useEffect(() => {
     combobox.render();
@@ -94,8 +135,19 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
     combobox.setState("activeValue", undefined);
   }, [combobox]);
 
-  const handleReplace = useCallback(
-    (input: string) => {
+  const reportPlaceholders = useCallback(
+    (nextValue: string) => {
+      const remaining = insertedPlaceholdersRef.current.filter((token) =>
+        nextValue.includes(token),
+      );
+      if (remaining.length === 0) argModeActiveRef.current = false;
+      onArgumentPlaceholdersChange?.(remaining);
+    },
+    [onArgumentPlaceholdersChange],
+  );
+
+  const replaceWith = useCallback(
+    (input: string): string | null => {
       if (!ref.current) return null;
       const nextValue = replaceRange(
         ref.current.value,
@@ -105,129 +157,202 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
       closeCombobox();
       requestCommandsCompletion.cancel();
       onChange(nextValue);
-      setMoveCursorTo(commands.replace[0] + input.length);
       return nextValue;
     },
     [closeCombobox, commands.replace, onChange, requestCommandsCompletion],
   );
 
+  const acceptCompletion = useCallback(
+    (command: string) => {
+      if (!ref.current) return;
+
+      if (command === "@help") {
+        replaceWith(command);
+        closeCombobox();
+        onHelpClick();
+        return;
+      }
+
+      if (!isSlashCommandCompletion(commands, command)) {
+        const nextValue = replaceWith(command);
+        if (nextValue !== null) {
+          const caret =
+            Math.min(commands.replace[0], commands.replace[1]) + command.length;
+          setPendingSelection({ start: caret, end: caret });
+        }
+        return;
+      }
+
+      const replaceStart = Math.min(commands.replace[0], commands.replace[1]);
+      const hint =
+        commands.completion_details?.[command]?.argument_hint?.trim();
+
+      if (hint) {
+        const inserted = `${command} ${hint}`;
+        const nextValue = replaceWith(inserted);
+        if (nextValue === null) return;
+        const tokens = parseHintPlaceholders(hint);
+        insertedPlaceholdersRef.current = tokens;
+        argModeActiveRef.current = tokens.length > 0;
+        suppressOpenValueRef.current = nextValue;
+        const first = nextPlaceholder(nextValue, replaceStart + command.length);
+        const caret = replaceStart + inserted.length;
+        setPendingSelection(first ?? { start: caret, end: caret });
+        reportPlaceholders(nextValue);
+        return;
+      }
+
+      const inserted = `${command} `;
+      const nextValue = replaceWith(inserted);
+      if (nextValue === null) return;
+      insertedPlaceholdersRef.current = [];
+      argModeActiveRef.current = false;
+      suppressOpenValueRef.current = nextValue;
+      const caret = replaceStart + inserted.length;
+      setPendingSelection({ start: caret, end: caret });
+      reportPlaceholders(nextValue);
+    },
+    [closeCombobox, commands, onHelpClick, replaceWith, reportPlaceholders],
+  );
+
+  const navigatePlaceholders = useCallback(
+    (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+      const textarea = ref.current;
+      if (!textarea || !argModeActiveRef.current) return false;
+
+      const selectionStart = textarea.selectionStart;
+      const selectionEnd = textarea.selectionEnd;
+      const onPlaceholder = selectionIsPlaceholder(
+        textarea.value,
+        selectionStart,
+        selectionEnd,
+      );
+
+      const store = combobox.getState();
+      const wantForward =
+        (event.key === "Tab" && !event.shiftKey) ||
+        (event.key === "Enter" && !event.shiftKey && !store.open) ||
+        (event.key === "ArrowRight" && onPlaceholder);
+      const wantBackward =
+        (event.key === "Tab" && event.shiftKey) ||
+        (event.key === "ArrowLeft" && onPlaceholder);
+
+      if (wantForward) {
+        const next = nextPlaceholder(textarea.value, selectionEnd);
+        if (next) {
+          event.preventDefault();
+          event.stopPropagation();
+          setPendingSelection(next);
+          return true;
+        }
+        argModeActiveRef.current = false;
+        if (event.key === "Tab") {
+          event.preventDefault();
+          setPendingSelection({ start: selectionEnd, end: selectionEnd });
+          return true;
+        }
+        return false;
+      }
+
+      if (wantBackward) {
+        const prev = previousPlaceholder(textarea.value, selectionStart);
+        if (prev) {
+          event.preventDefault();
+          event.stopPropagation();
+          setPendingSelection(prev);
+          return true;
+        }
+        if (event.key === "Tab") {
+          event.preventDefault();
+          return true;
+        }
+      }
+
+      return false;
+    },
+    [combobox],
+  );
+
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      const state = combobox.getState();
+      if (navigatePlaceholders(event)) return;
 
-      if (state.open && isCompletionAcceptKey(event.key)) {
+      const store = combobox.getState();
+
+      if (store.open && isCompletionAcceptKey(event.key)) {
         event.preventDefault();
       }
-      if (state.open) return;
-      if (
-        !shiftEnterToSubmit &&
-        event.key === "Enter" &&
-        !event.shiftKey &&
-        !hasMatches
-      ) {
+      if (store.open) return;
+
+      if (!shiftEnterToSubmit && event.key === "Enter" && !event.shiftKey) {
         event.stopPropagation();
         onSubmit(event);
-        setMoveCursorTo(null);
+        setPendingSelection(null);
         return;
-      } else if (
-        shiftEnterToSubmit &&
-        event.key === "Enter" &&
-        event.shiftKey &&
-        !hasMatches
-      ) {
+      }
+      if (shiftEnterToSubmit && event.key === "Enter" && event.shiftKey) {
         event.stopPropagation();
         onSubmit(event);
-        setMoveCursorTo(null);
+        setPendingSelection(null);
         return;
       }
 
       if (!shiftEnterToSubmit && event.key === "Enter" && event.shiftKey) {
         return;
-      } else if (
-        shiftEnterToSubmit &&
-        event.key === "Enter" &&
-        !event.shiftKey
-      ) {
+      }
+      if (shiftEnterToSubmit && event.key === "Enter" && !event.shiftKey) {
         onChange(value + "\n");
-
         return;
       }
     },
-    [combobox, hasMatches, onChange, onSubmit, shiftEnterToSubmit, value],
+    [
+      combobox,
+      navigatePlaceholders,
+      onChange,
+      onSubmit,
+      shiftEnterToSubmit,
+      value,
+    ],
   );
 
-  // TODO: filter matches
   const onKeyUp = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (!ref.current) return;
+      const store = combobox.getState();
 
       const wasArrowLeftOrRight =
         event.key === "ArrowLeft" || event.key === "ArrowRight";
-      if (wasArrowLeftOrRight) {
+      if (wasArrowLeftOrRight && store.open) {
         closeCombobox();
       }
 
-      if (wasArrowLeftOrRight && state.open) {
-        closeCombobox();
-      }
-
-      const tabOrEnterOrSpace = isCompletionAcceptKey(event.key);
-
-      const activeItemValue = combobox.item(state.activeId)?.value;
+      const activeItemValue = combobox.item(store.activeId)?.value;
       const selectedItemValue =
         activeItemValue && matches.includes(activeItemValue)
           ? activeItemValue
           : undefined;
       const activeValue =
-        typeof state.activeValue === "string" &&
-        matches.includes(state.activeValue)
-          ? state.activeValue
+        typeof store.activeValue === "string" &&
+        matches.includes(store.activeValue)
+          ? store.activeValue
           : undefined;
       const command = selectedItemValue ?? activeValue ?? matches[0];
 
-      if (state.open && tabOrEnterOrSpace && command) {
+      if (store.open && isCompletionAcceptKey(event.key) && command) {
         event.preventDefault();
         event.stopPropagation();
-        if (command === "@help") {
-          handleReplace(command);
-          closeCombobox();
-          onHelpClick();
-        } else {
-          const nextValue = handleReplace(command);
-          if (event.key === "Enter") {
-            const detail = commands.completion_details?.[command];
-            if (detail !== undefined && !detail.argument_hint) {
-              setTimeout(() => {
-                if (nextValue !== null && onSubmitAcceptedValue) {
-                  onSubmitAcceptedValue(nextValue);
-                } else {
-                  onSubmit(event);
-                }
-              }, 0);
-            }
-          }
-        }
+        acceptCompletion(command);
       }
 
       if (event.key === "Escape") {
+        const triggerOffset = getTriggerOffset(ref.current, TRIGGER_CHARS);
+        if (triggerOffset >= 0) dismissedTriggerRef.current = triggerOffset;
+        argModeActiveRef.current = false;
         closeCombobox();
         escapeKeyPressed("combobox");
       }
     },
-    [
-      onHelpClick,
-      onSubmit,
-      onSubmitAcceptedValue,
-      commands,
-      matches,
-      closeCombobox,
-      escapeKeyPressed,
-      combobox,
-      handleReplace,
-      state.activeId,
-      state.activeValue,
-      state.open,
-    ],
+    [acceptCompletion, matches, closeCombobox, escapeKeyPressed, combobox],
   );
 
   const handleChange = useCallback(
@@ -254,22 +379,42 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
         requestCommandsCompletion.cancel();
       }
       onChange(newValue);
+      suppressOpenValueRef.current = null;
+
+      if (newValue.length === 0) {
+        insertedPlaceholdersRef.current = [];
+        argModeActiveRef.current = false;
+        dismissedTriggerRef.current = null;
+        onArgumentPlaceholdersChange?.([]);
+      } else if (insertedPlaceholdersRef.current.length > 0) {
+        reportPlaceholders(newValue);
+      }
     },
-    [onChange, closeCombobox, requestCommandsCompletion, lastPasteTimestamp],
+    [
+      onChange,
+      closeCombobox,
+      requestCommandsCompletion,
+      lastPasteTimestamp,
+      onArgumentPlaceholdersChange,
+      reportPlaceholders,
+    ],
   );
+
+  const handleClick = useCallback(() => {
+    const textarea = ref.current;
+    if (!textarea || !argModeActiveRef.current) return;
+    if (textarea.selectionStart !== textarea.selectionEnd) return;
+    const range = placeholderAt(textarea.value, textarea.selectionStart);
+    if (range) setPendingSelection(range);
+  }, []);
 
   const onItemClick = useCallback(
     (item: string, event: React.MouseEvent<HTMLDivElement>) => {
       event.stopPropagation();
       event.preventDefault();
-      if (item === "@help") {
-        onHelpClick();
-        closeCombobox();
-      } else {
-        handleReplace(item);
-      }
+      acceptCompletion(item);
     },
-    [handleReplace, onHelpClick, closeCombobox],
+    [acceptCompletion],
   );
 
   const popoverWidth = ref.current
@@ -304,6 +449,7 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
           onChange: handleChange,
           onKeyUp: onKeyUp,
           onKeyDown: onKeyDown,
+          onClick: handleClick,
           onSubmit: onSubmit,
         })}
       />
