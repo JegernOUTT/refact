@@ -750,7 +750,7 @@ describe("TaskWorkspace worktree resolution", () => {
       record,
       legacy: false,
     });
-    expect(isActionableWorktree(target!)).toBe(true);
+    expect(isActionableWorktree(target)).toBe(true);
   });
 
   it("unresolved_registry_id_is_stale_and_not_actionable", () => {
@@ -769,7 +769,7 @@ describe("TaskWorkspace worktree resolution", () => {
     });
     expect(target?.record).toBeUndefined();
     expect(target?.label).toBe("missing-wt");
-    expect(isActionableWorktree(target!)).toBe(false);
+    expect(isActionableWorktree(target)).toBe(false);
   });
 
   it("resolves_worktree_by_branch_for_legacy_cards", () => {
