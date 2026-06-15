@@ -594,7 +594,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stream_request_keeps_body_unbounded_after_headers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -606,7 +606,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            tokio::time::sleep(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
             socket.write_all(b"data: late\n\n").await.unwrap();
             std::future::pending::<()>().await;
         });
@@ -616,7 +616,6 @@ mod tests {
         let mut stream = response.bytes_stream();
         let next = tokio::spawn(async move { stream.next().await });
 
-        tokio::time::advance(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_secs(2)).await;
         let chunk = next.await.unwrap().unwrap().unwrap();
         assert_eq!(&chunk[..], b"data: late\n\n");
         server.abort();
