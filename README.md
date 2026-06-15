@@ -198,15 +198,14 @@ Then open Refact from a workspace:
 refact
 ```
 
-That launches the interactive TUI and starts or reuses the local daemon. For daemon-oriented workflows, register the current project and inspect the runtime directly:
+That launches the interactive TUI and starts or reuses the local daemon. You can also register the current project explicitly before opening the TUI:
 
 ```sh
 refact projects open .
-refact status
-refact ps
+refact
 ```
 
-Useful daemon commands include `refact logs --daemon`, `refact events`, `refact doctor`, and `refact daemon --foreground` when you want to debug or supervise the process explicitly. Manual binary downloads are also available from [GitHub Releases](https://github.com/JegernOUTT/refact/releases).
+Manual binary downloads are also available from [GitHub Releases](https://github.com/JegernOUTT/refact/releases).
 
 IDE plugins are optional clients for the same daemon-backed projects:
 
@@ -214,6 +213,45 @@ IDE plugins are optional clients for the same daemon-backed projects:
 - [JetBrains](https://github.com/JegernOUTT/refact/wiki/Installation-JetBrains)
 
 After installation, configure a provider or local runtime with [BYOK](https://github.com/JegernOUTT/refact/wiki/BYOK), then start with the [Quickstart](https://github.com/JegernOUTT/refact/wiki/Quickstart) or the full [Installation](https://github.com/JegernOUTT/refact/wiki/Installation) guide.
+
+## Daily use: daemon, TUI, and worker
+
+Refact now has one user-facing binary with a resident daemon behind it:
+
+- `refact` and `refact tui` are the primary interactive entrypoints. They open the full-screen TUI and start or reuse the local daemon.
+- `refact daemon` is the resident control plane. It supervises project workers, logs, events, project registration, health checks, and browser/IDE attachment.
+- The project worker, also called the engine, is the per-project backend. It runs chat, tools, LSP/HTTP, indexing, checkpoints, scheduler work, and SSE streams; normal users usually do not start it directly.
+- The TUI, browser GUI, VS Code, and JetBrains all attach to the same daemon-managed project, so they share the same sessions, tools, memory, and project state.
+
+Fastest start from a repo:
+
+```sh
+refact projects open .
+refact
+```
+
+Most useful day-to-day commands:
+
+| Command | Use it for |
+| --- | --- |
+| `refact` | Open the TUI for the current project |
+| `refact tui --project .` | Open the TUI for an explicit project path |
+| `refact run --project . "…"` | Run one headless agent turn through the daemon |
+| `refact projects open .` | Register or wake the current project worker |
+| `refact ps` | List daemon-managed workers |
+| `refact status` | Check daemon health |
+| `refact logs --daemon -f` | Follow daemon logs |
+| `refact logs . -f` | Follow this project's worker logs |
+| `refact events -f` | Follow daemon events |
+| `refact doctor` | Diagnose daemon setup and worker reachability |
+| `refact restart --daemon` | Restart the daemon after config or binary changes |
+| `refact self-update` | Update the installed binary from GitHub Releases |
+
+Use daemon-backed `refact`, `refact tui`, and `refact run` for normal work. Use direct `refact worker` only when you are debugging the low-level engine process itself.
+
+Gotcha: `--tui` is not a top-level flag; use `refact` or `refact tui`.
+
+Full guide: [CLI and daemon installation guide](https://github.com/JegernOUTT/refact/wiki/Installation-CLI).
 
 ## Comparison
 
