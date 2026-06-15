@@ -622,10 +622,7 @@ fn clear_finished_agent_session_if_current(
 }
 
 fn agents_active(cards: &[BoardCard]) -> usize {
-    cards
-        .iter()
-        .filter(|c| c.column == "doing" && c.agent_chat_id.is_some())
-        .count()
+    storage::active_agent_count(cards)
 }
 
 fn sanitize_commit_component(text: &str, max_chars: usize) -> String {
@@ -909,7 +906,7 @@ impl Tool for ToolTaskAgentFinish {
 
                 if let Some(variant_key) = ab_variant_key_for_update.as_deref() {
                     let card_title = card.title.clone();
-                    let all_finished = mark_ab_variant_finished(
+                    mark_ab_variant_finished(
                         card,
                         variant_key,
                         &finish_chat_id,
@@ -918,6 +915,7 @@ impl Tool for ToolTaskAgentFinish {
                         &report_clone,
                         commit_hash.as_deref(),
                     )?;
+                    let all_finished = agents_active(&board.cards) == 0;
                     return Ok((
                         card_title,
                         all_finished,

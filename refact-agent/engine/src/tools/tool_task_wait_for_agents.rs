@@ -77,7 +77,7 @@ fn natural_card_id_key(id: &str) -> (String, u64) {
 }
 
 pub(crate) fn resolve_waiting_card_ids(statuses: &[&AgentStatus]) -> Vec<String> {
-    let mut ids: Vec<String> = statuses.iter().map(|s| s.card_id.clone()).collect();
+    let mut ids: Vec<String> = statuses.iter().map(|s| s.status_id()).collect();
     ids.sort_by(|a, b| natural_card_id_key(a).cmp(&natural_card_id_key(b)));
     ids.truncate(MAX_WAITING_CARD_IDS);
     ids
@@ -227,6 +227,7 @@ mod tests {
     fn make_status(card_id: &str, column: &str) -> AgentStatus {
         AgentStatus {
             card_id: card_id.to_string(),
+            variant_key: None,
             card_title: format!("{} title", card_id),
             agent_chat_id: format!("agent-{}", card_id),
             column: column.to_string(),
@@ -390,5 +391,17 @@ mod tests {
         let waitable: Vec<&AgentStatus> = statuses.iter().collect();
         let ids = resolve_waiting_card_ids(&waitable);
         assert_eq!(ids, vec!["T-1", "T-2", "T-10"]);
+    }
+
+    #[test]
+    fn wait_agents_uses_variant_status_ids() {
+        let mut variant = make_status("T-1", "doing");
+        variant.variant_key = Some("a".to_string());
+        let statuses = vec![variant];
+        let waitable: Vec<&AgentStatus> = statuses.iter().collect();
+
+        let ids = resolve_waiting_card_ids(&waitable);
+
+        assert_eq!(ids, vec!["T-1/a"]);
     }
 }

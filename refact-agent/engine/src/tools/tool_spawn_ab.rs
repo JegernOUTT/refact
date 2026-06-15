@@ -15,6 +15,7 @@ use crate::chat::verifier::{schedule_card_verifier_after_finish, ExpectedCardSta
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
+use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
 use crate::tools::tool_task_spawn_agent::{
     build_agent_prompt, build_agent_thread_params, find_abandoned_worktrees,
     prepare_agent_worktree_with_suffix, resolve_agent_model, PreparedWorktree,
@@ -350,6 +351,23 @@ async fn cleanup_ab_variant(
     gcx: Arc<GlobalContext>,
     variant: &AbVariantInfo,
 ) -> Result<(), String> {
+    cleanup_ab_variant_with_timeout(gcx, variant, AGENT_ABORT_TIMEOUT).await
+}
+
+async fn cleanup_ab_variant_with_timeout(
+    gcx: Arc<GlobalContext>,
+    variant: &AbVariantInfo,
+    abort_timeout: std::time::Duration,
+) -> Result<(), String> {
+    wait_for_agent_abort(gcx.clone(), &variant.chat_id, abort_timeout)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to abort A/B variant {} before cleanup: {}",
+                variant.chat_id, e
+            )
+        })?;
+
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
 
@@ -1009,6 +1027,66 @@ mod tests {
         cleanup_ab_variant(gcx, &variant_info(&prepared.a))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_ab_loser_cleanup_aborts_before_delete() {
+        use crate::chat::types::ChatSession;
+        use refact_runtime_api::SessionState;
+        use std::sync::atomic::Ordering;
+        use tokio::sync::Mutex as AMutex;
+
+        let (gcx, _temp, _source) = setup_repo_task().await;
+        let meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let prepared = prepare_ab_worktrees(
+            gcx.clone(),
+            &meta,
+            "task-1",
+            "T-1",
+            "model-a".to_string(),
+            "model-b".to_string(),
+        )
+        .await
+        .unwrap();
+        let loser = variant_info(&prepared.b);
+        let loser_root = prepared.b.prepared.worktree_path();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(loser.chat_id.clone())));
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
+        }
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(loser.chat_id.clone(), session_arc.clone());
+
+        let error = cleanup_ab_variant_with_timeout(
+            gcx.clone(),
+            &loser,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Failed to abort A/B variant"), "{error}");
+        assert!(loser_root.exists());
+        {
+            let session = session_arc.lock().await;
+            assert!(session.abort_flag.load(Ordering::SeqCst));
+            assert_eq!(session.runtime.state, SessionState::Idle);
+            session
+                .queue_processor_running
+                .store(false, Ordering::SeqCst);
+        }
+        cleanup_ab_variant(gcx.clone(), &loser).await.unwrap();
+        assert!(!loser_root.exists());
+
+        prepared.a.prepared.cleanup_unlinked(gcx).await;
     }
 
     #[tokio::test]

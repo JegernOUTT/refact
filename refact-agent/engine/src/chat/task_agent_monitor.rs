@@ -749,11 +749,7 @@ async fn mark_agent_as_failed(
 
             let _ = card;
 
-            let agents_active_after = board
-                .cards
-                .iter()
-                .filter(|c| c.column == "doing" && c.assignee.is_some())
-                .count();
+            let agents_active_after = storage::active_agent_count(&board.cards);
             let all_finished = agents_active_after == 0;
 
             Ok((card_title, true, all_finished))
@@ -932,6 +928,43 @@ pub(crate) async fn notify_planner_agents_finished(
 
     let mut results = Vec::new();
     for card in &board.cards {
+        if let Some(variants) = card.ab_variants.as_ref() {
+            for (variant_key, variant) in [("a", &variants.a), ("b", &variants.b)] {
+                let Some(finish) = variant.finish.as_ref() else {
+                    continue;
+                };
+                if let Some(ref since_dt) = since {
+                    let Some(completed_at) =
+                        chrono::DateTime::parse_from_rfc3339(&finish.completed_at)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc))
+                    else {
+                        continue;
+                    };
+                    if completed_at < *since_dt {
+                        continue;
+                    }
+                }
+                let status = if finish.success {
+                    "✅ done"
+                } else {
+                    "❌ failed"
+                };
+                let report_preview: String = finish.final_report.chars().take(200).collect();
+                results.push(format!(
+                    "**{}/{} ({} [A/B {}])**: {}\n{}",
+                    card.id,
+                    variant_key,
+                    card.title,
+                    variant_key.to_ascii_uppercase(),
+                    status,
+                    report_preview
+                ));
+            }
+            if card.agent_chat_id.is_none() {
+                continue;
+            }
+        }
         if card.agent_chat_id.is_none() {
             continue;
         }
@@ -1585,6 +1618,9 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
 
         for card in &board.cards {
             if card.column != "doing" || card.assignee.is_none() {
+                continue;
+            }
+            if card.ab_variants.is_some() && card.agent_chat_id.is_none() {
                 continue;
             }
 

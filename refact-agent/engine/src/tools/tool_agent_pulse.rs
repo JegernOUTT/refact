@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatUsage, ContextEnum};
 use crate::tasks::storage;
-use crate::tasks::types::BoardCard;
+use crate::tasks::types::{AbVariantInfo, BoardCard};
 use crate::tools::task_tool_helpers::{
     human_age_at, required_string, require_bound_planner_task, truncate_chars,
 };
@@ -49,6 +49,7 @@ struct LastToolCall {
 #[derive(Debug, Clone)]
 struct AgentPulse {
     card_id: String,
+    variant_key: Option<String>,
     card_title: String,
     state: Option<SessionState>,
     card_column: String,
@@ -61,6 +62,66 @@ struct AgentPulse {
     last_assistant_preview: Option<String>,
     last_tool_call: Option<String>,
     session_note: Option<String>,
+}
+
+struct PulseTarget<'a> {
+    card: &'a BoardCard,
+    variant_key: Option<&'static str>,
+    variant: Option<&'a AbVariantInfo>,
+}
+
+impl<'a> PulseTarget<'a> {
+    fn chat_id(&self) -> Option<&str> {
+        self.variant
+            .map(|variant| variant.chat_id.as_str())
+            .or_else(|| self.card.agent_chat_id.as_deref())
+    }
+}
+
+fn parse_card_variant_id(input: &str) -> (&str, Option<&str>) {
+    if let Some((card_id, variant)) = input.split_once('/') {
+        return (card_id, Some(variant));
+    }
+    if let Some((card_id, variant)) = input.split_once(':') {
+        return (card_id, Some(variant));
+    }
+    (input, None)
+}
+
+fn resolve_pulse_target<'a>(
+    card: &'a BoardCard,
+    requested_id: &str,
+) -> Result<PulseTarget<'a>, String> {
+    let (_, requested_variant) = parse_card_variant_id(requested_id);
+    if let Some(variants) = card.ab_variants.as_ref() {
+        let variant_key = match requested_variant {
+            Some("a") | Some("A") => Some("a"),
+            Some("b") | Some("B") => Some("b"),
+            Some(other) => {
+                return Err(format!(
+                    "Invalid A/B variant '{}', expected 'a' or 'b'",
+                    other
+                ));
+            }
+            None if card.agent_chat_id.is_none() => Some("a"),
+            None => None,
+        };
+        if let Some(variant_key) = variant_key {
+            let variant = variants
+                .variant(variant_key)
+                .ok_or_else(|| format!("A/B variant {} not found", variant_key))?;
+            return Ok(PulseTarget {
+                card,
+                variant_key: Some(variant_key),
+                variant: Some(variant),
+            });
+        }
+    }
+    Ok(PulseTarget {
+        card,
+        variant_key: None,
+        variant: None,
+    })
 }
 
 async fn fetch_session_snapshot(
@@ -104,13 +165,14 @@ async fn fetch_session_snapshot(
 }
 
 fn build_agent_pulse(
-    card: &BoardCard,
+    target: &PulseTarget<'_>,
     snapshot: Option<&ChatSessionSnapshot>,
     session_state: Option<SessionState>,
     session_note: Option<String>,
     fallback_token_cap: usize,
     live_last_activity: Option<DateTime<Utc>>,
 ) -> AgentPulse {
+    let card = target.card;
     let messages = snapshot
         .map(|snapshot| snapshot.messages.as_slice())
         .unwrap_or(&[]);
@@ -128,10 +190,21 @@ fn build_agent_pulse(
     let latest_finish_reason = latest_assistant.and_then(|message| message.finish_reason.clone());
 
     AgentPulse {
-        card_id: card.id.clone(),
-        card_title: card.title.clone(),
+        card_id: target
+            .variant_key
+            .map(|variant| format!("{}/{}", card.id, variant))
+            .unwrap_or_else(|| card.id.clone()),
+        variant_key: target.variant_key.map(str::to_string),
+        card_title: target
+            .variant_key
+            .map(|variant| format!("{} [A/B {}]", card.title, variant.to_ascii_uppercase()))
+            .unwrap_or_else(|| card.title.clone()),
         state: session_state,
-        card_column: card.column.clone(),
+        card_column: target
+            .variant
+            .and_then(|variant| variant.finish.as_ref())
+            .map(|finish| if finish.success { "done" } else { "failed" }.to_string())
+            .unwrap_or_else(|| card.column.clone()),
         last_activity_at: live_last_activity.or_else(|| last_activity_timestamp(card)),
         tokens_used: tokens_used(messages),
         token_cap,
@@ -172,6 +245,11 @@ fn render_agent_pulse_at(pulse: &AgentPulse, now: DateTime<Utc>) -> String {
     if let Some(note) = &pulse.session_note {
         result.push_str("\n");
         result.push_str(note);
+        result.push_str("\n");
+    }
+    if let Some(variant_key) = pulse.variant_key.as_deref() {
+        result.push_str("\n**A/B variant:** ");
+        result.push_str(&variant_key.to_ascii_uppercase());
         result.push_str("\n");
     }
 
@@ -426,7 +504,7 @@ impl Tool for ToolAgentPulse {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Show a live planner-only pulse for one task agent: state, activity age, token usage, current edit target, last assistant preview, and last tool call.".to_string(),
+            description: "Show a live planner-only pulse for one task agent: state, activity age, token usage, current edit target, last assistant preview, and last tool call. For A/B variants, pass card_id as T-1/a or T-1/b.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -461,7 +539,8 @@ impl Tool for ToolAgentPulse {
             );
         }
 
-        let card_id = required_string(args, "card_id")?;
+        let requested_card_id = required_string(args, "card_id")?;
+        let (card_id, _) = parse_card_variant_id(&requested_card_id);
         let task_id = require_bound_planner_task(&ccx, args).await?;
         let (gcx, chat_facade, sessions, fallback_token_cap) = {
             let ccx_lock = ccx.lock().await;
@@ -474,9 +553,11 @@ impl Tool for ToolAgentPulse {
         };
         let board = storage::load_board(gcx, &task_id).await?;
         let card = board
-            .get_card(&card_id)
+            .get_card(card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
-        let live_last_activity = if let Some(chat_id) = card.agent_chat_id.as_deref() {
+        let target = resolve_pulse_target(card, &requested_card_id)?;
+        let chat_id = target.chat_id();
+        let live_last_activity = if let Some(chat_id) = chat_id {
             let session_arc = sessions.read().await.get(chat_id).cloned();
             if let Some(session_arc) = session_arc {
                 let session = session_arc.lock().await;
@@ -492,9 +573,9 @@ impl Tool for ToolAgentPulse {
             None
         };
         let (snapshot, session_state, session_note) =
-            fetch_session_snapshot(chat_facade, card.agent_chat_id.as_deref()).await;
+            fetch_session_snapshot(chat_facade, chat_id).await;
         let pulse = build_agent_pulse(
-            card,
+            &target,
             snapshot.as_ref(),
             session_state,
             session_note,
@@ -618,6 +699,33 @@ mod tests {
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
+    }
+
+    fn ab_test_card() -> BoardCard {
+        let mut card = test_card(None);
+        card.assignee = Some("ab".to_string());
+        card.ab_variants = Some(crate::tasks::types::AbVariants {
+            a: AbVariantInfo {
+                agent_id: "agent-a".to_string(),
+                chat_id: "agent-chat-a".to_string(),
+                worktree: "/tmp/agent-a".to_string(),
+                worktree_name: Some("worktree-a".to_string()),
+                branch: Some("branch-a".to_string()),
+                model: Some("model-a".to_string()),
+                finish: None,
+            },
+            b: AbVariantInfo {
+                agent_id: "agent-b".to_string(),
+                chat_id: "agent-chat-b".to_string(),
+                worktree: "/tmp/agent-b".to_string(),
+                worktree_name: Some("worktree-b".to_string()),
+                branch: Some("branch-b".to_string()),
+                model: Some("model-b".to_string()),
+                finish: None,
+            },
+            winner: None,
+        });
+        card
     }
 
     fn task_meta() -> TaskMeta {
@@ -874,6 +982,50 @@ mod tests {
         assert!(output.contains('…'));
         assert!(!output.contains("hidden"));
         assert!(!output.contains("supersecret"));
+    }
+
+    #[tokio::test]
+    async fn tool_agent_pulse_resolves_ab_variant_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatSessionFacade::default());
+        let snapshot = ChatSessionSnapshot {
+            messages: vec![ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("Variant B is editing.".to_string()),
+                ..Default::default()
+            }],
+            thread: ThreadParams {
+                context_tokens_cap: Some(100_000),
+                ..Default::default()
+            },
+            session_state: SessionState::Generating,
+            pause_reasons: vec![],
+        };
+        facade
+            .snapshots
+            .lock()
+            .unwrap()
+            .insert("agent-chat-b".to_string(), Ok(snapshot));
+        facade.states.lock().unwrap().insert(
+            "agent-chat-b".to_string(),
+            Ok(Some(SessionState::Generating)),
+        );
+        let gcx = write_task(temp.path(), ab_test_card()).await;
+        let ccx = planner_ccx(gcx, "planner", facade).await;
+        let mut tool = ToolAgentPulse::new();
+        let args = HashMap::from([("card_id".to_string(), json!("T-29/b"))]);
+
+        let output = tool_output_text(
+            tool.tool_execute(ccx, &"call".to_string(), &args)
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("# Agent Pulse: T-29/b"));
+        assert!(output.contains("check_agents redesign [A/B B]"));
+        assert!(output.contains("**A/B variant:** B"));
+        assert!(output.contains("**State:** 🔄 generating response"));
+        assert!(output.contains("Variant B is editing."));
     }
 
     #[tokio::test]
