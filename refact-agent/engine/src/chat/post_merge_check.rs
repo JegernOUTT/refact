@@ -361,6 +361,27 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         )
         .await;
     if !revert_output.success {
+        let reason = "git revert failed";
+        let diagnostic = format!(
+            "Expected merge commit: {}\nCurrent HEAD: {}\nGit revert output:\n{}",
+            expected_merge_commit,
+            current_head,
+            revert_output.output.trim()
+        );
+        store_regression_result(
+            gcx,
+            &request.task_id,
+            &request.card_id,
+            request.expected_card_state.as_ref(),
+            &command,
+            &output_tail,
+            &expected_merge_commit,
+            "not reverted",
+            &first_error_line(&output_tail),
+            Some(reason),
+            Some(&diagnostic),
+        )
+        .await?;
         return Err(format!(
             "post-merge verification failed, and git revert failed: {}",
             first_error_line(&revert_output.output)
@@ -1240,6 +1261,54 @@ mod tests {
         assert_eq!(original.column, "done");
         assert_eq!(original.final_report.as_deref(), Some("newer finish"));
         assert!(board.get_card("T-1-fix").is_none());
+    }
+
+    #[tokio::test]
+    async fn post_merge_check_persists_regression_when_revert_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cargo test --lib`"),
+        )
+        .await;
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([
+                output(false, Some(1), "running\nerror: regression failed\n"),
+                output(true, Some(0), "mergehash\n"),
+                output(true, Some(0), ""),
+                output(false, Some(1), "CONFLICT in src/lib.rs\n"),
+            ]),
+            calls: Vec::new(),
+        };
+
+        let error = post_merge_check_with_runner(gcx.clone(), request(temp.path()), &mut runner)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("post-merge verification failed, and git revert failed"),
+            "{error}"
+        );
+        assert!(runner.calls.contains(&PostMergeCommand::Git(vec![
+            "revert".to_string(),
+            "--no-edit".to_string(),
+            "mergehash".to_string()
+        ])));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let original = board.get_card("T-1").unwrap();
+        assert_eq!(original.column, "regressed");
+        assert!(original
+            .status_updates
+            .iter()
+            .any(|update| update.message == "Auto-revert skipped: git revert failed"));
+        let fix = board.get_card("T-1-fix").unwrap();
+        assert!(fix
+            .instructions
+            .contains("Auto-revert was skipped: git revert failed"));
+        assert!(fix.instructions.contains("Git revert output"));
+        assert!(fix.instructions.contains("CONFLICT in src/lib.rs"));
     }
 
     #[tokio::test]

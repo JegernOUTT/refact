@@ -505,13 +505,52 @@ pub(crate) fn build_agent_thread_params(
     }
 }
 
-async fn resolve_invoking_planner_chat_id(
+pub(crate) async fn resolve_invoking_planner_chat_id(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
     root_chat_id: &str,
     task_meta: Option<&TaskMeta>,
 ) -> String {
+    if let Some(task_meta) = task_meta {
+        if !root_chat_id.is_empty()
+            && root_chat_id != chat_id
+            && root_chat_is_planner_for_task(gcx.clone(), root_chat_id, &task_meta.task_id).await
+        {
+            return root_chat_id.to_string();
+        }
+    }
     resolve_task_planner_controller_chat_id(gcx, chat_id, Some(root_chat_id), task_meta).await
+}
+
+async fn root_chat_is_planner_for_task(
+    gcx: Arc<GlobalContext>,
+    root_chat_id: &str,
+    task_id: &str,
+) -> bool {
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(root_chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        let session = session_arc.lock().await;
+        if session
+            .thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+        {
+            return true;
+        }
+    }
+    crate::chat::trajectories::load_trajectory_for_chat(gcx, root_chat_id)
+        .await
+        .is_some_and(|loaded| {
+            loaded
+                .thread
+                .task_meta
+                .as_ref()
+                .is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
+        })
 }
 
 fn resolve_files_to_open_path(worktree_root: &Path, source_root: &Path, path_str: &str) -> PathBuf {
