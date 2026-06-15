@@ -670,6 +670,7 @@ async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
         .find(|task| task["id"] == json!(id))
         .unwrap();
     assert_eq!(listed_task["trigger_kind"], json!("webhook"));
+    assert_eq!(listed_task["hook_id"], json!("deploy"));
     assert_eq!(listed_task["next_fire_at_ms"], json!(0));
 }
 

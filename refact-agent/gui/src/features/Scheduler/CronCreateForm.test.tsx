@@ -3,6 +3,15 @@ import { screen, render, waitFor } from "../../utils/test-utils";
 import { CronCreateForm } from "./CronCreateForm";
 
 describe("CronCreateForm", () => {
+  it("presents trigger action and delivery builder sections", () => {
+    render(<CronCreateForm onSubmit={vi.fn()} taskCount={0} />);
+
+    expect(screen.getByRole("group", { name: "Trigger" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Action" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Delivery" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Webhook" })).toBeInTheDocument();
+  });
+
   it("validates required description", async () => {
     const onSubmit = vi.fn();
     const { user } = render(
@@ -114,6 +123,49 @@ describe("CronCreateForm", () => {
         description: "One frog check",
       });
     });
+  });
+
+  it("submits webhook trigger jobs with hook id", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: "Webhook" }));
+    await user.type(screen.getByLabelText("Hook ID"), "deploy");
+    await user.type(screen.getByLabelText("Description"), "Deploy hook");
+    await user.click(screen.getByRole("radio", { name: "Command action" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Command" }),
+      "echo hi",
+    );
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        trigger: { kind: "webhook", hook_id: "deploy" },
+        command: "echo hi",
+        durable: false,
+        description: "Deploy hook",
+      });
+    });
+  });
+
+  it("blocks webhook trigger jobs without a hook id", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: "Webhook" }));
+    await user.type(screen.getByLabelText("Description"), "Deploy hook");
+    await user.type(screen.getByLabelText("Prompt"), "Run deploy");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Webhook hook ID is required.",
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("toggles action fields when switching action kind", async () => {
@@ -266,6 +318,27 @@ describe("CronCreateForm", () => {
         description: "Notifier frog check",
       });
     });
+  });
+
+  it("blocks non-chat delivery for agent actions", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.type(screen.getByLabelText("Description"), "Webhook frog check");
+    await user.type(screen.getByLabelText("Prompt"), "Check frogs");
+    await user.click(screen.getByRole("radio", { name: "Webhook delivery" }));
+    await user.type(
+      screen.getByLabelText("Webhook URL"),
+      "https://example.com/hook",
+    );
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Webhook and notifier delivery require a command action.",
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("emits isolated toggle for agent actions", async () => {

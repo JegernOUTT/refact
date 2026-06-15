@@ -26,6 +26,8 @@ export type CreateCronDelivery =
   | { kind: "webhook"; url: string; token?: string }
   | { kind: "notifier"; integration_id: string; target?: string };
 
+export type CreateCronTrigger = { kind: "webhook"; hook_id: string };
+
 export type CronTaskDelivery =
   | { kind: "chat" }
   | { kind: "webhook"; url?: string; has_token?: boolean }
@@ -45,6 +47,7 @@ export type CronTask = {
   created_at_ms: number;
   enabled: boolean;
   paused: boolean;
+  trigger?: CreateCronTrigger;
   trigger_kind: CronTriggerKind;
   tz: string | null;
   every_ms: number | null;
@@ -55,6 +58,7 @@ export type CronTask = {
   action_kind: CronActionKind;
   delivery_kind: CronDeliveryKind;
   delivery?: CronTaskDelivery;
+  hook_id?: string | null;
   chat_id: string | null;
   target: CronActionTarget;
   isolated: boolean;
@@ -65,8 +69,11 @@ type CronTaskWire = Omit<CronTask, "delivery_kind"> & {
 };
 
 function normalizeCronTask(task: CronTaskWire): CronTask {
+  const triggerHookId =
+    task.trigger?.kind === "webhook" ? task.trigger.hook_id : undefined;
   return {
     ...task,
+    hook_id: task.hook_id ?? triggerHookId ?? null,
     delivery_kind: task.delivery?.kind ?? task.delivery_kind ?? "chat",
   };
 }
@@ -76,6 +83,8 @@ export type CreateCronRequest = {
   every?: string;
   at?: string;
   tz?: string;
+  trigger?: CreateCronTrigger;
+  hook_id?: string;
   prompt?: string;
   isolated?: boolean;
   command?: string;

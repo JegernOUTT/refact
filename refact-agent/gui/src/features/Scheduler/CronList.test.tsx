@@ -108,6 +108,114 @@ describe("CronList", () => {
     expect(screen.getByText("Notifier")).toBeInTheDocument();
   });
 
+  it("renders expandable run history with status time and error", async () => {
+    const { user } = render(
+      <CronList
+        tasks={[
+          {
+            ...task,
+            recent_runs: [
+              ...task.recent_runs,
+              {
+                at_ms: Date.UTC(2026, 0, 1, 8, 30),
+                status: "failed",
+                error: "network goblin",
+              },
+            ],
+          },
+        ]}
+        {...defaultProps}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Run history (2)" }));
+
+    expect(screen.getByText("failed")).toBeInTheDocument();
+    expect(screen.getByText("network goblin")).toBeInTheDocument();
+    expect(screen.getAllByText("fired").length).toBeGreaterThan(1);
+  });
+
+  it("renders webhook trigger management and copies hook path", async () => {
+    const { user } = render(
+      <CronList
+        tasks={[
+          {
+            ...task,
+            id: "cron_hook",
+            human_schedule: "webhook",
+            cron: "",
+            trigger_kind: "webhook",
+            next_fire_at_ms: 0,
+            hook_id: "deploy",
+          },
+        ]}
+        {...defaultProps}
+      />,
+    );
+
+    expect(screen.getByText("hook_id: deploy")).toBeInTheDocument();
+    expect(screen.getByText("/hooks/deploy")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy path" }));
+
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("explains webhook path when hook id is absent", () => {
+    render(
+      <CronList
+        tasks={[
+          {
+            ...task,
+            id: "cron_hook_unknown",
+            human_schedule: "webhook",
+            cron: "",
+            trigger_kind: "webhook",
+            next_fire_at_ms: 0,
+            hook_id: null,
+          },
+        ]}
+        {...defaultProps}
+      />,
+    );
+
+    expect(screen.getByText("hook_id unavailable")).toBeInTheDocument();
+    expect(screen.getByText("/hooks/:name")).toBeInTheDocument();
+  });
+
+  it("edits webhook trigger descriptions without converting schedules", async () => {
+    const onUpdate = vi.fn();
+    const { user } = render(
+      <CronList
+        tasks={[
+          {
+            ...task,
+            id: "cron_hook",
+            human_schedule: "webhook",
+            cron: "",
+            trigger_kind: "webhook",
+            next_fire_at_ms: 0,
+            hook_id: "deploy",
+          },
+        ]}
+        {...defaultProps}
+        onUpdate={onUpdate}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByLabelText("Edit description"));
+    await user.type(screen.getByLabelText("Edit description"), "Updated hook");
+    expect(screen.getByLabelText("Edit hook ID")).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onUpdate).toHaveBeenCalledWith("cron_hook", {
+        description: "Updated hook",
+      });
+    });
+  });
+
   it("calls delete with the task id", async () => {
     const onDelete = vi.fn();
     const { user } = render(

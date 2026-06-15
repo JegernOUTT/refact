@@ -32,6 +32,7 @@ pub struct CronTaskResponse {
     pub enabled: bool,
     pub paused: bool,
     pub trigger_kind: String,
+    pub hook_id: Option<String>,
     pub tz: Option<String>,
     pub every_ms: Option<u64>,
     pub at_ms: Option<u64>,
@@ -269,7 +270,7 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
     let human_schedule = job_human_schedule(&task);
     let prompt = first_chars(task.prompt().unwrap_or_default(), 200);
     let next_fire_at_ms = next_run_ms(&task, now_ms, tz).unwrap_or(0);
-    let (trigger_kind, tz, every_ms, at_ms) = trigger_response_fields(&task.trigger);
+    let (trigger_kind, hook_id, every_ms, at_ms, tz) = trigger_response_fields(&task.trigger);
     let paused = task.is_paused();
     let action_kind = task.action_kind().to_string();
     let delivery = delivery_response(&task.delivery);
@@ -295,6 +296,7 @@ fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse 
         enabled: task.enabled,
         paused,
         trigger_kind,
+        hook_id,
         tz,
         every_ms,
         at_ms,
@@ -576,14 +578,28 @@ fn validate_next_fire(task: &Job, now_ms: u64) -> Result<(), String> {
 
 fn trigger_response_fields(
     trigger: &Trigger,
-) -> (String, Option<String>, Option<u64>, Option<u64>) {
+) -> (
+    String,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+) {
     match trigger {
-        Trigger::Cron { tz, .. } => ("cron".to_string(), tz.clone(), None, None),
-        Trigger::Interval { every_ms } => ("interval".to_string(), None, Some(*every_ms), None),
-        Trigger::Once { at_ms } => ("once".to_string(), None, None, Some(*at_ms)),
-        Trigger::Manual => ("manual".to_string(), None, None, None),
-        Trigger::Webhook { .. } => ("webhook".to_string(), None, None, None),
-        Trigger::OnProcessExit { .. } => ("manual".to_string(), None, None, None),
+        Trigger::Cron { tz, .. } => ("cron".to_string(), None, None, None, tz.clone()),
+        Trigger::Interval { every_ms } => {
+            ("interval".to_string(), None, Some(*every_ms), None, None)
+        }
+        Trigger::Once { at_ms } => ("once".to_string(), None, None, Some(*at_ms), None),
+        Trigger::Manual => ("manual".to_string(), None, None, None, None),
+        Trigger::Webhook { hook_id } => (
+            "webhook".to_string(),
+            Some(hook_id.clone()),
+            None,
+            None,
+            None,
+        ),
+        Trigger::OnProcessExit { .. } => ("manual".to_string(), None, None, None, None),
     }
 }
 
