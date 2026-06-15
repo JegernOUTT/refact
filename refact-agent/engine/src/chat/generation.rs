@@ -53,6 +53,10 @@ const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
+const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
+    "LLM stream ended unexpectedly without completion signal";
+const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
+    "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextLimitCompactionDecision {
@@ -118,6 +122,58 @@ fn context_limit_compaction_decision(
     } else {
         ContextLimitCompactionDecision::Attempt { attempt }
     }
+}
+
+fn is_responses_incomplete_stream_error(error: &LlmStreamError) -> bool {
+    error.message.contains(RESPONSES_INCOMPLETE_STREAM_ERROR)
+        || error
+            .message
+            .contains("OpenAI Codex WebSocket ended before completion")
+        || error
+            .message
+            .contains("OpenAI Codex WebSocket closed before completion")
+}
+
+fn responses_incomplete_stream_at_critical_pressure(
+    error: &LlmStreamError,
+    model_rec: &BaseModelRecord,
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    usage_stale: bool,
+) -> bool {
+    model_rec.wire_format == crate::llm::WireFormat::OpenaiResponses
+        && effective_n_ctx > 0
+        && is_responses_incomplete_stream_error(error)
+        && matches!(
+            crate::chat::summarization::estimated_provider_context_pressure_with_usage(
+                messages,
+                effective_n_ctx,
+                usage_stale,
+            ),
+            ContextPressure::Critical
+        )
+}
+
+fn synthesize_responses_context_cutoff_error_if_needed(
+    mut error: LlmStreamError,
+    model_rec: &BaseModelRecord,
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    usage_stale: bool,
+) -> LlmStreamError {
+    if responses_incomplete_stream_at_critical_pressure(
+        &error,
+        model_rec,
+        messages,
+        effective_n_ctx,
+        usage_stale,
+    ) {
+        error.message = format!(
+            "{RESPONSES_CONTEXT_CUTOFF_ERROR}. Original error: {}",
+            error.message
+        );
+    }
+    error
 }
 
 fn safe_context_limit_error_for_log(error: &str) -> String {
@@ -2239,10 +2295,20 @@ async fn run_streaming_generation(
             return Ok(GenerationResult::PausedForUserDecision);
         }
 
-        let results = stream_outcome.map(|o| match o {
-            LlmStreamOutcome::Choices(c) => c,
-            LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
-        });
+        let results = stream_outcome
+            .map(|o| match o {
+                LlmStreamOutcome::Choices(c) => c,
+                LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
+            })
+            .map_err(|error| {
+                synthesize_responses_context_cutoff_error_if_needed(
+                    error,
+                    &model_rec.base,
+                    &llm_request.messages,
+                    llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx),
+                    true,
+                )
+            });
 
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
