@@ -263,6 +263,25 @@ impl Job {
         !self.enabled || self.paused_at_ms.is_some()
     }
 
+    pub fn is_isolated(&self) -> bool {
+        matches!(
+            &self.action,
+            Action::AgentTurn {
+                target: AgentTarget::Isolated,
+                ..
+            } | Action::Command {
+                target: AgentTarget::Isolated,
+                ..
+            }
+        )
+    }
+
+    pub fn set_trigger(&mut self, trigger: Trigger) {
+        self.trigger = trigger;
+        self.auto_expire_after_ms =
+            default_auto_expire_after_trigger(&self.trigger, self.recurring);
+    }
+
     pub fn set_existing_chat(&mut self, chat_id: Option<String>) {
         match &mut self.action {
             Action::AgentTurn { target, .. } | Action::Command { target, .. } => {
@@ -349,6 +368,175 @@ pub enum Delivery {
         target: Option<String>,
     },
     None,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CronTaskResponse {
+    pub id: String,
+    pub cron: String,
+    pub human_schedule: String,
+    pub description: String,
+    pub prompt: String,
+    pub recurring: bool,
+    pub durable: bool,
+    pub next_fire_at_ms: u64,
+    pub fire_count: u32,
+    pub created_at_ms: u64,
+    pub enabled: bool,
+    pub paused: bool,
+    pub trigger_kind: String,
+    pub hook_id: Option<String>,
+    pub tz: Option<String>,
+    pub every_ms: Option<u64>,
+    pub at_ms: Option<u64>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    pub recent_runs: Vec<CronRunRecord>,
+    pub action_kind: String,
+    pub delivery_kind: String,
+    pub delivery: DeliveryResponse,
+    pub chat_id: Option<String>,
+    pub target: String,
+    pub isolated: bool,
+    pub mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryResponse {
+    Chat,
+    Webhook {
+        url: String,
+        has_token: bool,
+    },
+    Notifier {
+        integration_id: String,
+        target: Option<String>,
+    },
+    None,
+}
+
+impl DeliveryResponse {
+    pub fn from_delivery(delivery: &Delivery) -> Self {
+        match delivery {
+            Delivery::Chat => DeliveryResponse::Chat,
+            Delivery::Webhook { url, token } => DeliveryResponse::Webhook {
+                url: url.clone(),
+                has_token: token.as_ref().is_some_and(|token| !token.trim().is_empty()),
+            },
+            Delivery::Notifier {
+                integration_id,
+                target,
+            } => DeliveryResponse::Notifier {
+                integration_id: integration_id.clone(),
+                target: target.clone(),
+            },
+            Delivery::None => DeliveryResponse::None,
+        }
+    }
+}
+
+pub fn cron_task_response(task: &Job, next_fire_at_ms: u64) -> CronTaskResponse {
+    let (trigger_kind, hook_id, every_ms, at_ms, tz) = trigger_response_fields(&task.trigger);
+    let isolated = task.is_isolated();
+    CronTaskResponse {
+        id: task.id.clone(),
+        cron: task.cron_expr().unwrap_or_default().to_string(),
+        human_schedule: human_schedule_for_trigger(&task.trigger),
+        description: task.description.clone(),
+        prompt: first_chars(task.prompt().unwrap_or_default(), 200),
+        recurring: task.recurring,
+        durable: task.durable,
+        next_fire_at_ms,
+        fire_count: task.fire_count,
+        created_at_ms: task.created_at_ms,
+        enabled: task.enabled,
+        paused: task.is_paused(),
+        trigger_kind,
+        hook_id,
+        tz,
+        every_ms,
+        at_ms,
+        last_status: task.last_status.clone(),
+        last_error: task.last_error.clone(),
+        recent_runs: task.recent_runs.clone(),
+        action_kind: task.action_kind().to_string(),
+        delivery_kind: delivery_kind(&task.delivery).to_string(),
+        delivery: DeliveryResponse::from_delivery(&task.delivery),
+        chat_id: task.chat_id().map(str::to_string),
+        target: if isolated {
+            "isolated"
+        } else {
+            "existing_chat"
+        }
+        .to_string(),
+        isolated,
+        mode: task.mode().map(str::to_string),
+    }
+}
+
+pub fn human_schedule_for_trigger(trigger: &Trigger) -> String {
+    match trigger {
+        Trigger::Cron { expr, .. } => super::cron_expr::human_schedule(expr),
+        Trigger::Interval { every_ms } => format!("every {}", duration_label(*every_ms)),
+        Trigger::Once { at_ms } => format!("at {at_ms}"),
+        Trigger::Manual => "manual".to_string(),
+        Trigger::Webhook { .. } => "webhook".to_string(),
+        Trigger::OnProcessExit { .. } => "process exit".to_string(),
+    }
+}
+
+pub fn delivery_kind(delivery: &Delivery) -> &'static str {
+    match delivery {
+        Delivery::Chat => "chat",
+        Delivery::Webhook { .. } => "webhook",
+        Delivery::Notifier { .. } => "notifier",
+        Delivery::None => "none",
+    }
+}
+
+fn trigger_response_fields(
+    trigger: &Trigger,
+) -> (
+    String,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+) {
+    match trigger {
+        Trigger::Cron { tz, .. } => ("cron".to_string(), None, None, None, tz.clone()),
+        Trigger::Interval { every_ms } => {
+            ("interval".to_string(), None, Some(*every_ms), None, None)
+        }
+        Trigger::Once { at_ms } => ("once".to_string(), None, None, Some(*at_ms), None),
+        Trigger::Manual => ("manual".to_string(), None, None, None, None),
+        Trigger::Webhook { hook_id } => (
+            "webhook".to_string(),
+            Some(hook_id.clone()),
+            None,
+            None,
+            None,
+        ),
+        Trigger::OnProcessExit { .. } => ("manual".to_string(), None, None, None, None),
+    }
+}
+
+fn duration_label(ms: u64) -> String {
+    const SECOND: u64 = 1_000;
+    const MINUTE: u64 = 60 * SECOND;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    for (unit_ms, suffix) in [(DAY, "d"), (HOUR, "h"), (MINUTE, "m"), (SECOND, "s")] {
+        if ms >= unit_ms && ms % unit_ms == 0 {
+            return format!("{}{}", ms / unit_ms, suffix);
+        }
+    }
+    format!("{ms}ms")
+}
+
+fn first_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 pub fn delivery_from_value(value: &Value) -> Result<Delivery, String> {
@@ -454,9 +642,12 @@ impl From<RawJob> for Job {
         let recurring = raw
             .recurring
             .unwrap_or_else(|| default_recurring_for_trigger(&trigger));
-        let auto_expire_after_ms = raw
-            .auto_expire_after_ms
-            .unwrap_or_else(|| default_auto_expire_after_ms(recurring));
+        let auto_expire_after_ms = if non_time_trigger(&trigger) {
+            0
+        } else {
+            raw.auto_expire_after_ms
+                .unwrap_or_else(|| default_auto_expire_after_ms(recurring))
+        };
 
         Self {
             id: raw.id.unwrap_or_else(new_job_id),
@@ -525,6 +716,21 @@ fn default_auto_expire_after_ms(recurring: bool) -> u64 {
     } else {
         0
     }
+}
+
+fn default_auto_expire_after_trigger(trigger: &Trigger, recurring: bool) -> u64 {
+    if non_time_trigger(trigger) {
+        0
+    } else {
+        default_auto_expire_after_ms(recurring)
+    }
+}
+
+fn non_time_trigger(trigger: &Trigger) -> bool {
+    matches!(
+        trigger,
+        Trigger::Manual | Trigger::Webhook { .. } | Trigger::OnProcessExit { .. }
+    )
 }
 
 #[cfg(test)]
@@ -685,6 +891,59 @@ mod tests {
                 target: None,
             }
         );
+    }
+
+    #[test]
+    fn non_time_triggers_do_not_auto_expire() {
+        let mut job = Job::new_cron_agent_chat(
+            "*/5 * * * *".to_string(),
+            "Check".to_string(),
+            "Check".to_string(),
+            true,
+            false,
+            1_000,
+        );
+        job.set_trigger(Trigger::Webhook {
+            hook_id: "deploy".to_string(),
+        });
+
+        assert!(job.recurring);
+        assert_eq!(job.auto_expire_after_ms, 0);
+
+        job.set_trigger(Trigger::Manual);
+        assert_eq!(job.auto_expire_after_ms, 0);
+
+        job.set_trigger(Trigger::OnProcessExit {
+            match_kind: "service".to_string(),
+        });
+        assert_eq!(job.auto_expire_after_ms, 0);
+    }
+
+    #[test]
+    fn legacy_non_time_trigger_with_expire_field_deserializes_without_expiry() {
+        let value = json!({
+            "id": "cron_webhook_expire",
+            "description": "Deploy hook",
+            "recurring": true,
+            "durable": false,
+            "created_at_ms": 123,
+            "trigger": {"kind": "webhook", "hook_id": "deploy"},
+            "action": {
+                "kind": "command",
+                "argv": ["printf", "hi"],
+                "target": {"kind": "isolated"},
+                "cwd": null,
+                "env": null,
+                "timeout_secs": null
+            },
+            "delivery": {"kind": "none"},
+            "auto_expire_after_ms": DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS
+        });
+
+        let job: Job = serde_json::from_value(value).unwrap();
+
+        assert!(job.recurring);
+        assert_eq!(job.auto_expire_after_ms, 0);
     }
 
     #[test]

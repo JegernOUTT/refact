@@ -2933,6 +2933,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_trigger_with_zero_auto_expire_survives_fire() {
+        let now = now_ms();
+        let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut task = command_due_task("cron_webhook_no_expire", now, empty_command());
+        task.set_trigger(Trigger::Webhook {
+            hook_id: "deploy".to_string(),
+        });
+        task.recurring = true;
+        task.created_at_ms = now - 2 * DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        task.auto_expire_after_ms = 0;
+        task.trigger_at_ms = Some(now);
+        store.add(task.clone()).await.unwrap();
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        assert!(!task_final_after_fire(&task, now));
+        assert!(runner.handle_due_task(task.clone(), now).await);
+
+        let stored = store.get(&task.id).await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.auto_expire_after_ms, 0);
+    }
+
+    #[tokio::test]
     async fn final_fire_event_payload_has_final_true() {
         let now = now_ms();
         let message = cron_fire_message(&expired_task("cron_final", now), true);

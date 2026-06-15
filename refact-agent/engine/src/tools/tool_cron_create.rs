@@ -15,8 +15,9 @@ use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::get_active_project_path;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
-    human_schedule, next_run_ms, scheduler_timezone, session_cron_store, Action, AgentTarget,
-    CronStore, Delivery, Job, JsonFileCronStore, Trigger, delivery_from_value,
+    delivery_kind, human_schedule_for_trigger as scheduler_human_schedule_for_trigger, next_run_ms,
+    scheduler_timezone, session_cron_store, Action, AgentTarget, CronStore, Delivery, Job,
+    JsonFileCronStore, Trigger, delivery_from_value,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -168,8 +169,9 @@ impl Tool for ToolCronCreate {
             "recurring": outcome.task.recurring,
             "durable": outcome.task.durable,
             "action_kind": outcome.task.action_kind(),
+            "delivery_kind": delivery_kind(&outcome.task.delivery),
             "delivery": delivery_output(&outcome.task.delivery),
-            "isolated": job_is_isolated(&outcome.task),
+            "isolated": outcome.task.is_isolated(),
         });
 
         Ok((
@@ -481,7 +483,7 @@ pub(crate) async fn create_cron_job(
         input.durable,
         runtime.now_ms,
     );
-    task.trigger = trigger;
+    task.set_trigger(trigger);
     task.delivery = input.delivery.clone();
     apply_cron_create_action(&mut task, &input, runtime.chat_id, runtime.model)?;
     task.set_mode(runtime.mode);
@@ -553,19 +555,6 @@ fn command_argv_from_input(input: &CronCreateInput) -> Result<Vec<String>, Strin
     shell_words::split(command).map_err(|error| format!("failed to parse command: {error}"))
 }
 
-fn job_is_isolated(task: &Job) -> bool {
-    matches!(
-        &task.action,
-        Action::AgentTurn {
-            target: AgentTarget::Isolated,
-            ..
-        } | Action::Command {
-            target: AgentTarget::Isolated,
-            ..
-        }
-    )
-}
-
 #[cfg(test)]
 fn job_model(task: &Job) -> Option<&str> {
     match &task.action {
@@ -617,10 +606,17 @@ fn validate_next_run(task: &Job, now_ms: u64, timezone: Tz) -> Result<(), String
     Ok(())
 }
 
+fn no_match_in_year_error() -> String {
+    "matches no calendar date in the next year".to_string()
+}
+
 pub(crate) fn human_schedule_for_trigger(trigger: &Trigger) -> String {
     match trigger {
-        Trigger::Cron { expr, .. } => human_schedule(expr),
-        Trigger::Interval { every_ms } => format!("every {}", human_duration(*every_ms)),
+        Trigger::Cron { expr, .. } => scheduler_human_schedule_for_trigger(&Trigger::Cron {
+            expr: expr.clone(),
+            tz: None,
+        }),
+        Trigger::Interval { every_ms } => format!("every {}", tool_human_duration(*every_ms)),
         Trigger::Once { at_ms } => Utc
             .timestamp_millis_opt(*at_ms as i64)
             .single()
@@ -632,7 +628,7 @@ pub(crate) fn human_schedule_for_trigger(trigger: &Trigger) -> String {
     }
 }
 
-fn human_duration(ms: u64) -> String {
+fn tool_human_duration(ms: u64) -> String {
     for (unit_ms, singular, plural) in [
         (24 * 60 * 60 * 1000, "day", "days"),
         (60 * 60 * 1000, "hour", "hours"),
@@ -646,10 +642,6 @@ fn human_duration(ms: u64) -> String {
         }
     }
     format!("{ms}ms")
-}
-
-fn no_match_in_year_error() -> String {
-    "matches no calendar date in the next year".to_string()
 }
 
 async fn emit_created_notice(
@@ -674,7 +666,7 @@ async fn emit_created_notice(
             "recurring": task.recurring,
             "durable": task.durable,
             "action_kind": task.action_kind(),
-            "isolated": job_is_isolated(task),
+            "isolated": task.is_isolated(),
         }),
         summary.to_string(),
     ));
@@ -952,7 +944,7 @@ mod tests {
         );
         assert!(outcome.task.recurring);
         assert_eq!(outcome.human_schedule, "every 5 minutes");
-        assert!(!job_is_isolated(&outcome.task));
+        assert!(!outcome.task.is_isolated());
         assert_eq!(outcome.task.chat_id(), Some("chat-1"));
     }
 
@@ -971,7 +963,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(job_is_isolated(&outcome.task));
+        assert!(outcome.task.is_isolated());
         assert_eq!(outcome.task.chat_id(), None);
         assert_eq!(outcome.task.mode(), Some("agent"));
         assert_eq!(job_model(&outcome.task), Some("model-1"));
@@ -987,7 +979,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!job_is_isolated(&outcome.task));
+        assert!(!outcome.task.is_isolated());
         assert_eq!(outcome.task.chat_id(), Some("chat-1"));
         assert_eq!(outcome.task.mode(), Some("agent"));
         assert_eq!(job_model(&outcome.task), None);

@@ -219,10 +219,11 @@ async fn load_job_store(
 
 fn apply_update(job: &mut Job, input: CronUpdateInput, now_ms: u64) -> Result<(), String> {
     if input.has_schedule_update() {
-        job.trigger = parse_schedule_update(&input, now_ms)?;
-        if matches!(job.trigger, Trigger::Once { .. }) {
+        let trigger = parse_schedule_update(&input, now_ms)?;
+        if matches!(trigger, Trigger::Once { .. }) {
             job.recurring = false;
         }
+        job.set_trigger(trigger);
     }
     if let Some(prompt) = input.prompt {
         set_prompt(job, prompt);
@@ -299,7 +300,9 @@ fn unix_now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use crate::scheduler::{InMemoryCronStore, JsonFileCronStore};
+    use crate::scheduler::{
+        InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+    };
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
@@ -390,6 +393,28 @@ mod tests {
         );
         assert_eq!(result["human_schedule"], json!("every 30 minutes"));
         assert_eq!(result["updated"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn cron_update_non_time_trigger_clears_auto_expire() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let mut task = test_task("cron_update_once", false);
+        task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+        session_store.add(task).await.unwrap();
+        let mut tool =
+            ToolCronUpdate::with_stores(String::new(), session_store.clone(), None, 2_000);
+        let ccx = test_ccx().await;
+
+        run_tool(
+            &mut tool,
+            ccx,
+            &[("id", json!("cron_update_once")), ("at", json!("in 30m"))],
+        )
+        .await;
+
+        let stored = session_store.get("cron_update_once").await.unwrap();
+        assert!(!stored.recurring);
+        assert_eq!(stored.auto_expire_after_ms, 0);
     }
 
     #[tokio::test]

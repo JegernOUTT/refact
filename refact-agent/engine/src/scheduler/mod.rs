@@ -17,11 +17,12 @@ pub use schedule::{
 };
 pub use store::{scheduled_tasks_path, CronStore, InMemoryCronStore, JsonFileCronStore};
 pub use types::{
-    Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, Delivery,
-    DEFAULT_MISSED_GRACE_MAX_MS, DEFAULT_MISSED_GRACE_MIN_MS,
+    Action, AgentTarget, CommandSpec, CronCreatePolicy, CronRunRecord, CronTaskResponse, Delivery,
+    DeliveryResponse, DEFAULT_MISSED_GRACE_MAX_MS, DEFAULT_MISSED_GRACE_MIN_MS,
     DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, DEFAULT_SCHEDULER_MAX_CONCURRENT_RUNS,
     DEFAULT_SCHEDULER_MAX_JOBS, DURABLE_DISABLED_NOTE, Job, RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV,
-    SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger, cron_create_policy, delivery_from_value,
+    SCHEDULER_DISABLED_ERROR, SchedulerConfig, Trigger, cron_create_policy, cron_task_response,
+    delivery_from_value, delivery_kind, human_schedule_for_trigger,
 };
 
 pub fn scheduler_timezone() -> chrono_tz::Tz {
