@@ -330,6 +330,7 @@ mod tests {
             fire_count: 0,
             last_status: None,
             last_error: None,
+            last_delivery_error: None,
             recent_runs: Vec::new(),
             paused_at_ms: None,
             trigger_at_ms: None,

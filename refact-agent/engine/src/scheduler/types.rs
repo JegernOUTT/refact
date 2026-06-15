@@ -145,6 +145,8 @@ pub struct Job {
     pub fire_count: u32,
     pub last_status: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_delivery_error: Option<String>,
     pub recent_runs: Vec<CronRunRecord>,
     pub paused_at_ms: Option<u64>,
     pub trigger_at_ms: Option<u64>,
@@ -187,6 +189,7 @@ impl Job {
             fire_count: 0,
             last_status: None,
             last_error: None,
+            last_delivery_error: None,
             recent_runs: Vec::new(),
             paused_at_ms: None,
             trigger_at_ms: None,
@@ -433,6 +436,7 @@ struct RawJob {
     fire_count: Option<u32>,
     last_status: Option<String>,
     last_error: Option<String>,
+    last_delivery_error: Option<String>,
     recent_runs: Option<Vec<CronRunRecord>>,
     paused_at_ms: Option<u64>,
     trigger_at_ms: Option<u64>,
@@ -470,6 +474,7 @@ impl From<RawJob> for Job {
             fire_count: raw.fire_count.unwrap_or_default(),
             last_status: raw.last_status,
             last_error: raw.last_error,
+            last_delivery_error: raw.last_delivery_error,
             recent_runs: raw.recent_runs.unwrap_or_default(),
             paused_at_ms: raw.paused_at_ms,
             trigger_at_ms: raw.trigger_at_ms,
@@ -554,6 +559,7 @@ mod tests {
             fire_count: 3,
             last_status: Some("ok".to_string()),
             last_error: None,
+            last_delivery_error: None,
             recent_runs: vec![CronRunRecord {
                 at_ms: 2_000,
                 status: "ok".to_string(),
@@ -633,6 +639,50 @@ mod tests {
             Delivery::Notifier {
                 integration_id: "notifier_telegram".to_string(),
                 target: Some("chat-1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_from_value_accepts_kind_and_type_aliases() {
+        assert_eq!(
+            delivery_from_value(&json!({"kind":"chat"})).unwrap(),
+            Delivery::Chat
+        );
+        assert_eq!(
+            delivery_from_value(&json!({"type":"chat"})).unwrap(),
+            Delivery::Chat
+        );
+        assert_eq!(
+            delivery_from_value(&json!({"kind":"webhook","url":"https://example.test/hook"}))
+                .unwrap(),
+            Delivery::Webhook {
+                url: "https://example.test/hook".to_string(),
+                token: None,
+            }
+        );
+        assert_eq!(
+            delivery_from_value(&json!({"type":"webhook","url":"https://example.test/hook"}))
+                .unwrap(),
+            Delivery::Webhook {
+                url: "https://example.test/hook".to_string(),
+                token: None,
+            }
+        );
+        assert_eq!(
+            delivery_from_value(&json!({"kind":"notifier","integration_id":"notifier_telegram"}))
+                .unwrap(),
+            Delivery::Notifier {
+                integration_id: "notifier_telegram".to_string(),
+                target: None,
+            }
+        );
+        assert_eq!(
+            delivery_from_value(&json!({"type":"notifier","integration_id":"notifier_telegram"}))
+                .unwrap(),
+            Delivery::Notifier {
+                integration_id: "notifier_telegram".to_string(),
+                target: None,
             }
         );
     }

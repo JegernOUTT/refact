@@ -9,6 +9,7 @@ use crate::app_state::AppState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::custom_error::ScratchError;
+use crate::daemon::auth::token_matches;
 use crate::scheduler::{
     active_durable_cron_store, delivery_from_value, session_cron_store, Action, AgentTarget,
     CronRunner, CronStore, Delivery, Job, Trigger,
@@ -100,7 +101,10 @@ fn authorize_worker_hook(app: &AppState, headers: &HeaderMap) -> Result<(), Scra
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().strip_prefix("Bearer "));
-    if actual == Some(expected) {
+    if actual
+        .map(|actual| token_matches(actual, expected))
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     Err(ScratchError::new(
@@ -345,6 +349,16 @@ mod tests {
         vec!["cmd".to_string(), "/C".to_string(), "echo hi".to_string()]
     }
 
+    #[cfg(not(target_os = "windows"))]
+    fn failing_command() -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn failing_command() -> Vec<String> {
+        vec!["cmd".to_string(), "/C".to_string(), "exit 7".to_string()]
+    }
+
     #[tokio::test]
     async fn hooks_fire_auth_requires_daemon_bearer_when_configured() {
         let mut gcx = crate::global_context::tests::make_test_gcx().await;
@@ -354,6 +368,14 @@ mod tests {
 
         let (status, _) =
             request_json(router.clone(), json!({"kind":"wake","text":"hello"}), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = request_json(
+            router.clone(),
+            json!({"kind":"wake","text":"hello"}),
+            Some("wrong-secret"),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let (status, value) = request_json(
@@ -427,6 +449,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hooks_fire_agent_accepts_type_delivery_alias() {
+        let app = test_app().await;
+        let router = router(app.clone());
+
+        let (status, value) = request_json(
+            router,
+            json!({"kind":"agent","message":"ship typed","deliver":{"type":"chat"}}),
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["inline"]["kind"], json!("agent"));
+        let job_id = value["inline"]["job_id"].as_str().unwrap();
+        let prefix = format!("cron_{job_id}_");
+        let sessions = app.gcx.chat_sessions.read().await;
+        assert!(sessions.keys().any(|chat_id| chat_id.starts_with(&prefix)));
+    }
+
+    #[tokio::test]
     async fn hooks_fire_hook_id_runs_matching_webhook_jobs_only() {
         let app = test_app().await;
         let store = session_cron_store();
@@ -493,6 +535,47 @@ mod tests {
         assert_eq!(other.last_status, None);
         store.remove(&matching_id).await.unwrap();
         store.remove(&other_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hooks_fire_one_shot_failed_job_reports_not_fired() {
+        let app = test_app().await;
+        let store = session_cron_store();
+        let hook_id = format!("deploy-fail-{}", Uuid::now_v7());
+        let mut matching = Job::new_cron_agent_chat(
+            String::new(),
+            String::new(),
+            "Run failing hook command".to_string(),
+            false,
+            false,
+            unix_now_ms(),
+        );
+        matching.id = format!("hook_test_fail_{}", Uuid::now_v7());
+        matching.trigger = Trigger::Webhook {
+            hook_id: hook_id.clone(),
+        };
+        matching.action = Action::Command {
+            argv: failing_command(),
+            target: AgentTarget::Isolated,
+            cwd: None,
+            env: None,
+            timeout_secs: Some(5),
+        };
+        matching.delivery = Delivery::None;
+        matching.auto_expire_after_ms = 0;
+        let matching_id = matching.id.clone();
+        store.add(matching).await.unwrap();
+
+        let router = router(app);
+        let (status, value) =
+            request_json(router, json!({"kind":"wake","hook_id": hook_id}), None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["hook_jobs"]["matched"], json!(1));
+        assert_eq!(value["hook_jobs"]["fired"], json!(0));
+        assert_eq!(value["hook_jobs"]["jobs"][0]["id"], json!(matching_id));
+        assert_eq!(value["hook_jobs"]["jobs"][0]["fired"], json!(false));
+        assert!(store.get(&matching_id).await.is_none());
     }
 
     #[tokio::test]

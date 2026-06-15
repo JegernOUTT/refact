@@ -90,12 +90,7 @@ impl CronRunner {
             .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
         task.trigger_at_ms = Some(now);
         let mut runner = Self::new(store.clone(), gcx);
-        runner.handle_due_task(task, now).await;
-        let fired = store
-            .get(job_id)
-            .await
-            .map(|task| task.last_status.as_deref() == Some("fired"))
-            .unwrap_or(true);
+        let fired = runner.handle_due_task(task, now).await;
         if !fired {
             if let Some(mut stored) = store
                 .get(job_id)
@@ -318,14 +313,12 @@ impl CronRunner {
         }
     }
 
-    async fn handle_due_task(&mut self, task: Job, now: u64) {
+    async fn handle_due_task(&mut self, task: Job, now: u64) -> bool {
         if matches!(&task.action, Action::Command { .. }) {
-            self.handle_due_command_task(task, now).await;
-            return;
+            return self.handle_due_command_task(task, now).await;
         }
         if job_is_isolated(&task) {
-            self.handle_due_isolated_task(task, now).await;
-            return;
+            return self.handle_due_isolated_task(task, now).await;
         }
 
         let chat_id = match runnable_chat_id(&task) {
@@ -333,11 +326,11 @@ impl CronRunner {
             Err("missing chat_id") => {
                 self.handle_unfireable_task(&task, now, "missing chat_id")
                     .await;
-                return;
+                return false;
             }
             Err(reason) => {
                 self.handle_unfireable_task(&task, now, reason).await;
-                return;
+                return false;
             }
         };
 
@@ -352,7 +345,7 @@ impl CronRunner {
                     );
                 }
                 self.defer_task(&task, now);
-                return;
+                return false;
             }
             ChatFireStatus::Missing => {
                 if task.durable {
@@ -385,7 +378,7 @@ impl CronRunner {
                             );
                         }
                         self.defer_invalid_target_task(&task, now);
-                        return;
+                        return false;
                     }
                     match chat_fire_status(&self.gcx, chat_id).await {
                         ChatFireStatus::Fireable => {}
@@ -411,26 +404,39 @@ impl CronRunner {
                                 );
                             }
                             self.defer_invalid_target_task(&task, now);
-                            return;
+                            return false;
                         }
                     }
                 } else {
                     self.handle_unfireable_task(&task, now, "chat session not found")
                         .await;
-                    return;
+                    return false;
                 }
             }
             ChatFireStatus::Closed => {
                 self.handle_unfireable_task(&task, now, "chat session is closed")
                     .await;
-                return;
+                return false;
             }
         }
+
+        let task = match self.advance_recurring_before_fire(&task, now).await {
+            Ok(Some(advanced)) => advanced,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!("failed to advance scheduled task {}: {}", task.id, error);
+                self.handle_unfireable_task(&task, now, &error).await;
+                return false;
+            }
+        };
 
         let final_fire = task_final_after_fire(&task, now);
         match self.fire(&task, final_fire, now).await {
             Ok(true) => {}
             Ok(false) => {
+                if self.record_skipped_after_advance(&task, now).await {
+                    return false;
+                }
                 if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
@@ -439,7 +445,7 @@ impl CronRunner {
                     );
                 }
                 self.defer_task(&task, now);
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
@@ -447,10 +453,10 @@ impl CronRunner {
                     .handle_classifiable_fire_error(&task, final_fire, now, &error)
                     .await
                 {
-                    return;
+                    return false;
                 }
                 self.handle_unfireable_task(&task, now, &error).await;
-                return;
+                return false;
             }
         }
 
@@ -485,27 +491,28 @@ impl CronRunner {
             }
         }
         self.deferred_until_ms.remove(&task.id);
+        true
     }
 
-    async fn handle_due_command_task(&mut self, task: Job, now: u64) {
+    async fn handle_due_command_task(&mut self, task: Job, now: u64) -> bool {
         let cmd = match task.command_spec() {
             Some(cmd) => cmd,
             None => {
                 self.handle_unfireable_task(&task, now, "command action is missing")
                     .await;
-                return;
+                return false;
             }
         };
         if let Err(reason) = runnable_command_job(&task) {
             self.handle_unfireable_task(&task, now, reason).await;
-            return;
+            return false;
         }
         if matches!(task.delivery, Delivery::Chat) {
             if let AgentTarget::ExistingChat { chat_id } = &cmd.target {
                 if chat_id.is_empty() {
                     self.handle_unfireable_task(&task, now, "missing chat_id")
                         .await;
-                    return;
+                    return false;
                 }
                 match chat_fire_status(&self.gcx, chat_id).await {
                     ChatFireStatus::Fireable => {}
@@ -518,7 +525,7 @@ impl CronRunner {
                             );
                         }
                         self.defer_task(&task, now);
-                        return;
+                        return false;
                     }
                     ChatFireStatus::Missing => {
                         if task.durable {
@@ -546,18 +553,18 @@ impl CronRunner {
                                     );
                                 }
                                 self.defer_invalid_target_task(&task, now);
-                                return;
+                                return false;
                             }
                         } else {
                             self.handle_unfireable_task(&task, now, "chat session not found")
                                 .await;
-                            return;
+                            return false;
                         }
                     }
                     ChatFireStatus::Closed => {
                         self.handle_unfireable_task(&task, now, "chat session is closed")
                             .await;
-                        return;
+                        return false;
                     }
                 }
             }
@@ -565,11 +572,11 @@ impl CronRunner {
 
         let task = match self.advance_recurring_before_fire(&task, now).await {
             Ok(Some(advanced)) => advanced,
-            Ok(None) => return,
+            Ok(None) => return false,
             Err(error) => {
                 tracing::warn!("failed to advance scheduled task {}: {}", task.id, error);
                 self.handle_unfireable_task(&task, now, &error).await;
-                return;
+                return false;
             }
         };
         let final_fire = task_final_after_fire(&task, now);
@@ -584,10 +591,10 @@ impl CronRunner {
                     .handle_classifiable_fire_error(&task, final_fire, now, &error)
                     .await
                 {
-                    return;
+                    return false;
                 }
                 self.handle_unfireable_task(&task, now, &error).await;
-                return;
+                return false;
             }
         };
 
@@ -607,7 +614,7 @@ impl CronRunner {
             {
                 Ok(true) => {
                     self.deferred_until_ms.remove(&task.id);
-                    return;
+                    return false;
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -639,27 +646,31 @@ impl CronRunner {
             }
         }
         self.deferred_until_ms.remove(&task.id);
+        result.status == "fired"
     }
 
-    async fn handle_due_isolated_task(&mut self, task: Job, now: u64) {
+    async fn handle_due_isolated_task(&mut self, task: Job, now: u64) -> bool {
         if let Err(reason) = runnable_isolated_job(&task) {
             self.handle_unfireable_task(&task, now, reason).await;
-            return;
+            return false;
         }
 
         let task = match self.advance_recurring_before_fire(&task, now).await {
             Ok(Some(advanced)) => advanced,
-            Ok(None) => return,
+            Ok(None) => return false,
             Err(error) => {
                 tracing::warn!("failed to advance scheduled task {}: {}", task.id, error);
                 self.handle_unfireable_task(&task, now, &error).await;
-                return;
+                return false;
             }
         };
         let final_fire = task_final_after_fire(&task, now);
         match self.fire(&task, final_fire, now).await {
             Ok(true) => {}
             Ok(false) => {
+                if self.record_skipped_after_advance(&task, now).await {
+                    return false;
+                }
                 if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
@@ -668,7 +679,7 @@ impl CronRunner {
                     );
                 }
                 self.defer_task(&task, now);
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
@@ -676,10 +687,10 @@ impl CronRunner {
                     .handle_classifiable_fire_error(&task, final_fire, now, &error)
                     .await
                 {
-                    return;
+                    return false;
                 }
                 self.handle_unfireable_task(&task, now, &error).await;
-                return;
+                return false;
             }
         }
 
@@ -714,6 +725,7 @@ impl CronRunner {
             }
         }
         self.deferred_until_ms.remove(&task.id);
+        true
     }
 
     async fn handle_unfireable_task(&mut self, task: &Job, now: u64, reason: &str) {
@@ -821,6 +833,29 @@ impl CronRunner {
         true
     }
 
+    async fn record_skipped_after_advance(&mut self, task: &Job, now: u64) -> bool {
+        if !job_was_advanced_before_fire(task, now) {
+            return false;
+        }
+        if let Err(error) = self
+            .record_run(
+                &task.id,
+                "skipped",
+                Some("slot advanced before enqueue".to_string()),
+                now,
+            )
+            .await
+        {
+            tracing::warn!(
+                "failed to record skipped scheduled task {}: {}",
+                task.id,
+                error
+            );
+        }
+        self.deferred_until_ms.remove(&task.id);
+        true
+    }
+
     async fn schedule_retry(&self, task: &Job, now: u64, error: &str) -> Result<bool, String> {
         let Some(category) = classify(error) else {
             return Ok(false);
@@ -888,6 +923,7 @@ impl CronRunner {
         advanced.last_fired_at_ms = Some(advance_to_ms);
         advanced.last_status = Some("advanced".to_string());
         advanced.last_error = None;
+        advanced.last_delivery_error = None;
         if state.should_fire {
             advanced.fire_count = advanced.fire_count.saturating_add(1);
         }
@@ -1107,20 +1143,52 @@ impl CronRunner {
             )
         })?;
         let app = AppState::from_gcx(self.gcx.clone()).await;
-        let mut result = run_command(&app, task, cmd).await;
+        let result = run_command(&app, task, cmd).await;
         if let Err(error) = self
             .deliver_command_result(&app, task, cmd, final_fire, fired_at_ms, missed, &result)
             .await
         {
-            result.status = "error".to_string();
-            if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
-                result.stderr.push('\n');
+            if let Err(store_error) = self.record_delivery_error(&task.id, error).await {
+                tracing::warn!(
+                    "failed to record delivery error for scheduled task {}: {}",
+                    task.id,
+                    store_error
+                );
             }
-            result
-                .stderr
-                .push_str(&format!("Delivery failed: {error}\n"));
+        } else if let Err(store_error) = self.clear_delivery_error(&task.id).await {
+            tracing::warn!(
+                "failed to clear delivery error for scheduled task {}: {}",
+                task.id,
+                store_error
+            );
         }
         Ok(result)
+    }
+
+    async fn clear_delivery_error(&self, job_id: &str) -> Result<(), String> {
+        let Some(mut task) = self.store.get(job_id).await else {
+            return Ok(());
+        };
+        task.last_delivery_error = None;
+        if self.store.replace(task).await? {
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn record_delivery_error(&self, job_id: &str, error: String) -> Result<(), String> {
+        let mut task = self
+            .store
+            .get(job_id)
+            .await
+            .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
+        task.last_delivery_error = Some(error);
+        if self.store.replace(task).await? {
+            Ok(())
+        } else {
+            Err(format!("Scheduled task {job_id} not found"))
+        }
     }
 
     async fn deliver_command_result(
@@ -2315,6 +2383,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recurring_existing_chat_advanced_crash_does_not_refire_same_slot() {
+        let now = now_ms();
+        let every_ms = 60_000;
+        let store = Arc::new(InMemoryCronStore::new());
+        let task = interval_task("chat_crash_advanced", now, every_ms);
+        store.add(task.clone()).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let runner = CronRunner::new(store.clone(), gcx.clone());
+
+        let advanced = runner
+            .advance_recurring_before_fire(&task, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let advanced_at_ms = advanced.last_fired_at_ms.unwrap();
+        assert!(advanced_at_ms <= now);
+        assert_eq!(advanced.fire_count, 1);
+
+        let mut restarted = CronRunner::new(store.clone(), gcx.clone());
+        restarted.fire_due_tasks(now).await;
+
+        let stored = store.get("chat_crash_advanced").await.unwrap();
+        assert_eq!(stored.last_fired_at_ms, Some(advanced_at_ms));
+        assert_eq!(stored.fire_count, 1);
+        assert_no_fire(&gcx).await;
+    }
+
+    #[tokio::test]
     async fn recurring_isolated_advanced_crash_does_not_refire_same_slot() {
         let now = now_ms();
         let every_ms = 60_000;
@@ -2468,6 +2564,47 @@ mod tests {
         assert_eq!(stored.last_status.as_deref(), Some("fired"));
         assert_eq!(stored.retry_attempts, 0);
         assert_eq!(stored.trigger_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn command_delivery_failure_records_separate_error_without_retry() {
+        let router = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(router.into_make_service());
+        let server_task = tokio::spawn(server);
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut task = command_due_task("command_delivery_error", now, empty_command());
+        task.delivery = Delivery::Webhook {
+            url: format!("http://127.0.0.1:{port}/hook"),
+            token: None,
+        };
+        store.add(task).await.unwrap();
+        let gcx = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("command_delivery_error").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.last_error, None);
+        assert!(stored
+            .last_delivery_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("webhook delivery returned status"));
+        assert_eq!(stored.retry_attempts, 0);
+        assert_eq!(stored.trigger_at_ms, None);
+        assert_eq!(stored.recent_runs.len(), 1);
+        assert_eq!(stored.recent_runs[0].status, "fired");
+        assert_eq!(stored.recent_runs[0].error, None);
+        server_task.abort();
     }
 
     #[tokio::test]

@@ -242,6 +242,7 @@ mod tests {
             fire_count: 2,
             last_status: Some("fired".to_string()),
             last_error: None,
+            last_delivery_error: None,
             recent_runs: vec![CronRunRecord {
                 at_ms: 2_000,
                 status: "fired".to_string(),
