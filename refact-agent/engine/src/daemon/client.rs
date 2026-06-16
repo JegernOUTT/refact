@@ -290,6 +290,7 @@ fn build_control_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .connect_timeout(CONTROL_CONNECT_TIMEOUT)
         .timeout(CONTROL_TOTAL_TIMEOUT)
+        .no_proxy()
         .build()
 }
 

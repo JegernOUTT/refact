@@ -137,6 +137,7 @@ impl Supervisor {
             idle_timeout_secs,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
+                .no_proxy()
                 .build()
                 .expect("failed to build daemon supervisor http client"),
             shutdown_tx,

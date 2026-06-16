@@ -81,6 +81,7 @@ impl ProxyChatClient {
         let client = reqwest::Client::builder()
             .connect_timeout(CHAT_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .map_err(|error| {
                 ChatClientError::Http(format!("failed to build HTTP client: {error}"))
