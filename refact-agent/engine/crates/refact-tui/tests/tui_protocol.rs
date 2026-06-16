@@ -548,13 +548,13 @@ fn render_snapshot_for_assistant_streaming_fixture() {
 
   › render a table
 
-
   •  A      B
     ━━━━━  ━━━━━
      one    two
 
 
     fn main() {}
+
 
 
 › Ask Refact…

@@ -311,6 +311,8 @@ mod tests {
     fn user_cell_snapshot() {
         let cell = UserCell::new("hello @there", false);
         assert_eq!(text(&cell.render(40)), "\n› hello @there\n");
+        let style = user_message_style();
+        assert!(cell.render(40).iter().all(|line| line.style == style));
         let mention = cell
             .render(40)
             .into_iter()
@@ -318,6 +320,15 @@ mod tests {
             .find(|span| span.content.as_ref() == "@there")
             .unwrap();
         assert_eq!(mention.style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn user_cell_wraps_with_hanging_gutter_and_band() {
+        let cell = UserCell::new("alpha beta gamma", false);
+        let lines = cell.render(10);
+
+        assert_eq!(text(&lines), "\n› alpha\n  beta\n  gamma\n");
+        assert!(lines.iter().all(|line| line.style == user_message_style()));
     }
 
     #[test]

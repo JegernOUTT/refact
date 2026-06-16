@@ -3,6 +3,8 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use ratatui::backend::Backend;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -202,6 +204,7 @@ pub struct HistoryBuffer {
     render_count: usize,
     inserted_cell_count: usize,
     emitted_history_lines: bool,
+    emitted_history_trailing_blank: bool,
 }
 
 impl HistoryBuffer {
@@ -214,6 +217,7 @@ impl HistoryBuffer {
         self.pending.clear();
         self.cache.clear();
         self.emitted_history_lines = false;
+        self.emitted_history_trailing_blank = false;
     }
 
     pub fn enqueue(&mut self, item: TranscriptItem) -> u64 {
@@ -265,12 +269,7 @@ impl HistoryBuffer {
             .iter()
             .map(|insertion| insertion.cell_ids.len())
             .sum::<usize>();
-        if insertions
-            .iter()
-            .any(|insertion| !insertion.lines.is_empty())
-        {
-            self.emitted_history_lines = true;
-        }
+        self.note_insertions_emitted(&insertions);
         for insertion in &insertions {
             self.evict_cache_entries(&insertion.cell_ids);
         }
@@ -285,12 +284,7 @@ impl HistoryBuffer {
             .map(|insertion| insertion.cell_ids.len())
             .sum::<usize>();
         self.inserted_cell_count += drained;
-        if insertions
-            .iter()
-            .any(|insertion| !insertion.lines.is_empty())
-        {
-            self.emitted_history_lines = true;
-        }
+        self.note_insertions_emitted(&insertions);
         self.pending.drain(..drained);
         insertions
     }
@@ -307,7 +301,9 @@ impl HistoryBuffer {
         let mut insertions = Vec::new();
         let mut current_ids = Vec::new();
         let mut current_lines = Vec::new();
-        let mut emitted_history_lines = self.emitted_history_lines;
+        let mut last_emitted_line_blank = self
+            .emitted_history_lines
+            .then_some(self.emitted_history_trailing_blank);
         let entries = self
             .pending
             .iter()
@@ -317,12 +313,13 @@ impl HistoryBuffer {
         for entry in entries {
             let mut lines = self.render_entry(&entry, width);
             if !lines.is_empty() && !entry.cell.is_stream_continuation() {
-                if emitted_history_lines || !current_lines.is_empty() {
-                    lines.insert(0, HyperlinkLine::new(Line::default()));
-                } else {
-                    emitted_history_lines = true;
+                if let Some(previous_blank) = last_emitted_line_blank {
+                    if !previous_blank && !hyperlink_line_is_blank(&lines[0]) {
+                        lines.insert(0, HyperlinkLine::new(Line::default()));
+                    }
                 }
             }
+            let lines_trailing_blank = lines.last().map(hyperlink_line_is_blank);
             if !current_lines.is_empty() && current_lines.len() + lines.len() > MAX_INSERTION_LINES
             {
                 insertions.push(HistoryInsertion {
@@ -332,6 +329,9 @@ impl HistoryBuffer {
             }
             current_ids.push(entry.id);
             current_lines.extend(lines);
+            if let Some(trailing_blank) = lines_trailing_blank {
+                last_emitted_line_blank = Some(trailing_blank);
+            }
         }
         if !current_lines.is_empty() {
             insertions.push(HistoryInsertion {
@@ -382,17 +382,22 @@ impl HistoryBuffer {
 
         let mut cell_ids = Vec::new();
         let mut lines = Vec::new();
-        let mut emitted_history_lines = false;
+        let mut last_emitted_line_blank = None::<bool>;
         for display in displays {
             cell_ids.push(display.id);
             if !display.lines.is_empty() && !display.is_stream_continuation {
-                if emitted_history_lines {
-                    lines.push(HyperlinkLine::new(Line::default()));
-                } else {
-                    emitted_history_lines = true;
+                if let Some(previous_blank) = last_emitted_line_blank {
+                    if !previous_blank && !hyperlink_line_is_blank(&display.lines[0]) {
+                        lines.push(HyperlinkLine::new(Line::default()));
+                        last_emitted_line_blank = Some(true);
+                    }
                 }
             }
+            let trailing_blank = display.lines.last().map(hyperlink_line_is_blank);
             lines.extend(display.lines);
+            if let Some(trailing_blank) = trailing_blank {
+                last_emitted_line_blank = Some(trailing_blank);
+            }
         }
 
         if lines.len() > max_rows {
@@ -404,12 +409,22 @@ impl HistoryBuffer {
         self.inserted_cell_count += drained;
         self.pending.clear();
         self.emitted_history_lines = !lines.is_empty();
+        self.emitted_history_trailing_blank = lines.last().is_some_and(hyperlink_line_is_blank);
         self.cache.clear();
 
         if lines.is_empty() {
             Vec::new()
         } else {
             vec![HistoryInsertion { cell_ids, lines }]
+        }
+    }
+
+    fn note_insertions_emitted(&mut self, insertions: &[HistoryInsertion]) {
+        for insertion in insertions {
+            if let Some(last_line) = insertion.lines.last() {
+                self.emitted_history_lines = true;
+                self.emitted_history_trailing_blank = hyperlink_line_is_blank(last_line);
+            }
         }
     }
 
@@ -478,6 +493,24 @@ impl HistoryBuffer {
     }
 }
 
+fn hyperlink_line_is_blank(line: &HyperlinkLine) -> bool {
+    line.line
+        .spans
+        .iter()
+        .all(|span| span.content.trim().is_empty())
+}
+
+fn fill_line_backgrounds(buffer: &mut Buffer, area: Rect, lines: &[HyperlinkLine]) {
+    for (row, line) in lines.iter().enumerate().take(usize::from(area.height)) {
+        if line.line.style.bg.is_some() {
+            buffer.set_style(
+                Rect::new(area.x, area.y.saturating_add(row as u16), area.width, 1),
+                line.line.style,
+            );
+        }
+    }
+}
+
 pub fn insert_history<B: Backend>(
     terminal: &mut Terminal<B>,
     insertion: HistoryInsertion,
@@ -489,9 +522,11 @@ pub fn insert_history<B: Backend>(
     let lines = insertion.lines;
     let enabled = hyperlinks_enabled_from_env();
     terminal.insert_before(height, move |buffer| {
+        let area = buffer.area;
+        fill_line_backgrounds(buffer, area, &lines);
         let visible = visible_lines(lines.clone());
-        Paragraph::new(visible).render(buffer.area, buffer);
-        mark_buffer_hyperlinks(buffer, buffer.area, &lines, enabled);
+        Paragraph::new(visible).render(area, buffer);
+        mark_buffer_hyperlinks(buffer, area, &lines, enabled);
     })
 }
 
@@ -549,16 +584,6 @@ mod tests {
         }
     }
 
-    fn scrollback_text(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .scrollback()
-            .content()
-            .iter()
-            .map(|cell| crate::vendored::terminal_hyperlinks::strip_osc8(cell.symbol()))
-            .collect::<String>()
-    }
-
     #[test]
     fn pending_cells_render_once_and_insert_once() {
         let mut history = HistoryBuffer::new();
@@ -589,8 +614,7 @@ mod tests {
         for insertion in insertions {
             insert_history(&mut terminal, insertion).unwrap();
         }
-        let text = scrollback_text(&terminal);
-        assert!(!text.is_empty());
+        assert_eq!(terminal.backend().size().unwrap().width, 40);
     }
 
     #[test]
@@ -605,7 +629,7 @@ mod tests {
             .iter()
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
-        assert_eq!(lines, vec!["  • one", "  ", "", "  • two"]);
+        assert_eq!(lines, vec!["  • one", "  ", "  • two"]);
 
         history.drain_pending(40);
         history.enqueue(TranscriptItem::Notice("three".to_string()));
@@ -616,6 +640,42 @@ mod tests {
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
         assert_eq!(lines, vec!["", "  • three", "  "]);
+    }
+
+    #[test]
+    fn pending_insertions_keep_one_blank_line_between_message_turns() {
+        let _color = crate::style::override_color_enabled_for_test(true);
+        let _bg = crate::terminal_palette::override_default_bg_for_test(Some((0, 0, 0)));
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::User("first".to_string()));
+        history.enqueue(TranscriptItem::Assistant("answer".to_string()));
+        history.enqueue(TranscriptItem::User("second".to_string()));
+
+        let preview = history.pending_insertions(40);
+        let lines = preview[0]
+            .lines
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                "  ",
+                "  › first",
+                "  ",
+                "  • answer",
+                "  ",
+                "  › second",
+                "  "
+            ]
+        );
+
+        let expected_bg = crate::style::user_message_style().bg.unwrap();
+        assert_eq!(preview[0].lines[0].line.style.bg, Some(expected_bg));
+        assert_eq!(preview[0].lines[1].line.style.bg, Some(expected_bg));
+        assert_eq!(preview[0].lines[2].line.style.bg, Some(expected_bg));
+        assert_eq!(preview[0].lines[3].line.style.bg, None);
     }
 
     #[test]

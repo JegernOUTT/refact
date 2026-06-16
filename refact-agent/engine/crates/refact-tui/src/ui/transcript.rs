@@ -56,10 +56,17 @@ fn prepare_transcript_children(app: &App, width: u16, empty_hint: &str) -> Vec<P
     }
     let mut children = Vec::new();
     let content_width = width.saturating_sub(TRANSCRIPT_GUTTER).max(1) as usize;
+    let mut last_child_trailing_blank = None::<bool>;
     for (index, item) in app.visible_transcript().iter().enumerate() {
-        if let Some(child) =
-            prepare_item_child(item, index, app, width, content_width, children.is_empty())
-        {
+        if let Some(child) = prepare_item_child(
+            item,
+            index,
+            app,
+            width,
+            content_width,
+            last_child_trailing_blank,
+        ) {
+            last_child_trailing_blank = Some(child.trailing_blank);
             children.push(child);
         }
     }
@@ -76,24 +83,29 @@ fn prepare_item_child(
     app: &App,
     width: u16,
     content_width: usize,
-    first_visible_cell: bool,
+    last_child_trailing_blank: Option<bool>,
 ) -> Option<PreparedRenderable> {
     let cell = cell_from_transcript_item(item, app.transcript_item_selected(index, item));
-    let top = if first_visible_cell || cell.is_stream_continuation() {
-        0
-    } else {
-        1
-    };
     let lines = cell.display_hyperlink_lines(content_width);
     if lines.is_empty() {
         return None;
     }
+    let top = if cell.is_stream_continuation()
+        || last_child_trailing_blank.is_none()
+        || last_child_trailing_blank.unwrap_or(false)
+        || hyperlink_line_is_blank(&lines[0])
+    {
+        0
+    } else {
+        1
+    };
+    let trailing_blank = lines.last().is_some_and(hyperlink_line_is_blank);
     let child: Box<dyn Renderable> = Box::new(HyperlinkLinesRenderable::new(lines));
     let renderable: Box<dyn Renderable> = Box::new(InsetRenderable::new(
         child,
         Insets::tlbr(top, TRANSCRIPT_GUTTER, 0, 0),
     ));
-    PreparedRenderable::new(renderable, width)
+    PreparedRenderable::new(renderable, width, trailing_blank)
 }
 
 fn prepare_hint(width: u16, empty_hint: &str) -> PreparedRenderable {
@@ -101,8 +113,15 @@ fn prepare_hint(width: u16, empty_hint: &str) -> PreparedRenderable {
         empty_hint.to_string(),
         Style::default().fg(Color::DarkGray),
     )))];
-    PreparedRenderable::new(Box::new(HyperlinkLinesRenderable::new(lines)), width)
+    PreparedRenderable::new(Box::new(HyperlinkLinesRenderable::new(lines)), width, false)
         .expect("empty transcript hint has height")
+}
+
+fn hyperlink_line_is_blank(line: &HyperlinkLine) -> bool {
+    line.line
+        .spans
+        .iter()
+        .all(|span| span.content.trim().is_empty())
 }
 
 fn render_prepared_children(
@@ -160,15 +179,31 @@ fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
 }
 
+fn fill_line_backgrounds(buffer: &mut Buffer, area: Rect, lines: &[HyperlinkLine]) {
+    for (row, line) in lines.iter().enumerate().take(usize::from(area.height)) {
+        if line.line.style.bg.is_some() {
+            buffer.set_style(
+                Rect::new(area.x, area.y.saturating_add(row as u16), area.width, 1),
+                line.line.style,
+            );
+        }
+    }
+}
+
 struct PreparedRenderable {
     renderable: Box<dyn Renderable>,
     height: u16,
+    trailing_blank: bool,
 }
 
 impl PreparedRenderable {
-    fn new(renderable: Box<dyn Renderable>, width: u16) -> Option<Self> {
+    fn new(renderable: Box<dyn Renderable>, width: u16, trailing_blank: bool) -> Option<Self> {
         let height = renderable.desired_height(width);
-        (height > 0).then_some(Self { renderable, height })
+        (height > 0).then_some(Self {
+            renderable,
+            height,
+            trailing_blank,
+        })
     }
 }
 
@@ -184,6 +219,7 @@ impl HyperlinkLinesRenderable {
 
 impl Renderable for HyperlinkLinesRenderable {
     fn render(&self, area: Rect, buffer: &mut Buffer) {
+        fill_line_backgrounds(buffer, area, &self.lines);
         let view = self
             .lines
             .iter()
@@ -286,6 +322,7 @@ mod tests {
                 Line::from(text),
             )])),
             16,
+            false,
         )
         .unwrap()
     }
@@ -329,7 +366,47 @@ mod tests {
         assert!(!text.contains('─'));
         assert!(rows[opened].starts_with("  •"));
         assert!(rows[one].starts_with("  •"));
-        assert_eq!(one, opened + 3);
+        assert_eq!(one, opened + 2);
+    }
+
+    #[test]
+    fn full_transcript_keeps_one_blank_line_between_message_turns() {
+        let _color = crate::style::override_color_enabled_for_test(true);
+        let _bg = crate::terminal_palette::override_default_bg_for_test(Some((0, 0, 0)));
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        app.test_set_history_items(vec![
+            TranscriptItem::User("first".to_string()),
+            TranscriptItem::Assistant("answer".to_string()),
+            TranscriptItem::User("second".to_string()),
+        ]);
+        let backend = TestBackend::new(48, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_full_transcript(frame, &mut app, frame.area()))
+            .unwrap();
+
+        let rows = buffer_rows(terminal.backend().buffer());
+        let first = rows.iter().position(|row| row.contains("› first")).unwrap();
+        let answer = rows
+            .iter()
+            .position(|row| row.contains("• answer"))
+            .unwrap();
+        let second = rows
+            .iter()
+            .position(|row| row.contains("› second"))
+            .unwrap();
+        assert_eq!(answer, first + 2);
+        assert_eq!(second, answer + 2);
+        assert_eq!(rows[first + 1].trim(), "");
+        assert_eq!(rows[answer + 1].trim(), "");
+
+        let expected_bg = crate::style::user_message_style().bg.unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, first as u16)].bg, expected_bg);
+        assert_eq!(buffer[(47, first as u16)].bg, expected_bg);
+        assert_eq!(buffer[(2, answer as u16)].bg, Color::Reset);
     }
 
     #[test]

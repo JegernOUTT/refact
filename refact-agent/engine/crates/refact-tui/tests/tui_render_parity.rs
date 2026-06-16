@@ -164,7 +164,6 @@ fn transcript_cells_golden_snapshot() {
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   ─ Parity sweep · fixture · gpt-demo · agent · <chat> ───────────────────────────────────────────
 
-
   • Proposed Plan
 
 
@@ -189,9 +188,7 @@ fn transcript_cells_golden_snapshot() {
 
 
 
-
   › Inspect @src/lib.rs and summarize the TUI parity risks.
-
 
   • collapsed
 
@@ -213,14 +210,17 @@ fn transcript_cells_golden_snapshot() {
   ▸ ✅  $ cargo test -p refact-tui · exit 0 · <ms>
     └ ok
 
-
   diff
   ▸ ✅  1 file · +1 -1 · <ms>
   • Edited src/lib.rs (+1 -1)
   Δ src/lib.rs +1 -1
 
-
   • Daemon event captured separately.
+
+
+
+
+
 
 
 

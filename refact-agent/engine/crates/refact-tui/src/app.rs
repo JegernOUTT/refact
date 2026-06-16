@@ -5481,6 +5481,11 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_set_history_items(&mut self, items: Vec<TranscriptItem>) {
+        self.transcript = items;
+    }
+
+    #[cfg(test)]
     pub fn test_set_daemon_status(&mut self, status: DaemonStatus, base_url: impl Into<String>) {
         self.daemon_online = true;
         self.daemon_status = Some(status);

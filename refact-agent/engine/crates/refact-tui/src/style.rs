@@ -5,10 +5,16 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::terminal_palette;
 
 const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (0, 95, 135);
+const ASSUMED_DARK_TERMINAL_BG: (u8, u8, u8) = (0, 0, 0);
 const TABLE_SEPARATOR_FG_ALPHA: f32 = 0.20;
 
 pub fn user_message_style() -> Style {
-    user_message_style_for(default_terminal_bg())
+    if !terminal_background_color_enabled() {
+        return Style::default();
+    }
+    user_message_style_for(Some(
+        terminal_palette::default_bg().unwrap_or(ASSUMED_DARK_TERMINAL_BG),
+    ))
 }
 
 pub fn proposed_plan_style() -> Style {
@@ -93,7 +99,7 @@ fn color_enabled_override_for_test() -> Option<bool> {
 }
 
 #[cfg(test)]
-struct ColorEnabledOverrideGuard {
+pub(crate) struct ColorEnabledOverrideGuard {
     previous: Option<bool>,
 }
 
@@ -105,7 +111,7 @@ impl Drop for ColorEnabledOverrideGuard {
 }
 
 #[cfg(test)]
-fn override_color_enabled_for_test(enabled: bool) -> ColorEnabledOverrideGuard {
+pub(crate) fn override_color_enabled_for_test(enabled: bool) -> ColorEnabledOverrideGuard {
     let previous =
         COLOR_ENABLED_OVERRIDE.with(|override_value| override_value.replace(Some(enabled)));
     ColorEnabledOverrideGuard { previous }
@@ -166,7 +172,7 @@ mod tests {
 
         assert_eq!(default_terminal_bg(), None);
         assert_eq!(accent_style().fg, Some(Color::Cyan));
-        assert_eq!(user_message_style(), Style::default());
+        assert_eq!(user_message_style().bg, Some(Color::Rgb(30, 30, 30)));
     }
 
     #[test]
@@ -198,9 +204,11 @@ mod tests {
 
     #[test]
     fn user_message_style_returns_a_style() {
+        let _color = override_color_enabled_for_test(true);
+        let _bg = terminal_palette::override_default_bg_for_test(None);
         let style = user_message_style();
 
-        assert_eq!(style, Style::default());
+        assert_eq!(style.bg, Some(Color::Rgb(30, 30, 30)));
     }
 
     #[test]
