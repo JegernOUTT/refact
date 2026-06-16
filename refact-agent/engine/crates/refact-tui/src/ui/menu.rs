@@ -312,24 +312,17 @@ pub(crate) fn measure_rows_height_with_config(
     if rows_all.is_empty() {
         return 1;
     }
-    let visible_items = max_results.min(rows_all.len());
-    if visible_items == 0 {
+    let max_lines = max_results;
+    if max_lines == 0 {
         return 0;
     }
-    let start_idx = window_start(rows_all.len(), state, visible_items);
     let content_width = width.max(1);
-    let desc_col = compute_desc_col(
-        rows_all,
-        start_idx,
-        visible_items,
-        content_width,
-        column_width,
-    );
+    let window = wrapped_row_window(rows_all, state, max_lines, content_width, column_width);
     rows_all
         .iter()
-        .skip(start_idx)
-        .take(visible_items)
-        .map(|row| wrap_row_lines(row, desc_col, content_width).len() as u16)
+        .skip(window.start_idx)
+        .take(window.visible_items)
+        .map(|row| wrap_row_lines(row, window.desc_col, content_width).len() as u16)
         .fold(0u16, u16::saturating_add)
         .max(1)
 }
@@ -348,26 +341,32 @@ fn render_rows_inner(
         return u16::from(area.height > 0);
     }
     let max_items = max_results.min(rows_all.len());
-    if max_items == 0 {
+    let max_lines = max_results.min(area.height as usize);
+    if max_items == 0 || max_lines == 0 {
         return 0;
     }
-    let start_idx = window_start(rows_all.len(), state, max_items);
-    let desc_col = compute_desc_col(rows_all, start_idx, max_items, area.width, column_width);
+    let window = wrapped_row_window(rows_all, state, max_lines, area.width, column_width);
     let mut rendered_lines = 0u16;
     let mut y = area.y;
+    let bottom = area.y.saturating_add(max_lines as u16);
 
-    for (idx, row) in rows_all.iter().enumerate().skip(start_idx).take(max_items) {
-        if y >= area.y.saturating_add(area.height) {
+    for (idx, row) in rows_all
+        .iter()
+        .enumerate()
+        .skip(window.start_idx)
+        .take(window.visible_items)
+    {
+        if y >= bottom {
             break;
         }
-        let mut wrapped = wrap_row_lines(row, desc_col, area.width);
+        let mut wrapped = wrap_row_lines(row, window.desc_col, area.width);
         apply_row_state_style(
             &mut wrapped,
             Some(idx) == state.selected_idx && !row.is_disabled,
             row.is_disabled,
         );
         for line in wrapped {
-            if y >= area.y.saturating_add(area.height) {
+            if y >= bottom {
                 break;
             }
             line.render(
@@ -416,6 +415,118 @@ fn window_start(len: usize, state: &ScrollState, visible_items: usize) -> usize 
         }
     }
     start_idx
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowWindow {
+    start_idx: usize,
+    visible_items: usize,
+    desc_col: usize,
+}
+
+fn wrapped_row_window(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_lines: usize,
+    width: u16,
+    column_width: ColumnWidthConfig,
+) -> RowWindow {
+    let len = rows_all.len();
+    if len == 0 || max_lines == 0 {
+        return RowWindow {
+            start_idx: 0,
+            visible_items: 0,
+            desc_col: 0,
+        };
+    }
+    let width = width.max(1);
+    let mut visible_items = max_lines.min(len).max(1);
+    let mut start_idx = window_start(len, state, visible_items);
+    let mut desc_col = compute_desc_col(rows_all, start_idx, visible_items, width, column_width);
+    for _ in 0..len.saturating_mul(2).max(1) {
+        let line_counts = row_line_counts(rows_all, desc_col, width);
+        let next_start_idx = wrapped_window_start(&line_counts, state, max_lines);
+        let next_visible_items = visible_items_for_lines(&line_counts, next_start_idx, max_lines);
+        let next_desc_col = compute_desc_col(
+            rows_all,
+            next_start_idx,
+            next_visible_items,
+            width,
+            column_width,
+        );
+        if start_idx == next_start_idx
+            && visible_items == next_visible_items
+            && desc_col == next_desc_col
+        {
+            break;
+        }
+        start_idx = next_start_idx;
+        visible_items = next_visible_items;
+        desc_col = next_desc_col;
+    }
+    RowWindow {
+        start_idx,
+        visible_items,
+        desc_col,
+    }
+}
+
+fn row_line_counts(rows_all: &[GenericDisplayRow], desc_col: usize, width: u16) -> Vec<usize> {
+    rows_all
+        .iter()
+        .map(|row| wrap_row_lines(row, desc_col, width).len().max(1))
+        .collect()
+}
+
+fn wrapped_window_start(row_line_counts: &[usize], state: &ScrollState, max_lines: usize) -> usize {
+    if row_line_counts.is_empty() || max_lines == 0 {
+        return 0;
+    }
+    let len = row_line_counts.len();
+    let mut start_idx = state.scroll_top.min(len.saturating_sub(1));
+    let Some(selected) = state.selected_idx.map(|idx| idx.min(len.saturating_sub(1))) else {
+        return start_idx;
+    };
+    if selected < start_idx {
+        return selected;
+    }
+    let selected_bottom = row_line_counts[start_idx..=selected]
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add);
+    if selected_bottom <= max_lines {
+        return start_idx;
+    }
+    start_idx = selected;
+    let mut lines = row_line_counts[selected];
+    while start_idx > 0 {
+        let previous = row_line_counts[start_idx - 1];
+        if lines.saturating_add(previous) > max_lines {
+            break;
+        }
+        lines = lines.saturating_add(previous);
+        start_idx -= 1;
+    }
+    start_idx
+}
+
+fn visible_items_for_lines(row_line_counts: &[usize], start_idx: usize, max_lines: usize) -> usize {
+    if row_line_counts.is_empty() || max_lines == 0 || start_idx >= row_line_counts.len() {
+        return 0;
+    }
+    let mut lines = 0usize;
+    let mut count = 0usize;
+    for row_lines in row_line_counts.iter().copied().skip(start_idx) {
+        if count > 0 && lines.saturating_add(row_lines) > max_lines {
+            break;
+        }
+        lines = lines.saturating_add(row_lines);
+        count += 1;
+        if lines >= max_lines {
+            break;
+        }
+    }
+    count.max(1)
 }
 
 fn compute_desc_col(
@@ -691,6 +802,43 @@ mod tests {
         };
 
         assert!(measure_rows_height(&rows, &state, 1, 12) > 1);
+    }
+
+    #[test]
+    fn wrapped_rows_window_to_keep_selected_visible() {
+        let mut rows = (0..4)
+            .map(|idx| GenericDisplayRow {
+                name: format!("Row{idx}"),
+                description: Some("one two three four five six seven eight nine ten".to_string()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        rows.push(GenericDisplayRow {
+            name: "Target".to_string(),
+            ..Default::default()
+        });
+        let state = ScrollState {
+            selected_idx: Some(4),
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 18, 4);
+        let mut buffer = Buffer::empty(area);
+
+        render_rows(
+            area,
+            &mut buffer,
+            &rows,
+            &state,
+            area.height as usize,
+            "no rows",
+        );
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Target"));
     }
 
     #[test]

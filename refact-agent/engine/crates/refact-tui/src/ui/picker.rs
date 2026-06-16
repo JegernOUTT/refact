@@ -19,13 +19,14 @@ pub(crate) fn render_project_picker(
     area: Rect,
 ) {
     let filtered = picker.filtered_projects();
+    let selected_idx = clamped_selected_idx(filtered.len(), picker.selected);
     let rows = filtered
         .iter()
         .enumerate()
-        .map(|(idx, project)| project_row(idx, picker.selected, project))
+        .map(|(idx, project)| project_row(idx, selected_idx, project))
         .collect::<Vec<_>>();
     let width = area.width.saturating_sub(8).min(80).max(1);
-    let height = popup_height_for_rows(&rows, picker.selected, width, area.height);
+    let height = popup_height_for_rows(&rows, selected_idx, width, area.height);
     let popup = super::centered(area, width, height);
     frame.render_widget(Clear, popup);
     let inner = menu::render_menu_surface(popup, frame.buffer_mut());
@@ -34,10 +35,18 @@ pub(crate) fn render_project_picker(
         inner,
         Line::from(format!("projects: {}", picker.filter)),
         rows,
-        picker.selected,
+        selected_idx,
         menu::standard_popup_hint_line(),
         "No projects match",
     );
+}
+
+fn clamped_selected_idx(len: usize, selected: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        selected.min(len - 1)
+    }
 }
 
 fn project_row(idx: usize, selected: usize, project: &ProjectEntry) -> GenericDisplayRow {
@@ -69,6 +78,7 @@ pub fn render_modal_picker(
     }
 
     let filtered = picker.filtered_items();
+    let selected_idx = clamped_selected_idx(filtered.len(), picker.selected);
     let rows = filtered
         .iter()
         .enumerate()
@@ -85,14 +95,14 @@ pub fn render_modal_picker(
             };
             GenericDisplayRow {
                 name,
-                name_prefix_spans: vec![Span::raw(cursor_prefix(idx, picker.selected))],
+                name_prefix_spans: vec![Span::raw(cursor_prefix(idx, selected_idx))],
                 description: (!item.description.is_empty()).then(|| item.description.clone()),
                 ..Default::default()
             }
         })
         .collect::<Vec<_>>();
     let width = area.width.saturating_sub(8).min(86).max(1);
-    let height = popup_height_for_rows(&rows, picker.selected, width, area.height);
+    let height = popup_height_for_rows(&rows, selected_idx, width, area.height);
     let max_y = area.y.saturating_add(area.height.saturating_sub(height));
     let wanted_y = composer.y.saturating_sub(height);
     let popup = Rect {
@@ -123,7 +133,7 @@ pub fn render_modal_picker(
         inner,
         Line::from(title),
         rows,
-        picker.selected,
+        selected_idx,
         footer,
         "No entries match",
     );
@@ -397,6 +407,36 @@ mod tests {
         }
     }
 
+    fn find_symbol(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<(u16, u16)> {
+        let area = buffer.area;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if buffer[(x, y)].symbol() == symbol {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    fn find_text_start_on_row(
+        buffer: &ratatui::buffer::Buffer,
+        text: &str,
+        y: u16,
+    ) -> Option<(u16, u16)> {
+        let area = buffer.area;
+        let width = text.chars().count() as u16;
+        for x in area.left()..area.right().saturating_sub(width.saturating_sub(1)) {
+            let candidate = (0..width)
+                .map(|offset| buffer[(x + offset, y)].symbol())
+                .collect::<String>();
+            if candidate == text {
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
     #[test]
     fn project_rows_keep_daemon_fields_and_mark_pinned_projects() {
         let project = project_entry("demo", "/tmp/demo", true);
@@ -474,6 +514,39 @@ mod tests {
         assert!(text.contains("permissions: 1 selected"));
         assert!(text.contains("☑ Beta"));
         assert!(text.contains("Press Space to toggle; Enter to confirm"));
+    }
+
+    #[test]
+    fn modal_picker_clamps_cursor_and_highlight_after_filtering() {
+        let mut picker = PickerState::new(
+            PickerKind::Model,
+            vec![
+                item("a", "Alpha", "fast"),
+                item("b", "Beta", "careful"),
+                item("g", "Gamma", "filtered survivor"),
+            ],
+        );
+        picker.filter = "Gamma".to_string();
+        picker.selected = 2;
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 60, 2));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let cursor_pos = find_symbol(buffer, "›").expect("selected cursor rendered");
+        let gamma_pos =
+            find_text_start_on_row(buffer, "Gamma", cursor_pos.1).expect("filtered row rendered");
+
+        assert_eq!(cursor_pos.1, gamma_pos.1);
+        assert_eq!(buffer[gamma_pos].style().fg, Some(Color::Cyan));
+        assert!(buffer[gamma_pos]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
