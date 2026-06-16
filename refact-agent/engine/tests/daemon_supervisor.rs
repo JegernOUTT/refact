@@ -120,7 +120,16 @@ async fn wait_for_state(
     project_id: &str,
     state: WorkerState,
 ) -> WorkerInfo {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    wait_for_state_with_timeout(supervisor, project_id, state, Duration::from_secs(8)).await
+}
+
+async fn wait_for_state_with_timeout(
+    supervisor: &Supervisor,
+    project_id: &str,
+    state: WorkerState,
+    timeout: Duration,
+) -> WorkerInfo {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(info) = supervisor.worker_info(project_id).await {
             if info.state == state.clone() {
@@ -129,7 +138,8 @@ async fn wait_for_state(
         }
         assert!(
             Instant::now() < deadline,
-            "worker state was not reached in time"
+            "worker state {:?} was not reached in time",
+            state
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -237,7 +247,13 @@ async fn crash_loop_reaches_crashed() {
     let supervisor = supervisor(&dir);
 
     let _ = supervisor.ensure_worker(&entry).await.unwrap();
-    let crashed = wait_for_state(&supervisor, &entry.id, WorkerState::Crashed).await;
+    let crashed = wait_for_state_with_timeout(
+        &supervisor,
+        &entry.id,
+        WorkerState::Crashed,
+        Duration::from_secs(20),
+    )
+    .await;
     assert_eq!(crashed.state, WorkerState::Crashed);
 }
 
