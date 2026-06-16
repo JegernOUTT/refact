@@ -2989,7 +2989,7 @@ impl App {
     }
 
     fn append_assistant(&mut self, text: &str) {
-        self.stream_controller.push_delta(text);
+        self.stream_controller.push_sanitized_delta(text);
         self.sync_assistant_stream_item();
     }
 
@@ -3338,7 +3338,8 @@ impl App {
                             TranscriptItem::Assistant(message.content.clone()),
                         );
                     } else {
-                        self.stream_controller.replace_committed(&message.content);
+                        self.stream_controller
+                            .replace_sanitized_committed(&message.content);
                         self.transcript
                             .push(TranscriptItem::Assistant(message.content.clone()));
                     }
@@ -7815,6 +7816,43 @@ mod tests {
             .collect::<String>()
     }
 
+    fn reasoning_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Reasoning(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
+    fn injected_model_text() -> &'static str {
+        "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
+    }
+
+    fn assert_escape_inert(text: &str) {
+        assert!(!text.as_bytes().contains(&0x1b), "raw ESC in {text:?}");
+        assert!(!text.as_bytes().contains(&0x07), "raw BEL in {text:?}");
+        assert!(!text.as_bytes().contains(&0x9b), "raw CSI byte in {text:?}");
+        assert!(!text.contains('\u{009b}'), "raw CSI char in {text:?}");
+        assert!(!text.contains("http://evil"), "raw OSC8 URL in {text:?}");
+    }
+
+    fn assert_model_text_survives(text: &str) {
+        for fragment in ["lead", "red", "clear", "bell", "csi", "TEXT", "tail"] {
+            assert!(text.contains(fragment), "missing {fragment:?} in {text:?}");
+        }
+    }
+
+    fn assert_rendered_item_escape_inert(item: &TranscriptItem) {
+        let lines = crate::history::cells::cell_from_transcript_item(item, false).render(80);
+        for line in lines {
+            for span in line.spans {
+                assert_escape_inert(span.content.as_ref());
+            }
+        }
+    }
+
     fn tool_cards(app: &App) -> Vec<&ToolCard> {
         app.visible_transcript()
             .iter()
@@ -10758,6 +10796,56 @@ new-chat = "ctrl-x"
             app.visible_transcript().last(),
             Some(TranscriptItem::Reasoning(text, false)) if text == "first second"
         ));
+    }
+
+    #[test]
+    fn model_text_escape_sanitization_reaches_live_transcript_and_render_cells() {
+        let mut app = App::new(project());
+        let injected = injected_model_text();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [
+                {"op": "append_reasoning", "text": injected},
+                {"op": "append_content", "text": injected}
+            ]}),
+        });
+
+        let assistant = assistant_text(&app);
+        let reasoning = reasoning_text(&app);
+        assert_escape_inert(&assistant);
+        assert_escape_inert(&reasoning);
+        assert_model_text_survives(&assistant);
+        assert_model_text_survives(&reasoning);
+        for item in app.visible_transcript() {
+            if matches!(
+                item,
+                TranscriptItem::Assistant(_) | TranscriptItem::Reasoning(_, _)
+            ) {
+                assert_rendered_item_escape_inert(item);
+            }
+        }
+    }
+
+    #[test]
+    fn user_message_escape_text_stays_raw_in_transcript_state() {
+        let mut app = App::new(project());
+        let injected = injected_model_text();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "user", "message_id": "u1", "content": injected}}),
+        });
+
+        let user = app
+            .transcript_state()
+            .messages()
+            .iter()
+            .find(|message| message.role == TranscriptRole::User)
+            .unwrap();
+        assert_eq!(user.content, injected);
     }
 
     #[test]

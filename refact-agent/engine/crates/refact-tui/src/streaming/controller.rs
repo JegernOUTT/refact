@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::render::MarkdownRenderer;
 use crate::table_detect::{is_table_delimiter_line, is_table_header_line};
+use crate::text_safety::sanitize_tool_text;
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
 use crate::vendored::terminal_hyperlinks::HyperlinkLine;
 
@@ -80,6 +81,11 @@ impl StreamController {
     }
 
     pub fn replace_committed(&mut self, content: &str) {
+        let sanitized = sanitize_tool_text(content);
+        self.replace_sanitized_committed(&sanitized);
+    }
+
+    pub(crate) fn replace_sanitized_committed(&mut self, content: &str) {
         self.clear();
         self.committed.push_str(content);
         self.raw_source.push_str(content);
@@ -120,6 +126,11 @@ impl StreamController {
     }
 
     pub fn push_delta(&mut self, delta: &str) {
+        let sanitized = sanitize_tool_text(delta);
+        self.push_sanitized_delta(&sanitized);
+    }
+
+    pub(crate) fn push_sanitized_delta(&mut self, delta: &str) {
         self.collector.push_delta(delta);
         if let Some(source) = self.collector.commit_complete_source() {
             self.ingest_complete_source(&source);
@@ -485,6 +496,32 @@ mod tests {
     }
 
     #[test]
+    fn streamed_model_text_is_escape_inert_in_source_and_rendered_lines() {
+        let mut stream = controller();
+        stream.push_delta(injected_model_text());
+
+        let tail = stream.current_tail_lines();
+        assert!(!tail.is_empty());
+        assert_hyperlink_lines_escape_inert(&tail);
+        assert_escape_inert(&stream.visible());
+        assert_model_text_survives(&stream.visible());
+
+        stream.push_delta("\n");
+        while let Some(drained) = stream.run_commit_tick() {
+            assert_escape_inert(&drained);
+        }
+        let finalized = stream.finalize();
+
+        assert_escape_inert(&finalized);
+        assert_model_text_survives(&finalized);
+
+        let mut restored = controller();
+        restored.replace_committed(injected_model_text());
+        assert_escape_inert(&restored.visible());
+        assert_hyperlink_lines_escape_inert(&restored.current_tail_lines());
+    }
+
+    #[test]
     fn replace_committed_keeps_utf8_boundary_before_table() {
         let mut stream = controller();
         stream.replace_committed("1234567");
@@ -614,5 +651,31 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn injected_model_text() -> &'static str {
+        "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
+    }
+
+    fn assert_hyperlink_lines_escape_inert(lines: &[HyperlinkLine]) {
+        for line in lines {
+            for span in &line.line.spans {
+                assert_escape_inert(span.content.as_ref());
+            }
+        }
+    }
+
+    fn assert_escape_inert(text: &str) {
+        assert!(!text.as_bytes().contains(&0x1b), "raw ESC in {text:?}");
+        assert!(!text.as_bytes().contains(&0x07), "raw BEL in {text:?}");
+        assert!(!text.as_bytes().contains(&0x9b), "raw CSI byte in {text:?}");
+        assert!(!text.contains('\u{009b}'), "raw CSI char in {text:?}");
+        assert!(!text.contains("http://evil"), "raw OSC8 URL in {text:?}");
+    }
+
+    fn assert_model_text_survives(text: &str) {
+        for fragment in ["lead", "red", "clear", "bell", "csi", "TEXT", "tail"] {
+            assert!(text.contains(fragment), "missing {fragment:?} in {text:?}");
+        }
     }
 }
