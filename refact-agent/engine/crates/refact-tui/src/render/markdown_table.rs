@@ -890,7 +890,7 @@ fn is_spillover_row(row: &TableBodyRow, next_row: Option<&TableBodyRow>) -> bool
         return false;
     };
 
-    if row.cells.len() == 1 && !row.has_table_pipe_syntax {
+    if !row.has_table_pipe_syntax {
         return true;
     }
 
@@ -1127,8 +1127,6 @@ mod tests {
     fn spillover_detects_parser_artifacts() {
         let row = make_body_row(vec![make_cell("some trailing text")], false);
         assert!(is_spillover_row(&row, None));
-        let row = make_body_row(vec![make_cell("some sparse value"), make_cell("")], false);
-        assert!(!is_spillover_row(&row, None));
         let row = make_body_row(vec![make_cell("some sparse value")], true);
         assert!(!is_spillover_row(&row, None));
         let row = make_body_row(
