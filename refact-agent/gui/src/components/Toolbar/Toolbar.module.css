@@ -295,7 +295,6 @@
     flex-basis: 120px;
     max-width: 148px;
   }
-
 }
 
 @container toolbar (max-width: 440px) {
