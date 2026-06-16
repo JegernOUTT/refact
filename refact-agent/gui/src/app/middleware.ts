@@ -323,7 +323,8 @@ startListening({
 startListening({
   matcher: isAnyOf(closeThread, removeChatFromCache),
   effect: (action, listenerApi) => {
-    if (!closeThread.match(action) && !removeChatFromCache.match(action)) return;
+    if (!closeThread.match(action) && !removeChatFromCache.match(action))
+      return;
     listenerApi.dispatch(removeTabEverywhere(action.payload.id));
     switchToFocusedPaneTab(listenerApi);
   },
