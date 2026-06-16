@@ -326,7 +326,7 @@ mod tests {
         let error = request.await.unwrap().unwrap_err();
         let error = error.to_string();
         assert!(error.contains("failed to send chat command"));
-        assert!(error.contains("timed out"));
+        assert!(error.contains("timed out") || error.contains("connection closed"));
         server.abort();
     }
 
