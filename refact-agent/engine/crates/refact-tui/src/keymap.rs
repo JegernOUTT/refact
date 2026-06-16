@@ -838,7 +838,6 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::CtrlC, &["ctrl-c"]),
         entry(KeyContext::Main, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::Main, KeyAction::CycleToolSelection, &["tab"]),
-        entry(KeyContext::Main, KeyAction::ToggleSelectedTool, &["space"]),
         entry(KeyContext::Main, KeyAction::OpenSlashCommands, &["/"]),
         entry(KeyContext::Main, KeyAction::OpenFileMention, &["@"]),
         entry(
@@ -1154,6 +1153,20 @@ newline = "enter"
     fn default_keymap_has_no_conflicts_and_lists_composer_power_actions() {
         let registry = KeymapRegistry::default();
         assert!(registry.warnings().is_empty());
+        assert_eq!(
+            registry.dispatch(
+                KeyContext::Main,
+                key(KeyCode::Char(' '), KeyModifiers::empty())
+            ),
+            KeyDispatch::text(' ')
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::ModalPicker,
+                key(KeyCode::Char(' '), KeyModifiers::empty())
+            ),
+            Some(KeyAction::ToggleSelectedTool)
+        );
         assert_eq!(
             registry.action_for(
                 KeyContext::Main,

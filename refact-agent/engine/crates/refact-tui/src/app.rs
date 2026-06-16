@@ -4665,6 +4665,9 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return AppAction::None;
         }
+        if is_ctrl_c_key(key) {
+            return self.ctrl_c_action();
+        }
         if self.help_open {
             self.help_open = false;
             return AppAction::None;
@@ -4704,6 +4707,12 @@ impl App {
         let Some(form) = self.ask_questions_form.as_mut() else {
             return AppAction::None;
         };
+        if form.current_question().question_type == AskQuestionType::MultiSelect
+            && is_plain_space_key(key)
+        {
+            form.toggle_current_multi();
+            return AppAction::None;
+        }
         if form.current_question().question_type == AskQuestionType::FreeText {
             if let KeyCode::Char(ch) = key.code {
                 if !key
@@ -5183,6 +5192,7 @@ impl App {
     }
 
     fn ctrl_c_action(&mut self) -> AppAction {
+        self.dismiss_interrupt_surfaces();
         if matches!(
             self.session_state,
             SessionState::Generating
@@ -5192,6 +5202,8 @@ impl App {
         ) {
             self.cancel_queue_edit();
             self.abort_in_flight = true;
+            self.clear_approvals();
+            self.clear_active_ask_questions();
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
             return AppAction::Abort;
@@ -5207,6 +5219,13 @@ impl App {
             self.last_ctrl_c = Some(now);
         }
         AppAction::None
+    }
+
+    fn dismiss_interrupt_surfaces(&mut self) {
+        self.help_open = false;
+        self.transcript_overlay = None;
+        self.cancel_modal_picker();
+        self.composer_mode = ComposerMode::Chat;
     }
 
     fn handle_project_picker_key(&mut self, key: KeyEvent) -> AppAction {
@@ -7883,6 +7902,21 @@ fn composer_search_text(key: KeyEvent) -> Option<char> {
     }
 }
 
+fn is_ctrl_c_key(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn is_plain_space_key(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && matches!(key.code, KeyCode::Char(' '))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8612,12 +8646,25 @@ new-chat = "ctrl-x"
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        assert_eq!(app.composer(), "a\nb");
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert_eq!(app.composer(), "a\nb\nc");
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(
             action,
-            AppAction::SendMessage { prompt, .. } if prompt == "a\nb"
+            AppAction::SendMessage { prompt, .. } if prompt == "a\nb\nc"
         ));
+    }
+
+    #[test]
+    fn app_space_key_inserts_space_in_composer() {
+        let mut app = App::new(project());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+
+        assert_eq!(app.composer(), "a b");
     }
 
     #[test]
@@ -10570,6 +10617,87 @@ new-chat = "ctrl-x"
         assert!(!app.should_quit());
     }
 
+    #[test]
+    fn ctrl_c_after_completed_turn_still_aborts_active_generation() {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.composer.set_text("second");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "second"
+        ));
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.abort_in_flight);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_is_global_for_overlay_picker_approval_and_ask_form() {
+        let mut app = App::new(project());
+        app.open_transcript_overlay();
+        app.set_session_state(SessionState::Generating);
+        assert!(app.transcript_overlay().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.transcript_overlay().is_none());
+
+        let mut app = App::new(project());
+        app.open_model_picker(json!({"chat_models": {"m1": {"name": "Model One"}}}));
+        assert!(app.modal_picker().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.modal_picker().is_none());
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.should_quit());
+
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        assert!(app.approval_modal().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.approval_modal().is_none());
+
+        let mut app = App::new(project());
+        app.handle_chat_event(ask_questions_tool_event(
+            &app,
+            "call-ask",
+            json!([
+                {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+            ]),
+        ));
+        app.handle_chat_event(waiting_user_input_event(&app));
+        assert!(app.ask_questions_form().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.ask_questions_form().is_none());
+    }
+
     #[tokio::test]
     async fn active_generation_quit_sends_abort_command() {
         let state = CommandState::default();
@@ -11336,6 +11464,39 @@ new-chat = "ctrl-x"
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn modal_picker_space_still_toggles_multi_select() {
+        let mut app = App::new(project());
+
+        app.open_permissions_picker();
+        assert_eq!(app.modal_picker().unwrap().selected_count(), 0);
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), AppAction::None);
+
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.selected_count(), 1);
+        assert!(picker.is_selected("editing_tools"));
+    }
+
+    #[test]
+    fn tab_cycles_tool_selection_and_enter_toggles_selected_tool() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [
+                {"id": "call-1", "function": {"name": "shell", "arguments": "{}"}},
+                {"id": "call-2", "function": {"name": "cat", "arguments": "{}"}}
+            ]}]}),
+        });
+
+        assert_eq!(app.selected_tool_index(), Some(2));
+        assert_eq!(app.handle_key(key(KeyCode::Tab)), AppAction::None);
+        assert_eq!(app.selected_tool_index(), Some(1));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert!(tool_cards(&app)[0].expanded);
     }
 
     #[test]
