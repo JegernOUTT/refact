@@ -73,6 +73,10 @@ import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
+import {
+  panesSlice,
+  reconcilePanesWithOpenThreads,
+} from "../features/ChatPanes/panesSlice";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -145,6 +149,7 @@ const rootReducer = combineSlices(
   browserSlice,
   notificationsSlice,
   schedulerSlice,
+  panesSlice,
 );
 
 const rootPersistConfig = {
@@ -156,9 +161,25 @@ const rootPersistConfig = {
 
 const APPLY_CHAT_EVENT_ACTION = "chatThread/applyChatEvent";
 
+const paneInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
+  const nextPanes = reconcilePanesWithOpenThreads(
+    state.panes,
+    state.chat.open_thread_ids,
+  );
+
+  if (nextPanes === state.panes) {
+    return state;
+  }
+
+  return {
+    ...state,
+    panes: nextPanes,
+  };
+};
+
 const persistedReducer = persistReducer<ReturnType<typeof rootReducer>>(
   rootPersistConfig,
-  rootReducer,
+  (state, action) => paneInvariantReducer(rootReducer(state, action)),
 );
 
 export type RootState = ReturnType<typeof persistedReducer>;
