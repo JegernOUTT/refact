@@ -104,6 +104,8 @@ impl TableHoldbackScanner {
             }
         }
         if was_confirmed && line.trim().is_empty() {
+            // Refact diverges from codex: a blank line terminates a markdown table.
+            // Release holdback so the completed table can commit.
             self.confirmed_table_start = None;
             self.pending_header_start = None;
         }
@@ -142,6 +144,23 @@ mod tests {
         assert_eq!(
             scanner.state(),
             TableHoldbackState::Confirmed { table_start: 6 }
+        );
+    }
+
+    #[test]
+    fn releases_confirmed_table_after_blank_line() {
+        let mut scanner = TableHoldbackScanner::default();
+        scanner.push_source_chunk("| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\n");
+        assert_eq!(scanner.state(), TableHoldbackState::None);
+    }
+
+    #[test]
+    fn keeps_confirmed_table_held_across_consecutive_rows() {
+        let mut scanner = TableHoldbackScanner::default();
+        scanner.push_source_chunk("| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n");
+        assert_eq!(
+            scanner.state(),
+            TableHoldbackState::Confirmed { table_start: 0 }
         );
     }
 
