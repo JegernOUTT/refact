@@ -1,3 +1,4 @@
+export * from "./ChatThreadContext";
 export * from "./actions";
 export * from "./reducer";
 export * from "./selectors";
