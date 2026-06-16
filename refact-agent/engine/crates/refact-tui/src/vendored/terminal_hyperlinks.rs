@@ -290,11 +290,11 @@ pub struct EnvProbe<'a> {
 }
 
 pub fn hyperlinks_enabled_from_probe(probe: EnvProbe<'_>) -> bool {
-    if probe.no_color || probe.term == Some("dumb") {
-        return false;
-    }
     if let Some(force) = probe.force {
         return force;
+    }
+    if probe.no_color || probe.term == Some("dumb") {
+        return false;
     }
     if probe.vte_version || probe.wt_session || probe.wezterm || probe.kitty {
         return true;
@@ -620,12 +620,19 @@ mod tests {
             term_program: Some("iTerm.app"),
             ..EnvProbe::default()
         }));
+        assert!(!hyperlinks_enabled_from_probe(EnvProbe {
+            term: Some("dumb"),
+            term_program: Some("iTerm.app"),
+            ..EnvProbe::default()
+        }));
         assert!(hyperlinks_enabled_from_probe(EnvProbe {
             term_program: Some("iTerm.app"),
             ..EnvProbe::default()
         }));
         assert!(hyperlinks_enabled_from_probe(EnvProbe {
             force: Some(true),
+            no_color: true,
+            term: Some("dumb"),
             ..EnvProbe::default()
         }));
         assert!(!hyperlinks_enabled_from_probe(EnvProbe {
