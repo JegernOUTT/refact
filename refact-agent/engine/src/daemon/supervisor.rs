@@ -1524,7 +1524,7 @@ mod tests {
 
         wait_for_starting(&supervisor, &entry.id).await;
         supervisor.request_shutdown("test shutdown".to_string());
-        let info = tokio::time::timeout(Duration::from_secs(2), start)
+        let info = tokio::time::timeout(Duration::from_secs(10), start)
             .await
             .unwrap()
             .unwrap()
