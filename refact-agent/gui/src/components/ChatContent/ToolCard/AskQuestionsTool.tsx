@@ -253,7 +253,9 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
-  const messages = useAppSelector((state) => selectMessagesById(state, threadId));
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, threadId),
+  );
 
   const data = useMemo((): AskQuestionsResult | null => {
     if (!maybeResult || typeof maybeResult.content !== "string") return null;
