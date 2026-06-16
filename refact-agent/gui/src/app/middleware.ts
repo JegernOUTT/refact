@@ -54,7 +54,10 @@ import {
 import { saveLastThreadParams } from "../utils/threadStorage";
 import {
   getProjectStorageNamespace,
+  isProjectStorageNamespaceTrusted,
+  loadPersistedPaneLayout,
   savePersistedChatTabs,
+  savePersistedPaneLayout,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
 import { integrationsApi } from "../services/refact/integrations";
@@ -108,10 +111,16 @@ import {
 } from "../services/refact/apiUrl";
 import {
   addTabToFocusedPane,
+  closePane,
   focusPane,
+  hydratePaneLayout,
+  moveTabToPane,
+  removeTabEverywhere,
+  resizeSplit,
   selectFocusedActiveTabId,
   selectFocusedLeafId,
   setPaneActiveTab,
+  splitPane,
 } from "../features/ChatPanes/panesSlice";
 
 const AUTH_ERROR_MESSAGE =
@@ -125,6 +134,7 @@ const startListening = listenerMiddleware.startListening.withTypes<
 
 function syncProjectStorageNamespace(state: RootState): boolean {
   const previous = getProjectStorageNamespace();
+  const wasTrusted = isProjectStorageNamespaceTrusted();
   const workspaceRoots = state.current_project.workspaceRoots;
   setProjectStorageNamespaceFromProjectInfo({
     workspaceRoots,
@@ -132,7 +142,10 @@ function syncProjectStorageNamespace(state: RootState): boolean {
       ? state.current_project.name
       : undefined,
   });
-  return getProjectStorageNamespace() !== previous;
+  return (
+    getProjectStorageNamespace() !== previous ||
+    isProjectStorageNamespaceTrusted() !== wasTrusted
+  );
 }
 
 function endpointConfigChanged(
@@ -173,6 +186,21 @@ function persistOpenChatTabs(state: RootState): void {
       };
     }),
   });
+}
+
+function persistPaneLayout(state: RootState): void {
+  syncProjectStorageNamespace(state);
+  savePersistedPaneLayout({
+    root: state.panes.root,
+    focusedLeafId: state.panes.focusedLeafId,
+  });
+}
+
+function hydratePersistedChatUi(listenerApi: { dispatch: AppDispatch }): void {
+  listenerApi.dispatch(hydratePersistedChatTabs());
+  if (isProjectStorageNamespaceTrusted()) {
+    listenerApi.dispatch(hydratePaneLayout(loadPersistedPaneLayout()));
+  }
 }
 
 function isPaneRoutableChat(
@@ -243,6 +271,45 @@ startListening({
     }
 
     persistOpenChatTabs(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    splitPane,
+    setPaneActiveTab,
+    focusPane,
+    closePane,
+    moveTabToPane,
+    addTabToFocusedPane,
+    removeTabEverywhere,
+    resizeSplit,
+    hydratePaneLayout,
+    newChatAction,
+    restoreChat,
+    newIntegrationChat,
+    closeThread,
+    switchToThread,
+    reorderOpenThreads,
+    saveTitle,
+    createChatWithId,
+    updateChatRuntimeFromSessionState,
+    openBuddyChat,
+    newBuddyChatAction,
+    applyChatEvent,
+  ),
+  effect: (action, listenerApi) => {
+    if (
+      applyChatEvent.match(action) &&
+      action.payload.type !== "snapshot" &&
+      action.payload.type !== "thread_updated" &&
+      action.payload.type !== "runtime_updated" &&
+      action.payload.type !== "stream_finished"
+    ) {
+      return;
+    }
+
+    persistPaneLayout(listenerApi.getState());
   },
 });
 
@@ -595,7 +662,7 @@ startListening({
       listenerApi.getState(),
     );
     if (namespaceChanged) {
-      listenerApi.dispatch(hydratePersistedChatTabs());
+      hydratePersistedChatUi(listenerApi);
     }
 
     const previousConfig = listenerApi.getOriginalState().config;
@@ -616,7 +683,7 @@ startListening({
       listenerApi.getState(),
     );
     if (namespaceChanged) {
-      listenerApi.dispatch(hydratePersistedChatTabs());
+      hydratePersistedChatUi(listenerApi);
     }
   },
 });

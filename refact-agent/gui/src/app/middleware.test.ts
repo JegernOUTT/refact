@@ -7,6 +7,7 @@ import {
   setMaxNewTokens,
   switchToThread,
 } from "../features/Chat/Thread";
+import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
 import {
   findLeaf,
@@ -14,6 +15,13 @@ import {
   setPaneActiveTab,
   type PaneNode,
 } from "../features/ChatPanes";
+import {
+  getProjectStorageNamespace,
+  savePersistedChatTabs,
+  savePersistedPaneLayout,
+  setProjectStorageNamespace,
+  setProjectStorageNamespaceFromProjectInfo,
+} from "../utils/chatUiPersistence";
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
   const title = id
@@ -91,6 +99,9 @@ function twoPaneRoot(): PaneNode {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  localStorage.clear();
+  sessionStorage.clear();
+  setProjectStorageNamespace(undefined);
 });
 
 describe("task delete middleware", () => {
@@ -203,6 +214,50 @@ describe("chat pane routing middleware", () => {
     await waitFor(() => {
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
     });
+  });
+
+  it("hydrates persisted pane layout after the project namespace is trusted", async () => {
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/project-a"],
+      projectName: "project-a",
+    });
+    const namespace = getProjectStorageNamespace();
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    savePersistedPaneLayout({ root: twoPaneRoot(), focusedLeafId: "right" });
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      namespace ?? "",
+    );
+
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+    });
+
+    expect(store.getState().chat.open_thread_ids).toEqual([]);
+    expect(findLeaf(store.getState().panes.root, "right")).toBeNull();
+
+    store.dispatch(
+      setCurrentProjectInfo({
+        name: "project-a",
+        workspaceRoots: ["/workspace/project-a"],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().chat.open_thread_ids).toEqual([
+        "chat-a",
+        "chat-b",
+      ]);
+      expect(findLeaf(store.getState().panes.root, "right")?.activeTabId).toBe(
+        "chat-b",
+      );
+    });
+    expect(store.getState().panes.focusedLeafId).toBe("right");
   });
 });
 

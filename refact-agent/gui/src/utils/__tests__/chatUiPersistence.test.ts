@@ -4,19 +4,64 @@ import {
   loadAskQuestionsDraft,
   loadPersistedActiveTab,
   loadPersistedChatTabs,
+  loadPersistedPaneLayout,
   loadPersistedTasksUIState,
   loadTaskWorkspaceTab,
   saveAskQuestionsDraft,
   savePersistedActiveTab,
   savePersistedChatTabs,
+  savePersistedPaneLayout,
   savePersistedTasksUIState,
   saveTaskWorkspaceTab,
 } from "../chatUiPersistence";
 import {
   getProjectStorageNamespace,
+  isProjectStorageNamespaceTrusted,
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../chatUiPersistence";
+import type { PaneNode } from "../../features/ChatPanes/panesTree";
+
+const PANE_LAYOUT_STORAGE_KEY = "refact:chat-ui:panes:v1";
+
+function paneStorageKey(): string {
+  return `refact:project:${getProjectStorageNamespace()}:${PANE_LAYOUT_STORAGE_KEY}`;
+}
+
+function fallbackPaneLayout() {
+  return {
+    root: {
+      kind: "leaf" as const,
+      id: "root",
+      tabIds: [],
+      activeTabId: null,
+    },
+    focusedLeafId: "root",
+  };
+}
+
+function splitPaneRoot(): PaneNode {
+  return {
+    kind: "split",
+    id: "root:split:row",
+    dir: "row",
+    sizes: [0.7, 0.3],
+    children: [
+      {
+        kind: "leaf",
+        id: "left",
+        tabIds: ["chat-a"],
+        activeTabId: "chat-a",
+      },
+      {
+        kind: "leaf",
+        id: "right",
+        tabIds: ["chat-b"],
+        activeTabId: "chat-b",
+      },
+    ],
+  };
+}
 
 describe("chatUiPersistence", () => {
   beforeEach(() => {
@@ -204,6 +249,219 @@ describe("chatUiPersistence", () => {
 
     savePersistedActiveTab({ type: "dashboard" });
     expect(loadPersistedActiveTab()).toEqual({ type: "dashboard" });
+  });
+
+  it("round-trips pane layout under the project namespace", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+
+    const layout = { root: splitPaneRoot(), focusedLeafId: "right" };
+    savePersistedPaneLayout(layout);
+
+    expect(loadPersistedPaneLayout()).toEqual(layout);
+  });
+
+  it("scopes pane layout by project namespace", () => {
+    setProjectStorageNamespace("/workspace/project-a");
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    savePersistedPaneLayout({ root: splitPaneRoot(), focusedLeafId: "right" });
+
+    setProjectStorageNamespace("/workspace/project-b");
+    savePersistedChatTabs({
+      openThreadIds: ["chat-c"],
+      currentThreadId: "chat-c",
+      tabs: [{ id: "chat-c" }],
+    });
+    savePersistedPaneLayout({
+      root: {
+        kind: "leaf",
+        id: "root",
+        tabIds: ["chat-c"],
+        activeTabId: "chat-c",
+      },
+      focusedLeafId: "root",
+    });
+
+    expect(loadPersistedPaneLayout()).toEqual({
+      root: {
+        kind: "leaf",
+        id: "root",
+        tabIds: ["chat-c"],
+        activeTabId: "chat-c",
+      },
+      focusedLeafId: "root",
+    });
+
+    setProjectStorageNamespace("/workspace/project-a");
+    expect(loadPersistedPaneLayout()).toEqual({
+      root: splitPaneRoot(),
+      focusedLeafId: "right",
+    });
+  });
+
+  it("falls back to a single empty leaf for invalid pane layout", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }],
+    });
+    localStorage.setItem(
+      paneStorageKey(),
+      JSON.stringify({
+        version: 1,
+        focusedLeafId: "left",
+        root: {
+          kind: "split",
+          id: "split",
+          dir: "row",
+          sizes: [1],
+          children: [
+            {
+              kind: "leaf",
+              id: "left",
+              tabIds: ["chat-a"],
+              activeTabId: "chat-a",
+            },
+            {
+              kind: "leaf",
+              id: "right",
+              tabIds: [],
+              activeTabId: null,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(loadPersistedPaneLayout()).toEqual(fallbackPaneLayout());
+  });
+
+  it("falls back to a single empty leaf for oversized pane layout", () => {
+    const openThreadIds = Array.from(
+      { length: 51 },
+      (_, index) => `chat-${index}`,
+    );
+    savePersistedChatTabs({
+      openThreadIds,
+      currentThreadId: "chat-50",
+      tabs: openThreadIds.map((id) => ({ id })),
+    });
+    localStorage.setItem(
+      paneStorageKey(),
+      JSON.stringify({
+        version: 1,
+        focusedLeafId: "root",
+        root: {
+          kind: "leaf",
+          id: "root",
+          tabIds: openThreadIds,
+          activeTabId: "chat-0",
+        },
+      }),
+    );
+
+    expect(loadPersistedPaneLayout()).toEqual(fallbackPaneLayout());
+  });
+
+  it("prunes pane tab ids missing from persisted chat tabs", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    localStorage.setItem(
+      paneStorageKey(),
+      JSON.stringify({
+        version: 1,
+        focusedLeafId: "right",
+        root: {
+          kind: "split",
+          id: "root:split:row",
+          dir: "row",
+          sizes: [2, 1],
+          children: [
+            {
+              kind: "leaf",
+              id: "left",
+              tabIds: ["chat-a", "dangling"],
+              activeTabId: "dangling",
+            },
+            {
+              kind: "leaf",
+              id: "right",
+              tabIds: ["chat-b", "chat-a"],
+              activeTabId: "chat-b",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(loadPersistedPaneLayout()).toEqual({
+      root: {
+        kind: "split",
+        id: "root:split:row",
+        dir: "row",
+        sizes: [2 / 3, 1 / 3],
+        children: [
+          {
+            kind: "leaf",
+            id: "left",
+            tabIds: ["chat-a"],
+            activeTabId: "chat-a",
+          },
+          {
+            kind: "leaf",
+            id: "right",
+            tabIds: ["chat-b"],
+            activeTabId: "chat-b",
+          },
+        ],
+      },
+      focusedLeafId: "right",
+    });
+  });
+
+  it("does not load or save pane layout before project namespace is trusted", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    savePersistedPaneLayout({ root: splitPaneRoot(), focusedLeafId: "right" });
+    const namespace = getProjectStorageNamespace();
+
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      namespace ?? "",
+    );
+
+    expect(getProjectStorageNamespace()).toBe(namespace);
+    expect(isProjectStorageNamespaceTrusted()).toBe(false);
+    expect(loadPersistedPaneLayout()).toEqual(fallbackPaneLayout());
+    savePersistedPaneLayout({
+      root: {
+        kind: "leaf",
+        id: "root",
+        tabIds: ["chat-a"],
+        activeTabId: "chat-a",
+      },
+      focusedLeafId: "root",
+    });
+
+    setProjectStorageNamespace(namespace ?? undefined);
+    expect(loadPersistedPaneLayout()).toEqual({
+      root: splitPaneRoot(),
+      focusedLeafId: "right",
+    });
   });
 
   it("persists task management tabs and their active child chat", () => {
