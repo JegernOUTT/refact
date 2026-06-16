@@ -88,6 +88,7 @@ const LIVE_TRANSCRIPT_ITEM_LIMIT: usize = 10_000;
 const LIVE_TRANSCRIPT_RETENTION_NOTICE: &str =
     "Older live transcript items dropped after reaching 10000 live items";
 const WORKING_ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
+const ASSISTANT_STREAM_RESERVED_COLS: u16 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -893,6 +894,7 @@ impl App {
     }
 
     fn note_terminal_resize_width(&mut self, width: u16) -> bool {
+        self.update_stream_width_for_terminal(width);
         if !self.native_scrollback {
             self.resize_reflow.clear();
             return false;
@@ -906,6 +908,23 @@ impl App {
         }
         self.resize_reflow.schedule_debounced(Some(width));
         true
+    }
+
+    fn update_stream_width_for_terminal(&mut self, width: u16) {
+        let should_sync =
+            self.stream_controller.has_live_tail() || self.stream_controller.stable_lines_ready();
+        if self.session_state != SessionState::Generating && !should_sync {
+            return;
+        }
+        self.stream_controller
+            .set_width(assistant_stream_width(width));
+        if should_sync {
+            if self.native_scrollback {
+                self.sync_assistant_stream_tail_item();
+            } else {
+                self.sync_assistant_stream_item();
+            }
+        }
     }
 
     fn note_terminal_height_resize(&mut self) -> bool {
@@ -7451,6 +7470,11 @@ fn apply_subchat_update_to_tool_value(
     map.insert("subchat_truncated".to_string(), Value::Bool(truncated));
 }
 
+fn assistant_stream_width(width: u16) -> Option<usize> {
+    crate::render::width::usable_content_width_u16(width, ASSISTANT_STREAM_RESERVED_COLS)
+        .or(Some(1))
+}
+
 fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
     line.spans
         .iter()
@@ -7853,6 +7877,14 @@ mod tests {
         }
     }
 
+    fn stream_tail_plain_lines(app: &App) -> Vec<String> {
+        app.stream_controller
+            .current_tail_lines()
+            .iter()
+            .map(|line| line_to_plain_string(&line.line))
+            .collect()
+    }
+
     fn tool_cards(app: &App) -> Vec<&ToolCard> {
         app.visible_transcript()
             .iter()
@@ -8112,6 +8144,45 @@ mod tests {
                 .sum::<usize>(),
             1
         );
+    }
+
+    #[test]
+    fn streaming_resize_rewraps_live_tail() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.note_terminal_resize_width(80);
+        let source = "intro\nalpha beta gamma delta epsilon zeta eta theta";
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_content", "text": source}]}),
+        });
+        let wide_tail = stream_tail_plain_lines(&app);
+
+        app.note_terminal_resize_width(16);
+        let narrow_tail = stream_tail_plain_lines(&app);
+
+        assert_eq!(
+            wide_tail,
+            vec!["alpha beta gamma delta epsilon zeta eta theta"]
+        );
+        assert!(narrow_tail.len() > wide_tail.len());
+        assert_eq!(assistant_text(&app), source);
+        app.apply_stream_commit_tick();
+        assert_eq!(app.active_stream_committed(), "intro\n");
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        assert_eq!(assistant_text(&app), format!("{source}\n"));
     }
 
     #[test]

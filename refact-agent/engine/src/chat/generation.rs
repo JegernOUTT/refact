@@ -1150,9 +1150,8 @@ fn should_notify_task_agent_reasoning_token_stop(
         return false;
     }
 
-    !effective_n_ctx.is_some_and(|n_ctx| {
-        is_high_pressure_length_stop(message, messages, n_ctx, usage_stale)
-    })
+    !effective_n_ctx
+        .is_some_and(|n_ctx| is_high_pressure_length_stop(message, messages, n_ctx, usage_stale))
 }
 
 async fn handle_task_agent_reasoning_token_stop(
@@ -3372,7 +3371,11 @@ mod tests {
         let mut session = ChatSession::new("length-stop-budget-marker".to_string());
         session.messages = vec![make_user_msg("continue"), make_low_pressure_length_stop()];
 
-        assert!(!maybe_inject_token_budget_instruction(&mut session, 100_000, 1));
+        assert!(!maybe_inject_token_budget_instruction(
+            &mut session,
+            100_000,
+            1
+        ));
         assert_eq!(session.messages.len(), 2);
     }
 

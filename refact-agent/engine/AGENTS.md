@@ -72,7 +72,7 @@ src/
 
 ### SSE Events
 
-Subscribe: `GET /v1/chats/subscribe?chat_id={id}`. Events have monotonic `seq: u64`.
+Subscribe: `GET /p/{project_id}/v1/chats/subscribe?chat_id={id}` (project-scoped proxy path used by daemon frontends via `daemon::chat_client::ProxyChatClient`; the worker itself serves `/v1/chats/subscribe`). Events have monotonic `seq: u64`.
 
 Key types: `Snapshot`, `StreamStarted`, `StreamDelta`, `StreamFinished`, `MessageAdded`, `MessageUpdated`, `MessageRemoved`, `MessagesTruncated`, `ThreadUpdated`, `QueueUpdated`, `RuntimeUpdated`, `PauseRequired`.
 
@@ -82,7 +82,7 @@ Background process completion is represented by a hidden `event(process_complete
 
 `POST /v1/chats/{chat_id}/commands` — queued processing.
 
-Variants: `UserMessage`, `SetParams`, `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort`, `ApproveTools`, `RejectTools`, `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`.
+Variants (Rust enum names; on the wire they are flattened JSON objects with `type` in snake_case): `UserMessage` (`user_message`), `SetParams` (`set_params`, payload under `patch`), `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort` (`abort`), `ApproveTools` / `RejectTools` (combined as `tool_decisions` with `decisions: [{tool_call_id, accepted}]`), `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`. All carry `client_request_id`; optional `priority` is accepted.
 
 ### Delta Operations
 
@@ -737,7 +737,7 @@ session and durable stores, so a single hook call may perform the inline action 
 
 Base: `http://127.0.0.1:{port}/v1/`. Middleware: permissive CORS, 15MB body limit.
 
-Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/chats/{id}/commands`, `/chats/subscribe`, `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status`, `/rag-status`, `/vecdb-search`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
+Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status`, `/rag-status`, `/vecdb-search`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
 
 ## AST
 
