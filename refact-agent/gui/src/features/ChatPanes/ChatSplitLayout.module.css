@@ -1,0 +1,135 @@
+.layout {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+}
+
+.split {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  gap: 0;
+}
+
+.row {
+  flex-direction: row;
+}
+
+.col {
+  flex-direction: column;
+}
+
+.paneSlot {
+  --pane-flex: 1;
+
+  position: relative;
+  display: flex;
+  flex: var(--pane-flex) 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.divider {
+  position: absolute;
+  z-index: var(--rf-z-dropdown);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: 0;
+}
+
+.divider::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--rf-color-accent-soft);
+  opacity: 0;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.divider:hover::before,
+.divider[data-dragging]::before {
+  opacity: 1;
+}
+
+.verticalDivider {
+  top: 0;
+  right: calc(-1 * var(--rf-space-xs));
+  bottom: 0;
+  width: calc(var(--rf-space-xs) * 2);
+  cursor: col-resize;
+}
+
+.horizontalDivider {
+  right: 0;
+  bottom: calc(-1 * var(--rf-space-xs));
+  left: 0;
+  height: calc(var(--rf-space-xs) * 2);
+  cursor: row-resize;
+}
+
+.dividerHandle {
+  position: relative;
+  z-index: 1;
+  background: var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.verticalDivider .dividerHandle {
+  width: var(--rf-hairline);
+  height: calc(var(--rf-space-6) * 2);
+}
+
+.horizontalDivider .dividerHandle {
+  width: calc(var(--rf-space-6) * 2);
+  height: var(--rf-hairline);
+}
+
+.divider:hover .dividerHandle,
+.divider[data-dragging] .dividerHandle {
+  background: var(--rf-color-accent);
+  transform: scale(1.2);
+}
+
+.stackedLayout {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.stackedSplit {
+  flex-direction: column;
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+  gap: var(--rf-space-3);
+}
+
+.stackedSplit .paneSlot {
+  flex: 0 0 auto;
+  min-height: min(60dvh, calc(var(--rf-control-h-lg) * 16));
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .divider::before,
+  .dividerHandle {
+    transition: none;
+  }
+}

@@ -1,0 +1,50 @@
+.pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  outline: 0 solid transparent;
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    outline-color var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.focused {
+  border-color: var(--rf-border-strong);
+  outline-width: var(--rf-focus-ring-w);
+  outline-color: var(--rf-focus-ring);
+  box-shadow: var(--rf-elev-panel);
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.emptyPane {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane {
+    transition: none;
+  }
+}
