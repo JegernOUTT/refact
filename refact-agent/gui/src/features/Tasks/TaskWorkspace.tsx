@@ -2030,6 +2030,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                       host={config.host}
                       tabbed={false}
                       backFromChat={handleBack}
+                      chatId={activeChat.chatId}
                     />
                   </InternalLinkProvider>
                 ) : (

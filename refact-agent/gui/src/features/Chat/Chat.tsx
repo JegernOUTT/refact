@@ -2,13 +2,18 @@ import React from "react";
 import type { Config } from "../Config/configSlice";
 import { Chat as ChatComponent } from "../../components/Chat";
 import { useAppSelector } from "../../hooks";
-import { selectHasUncalledTools } from "./Thread";
+import {
+  ChatThreadProvider,
+  selectCurrentThreadId,
+  selectHasUncalledToolsById,
+} from "./Thread";
 
 export type ChatProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
   style?: React.CSSProperties;
   backFromChat: () => void;
+  chatId?: string;
 };
 
 export const Chat: React.FC<ChatProps> = ({
@@ -16,7 +21,11 @@ export const Chat: React.FC<ChatProps> = ({
   backFromChat,
   host,
   tabbed,
+  chatId,
 }) => {
+  const currentThreadId = useAppSelector(selectCurrentThreadId);
+  const resolvedChatId = chatId ?? currentThreadId;
+
   const sendToSideBar = () => {
     // TODO:
   };
@@ -24,15 +33,20 @@ export const Chat: React.FC<ChatProps> = ({
   const maybeSendToSideBar =
     host === "vscode" && tabbed ? sendToSideBar : undefined;
 
-  const unCalledTools = useAppSelector(selectHasUncalledTools);
+  const unCalledTools = useAppSelector((state) =>
+    selectHasUncalledToolsById(state, resolvedChatId),
+  );
+
   return (
-    <ChatComponent
-      style={style}
-      host={host}
-      tabbed={tabbed}
-      backFromChat={backFromChat}
-      unCalledTools={unCalledTools}
-      maybeSendToSidebar={maybeSendToSideBar}
-    />
+    <ChatThreadProvider chatId={resolvedChatId}>
+      <ChatComponent
+        style={style}
+        host={host}
+        tabbed={tabbed}
+        backFromChat={backFromChat}
+        unCalledTools={unCalledTools}
+        maybeSendToSidebar={maybeSendToSideBar}
+      />
+    </ChatThreadProvider>
   );
 };
