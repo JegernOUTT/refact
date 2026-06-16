@@ -2,10 +2,7 @@ import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
 import { CheckSquare, Moon, Plus, Sun, X, Home } from "lucide-react";
 import classNames from "classnames";
 import { newChatAction } from "../../events";
-import {
-  getStatusFromSessionState,
-  getTaskStatusDotState,
-} from "../../utils/sessionStatus";
+import { getTaskStatusDotState } from "../../utils/sessionStatus";
 import { popBackTo, push } from "../../features/Pages/pagesSlice";
 import {
   useCreateTaskMutation,
@@ -30,20 +27,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { updateChatTitleById } from "../../features/History/historySlice";
 import {
-  saveTitle,
   selectAllThreads,
-  selectTabsDisplayData,
   closeThread,
   switchToThread,
-  reorderOpenThreads,
   selectChatId,
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
-} from "../../features/Chat";
+} from "../../features/Chat/Thread";
 import {
-  Badge,
   FieldText,
   Icon,
   IconButton,
@@ -59,11 +51,14 @@ import {
   useEventsBusForIDE,
   useOpenUrl,
 } from "../../hooks";
-import { useGetChatModesQuery } from "../../services/refact/chatModes";
 import {
   resolveEngineBaseUrl,
   type EngineApiConfig,
 } from "../../services/refact/apiUrl";
+import {
+  parseTabDragData,
+  tabDragData,
+} from "../../features/ChatPanes/tabDrag";
 
 import styles from "./Toolbar.module.css";
 import { ConnectionStatusIndicator } from "../ConnectionStatus";
@@ -127,21 +122,6 @@ const ToolbarIconButton = ({
     <Tooltip.Content side="bottom">{label}</Tooltip.Content>
   </Tooltip>
 );
-
-function tabDragData(type: "chat" | "task", id: string): string {
-  return `${type}:${id}`;
-}
-
-function parseTabDragData(
-  value: string,
-): { type: "chat" | "task"; id: string } | null {
-  const [type, ...idParts] = value.split(":");
-  const id = idParts.join(":");
-  if ((type === "chat" || type === "task") && id) {
-    return { type, id };
-  }
-  return null;
-}
 
 function taskStatusLabel(
   status: ComponentProps<typeof StatusDot>["status"],
@@ -234,12 +214,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const openUrl = useOpenUrl();
   const engineUrl = useMemo(() => resolveBrowserEngineUrl(config), [config]);
 
-  const tabs = useAppSelector(selectTabsDisplayData);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
 
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
-  const { data: modesData } = useGetChatModesQuery(undefined);
   const { data: tasksList = [] } = useListTasksQuery(undefined);
 
   const { openSettings } = useEventsBusForIDE();
@@ -247,7 +225,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [renameState, setRenameState] = useState<{
-    kind: "chat" | "task";
+    kind: "task";
     id: string;
     value: string;
   } | null>(null);
@@ -353,11 +331,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         taskName: task.name.trim() || "Task",
       });
     });
-    tabs.forEach((tab) => {
-      next.set(tab.id, { type: "chat", id: tab.id });
-    });
     return next;
-  }, [openTasks, tabs]);
+  }, [openTasks]);
 
   const handleTabValueChange = useCallback(
     (value: string) => {
@@ -389,36 +364,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         inline: "nearest",
       });
     }
-  }, [currentChatId, activeTab]);
-
-  const handleChatThreadRenaming = useCallback(
-    (tabId: string, currentTitle: string) => {
-      setRenameState({ kind: "chat", id: tabId, value: currentTitle });
-    },
-    [],
-  );
-
-  const handleKeyUpOnRename = useCallback(
-    (event: KeyboardEvent<HTMLInputElement>, tabId: string) => {
-      if (event.code === "Escape") {
-        setRenameState(null);
-      }
-      if (event.code === "Enter") {
-        const title = renameState?.value.trim();
-        setRenameState(null);
-        if (!title) return;
-        dispatch(
-          saveTitle({
-            id: tabId,
-            title,
-            isTitleGenerated: true,
-          }),
-        );
-        dispatch(updateChatTitleById({ chatId: tabId, newTitle: title }));
-      }
-    },
-    [dispatch, renameState],
-  );
+  }, [activeTab]);
 
   const handleTaskRenaming = useCallback(
     (taskId: string, currentName: string) => {
@@ -446,33 +392,12 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     setRenameState((prev) => (prev ? { ...prev, value } : null));
   };
 
-  const handleCloseTab = useCallback(
-    (event: MouseEvent, tabId: string) => {
-      event.stopPropagation();
-      event.preventDefault();
-      dispatch(closeThread({ id: tabId }));
-      if (activeTab.type === "chat" && activeTab.id === tabId) {
-        const remainingTabs = tabs.filter((t) => t.id !== tabId);
-        if (remainingTabs.length > 0) {
-          goToTab({ type: "chat", id: remainingTabs[0].id });
-        } else {
-          goToTab({ type: "dashboard" });
-        }
-      }
-    },
-    [dispatch, activeTab, tabs, goToTab],
-  );
-
   const handleMiddleClickClose = useCallback(
-    (event: MouseEvent, tab: ChatTab | TaskTab) => {
+    (event: MouseEvent, tab: TaskTab) => {
       if (event.button !== 1) return;
-      if (isChatTab(tab)) {
-        handleCloseTab(event, tab.id);
-      } else {
-        handleCloseTaskTab(event, tab.taskId);
-      }
+      handleCloseTaskTab(event, tab.taskId);
     },
-    [handleCloseTab, handleCloseTaskTab],
+    [handleCloseTaskTab],
   );
 
   const stopClosePointerEvent = useCallback(
@@ -493,9 +418,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   );
 
   const handleDragStart = useCallback(
-    (event: DragEvent, type: "chat" | "task", id: string) => {
+    (event: DragEvent, id: string) => {
       event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", tabDragData(type, id));
+      event.dataTransfer.setData("text/plain", tabDragData("task", id));
       setDraggingTabId(id);
     },
     [setDraggingTabId],
@@ -511,17 +436,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, []);
 
   const handleDrop = useCallback(
-    (event: DragEvent, type: "chat" | "task", id: string) => {
+    (event: DragEvent, id: string) => {
       event.preventDefault();
       const dragged = parseTabDragData(
         event.dataTransfer.getData("text/plain"),
       );
-      if (!dragged || dragged.type !== type || dragged.id === id) return;
-      if (type === "chat") {
-        dispatch(reorderOpenThreads({ sourceId: dragged.id, targetId: id }));
-      } else {
-        dispatch(reorderOpenTasks({ sourceId: dragged.id, targetId: id }));
-      }
+      if (!dragged || dragged.type !== "task" || dragged.id === id) return;
+      dispatch(reorderOpenTasks({ sourceId: dragged.id, targetId: id }));
     },
     [dispatch],
   );
@@ -550,13 +471,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           event.preventDefault();
           container.scrollLeft += event.deltaY || event.deltaX;
         }}
-        value={
-          isChatTab(activeTab)
-            ? activeTab.id
-            : isTaskTab(activeTab)
-              ? activeTab.taskId
-              : "dashboard"
-        }
+        value={isTaskTab(activeTab) ? activeTab.taskId : "dashboard"}
         onValueChange={handleTabValueChange}
       >
         <KitTabs.List className={styles.tabList}>
@@ -596,7 +511,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   draggingTabId === task.id && styles.tabWrapDragging,
                 )}
                 onDragOver={handleDragOver}
-                onDrop={(event) => handleDrop(event, "task", task.id)}
+                onDrop={(event) => handleDrop(event, task.id)}
                 ref={isActive ? activeTabRef : undefined}
               >
                 <KitTabs.Trigger value={task.id} asChild>
@@ -618,9 +533,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       })
                     }
                     onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
-                    onDragStart={(event) =>
-                      handleDragStart(event, "task", task.id)
-                    }
+                    onDragStart={(event) => handleDragStart(event, task.id)}
                     onDragEnd={handleDragEnd}
                     title={taskName}
                   >
@@ -644,110 +557,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   onPointerDown={stopClosePointerEvent}
                   onDragStart={stopCloseDragEvent}
                   onClick={(e) => handleCloseTaskTab(e, task.id)}
-                >
-                  <Icon icon={X} size="sm" tone="muted" />
-                </button>
-              </div>
-            );
-          })}
-
-          {tabs.map((tab) => {
-            const isActive = isChatTab(activeTab) && activeTab.id === tab.id;
-            const isRenaming =
-              renameState?.kind === "chat" && renameState.id === tab.id;
-
-            if (isRenaming) {
-              return (
-                <div key={tab.id} className={styles.tabWrap}>
-                  <FieldText
-                    autoComplete="off"
-                    onKeyUp={(e) => handleKeyUpOnRename(e, tab.id)}
-                    onBlur={() => setRenameState(null)}
-                    autoFocus
-                    value={renameState.value}
-                    onChange={handleRenameChange}
-                    className={styles.RenameInput}
-                  />
-                </div>
-              );
-            }
-
-            const statusState = getStatusFromSessionState(tab.session_state);
-            const modeInfo = modesData?.modes.find((m) => m.id === tab.mode);
-            const modeLabel = modeInfo?.title ?? tab.mode;
-
-            return (
-              <div
-                key={tab.id}
-                className={classNames(
-                  styles.tabWrap,
-                  draggingTabId === tab.id && styles.tabWrapDragging,
-                )}
-                onDragOver={handleDragOver}
-                onDrop={(event) => handleDrop(event, "chat", tab.id)}
-                ref={isActive ? activeTabRef : undefined}
-              >
-                <KitTabs.Trigger value={tab.id} asChild>
-                  <button
-                    type="button"
-                    aria-selected={isActive}
-                    draggable
-                    className={classNames(
-                      styles.tabButton,
-                      "rf-enter",
-                      "rf-pressable",
-                      isActive && styles.tabButtonActive,
-                    )}
-                    onAuxClick={(event) =>
-                      handleMiddleClickClose(event, {
-                        type: "chat",
-                        id: tab.id,
-                      })
-                    }
-                    onDoubleClick={() =>
-                      handleChatThreadRenaming(tab.id, tab.title)
-                    }
-                    onDragStart={(event) =>
-                      handleDragStart(event, "chat", tab.id)
-                    }
-                    onDragEnd={handleDragEnd}
-                    title={tab.title}
-                  >
-                    <span className={styles.tabStatus}>
-                      <StatusDot
-                        aria-label={taskStatusLabel(statusState)}
-                        status={statusState}
-                        size="small"
-                      />
-                    </span>
-                    <span className={styles.tabTitle}>{tab.title}</span>
-                    {tab.unreadNotificationCount > 0 && (
-                      <span
-                        className={styles.tabNotificationBadge}
-                        aria-label={`${tab.unreadNotificationCount} unread process notifications`}
-                      >
-                        {tab.unreadNotificationCount > 9
-                          ? "9+"
-                          : tab.unreadNotificationCount}
-                      </span>
-                    )}
-                    {!tab.is_buddy_chat && modeLabel && (
-                      <Badge tone="muted" className={styles.tabModeBadge}>
-                        {modeLabel}
-                      </Badge>
-                    )}
-                  </button>
-                </KitTabs.Trigger>
-                <button
-                  type="button"
-                  className={styles.tabClose}
-                  title="Close tab"
-                  aria-label="Close tab"
-                  draggable={false}
-                  onMouseDown={stopClosePointerEvent}
-                  onPointerDown={stopClosePointerEvent}
-                  onDragStart={stopCloseDragEvent}
-                  onClick={(e) => handleCloseTab(e, tab.id)}
                 >
                   <Icon icon={X} size="sm" tone="muted" />
                 </button>
