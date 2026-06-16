@@ -13,6 +13,9 @@ pub const MAX_SUBCHAT_ATTACHED_FILES: usize = 12;
 pub const MAX_SUBCHAT_PROGRESS_CHARS: usize = 2000;
 const COLLAPSED_SUBCHAT_LINES: usize = 2;
 const EXPANDED_SUBCHAT_LINES: usize = 8;
+const SUBCHAT_TREE_INITIAL: &str = "  └ ";
+const SUBCHAT_TREE_CONTINUATION: &str = "    ";
+const SUBCHAT_TREE_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolStatus {
@@ -208,27 +211,26 @@ impl ToolCard {
         if self.subchat_truncated {
             meta.push("truncated".to_string());
         }
+        let header_style = subchat_header_style();
         let mut lines = vec![Line::from(vec![
-            Span::styled("  ↳ ", Style::default().fg(Color::Magenta)),
-            Span::styled(meta.join(" · "), Style::default().fg(Color::Magenta)),
+            Span::styled("  ↳ ", header_style),
+            Span::styled(meta.join(" · "), header_style),
         ])];
+        let mut body = Vec::new();
         if self.expanded {
             let latest = self.subchat_log.last().cloned().unwrap_or_default();
             if !latest.is_empty() {
-                lines.extend(subchat_output_lines(&latest, width, EXPANDED_SUBCHAT_LINES));
+                body.extend(subchat_output_lines(&latest, width, EXPANDED_SUBCHAT_LINES));
             }
-            if !self.attached_files.is_empty() {
-                let shown = self.attached_files.len().min(MAX_SUBCHAT_ATTACHED_FILES);
-                for file in self.attached_files.iter().take(shown) {
-                    lines.push(Line::from(vec![
-                        Span::styled("    file ", Style::default().fg(Color::DarkGray)),
-                        Span::raw(compact_preview(file, width.saturating_sub(10).max(8))),
-                    ]));
-                }
+            if let Some(line) = subchat_files_line(&self.attached_files, width) {
+                body.push(line);
             }
         } else if let Some(latest) = self.subchat_log.last() {
-            lines.extend(subchat_output_lines(latest, width, COLLAPSED_SUBCHAT_LINES));
+            body.extend(subchat_output_lines(latest, width, COLLAPSED_SUBCHAT_LINES));
+        } else if let Some(line) = subchat_files_line(&self.attached_files, width) {
+            body.push(line);
         }
+        lines.extend(prefix_subchat_body(body));
         lines
     }
 }
@@ -241,23 +243,85 @@ fn subchat_output_lines(text: &str, width: usize, max_lines: usize) -> Vec<Line<
         all_lines
     };
     let shown = source.len().min(max_lines);
+    let text_width = width.saturating_sub(SUBCHAT_TREE_WIDTH).max(8);
     let mut lines = source
         .iter()
         .take(shown)
         .map(|line| {
-            Line::from(vec![
-                Span::styled("    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(compact_preview(line, width.saturating_sub(6).max(8))),
-            ])
+            Line::from(Span::styled(
+                compact_preview(line, text_width),
+                subchat_detail_style(),
+            ))
         })
         .collect::<Vec<_>>();
     if source.len() > shown {
         lines.push(Line::from(Span::styled(
-            format!("    … {} more subagent lines", source.len() - shown),
-            Style::default().fg(Color::DarkGray),
+            format!("… +{} lines", source.len() - shown),
+            subchat_detail_style(),
         )));
     }
     lines
+}
+
+fn subchat_files_line(files: &[String], width: usize) -> Option<Line<'static>> {
+    let mut names = Vec::<&str>::new();
+    for file in files.iter().take(MAX_SUBCHAT_ATTACHED_FILES) {
+        let name = file.as_str();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let joined = names.join(", ");
+    let text_width = width
+        .saturating_sub(SUBCHAT_TREE_WIDTH)
+        .saturating_sub("Read ".len())
+        .max(8);
+    Some(Line::from(vec![
+        Span::styled("Read ", subchat_action_style()),
+        Span::styled(compact_preview(&joined, text_width), subchat_detail_style()),
+    ]))
+}
+
+fn prefix_subchat_body(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut spans = vec![Span::styled(
+                if index == 0 {
+                    SUBCHAT_TREE_INITIAL
+                } else {
+                    SUBCHAT_TREE_CONTINUATION
+                },
+                subchat_detail_style(),
+            )];
+            spans.extend(line.spans);
+            Line {
+                spans,
+                style: line.style,
+                alignment: line.alignment,
+            }
+        })
+        .collect()
+}
+
+fn subchat_header_style() -> Style {
+    Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::DIM)
+}
+
+fn subchat_action_style() -> Style {
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+}
+
+fn subchat_detail_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 
 fn subchat_log_from_value(value: &Value) -> Vec<String> {
@@ -379,6 +443,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn plain_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn card_collapse_expand_toggles_result_lines() {
         let mut card = ToolCard::from_tool_call(&json!({
@@ -403,16 +480,44 @@ mod tests {
             "subchat_updates": 2,
             "subchat_depth": 2
         }));
-        let collapsed = format!("{:?}", card.render_subchat_lines(80));
-        assert!(collapsed.contains("subagent"));
-        assert!(collapsed.contains("one"));
-        assert!(collapsed.contains("more subagent lines"));
+        let collapsed_lines = card.render_subchat_lines(80);
+        let collapsed = plain_text(&collapsed_lines);
+        assert!(collapsed.contains("  ↳ subagent recent · depth 2 · 2 updates · 1 files"));
+        assert!(collapsed.contains("  └ one"));
+        assert!(collapsed.contains("    two"));
+        assert!(collapsed.contains("    … +1 lines"));
         assert!(!collapsed.contains("src/lib.rs"));
+        assert!(collapsed_lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::DIM)));
+        assert!(collapsed_lines[1].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::DIM));
+        assert!(collapsed_lines[1].spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::DIM));
 
         card.toggle();
-        let expanded = format!("{:?}", card.render_subchat_lines(80));
-        assert!(expanded.contains("src/lib.rs"));
-        assert!(expanded.contains("three"));
+        let expanded = plain_text(&card.render_subchat_lines(80));
+        assert!(expanded.contains("    three"));
+        assert!(expanded.contains("    Read src/lib.rs"));
+    }
+
+    #[test]
+    fn subchat_attached_files_coalesce_like_read_names() {
+        let mut card = ToolCard::from_tool_call(&json!({
+            "id": "call-1",
+            "function": {"name": "tool_subagent", "arguments": "{}"},
+            "attached_files": ["src/lib.rs", "src/app.rs", "src/lib.rs"],
+            "subchat_updates": 1
+        }));
+        card.toggle();
+        let rendered = plain_text(&card.render_subchat_lines(80));
+        assert!(rendered.contains("  └ Read src/lib.rs, src/app.rs"));
+        assert_eq!(rendered.matches("src/lib.rs").count(), 1);
     }
 
     #[test]
@@ -478,7 +583,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        assert!(rendered.contains(&"- old".to_string()));
-        assert!(rendered.contains(&"+ new".to_string()));
+        assert!(rendered.contains(&"1 -old".to_string()));
+        assert!(rendered.contains(&"1 +new".to_string()));
     }
 }

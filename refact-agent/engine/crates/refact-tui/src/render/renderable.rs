@@ -1,0 +1,642 @@
+// Adapted from openai/codex codex-rs/tui/src/render/renderable.rs, Apache-2.0.
+use std::sync::Arc;
+
+use crossterm::cursor::SetCursorStyle;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::WidgetRef;
+
+use crate::render::Insets;
+use crate::render::RectExt as _;
+
+pub trait Renderable {
+    fn render(&self, area: Rect, buf: &mut Buffer);
+    fn desired_height(&self, width: u16) -> u16;
+    fn cursor_pos(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+    fn cursor_style(&self, _area: Rect) -> SetCursorStyle {
+        SetCursorStyle::DefaultUserShape
+    }
+}
+
+pub enum RenderableItem<'a> {
+    Owned(Box<dyn Renderable + 'a>),
+    Borrowed(&'a dyn Renderable),
+}
+
+impl<'a> Renderable for RenderableItem<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        match self {
+            RenderableItem::Owned(child) => child.render(area, buf),
+            RenderableItem::Borrowed(child) => child.render(area, buf),
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        match self {
+            RenderableItem::Owned(child) => child.desired_height(width),
+            RenderableItem::Borrowed(child) => child.desired_height(width),
+        }
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        match self {
+            RenderableItem::Owned(child) => child.cursor_pos(area),
+            RenderableItem::Borrowed(child) => child.cursor_pos(area),
+        }
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        match self {
+            RenderableItem::Owned(child) => child.cursor_style(area),
+            RenderableItem::Borrowed(child) => child.cursor_style(area),
+        }
+    }
+}
+
+impl<'a> From<Box<dyn Renderable + 'a>> for RenderableItem<'a> {
+    fn from(value: Box<dyn Renderable + 'a>) -> Self {
+        RenderableItem::Owned(value)
+    }
+}
+
+impl<'a, R> From<R> for Box<dyn Renderable + 'a>
+where
+    R: Renderable + 'a,
+{
+    fn from(value: R) -> Self {
+        Box::new(value)
+    }
+}
+
+impl Renderable for () {
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+    fn desired_height(&self, _width: u16) -> u16 {
+        0
+    }
+}
+
+impl Renderable for &str {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_ref(area, buf);
+    }
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+}
+
+impl Renderable for String {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_ref(area, buf);
+    }
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+}
+
+impl<'a> Renderable for Span<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_ref(area, buf);
+    }
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+}
+
+impl<'a> Renderable for Line<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        WidgetRef::render_ref(self, area, buf);
+    }
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+}
+
+impl<'a> Renderable for Paragraph<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_ref(area, buf);
+    }
+    fn desired_height(&self, width: u16) -> u16 {
+        self.line_count(width) as u16
+    }
+}
+
+impl<R: Renderable> Renderable for Option<R> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        if let Some(renderable) = self {
+            renderable.render(area, buf);
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        if let Some(renderable) = self {
+            renderable.desired_height(width)
+        } else {
+            0
+        }
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.as_ref()
+            .and_then(|renderable| renderable.cursor_pos(area))
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        self.as_ref()
+            .map_or(SetCursorStyle::DefaultUserShape, |renderable| {
+                renderable.cursor_style(area)
+            })
+    }
+}
+
+impl<R: Renderable> Renderable for Arc<R> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.as_ref().render(area, buf);
+    }
+    fn desired_height(&self, width: u16) -> u16 {
+        self.as_ref().desired_height(width)
+    }
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.as_ref().cursor_pos(area)
+    }
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        self.as_ref().cursor_style(area)
+    }
+}
+
+pub struct ColumnRenderable<'a> {
+    children: Vec<RenderableItem<'a>>,
+}
+
+impl Renderable for ColumnRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let mut y = area.y;
+        for child in &self.children {
+            let child_area = Rect::new(area.x, y, area.width, child.desired_height(area.width))
+                .intersection(area);
+            if !child_area.is_empty() {
+                child.render(child_area, buf);
+            }
+            y += child_area.height;
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.children
+            .iter()
+            .map(|child| child.desired_height(width))
+            .sum()
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let mut y = area.y;
+        for child in &self.children {
+            let child_area = Rect::new(area.x, y, area.width, child.desired_height(area.width))
+                .intersection(area);
+            if !child_area.is_empty() {
+                if let Some((px, py)) = child.cursor_pos(child_area) {
+                    return Some((px, py));
+                }
+            }
+            y += child_area.height;
+        }
+        None
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        let mut y = area.y;
+        for child in &self.children {
+            let child_area = Rect::new(area.x, y, area.width, child.desired_height(area.width))
+                .intersection(area);
+            if !child_area.is_empty() && child.cursor_pos(child_area).is_some() {
+                return child.cursor_style(child_area);
+            }
+            y += child_area.height;
+        }
+        SetCursorStyle::DefaultUserShape
+    }
+}
+
+impl<'a> ColumnRenderable<'a> {
+    pub fn new() -> Self {
+        Self { children: vec![] }
+    }
+
+    pub fn with<I, T>(children: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<RenderableItem<'a>>,
+    {
+        Self {
+            children: children.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn push(&mut self, child: impl Into<Box<dyn Renderable + 'a>>) {
+        self.children.push(RenderableItem::Owned(child.into()));
+    }
+}
+
+impl Default for ColumnRenderable<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct FlexChild<'a> {
+    flex: i32,
+    child: RenderableItem<'a>,
+}
+
+pub struct FlexRenderable<'a> {
+    children: Vec<FlexChild<'a>>,
+}
+
+impl<'a> FlexRenderable<'a> {
+    pub fn new() -> Self {
+        Self { children: vec![] }
+    }
+
+    pub fn push(&mut self, flex: i32, child: impl Into<RenderableItem<'a>>) {
+        self.children.push(FlexChild {
+            flex,
+            child: child.into(),
+        });
+    }
+
+    fn allocate(&self, area: Rect) -> Vec<Rect> {
+        let mut allocated_rects = Vec::with_capacity(self.children.len());
+        let mut child_sizes = vec![0; self.children.len()];
+        let mut allocated_size = 0;
+        let mut flex_children = Vec::new();
+
+        let max_size = area.height;
+        for (i, FlexChild { flex, child }) in self.children.iter().enumerate() {
+            if *flex > 0 {
+                flex_children.push((i, *flex as u16, child.desired_height(area.width)));
+            } else {
+                child_sizes[i] = child
+                    .desired_height(area.width)
+                    .min(max_size.saturating_sub(allocated_size));
+                allocated_size += child_sizes[i];
+            }
+        }
+        let free_space = max_size.saturating_sub(allocated_size);
+        let mut remaining_space = free_space;
+        while !flex_children.is_empty() {
+            let total_flex = flex_children.iter().map(|(_, flex, _)| *flex).sum::<u16>();
+            let mut satisfied_any = false;
+            flex_children.retain(|(i, flex, desired_height)| {
+                let proportional_share =
+                    (u32::from(remaining_space) * u32::from(*flex) / u32::from(total_flex)) as u16;
+                if *desired_height <= proportional_share {
+                    child_sizes[*i] = *desired_height;
+                    remaining_space = remaining_space.saturating_sub(*desired_height);
+                    satisfied_any = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if !satisfied_any {
+                break;
+            }
+        }
+        let total_flex = flex_children.iter().map(|(_, flex, _)| *flex).sum::<u16>();
+        let mut allocated_flex_space = 0;
+        let last_flex_child_idx = flex_children.last().map(|(i, _, _)| *i);
+        for (i, flex, desired_height) in flex_children {
+            let max_child_extent = if Some(i) == last_flex_child_idx {
+                remaining_space.saturating_sub(allocated_flex_space)
+            } else {
+                (u32::from(remaining_space) * u32::from(flex) / u32::from(total_flex)) as u16
+            };
+            let child_size = desired_height.min(max_child_extent);
+            child_sizes[i] = child_size;
+            allocated_flex_space += child_size;
+        }
+
+        let mut y = area.y;
+        for size in child_sizes {
+            let child_area = Rect::new(area.x, y, area.width, size);
+            allocated_rects.push(child_area);
+            y += child_area.height;
+        }
+        allocated_rects
+    }
+}
+
+impl Default for FlexRenderable<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> Renderable for FlexRenderable<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.allocate(area)
+            .into_iter()
+            .zip(self.children.iter())
+            .for_each(|(rect, child)| {
+                child.child.render(rect, buf);
+            });
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.allocate(Rect::new(0, 0, width, u16::MAX))
+            .last()
+            .map(|rect| rect.bottom())
+            .unwrap_or(0)
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.allocate(area)
+            .into_iter()
+            .zip(self.children.iter())
+            .find_map(|(rect, child)| child.child.cursor_pos(rect))
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        self.allocate(area)
+            .into_iter()
+            .zip(self.children.iter())
+            .find_map(|(rect, child)| {
+                child
+                    .child
+                    .cursor_pos(rect)
+                    .map(|_| child.child.cursor_style(rect))
+            })
+            .unwrap_or(SetCursorStyle::DefaultUserShape)
+    }
+}
+
+pub struct RowRenderable<'a> {
+    children: Vec<(u16, RenderableItem<'a>)>,
+}
+
+impl Renderable for RowRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let mut x = area.x;
+        for (width, child) in &self.children {
+            let available_width = area.width.saturating_sub(x - area.x);
+            let child_area = Rect::new(x, area.y, (*width).min(available_width), area.height);
+            if child_area.is_empty() {
+                break;
+            }
+            child.render(child_area, buf);
+            x = x.saturating_add(*width);
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        let mut max_height = 0;
+        let mut width_remaining = width;
+        for (child_width, child) in &self.children {
+            let w = (*child_width).min(width_remaining);
+            if w == 0 {
+                break;
+            }
+            let height = child.desired_height(w);
+            if height > max_height {
+                max_height = height;
+            }
+            width_remaining = width_remaining.saturating_sub(w);
+        }
+        max_height
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let mut x = area.x;
+        for (width, child) in &self.children {
+            let available_width = area.width.saturating_sub(x - area.x);
+            let child_area = Rect::new(x, area.y, (*width).min(available_width), area.height);
+            if !child_area.is_empty() {
+                if let Some(pos) = child.cursor_pos(child_area) {
+                    return Some(pos);
+                }
+            }
+            x = x.saturating_add(*width);
+        }
+        None
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        let mut x = area.x;
+        for (width, child) in &self.children {
+            let available_width = area.width.saturating_sub(x - area.x);
+            let child_area = Rect::new(x, area.y, (*width).min(available_width), area.height);
+            if !child_area.is_empty() && child.cursor_pos(child_area).is_some() {
+                return child.cursor_style(child_area);
+            }
+            x = x.saturating_add(*width);
+        }
+        SetCursorStyle::DefaultUserShape
+    }
+}
+
+impl<'a> RowRenderable<'a> {
+    pub fn new() -> Self {
+        Self { children: vec![] }
+    }
+
+    pub fn push(&mut self, width: u16, child: impl Into<Box<dyn Renderable + 'a>>) {
+        self.children
+            .push((width, RenderableItem::Owned(child.into())));
+    }
+}
+
+impl Default for RowRenderable<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct InsetRenderable<'a> {
+    child: RenderableItem<'a>,
+    insets: Insets,
+}
+
+impl<'a> Renderable for InsetRenderable<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.child.render(area.inset(self.insets), buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.child
+            .desired_height(width.saturating_sub(self.insets.left + self.insets.right))
+            + self.insets.top
+            + self.insets.bottom
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.child.cursor_pos(area.inset(self.insets))
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        self.child.cursor_style(area.inset(self.insets))
+    }
+}
+
+impl<'a> InsetRenderable<'a> {
+    pub fn new(child: impl Into<RenderableItem<'a>>, insets: Insets) -> Self {
+        Self {
+            child: child.into(),
+            insets,
+        }
+    }
+}
+
+pub trait RenderableExt<'a> {
+    fn inset(self, insets: Insets) -> RenderableItem<'a>;
+}
+
+impl<'a, R> RenderableExt<'a> for R
+where
+    R: Renderable + 'a,
+{
+    fn inset(self, insets: Insets) -> RenderableItem<'a> {
+        let child: RenderableItem<'a> =
+            RenderableItem::Owned(Box::new(self) as Box<dyn Renderable + 'a>);
+        RenderableItem::Owned(Box::new(InsetRenderable { child, insets }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct HeightRenderable(u16);
+
+    impl HeightRenderable {
+        fn with_height(height: u16) -> Self {
+            Self(height)
+        }
+    }
+
+    impl Renderable for HeightRenderable {
+        fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+        fn desired_height(&self, _width: u16) -> u16 {
+            self.0
+        }
+    }
+
+    struct FillRenderable(char);
+
+    impl Renderable for FillRenderable {
+        fn render(&self, area: Rect, buf: &mut Buffer) {
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    buf[(x, y)].set_char(self.0);
+                }
+            }
+        }
+
+        fn desired_height(&self, _width: u16) -> u16 {
+            1
+        }
+    }
+
+    fn buffer_text(buf: &Buffer) -> Vec<String> {
+        (buf.area.top()..buf.area.bottom())
+            .map(|y| {
+                (buf.area.left()..buf.area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn column_renders_children_in_order() {
+        let mut column = ColumnRenderable::new();
+        column.push(FillRenderable('a'));
+        column.push(FillRenderable('b'));
+
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buf = Buffer::empty(area);
+        column.render(area, &mut buf);
+
+        assert_eq!(
+            buffer_text(&buf),
+            vec!["aaa".to_string(), "bbb".to_string()]
+        );
+        assert_eq!(column.desired_height(3), 2);
+    }
+
+    #[test]
+    fn flex_redistributes_space_unused_by_short_children() {
+        let mut flex = FlexRenderable::new();
+        flex.push(
+            1,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(20))),
+        );
+        flex.push(
+            1,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(2))),
+        );
+
+        let allocated = flex.allocate(Rect::new(0, 0, 80, 10));
+
+        assert_eq!(
+            allocated
+                .into_iter()
+                .map(|area| area.height)
+                .collect::<Vec<_>>(),
+            vec![8, 2],
+        );
+    }
+
+    #[test]
+    fn flex_reserves_non_flex_space_before_flexible_children() {
+        let mut flex = FlexRenderable::new();
+        flex.push(
+            1,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(20))),
+        );
+        flex.push(
+            0,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(2))),
+        );
+        flex.push(
+            1,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(20))),
+        );
+
+        let allocated = flex.allocate(Rect::new(0, 0, 80, 10));
+
+        assert_eq!(
+            allocated
+                .into_iter()
+                .map(|area| area.height)
+                .collect::<Vec<_>>(),
+            vec![4, 2, 4],
+        );
+    }
+
+    #[test]
+    fn inset_renders_inside_inset_area_and_reports_height() {
+        let inset = InsetRenderable::new(
+            RenderableItem::Owned(Box::new(FillRenderable('x'))),
+            Insets::tlbr(1, 2, 1, 1),
+        );
+        let area = Rect::new(0, 0, 5, 3);
+        let mut buf = Buffer::empty(area);
+
+        inset.render(area, &mut buf);
+
+        assert_eq!(
+            buffer_text(&buf),
+            vec![
+                "     ".to_string(),
+                "  xx ".to_string(),
+                "     ".to_string()
+            ]
+        );
+        assert_eq!(inset.desired_height(5), 3);
+    }
+}

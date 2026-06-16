@@ -2,10 +2,14 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use crate::render::MarkdownRenderer;
+use crate::table_detect::{is_table_delimiter_line, is_table_header_line};
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
+use crate::vendored::terminal_hyperlinks::HyperlinkLine;
 
-use super::chunking::{AdaptiveChunkingPolicy, DrainPlan};
+use super::chunking::{AdaptiveChunkingPolicy, DrainPlan, QueueSnapshot};
 use super::commit_tick::drain_with_policy;
 use super::table_holdback::{TableHoldbackScanner, TableHoldbackState};
 
@@ -14,14 +18,33 @@ pub trait CommitDrain {
 }
 
 #[derive(Debug, Clone)]
+struct QueuedLine {
+    text: String,
+    queued_at: Instant,
+    line_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StablePrefixLenCache {
+    source_start: usize,
+    width: Option<usize>,
+    stable_prefix_len: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamController {
     collector: MarkdownStreamCollector,
     committed: String,
-    buffered: String,
-    queue: VecDeque<String>,
-    held: String,
+    raw_source: String,
+    rendered_lines: Vec<HyperlinkLine>,
+    enqueued_stable_len: usize,
+    emitted_stable_len: usize,
+    enqueued_source_len: usize,
+    queue: VecDeque<QueuedLine>,
     table_scanner: TableHoldbackScanner,
     policy: AdaptiveChunkingPolicy,
+    stable_prefix_len_cache: Option<StablePrefixLenCache>,
+    width: Option<usize>,
 }
 
 impl StreamController {
@@ -29,35 +52,79 @@ impl StreamController {
         Self {
             collector: MarkdownStreamCollector::new(width, cwd),
             committed: String::new(),
-            buffered: String::new(),
+            raw_source: String::new(),
+            rendered_lines: Vec::new(),
+            enqueued_stable_len: 0,
+            emitted_stable_len: 0,
+            enqueued_source_len: 0,
             queue: VecDeque::new(),
-            held: String::new(),
             table_scanner: TableHoldbackScanner::default(),
             policy: AdaptiveChunkingPolicy::default(),
+            stable_prefix_len_cache: None,
+            width,
         }
     }
 
     pub fn clear(&mut self) {
         self.collector.clear();
         self.committed.clear();
-        self.buffered.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_stable_len = 0;
+        self.emitted_stable_len = 0;
+        self.enqueued_source_len = 0;
         self.queue.clear();
-        self.held.clear();
         self.table_scanner.reset();
         self.policy.reset();
+        self.stable_prefix_len_cache = None;
     }
 
     pub fn replace_committed(&mut self, content: &str) {
         self.clear();
         self.committed.push_str(content);
+        self.raw_source.push_str(content);
+        self.enqueued_source_len = self.raw_source.len();
         self.table_scanner.replace_prefix(content);
+        self.recompute_streaming_render();
+        self.enqueued_stable_len = self.rendered_lines.len();
+        self.emitted_stable_len = self.rendered_lines.len();
         self.assert_holdback_boundary();
+    }
+
+    pub fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+        let had_pending_queue = !self.queue.is_empty();
+        let had_live_tail = self.has_tail();
+        self.width = width;
+        self.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
+        if had_pending_queue
+            && self.emitted_stable_len == self.rendered_lines.len()
+            && self.emitted_stable_len > 0
+        {
+            self.emitted_stable_len -= 1;
+        }
+        self.queue.clear();
+        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
+            self.enqueued_stable_len = self.rendered_lines.len();
+            self.enqueued_source_len = self.raw_source.len();
+            return;
+        }
+        self.rebuild_stable_queue_from_render();
     }
 
     pub fn push_delta(&mut self, delta: &str) {
         self.collector.push_delta(delta);
         if let Some(source) = self.collector.commit_complete_source() {
             self.ingest_complete_source(&source);
+        } else {
+            self.recompute_streaming_render();
         }
     }
 
@@ -66,76 +133,182 @@ impl StreamController {
     }
 
     pub fn live(&self) -> String {
-        let mut live = self.queue.iter().map(String::as_str).collect::<String>();
-        live.push_str(&self.held);
+        let mut live =
+            self.raw_source[self.enqueued_source_len.min(self.raw_source.len())..].to_string();
         live.push_str(self.collector.pending_source());
         live
     }
 
     pub fn visible(&self) -> String {
         let mut visible = self.committed.clone();
+        for line in &self.queue {
+            visible.push_str(&line.text);
+        }
         visible.push_str(&self.live());
         visible
     }
 
+    pub fn current_tail_lines(&self) -> Vec<HyperlinkLine> {
+        let start = self.enqueued_stable_len.min(self.rendered_lines.len());
+        self.rendered_lines[start..].to_vec()
+    }
+
+    pub fn has_live_tail(&self) -> bool {
+        self.has_tail()
+    }
+
     pub fn queued_lines(&self) -> usize {
-        self.queue.len()
+        self.queue.iter().map(|line| line.line_count).sum()
     }
 
     pub fn stable_lines_ready(&self) -> bool {
         !self.queue.is_empty()
     }
 
+    pub fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.queue
+            .front()
+            .map(|line| now.saturating_duration_since(line.queued_at))
+    }
+
     pub fn finalize(&mut self) -> String {
         let remainder = self.collector.finalize_and_drain_source();
         if !remainder.is_empty() {
-            self.buffered.push_str(&remainder);
+            self.raw_source.push_str(&remainder);
+            self.table_scanner.push_source_chunk(&remainder);
         }
-        self.queue.clear();
-        self.held.clear();
-        let buffered = std::mem::take(&mut self.buffered);
-        self.committed.push_str(&buffered);
-        let out = self.committed.clone();
+        let out = if self.raw_source.is_empty() {
+            self.committed.clone()
+        } else {
+            self.raw_source.clone()
+        };
         self.clear();
         out
     }
 
-    fn ingest_complete_source(&mut self, source: &str) {
-        self.buffered.push_str(source);
-        self.table_scanner.push_source_chunk(source);
-        let stable_len = self.stable_buffer_len();
-        self.rebuild_queue(stable_len);
+    pub fn drain_all_stable(&mut self) -> Option<String> {
+        self.drain(DrainPlan::Batch(usize::MAX))
     }
 
-    fn stable_buffer_len(&self) -> usize {
-        self.assert_holdback_boundary();
-        let stable_len = match self.table_scanner.state() {
-            TableHoldbackState::None => self.buffered.len(),
+    fn ingest_complete_source(&mut self, source: &str) {
+        self.raw_source.push_str(source);
+        self.table_scanner.push_source_chunk(source);
+        self.recompute_streaming_render();
+        self.sync_stable_queue();
+    }
+
+    fn render_source(&self, source: &str) -> Vec<HyperlinkLine> {
+        if source.is_empty() {
+            Vec::new()
+        } else {
+            MarkdownRenderer::new(self.width).render_with_links(source)
+        }
+    }
+
+    fn recompute_streaming_render(&mut self) {
+        let mut source = self.raw_source.clone();
+        source.push_str(self.collector.pending_source());
+        self.rendered_lines = self.render_source(&source);
+    }
+
+    fn has_tail(&self) -> bool {
+        self.enqueued_stable_len < self.rendered_lines.len()
+    }
+
+    fn target_stable_source_len(&self) -> usize {
+        let source_len = self.raw_source.len();
+        let target = match self.table_scanner.state() {
+            TableHoldbackState::None => source_len,
             TableHoldbackState::PendingHeader { header_start }
             | TableHoldbackState::Confirmed {
                 table_start: header_start,
-            } => header_start.saturating_sub(self.committed.len()),
-        }
-        .min(self.buffered.len());
-        previous_char_boundary(&self.buffered, stable_len)
+            } => header_start,
+        };
+        previous_char_boundary(&self.raw_source, target.min(source_len))
     }
 
-    fn rebuild_queue(&mut self, stable_len: usize) {
+    fn compute_target_stable_len(&mut self) -> usize {
+        let target_source_len = self.target_stable_source_len();
+        self.stable_prefix_len_for_source_start(target_source_len)
+            .max(self.emitted_stable_len)
+    }
+
+    fn sync_stable_queue(&mut self) -> bool {
+        let target_source_len = self.target_stable_source_len();
+        let target_stable_len = self.compute_target_stable_len();
+        if target_source_len < self.enqueued_source_len {
+            self.queue.clear();
+            if self.committed.len() < target_source_len {
+                self.enqueue_source_range(self.committed.len(), target_source_len);
+            }
+            self.enqueued_source_len = target_source_len;
+            self.enqueued_stable_len = target_stable_len;
+            return !self.queue.is_empty();
+        }
+        if target_source_len == self.enqueued_source_len {
+            self.enqueued_stable_len = target_stable_len;
+            return false;
+        }
+        self.enqueue_source_range(self.enqueued_source_len, target_source_len);
+        self.enqueued_source_len = target_source_len;
+        self.enqueued_stable_len = target_stable_len;
+        true
+    }
+
+    fn rebuild_stable_queue_from_render(&mut self) {
+        let target_source_len = self.target_stable_source_len();
+        let target_stable_len = self.compute_target_stable_len();
         self.queue.clear();
-        self.held.clear();
-        let stable_len =
-            previous_char_boundary(&self.buffered, stable_len.min(self.buffered.len()));
-        debug_assert!(self.buffered.is_char_boundary(stable_len));
-        let (stable, held) = self.buffered.split_at(stable_len);
-        enqueue_stable_source(&mut self.queue, stable);
-        self.held.push_str(held);
+        if self.committed.len() < target_source_len {
+            self.enqueue_source_range(self.committed.len(), target_source_len);
+        }
+        self.enqueued_source_len = target_source_len;
+        self.enqueued_stable_len = target_stable_len;
+    }
+
+    fn enqueue_source_range(&mut self, start: usize, end: usize) {
+        if start >= end || start >= self.raw_source.len() {
+            return;
+        }
+        let start = previous_char_boundary(&self.raw_source, start);
+        let end = previous_char_boundary(&self.raw_source, end.min(self.raw_source.len()));
+        let mut chunks = VecDeque::new();
+        enqueue_stable_source(&mut chunks, &self.raw_source[start..end]);
+        let now = Instant::now();
+        for text in chunks {
+            let line_count = text
+                .split_inclusive('\n')
+                .filter(|line| !line.is_empty())
+                .count()
+                .max(1);
+            self.queue.push_back(QueuedLine {
+                text,
+                queued_at: now,
+                line_count,
+            });
+        }
+    }
+
+    fn stable_prefix_len_for_source_start(&mut self, source_start: usize) -> usize {
+        if let Some(cache) = &self.stable_prefix_len_cache {
+            if cache.source_start == source_start && cache.width == self.width {
+                return cache.stable_prefix_len;
+            }
+        }
+        let stable_prefix_len = self.render_source(&self.raw_source[..source_start]).len();
+        self.stable_prefix_len_cache = Some(StablePrefixLenCache {
+            source_start,
+            width: self.width,
+            stable_prefix_len,
+        });
+        stable_prefix_len
     }
 
     fn assert_holdback_boundary(&self) {
         debug_assert_eq!(
             self.table_scanner.source_offset(),
-            self.committed.len().saturating_add(self.buffered.len()),
-            "table scanner offset must match committed + buffered bytes"
+            self.raw_source.len(),
+            "table scanner offset must match raw source bytes"
         );
         let boundary = match self.table_scanner.state() {
             TableHoldbackState::None => return,
@@ -143,19 +316,10 @@ impl StreamController {
             TableHoldbackState::Confirmed { table_start } => table_start,
         };
         debug_assert!(
-            self.absolute_boundary_is_valid(boundary),
-            "invalid table holdback boundary {boundary} for committed {} buffered {}",
-            self.committed.len(),
-            self.buffered.len()
+            boundary <= self.raw_source.len() && self.raw_source.is_char_boundary(boundary),
+            "invalid table holdback boundary {boundary} for source {}",
+            self.raw_source.len()
         );
-    }
-
-    fn absolute_boundary_is_valid(&self, boundary: usize) -> bool {
-        if boundary <= self.committed.len() {
-            return self.committed.is_char_boundary(boundary);
-        }
-        let relative = boundary - self.committed.len();
-        relative <= self.buffered.len() && self.buffered.is_char_boundary(relative)
     }
 
     fn drain(&mut self, plan: DrainPlan) -> Option<String> {
@@ -166,18 +330,18 @@ impl StreamController {
         if count == 0 || self.queue.is_empty() {
             return None;
         }
+        let mut remaining = count;
         let mut drained = String::new();
-        for _ in 0..count {
+        while remaining > 0 {
             let Some(line) = self.queue.pop_front() else {
                 break;
             };
-            self.committed.push_str(&line);
-            drained.push_str(&line);
+            remaining = remaining.saturating_sub(line.line_count.max(1));
+            self.committed.push_str(&line.text);
+            drained.push_str(&line.text);
         }
         if !drained.is_empty() {
-            let drain_len = drained.len().min(self.buffered.len());
-            let drain_len = previous_char_boundary(&self.buffered, drain_len);
-            self.buffered.drain(..drain_len);
+            self.emitted_stable_len = self.render_source(&self.committed).len();
             self.assert_holdback_boundary();
         }
         (!drained.is_empty()).then_some(drained)
@@ -238,7 +402,7 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
             continue;
         }
         if let Some((previous_start, previous_line)) = previous {
-            if is_table_header(previous_line) && is_table_delimiter(trimmed) {
+            if is_table_header_line(previous_line) && is_table_delimiter_line(trimmed) {
                 table_start = Some(previous_start);
             }
         }
@@ -248,46 +412,15 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
     table_start.map(|start| (start, source.len()))
 }
 
-fn is_table_header(line: &str) -> bool {
-    table_segments(line).is_some_and(|segments| {
-        segments.len() >= 2 && segments.iter().any(|segment| !segment.trim().is_empty())
-    })
-}
-
-fn is_table_delimiter(line: &str) -> bool {
-    table_segments(line).is_some_and(|segments| {
-        segments.len() >= 2
-            && segments.iter().all(|segment| {
-                let segment = segment.trim();
-                !segment.is_empty()
-                    && segment
-                        .chars()
-                        .all(|ch| ch == '-' || ch == ':' || ch.is_ascii_whitespace())
-                    && segment.chars().filter(|ch| *ch == '-').count() >= 3
-            })
-    })
-}
-
-fn table_segments(line: &str) -> Option<Vec<&str>> {
-    let mut line = line.trim();
-    if !line.contains('|') {
-        return None;
-    }
-    if let Some(rest) = line.strip_prefix('|') {
-        line = rest;
-    }
-    if let Some(rest) = line.strip_suffix('|') {
-        line = rest;
-    }
-    let segments = line.split('|').collect::<Vec<_>>();
-    (segments.len() >= 2).then_some(segments)
-}
-
 impl CommitDrain for StreamController {
     fn run_commit_tick(&mut self) -> Option<String> {
-        let queued_lines = self.queued_lines();
+        let now = Instant::now();
+        let snapshot = QueueSnapshot {
+            queued_lines: self.queued_lines(),
+            oldest_age: self.oldest_queued_age(now),
+        };
         let mut policy = std::mem::take(&mut self.policy);
-        let drained = drain_with_policy(&mut policy, queued_lines, |plan| self.drain(plan));
+        let drained = drain_with_policy(&mut policy, snapshot, now, |plan| self.drain(plan));
         self.policy = policy;
         drained
     }
@@ -310,7 +443,8 @@ mod tests {
         assert_eq!(stream.queued_lines(), 2);
         assert_eq!(stream.run_commit_tick(), Some("one\n".to_string()));
         assert_eq!(stream.committed(), "one\n");
-        assert_eq!(stream.live(), "two\n");
+        assert_eq!(stream.live(), "");
+        assert_eq!(stream.visible(), "one\ntwo\n");
     }
 
     #[test]
@@ -335,7 +469,7 @@ mod tests {
         let mut stream = controller();
         stream.push_delta("```rust\nfn");
         assert_eq!(stream.committed(), "");
-        assert!(stream.visible().contains("```rust"));
+        assert_eq!(stream.visible(), "```rust\nfn");
         stream.push_delta(" main() {}\n```\n");
         while stream.run_commit_tick().is_some() {}
         assert_eq!(stream.finalize(), "```rust\nfn main() {}\n```\n");
@@ -427,13 +561,33 @@ mod tests {
     fn completed_table_commits_as_one_queue_item_before_following_text() {
         let mut stream = controller();
         stream.push_delta("intro\n| A | B |\n| --- | --- |\n| one | two |\n\nafter\n");
-        assert_eq!(stream.queued_lines(), 3);
+        assert_eq!(stream.queued_lines(), 6);
         assert_eq!(stream.run_commit_tick(), Some("intro\n".to_string()));
         assert_eq!(
             stream.run_commit_tick(),
             Some("| A | B |\n| --- | --- |\n| one | two |\n\n".to_string())
         );
         assert_eq!(stream.run_commit_tick(), Some("after\n".to_string()));
+    }
+
+    #[test]
+    fn oldest_queued_age_tracks_first_stable_line() {
+        let mut stream = controller();
+        stream.push_delta("one\ntwo\n");
+        let age = stream.oldest_queued_age(Instant::now() + Duration::from_millis(150));
+        assert!(age.is_some_and(|age| age >= Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn set_width_rebuilds_queue_without_reemitting_emitted_lines() {
+        let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
+        stream.push_delta("alpha beta gamma\ndelta\n");
+        assert!(stream.run_commit_tick().is_some());
+        let emitted = stream.committed().to_string();
+        stream.set_width(Some(24));
+        while stream.run_commit_tick().is_some() {}
+        assert!(stream.committed().starts_with(&emitted));
+        assert_eq!(stream.finalize(), "alpha beta gamma\ndelta\n");
     }
 
     fn utf8_chunks(source: &str, max_bytes: usize) -> Vec<&str> {

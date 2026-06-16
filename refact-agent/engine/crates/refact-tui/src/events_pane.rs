@@ -1,9 +1,10 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::client::WorkerInfo;
+use crate::client::{worker_state_label, WorkerInfo};
+use crate::theme::{ThemeRole, TuiTheme};
 
 const MAX_EVENTS: usize = 10_000;
 const EVENTS_RETENTION_NOTICE_KIND: &str = "retention_notice";
@@ -94,45 +95,71 @@ pub fn format_event(event: &DaemonEventRecord) -> String {
     format!("{} {}{}", project, event.kind, payload)
 }
 
-pub fn render_event_lines(events: &[DaemonEventRecord]) -> Vec<Line<'static>> {
+pub fn render_event_lines(events: &[DaemonEventRecord], theme: &TuiTheme) -> Vec<Line<'static>> {
     if events.is_empty() {
         return vec![Line::from(Span::styled(
             "No daemon events yet",
-            Style::default().fg(Color::DarkGray),
+            theme.style(ThemeRole::Muted).add_modifier(Modifier::ITALIC),
         ))];
     }
     events
         .iter()
         .rev()
         .take(12)
-        .map(|event| Line::from(Span::raw(format_event(event))))
+        .map(|event| event_line(event, theme))
         .collect()
 }
 
-pub fn render_worker_lines(workers: &[WorkerInfo]) -> Vec<Line<'static>> {
+pub fn render_worker_lines(workers: &[WorkerInfo], theme: &TuiTheme) -> Vec<Line<'static>> {
     if workers.is_empty() {
         return vec![Line::from(Span::styled(
             "No workers",
-            Style::default().fg(Color::DarkGray),
+            theme.style(ThemeRole::Muted).add_modifier(Modifier::ITALIC),
         ))];
     }
     workers
         .iter()
-        .map(|worker| {
-            let pid = worker
-                .pid
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            Line::from(format!(
-                "{} pid={} http={} lsp={} state={}",
-                worker.project_id,
-                pid,
-                worker.http_port,
-                worker.lsp_port,
-                crate::client::worker_state_label(Some(worker))
-            ))
-        })
+        .map(|worker| worker_line(worker, theme))
         .collect()
+}
+
+fn event_line(event: &DaemonEventRecord, theme: &TuiTheme) -> Line<'static> {
+    let project = event.project_id.as_deref().unwrap_or("daemon");
+    let mut spans = vec![
+        Span::styled(project.to_string(), theme.style(ThemeRole::Accent)),
+        Span::raw(" "),
+        Span::raw(event.kind.clone()),
+    ];
+    match &event.payload {
+        Value::Null => {}
+        Value::Object(map) if map.is_empty() => {}
+        value => {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                compact_json(value, 96),
+                theme.style(ThemeRole::Muted),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn worker_line(worker: &WorkerInfo, theme: &TuiTheme) -> Line<'static> {
+    let pid = worker
+        .pid
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    Line::from(vec![
+        Span::styled(worker.project_id.clone(), theme.style(ThemeRole::Accent)),
+        Span::styled(" pid=", theme.style(ThemeRole::Muted)),
+        Span::raw(pid),
+        Span::styled(" http=", theme.style(ThemeRole::Muted)),
+        Span::raw(worker.http_port.to_string()),
+        Span::styled(" lsp=", theme.style(ThemeRole::Muted)),
+        Span::raw(worker.lsp_port.to_string()),
+        Span::styled(" state=", theme.style(ThemeRole::Muted)),
+        Span::raw(worker_state_label(Some(worker))),
+    ])
 }
 
 fn compact_json(value: &Value, max_chars: usize) -> String {
@@ -164,6 +191,34 @@ mod tests {
             payload: serde_json::json!({"pid": 42}),
         };
         assert_eq!(format_event(&event), "abc worker_ready {\"pid\":42}");
+    }
+
+    #[test]
+    fn events_rendering_keeps_event_and_worker_data() {
+        let theme = TuiTheme::dark();
+        let event = DaemonEventRecord {
+            ts_ms: 1,
+            kind: "worker_ready".to_string(),
+            project_id: Some("abc".to_string()),
+            payload: serde_json::json!({"pid": 42}),
+        };
+        let worker = WorkerInfo {
+            project_id: "abc".to_string(),
+            pid: Some(42),
+            http_port: 9000,
+            lsp_port: 9001,
+            state: Value::String("ready".to_string()),
+            last_error: None,
+        };
+
+        assert_eq!(
+            render_event_lines(&[event], &theme)[0].to_string(),
+            "abc worker_ready {\"pid\":42}"
+        );
+        assert_eq!(
+            render_worker_lines(&[worker], &theme)[0].to_string(),
+            "abc pid=42 http=9000 lsp=9001 state=ready"
+        );
     }
 
     #[test]

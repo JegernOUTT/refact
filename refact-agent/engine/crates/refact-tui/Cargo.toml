@@ -8,14 +8,18 @@ license = "Apache-2.0"
 base64 = "0.22.1"
 chrono = { version = "0.4.31", features = ["serde"] }
 crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
+dirs = "5.0"
 futures = "0.3"
 pulldown-cmark = "0.10"
-ratatui = { version = "0.29.0", features = ["unstable-widget-ref"] }
+ratatui = { version = "0.29.0", features = ["unstable-widget-ref", "unstable-rendered-line-info"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
+regex-lite = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 shell-words = "1.1.0"
+supports-color = "3"
 syntect = "5"
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 textwrap = "0.16.2"
 thiserror = "2.0.12"
 toml = "0.8"

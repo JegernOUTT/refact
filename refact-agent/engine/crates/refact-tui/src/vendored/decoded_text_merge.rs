@@ -1,4 +1,4 @@
-// Adapted from openai/codex codex-rs/tui, Apache-2.0.
+// Adapted from openai/codex codex-rs/tui/src/markdown_text_merge.rs, Apache-2.0.
 
 use std::iter::Peekable;
 use std::ops::Range;

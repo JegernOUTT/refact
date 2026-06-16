@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+use std::path::Path;
+
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
+
+use crate::render::highlight;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeRole {
@@ -39,6 +44,12 @@ pub struct TuiTheme {
     success: Style,
     highlight: Style,
     border: Style,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeEntry {
+    pub name: String,
+    pub is_custom: bool,
 }
 
 impl Default for TuiTheme {
@@ -98,6 +109,41 @@ impl TuiTheme {
         &["dark", "light", "plain"]
     }
 
+    pub fn list_available(custom_dir: Option<&Path>) -> Vec<ThemeEntry> {
+        let mut entries = Self::builtin_names()
+            .iter()
+            .map(|name| ThemeEntry {
+                name: (*name).to_string(),
+                is_custom: false,
+            })
+            .collect::<Vec<_>>();
+        let mut existing = entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<HashSet<_>>();
+
+        for syntax in highlight::list_available_themes(custom_dir) {
+            if existing.insert(syntax.name.clone()) {
+                entries.push(ThemeEntry {
+                    name: syntax.name,
+                    is_custom: syntax.is_custom,
+                });
+            } else if let Some(entry) = entries.iter_mut().find(|entry| entry.name == syntax.name) {
+                entry.is_custom = entry.is_custom || syntax.is_custom;
+            }
+        }
+
+        entries.sort_by_cached_key(|entry| {
+            (
+                !Self::builtin_names()
+                    .iter()
+                    .any(|name| *name == entry.name.as_str()),
+                entry.name.to_ascii_lowercase(),
+            )
+        });
+        entries
+    }
+
     pub fn named(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "dark" => Some(Self::dark()),
@@ -107,20 +153,63 @@ impl TuiTheme {
         }
     }
 
+    pub fn named_or_syntax(name: &str, custom_dir: Option<&Path>) -> Option<Self> {
+        if let Some(theme) = Self::named(name) {
+            return Some(theme);
+        }
+        let name = name.trim();
+        if name.is_empty() || highlight::resolve_theme_by_name(name, custom_dir).is_none() {
+            return None;
+        }
+        let mut theme = if syntax_name_is_light(name) {
+            Self::light()
+        } else {
+            Self::dark()
+        };
+        theme.name = name.to_string();
+        Some(theme)
+    }
+
     pub fn from_toml_str(content: &str) -> Result<Self, String> {
         let config: ThemeFileConfig = toml::from_str(content).map_err(|error| error.to_string())?;
-        Ok(Self::from_config(config))
+        Ok(Self::from_config(config, None))
+    }
+
+    pub fn from_toml_str_with_custom_dir(
+        content: &str,
+        custom_dir: Option<&Path>,
+    ) -> Result<Self, String> {
+        let config: ThemeFileConfig = toml::from_str(content).map_err(|error| error.to_string())?;
+        Ok(Self::from_config(config, custom_dir))
     }
 
     pub fn from_config_file_content(content: Option<&str>) -> Result<Self, String> {
+        Self::from_config_file_content_with_custom_dir(content, None)
+    }
+
+    pub fn from_config_file_content_with_custom_dir(
+        content: Option<&str>,
+        custom_dir: Option<&Path>,
+    ) -> Result<Self, String> {
         match content {
-            Some(content) if !content.trim().is_empty() => Self::from_toml_str(content),
+            Some(content) if !content.trim().is_empty() => {
+                Self::from_toml_str_with_custom_dir(content, custom_dir)
+            }
             _ => Ok(Self::default()),
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn syntax_theme_name(&self) -> &str {
+        match self.name.as_str() {
+            "dark" => "catppuccin-mocha",
+            "light" => "catppuccin-latte",
+            "plain" => "ansi",
+            name => name,
+        }
     }
 
     pub fn style(&self, role: ThemeRole) -> Style {
@@ -136,12 +225,12 @@ impl TuiTheme {
         }
     }
 
-    fn from_config(config: ThemeFileConfig) -> Self {
+    fn from_config(config: ThemeFileConfig, custom_dir: Option<&Path>) -> Self {
         let mut theme = config
             .theme
             .as_ref()
             .and_then(|section| section.name.as_deref())
-            .and_then(Self::named)
+            .and_then(|name| Self::named_or_syntax(name, custom_dir))
             .unwrap_or_default();
         if let Some(section) = config.theme {
             theme.apply_overrides(section);
@@ -236,6 +325,11 @@ fn parse_color(value: &str) -> Option<Color> {
     }
 }
 
+fn syntax_name_is_light(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("light") || name.contains("latte") || name == "github"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +352,24 @@ muted = "dark-gray"
             Some(Color::Rgb(17, 34, 51))
         );
         assert_eq!(theme.style(ThemeRole::Muted).fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn available_themes_include_chrome_and_syntax_catalogs() {
+        let entries = TuiTheme::list_available(None);
+        assert_eq!(&entries[0].name, "dark");
+        assert_eq!(&entries[1].name, "light");
+        assert_eq!(&entries[2].name, "plain");
+        assert!(entries.iter().any(|entry| entry.name == "catppuccin-mocha"));
+    }
+
+    #[test]
+    fn syntax_theme_names_get_chrome_shells() {
+        let theme = TuiTheme::named_or_syntax("catppuccin-latte", None).unwrap();
+        assert_eq!(theme.name(), "catppuccin-latte");
+        assert_eq!(theme.syntax_theme_name(), "catppuccin-latte");
+        assert_eq!(theme.style(ThemeRole::Text).fg, Some(Color::Black));
+        assert_eq!(TuiTheme::dark().syntax_theme_name(), "catppuccin-mocha");
+        assert_eq!(TuiTheme::light().syntax_theme_name(), "catppuccin-latte");
     }
 }

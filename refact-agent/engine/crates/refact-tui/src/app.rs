@@ -29,8 +29,13 @@ use crate::commands::{
 use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
-use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
-use crate::history::{insert_history, HistoryBuffer, HistoryInsertion, RESIZE_REFLOW_PENDING_CELL_CAP};
+use crate::history::cells::{
+    synthesize_plan_content, ApprovalOutcome, AssistantStreamCell, PlanCellData,
+};
+use crate::history::{
+    insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
+    ResizeReflowState, RESIZE_REFLOW_PENDING_CELL_CAP,
+};
 use crate::keymap::{
     HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
 };
@@ -45,11 +50,14 @@ use crate::read_only_views::{
     hooks_overlay, import_run_notice, import_run_overlay, import_sources_overlay, mcp_overlay,
     memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
 };
+use crate::render::highlight;
 use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
 use crate::streaming::{run_commit_tick, StreamController};
-use crate::terminal::{terminal_title, TerminalSession, TerminalTitleConfig};
+use crate::terminal::{
+    terminal_title, FrameRequester, TerminalSession, TerminalTitleConfig, TARGET_FRAME_INTERVAL,
+};
 use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text, truncate_graphemes};
 use crate::theme::TuiTheme;
 use crate::tools::{
@@ -79,6 +87,7 @@ const ABORT_BEFORE_QUIT_TIMEOUT: Duration = Duration::from_secs(1);
 const LIVE_TRANSCRIPT_ITEM_LIMIT: usize = 10_000;
 const LIVE_TRANSCRIPT_RETENTION_NOTICE: &str =
     "Older live transcript items dropped after reaching 10000 live items";
+const WORKING_ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -102,6 +111,12 @@ struct HistorySaveRequest {
     entries: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ThemePickerSnapshot {
+    theme: TuiTheme,
+    syntax_theme: syntect::highlighting::Theme,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorCommand {
     program: String,
@@ -120,6 +135,7 @@ pub enum TranscriptItem {
     Diff(String),
     Notice(String),
     Info(Vec<String>),
+    Status(session::StatusSnapshot, TuiTheme),
     Approval(ApprovalModalState, Option<ApprovalOutcome>),
     Session {
         title: String,
@@ -379,9 +395,11 @@ pub struct App {
     pending_history_save: Option<HistorySaveRequest>,
     history_save_in_flight: bool,
     history_failure_notified: bool,
+    tui_config_path: Option<PathBuf>,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
+    theme_picker_snapshot: Option<ThemePickerSnapshot>,
     approval_queue: ApprovalQueue,
     ask_questions_form: Option<AskQuestionsForm>,
     pending_manual_ask_questions: Option<AskQuestionsRequest>,
@@ -425,10 +443,13 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     working_started_at_ms: Option<u64>,
     working_tick: u64,
+    working_last_tick_at_ms: Option<u64>,
     working_detail: Option<String>,
     stream_controller: StreamController,
     notifications: NotificationManager,
     history: HistoryBuffer,
+    resize_reflow: ResizeReflowState,
+    resize_reflow_row_cap: usize,
     native_scrollback: bool,
     rendered_message_count: usize,
     rendered_state_cursor: usize,
@@ -447,6 +468,9 @@ impl App {
             .unwrap_or_default();
         let keymap = KeymapRegistry::default();
         let vim = VimState::new(keymap.vim_mode_enabled());
+        let tui_config_path = default_tui_config_path();
+        let theme = TuiTheme::default();
+        initialize_syntax_theme(&theme, tui_config_path.as_deref());
         Self {
             transcript: vec![TranscriptItem::Notice(format!(
                 "Opened project {} at {}",
@@ -461,7 +485,7 @@ impl App {
             composer: ComposerState::new(history_entries),
             keymap,
             vim,
-            theme: TuiTheme::default(),
+            theme,
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -469,9 +493,11 @@ impl App {
             pending_history_save: None,
             history_save_in_flight: false,
             history_failure_notified: false,
+            tui_config_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
+            theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
             pending_manual_ask_questions: None,
@@ -515,10 +541,13 @@ impl App {
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
+            working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
+            resize_reflow: ResizeReflowState::default(),
+            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
             native_scrollback: false,
             rendered_message_count: 0,
             rendered_state_cursor: 0,
@@ -528,13 +557,16 @@ impl App {
 
     fn notice_only(notice: impl Into<String>) -> Self {
         let notice = notice.into();
+        let tui_config_path = default_tui_config_path();
+        let theme = TuiTheme::default();
+        initialize_syntax_theme(&theme, tui_config_path.as_deref());
         Self {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             composer: ComposerState::new(Vec::new()),
             keymap: KeymapRegistry::default(),
             vim: VimState::new(false),
-            theme: TuiTheme::default(),
+            theme,
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -542,9 +574,11 @@ impl App {
             pending_history_save: None,
             history_save_in_flight: false,
             history_failure_notified: false,
+            tui_config_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
+            theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
             pending_manual_ask_questions: None,
@@ -588,10 +622,13 @@ impl App {
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
+            working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
+            resize_reflow: ResizeReflowState::default(),
+            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
             native_scrollback: false,
             rendered_message_count: 0,
             rendered_state_cursor: 0,
@@ -642,8 +679,12 @@ impl App {
             }
             Err(error) => self.add_notice(format!("Failed to load TUI keymap config: {error}")),
         }
-        match TuiTheme::from_config_file_content(Some(content)) {
-            Ok(theme) => self.theme = theme,
+        let theme_home = self.tui_theme_home();
+        match TuiTheme::from_config_file_content_with_custom_dir(
+            Some(content),
+            theme_home.as_deref(),
+        ) {
+            Ok(theme) => self.set_theme(theme),
             Err(error) => self.add_notice(format!("Failed to load TUI theme config: {error}")),
         }
         match NotificationConfig::from_config_file_content(Some(content)) {
@@ -770,6 +811,7 @@ impl App {
             (false, true) => {
                 self.working_started_at_ms = Some(now_ms());
                 self.working_tick = 0;
+                self.working_last_tick_at_ms = None;
                 self.working_detail = self.latest_tool_detail();
             }
             (true, false) => self.clear_working_indicator(),
@@ -780,6 +822,7 @@ impl App {
     fn clear_working_indicator(&mut self) {
         self.working_started_at_ms = None;
         self.working_tick = 0;
+        self.working_last_tick_at_ms = None;
         self.working_detail = None;
     }
 
@@ -790,6 +833,13 @@ impl App {
         if self.working_started_at_ms.is_none() {
             self.working_started_at_ms = Some(now_ms());
         }
+        let now = now_ms();
+        if self.working_last_tick_at_ms.is_some_and(|last| {
+            now.saturating_sub(last) < WORKING_ANIMATION_INTERVAL.as_millis() as u64
+        }) {
+            return;
+        }
+        self.working_last_tick_at_ms = Some(now);
         self.working_tick = self.working_tick.wrapping_add(1);
     }
 
@@ -837,6 +887,73 @@ impl App {
             .drain_pending_capped(width, RESIZE_REFLOW_PENDING_CELL_CAP)
     }
 
+    fn resize_reflow_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
+        self.history
+            .reflow_insertions(width, self.resize_reflow_row_cap)
+    }
+
+    fn note_terminal_resize_width(&mut self, width: u16) -> bool {
+        if !self.native_scrollback {
+            self.resize_reflow.clear();
+            return false;
+        }
+        let width_change = self.resize_reflow.note_width(width);
+        if !width_change.changed || self.history.source_cell_count() == 0 {
+            return false;
+        }
+        if self.should_mark_resize_reflow_as_stream_time() {
+            self.resize_reflow.mark_resize_requested_during_stream();
+        }
+        self.resize_reflow.schedule_debounced(Some(width));
+        true
+    }
+
+    fn note_terminal_height_resize(&mut self) -> bool {
+        if !self.native_scrollback || self.history.source_cell_count() == 0 {
+            return false;
+        }
+        if self.should_mark_resize_reflow_as_stream_time() {
+            self.resize_reflow.mark_resize_requested_during_stream();
+        }
+        self.resize_reflow.schedule_debounced(None);
+        true
+    }
+
+    fn resize_reflow_is_due(&self) -> bool {
+        self.resize_reflow.pending_is_due(Instant::now())
+    }
+
+    fn resize_reflow_delay(&self) -> Option<Duration> {
+        self.resize_reflow
+            .pending_until()
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+    }
+
+    fn finish_resize_reflow(&mut self, width: u16, ran_during_stream: bool) {
+        self.resize_reflow.clear_pending_reflow();
+        self.resize_reflow.mark_reflowed_width(width);
+        if ran_during_stream {
+            self.resize_reflow.mark_ran_during_stream();
+        }
+    }
+
+    fn schedule_final_stream_resize_reflow(&mut self) {
+        if self.native_scrollback
+            && self.history.source_cell_count() > 0
+            && self.resize_reflow.take_stream_finish_reflow_needed()
+        {
+            self.resize_reflow.schedule_immediate();
+        }
+    }
+
+    fn should_mark_resize_reflow_as_stream_time(&self) -> bool {
+        self.session_state.shows_working_indicator()
+            || self
+                .transcript
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Assistant(_)))
+    }
+
     pub fn history_pending_count(&self) -> usize {
         self.history.pending_cell_count()
     }
@@ -851,6 +968,10 @@ impl App {
 
     pub fn flush_pending_paste(&mut self) -> bool {
         self.composer.flush_pending_paste(Instant::now())
+    }
+
+    fn pending_paste_delay(&self) -> Option<Duration> {
+        self.composer.pending_paste_delay(Instant::now())
     }
 
     pub fn set_native_scrollback(&mut self, enabled: bool) {
@@ -962,7 +1083,10 @@ impl App {
     }
 
     pub fn composer_height(&self, width: u16) -> u16 {
-        self.composer.height(width.saturating_sub(2).max(1), 8) + self.queue_preview_height()
+        let text_width = width
+            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 1)
+            .max(1);
+        self.composer.height(text_width, 8) + 1 + self.queue_preview_height()
     }
 
     pub fn queue_preview_height(&self) -> u16 {
@@ -1071,11 +1195,79 @@ impl App {
     }
 
     fn open_theme_picker(&mut self) {
-        self.modal_picker = Some(PickerState::new(
+        self.theme_picker_snapshot = Some(ThemePickerSnapshot {
+            theme: self.theme.clone(),
+            syntax_theme: highlight::current_syntax_theme(),
+        });
+        let theme_home = self.tui_theme_home();
+        let mut picker = PickerState::new(
             PickerKind::Theme,
-            misc::theme_picker_items(),
-        ));
+            misc::theme_picker_items(theme_home.as_deref()),
+        );
+        if let Some(index) = picker
+            .filtered_items()
+            .iter()
+            .position(|item| item.id == self.theme.name())
+        {
+            picker.selected = index;
+        }
+        self.modal_picker = Some(picker);
         self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn set_theme(&mut self, theme: TuiTheme) {
+        let syntax_name = theme.syntax_theme_name().to_string();
+        let warning = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
+        self.theme = theme;
+        if let Some(warning) = warning {
+            self.add_notice(warning);
+        }
+    }
+
+    fn preview_theme_name(&mut self, name: &str) {
+        if let Some(theme) = TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
+            self.set_theme(theme);
+        }
+    }
+
+    fn tui_theme_home(&self) -> Option<PathBuf> {
+        self.tui_config_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+    }
+
+    fn preview_current_theme_picker_selection(&mut self) {
+        let Some(picker) = self.modal_picker.as_ref() else {
+            return;
+        };
+        if picker.kind != PickerKind::Theme {
+            return;
+        }
+        let Some(item) = picker.selected_item() else {
+            return;
+        };
+        self.preview_theme_name(&item.id);
+    }
+
+    fn cancel_modal_picker(&mut self) {
+        if self
+            .modal_picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == PickerKind::Theme)
+        {
+            self.restore_theme_picker_snapshot();
+        }
+        self.modal_picker = None;
+    }
+
+    fn restore_theme_picker_snapshot(&mut self) {
+        if let Some(snapshot) = self.theme_picker_snapshot.take() {
+            let syntax_name = snapshot.theme.syntax_theme_name().to_string();
+            self.theme = snapshot.theme;
+            let _ = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
+            highlight::set_syntax_theme(snapshot.syntax_theme);
+        }
     }
 
     fn update_slash_picker_filter(&mut self) {
@@ -1204,7 +1396,8 @@ impl App {
                 }
             }
             (PickerKind::Theme, PickerAccept::Single(Some(item))) => {
-                self.apply_theme_name(&item.id);
+                self.theme_picker_snapshot = None;
+                self.apply_theme_name(&item.id, true);
                 AppAction::None
             }
             (PickerKind::ProviderLogout, PickerAccept::Single(Some(item))) => {
@@ -1463,7 +1656,7 @@ impl App {
                 if args.trim().is_empty() {
                     self.open_theme_picker();
                 } else {
-                    self.apply_theme_name(args.trim());
+                    self.apply_theme_name(args.trim(), true);
                 }
                 AppAction::None
             }
@@ -1565,11 +1758,10 @@ impl App {
         } else {
             overlay.raw_lines
         };
-        self.transcript_overlay = Some(PagerOverlay::new(
-            overlay.title,
-            overlay.rendered_lines,
-            raw_lines,
-        ));
+        self.transcript_overlay = Some(
+            PagerOverlay::new(overlay.title, overlay.rendered_lines, raw_lines)
+                .with_surface(overlay.surface),
+        );
     }
 
     fn handle_mcp_view_loaded(&mut self, result: Result<McpViewData, String>) {
@@ -1754,6 +1946,7 @@ impl App {
             title: view.title().to_string(),
             rendered_lines: lines.clone(),
             raw_lines: lines,
+            surface: None,
         });
     }
 
@@ -1794,23 +1987,43 @@ impl App {
         }
     }
 
-    fn apply_theme_name(&mut self, name: &str) {
-        match TuiTheme::named(name) {
+    fn apply_theme_name(&mut self, name: &str, persist: bool) {
+        match TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
             Some(theme) => {
                 let theme_name = theme.name().to_string();
-                self.theme = theme;
+                self.set_theme(theme);
                 self.add_notice(format!("Theme set to {theme_name}"));
+                if persist {
+                    match self.persist_theme_name(&theme_name) {
+                        Ok(path) => self.add_notice(format!("Theme saved to {}", path.display())),
+                        Err(error) => self.add_notice(error),
+                    }
+                }
             }
             None => self.add_notice(format!(
                 "Unknown theme `{}`; available: {}",
                 name,
-                TuiTheme::builtin_names().join(", ")
+                TuiTheme::list_available(self.tui_theme_home().as_deref())
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
 
+    fn persist_theme_name(&mut self, name: &str) -> Result<PathBuf, String> {
+        let Some(path) = self.tui_config_path.clone() else {
+            return Err("Cannot persist TUI theme; config path is unavailable".to_string());
+        };
+        persist_theme_name_to_path(&path, name)?;
+        Ok(path)
+    }
+
     fn show_debug_config_card(&mut self) {
-        let config_path = KeymapRegistry::default_config_path()
+        let config_path = self
+            .tui_config_path
+            .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "unavailable".to_string());
         self.push_history_item(TranscriptItem::Info(vec![
@@ -1834,10 +2047,9 @@ impl App {
     }
 
     fn show_status_card(&mut self) {
-        let snapshot = self.status_snapshot();
-        let text = session::status_card_text(&snapshot);
-        self.push_history_item(TranscriptItem::Info(
-            text.lines().map(str::to_string).collect(),
+        self.push_history_item(TranscriptItem::Status(
+            self.status_snapshot(),
+            self.theme.clone(),
         ));
     }
 
@@ -1939,6 +2151,7 @@ impl App {
             model: self.model().unwrap_or("default").to_string(),
             mode: self.mode().unwrap_or("agent").to_string(),
             reasoning: self.reasoning_effort_label().to_string(),
+            permission_policy: self.permission_policy,
             session_id: self.chat_id.clone(),
             usage: self.usage().map(|usage| session::StatusUsage {
                 prompt_tokens: usage.prompt_tokens,
@@ -1946,6 +2159,7 @@ impl App {
                 total_tokens: usage.tokens_used(),
                 context_window_tokens: self.context_window_tokens(),
             }),
+            retry_hint: self.retry_hint.clone(),
         }
     }
 
@@ -2790,6 +3004,18 @@ impl App {
         }
     }
 
+    fn sync_assistant_stream_tail_item(&mut self) {
+        let tail = self.stream_controller.live();
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::Assistant(_)) if tail.is_empty() => {
+                self.transcript.pop();
+            }
+            Some(TranscriptItem::Assistant(value)) => *value = tail,
+            _ if !tail.is_empty() => self.push_live_item(TranscriptItem::Assistant(tail)),
+            _ => {}
+        }
+    }
+
     fn push_state_history_item(&mut self, key: String, item: TranscriptItem) {
         if !self.record_state_history_key(key) {
             return;
@@ -2922,39 +3148,6 @@ impl App {
         }
     }
 
-    fn flush_finalized_state_assistant_to_history(&mut self, message_id: Option<&str>) {
-        let Some((key, state_content)) =
-            self.finalized_assistant_message(message_id).map(|message| {
-                (
-                    render_message_key(
-                        message,
-                        "assistant",
-                        finalized_assistant_content_part(message),
-                    ),
-                    message.content.clone(),
-                )
-            })
-        else {
-            return;
-        };
-        let live_idx = self
-            .transcript
-            .iter()
-            .rposition(|item| matches!(item, TranscriptItem::Assistant(text) if !text.is_empty()));
-        let live_content = live_idx.and_then(|idx| match self.transcript.get(idx) {
-            Some(TranscriptItem::Assistant(text)) => Some(text.clone()),
-            _ => None,
-        });
-        let content = live_content.unwrap_or(state_content);
-        if content.is_empty() {
-            return;
-        }
-        if let Some(idx) = live_idx {
-            self.transcript.remove(idx);
-        }
-        self.push_state_history_item(key, TranscriptItem::Assistant(content));
-    }
-
     fn finalized_assistant_message(&self, message_id: Option<&str>) -> Option<&TranscriptMessage> {
         let normalized_id = message_id.filter(|value| !value.is_empty());
         if let Some(id) = normalized_id {
@@ -2978,21 +3171,49 @@ impl App {
 
     fn run_stream_commit_tick(&mut self) {
         self.tick_working_indicator();
-        if run_commit_tick(&mut self.stream_controller).is_some() {
+        let Some(drained) = run_commit_tick(&mut self.stream_controller) else {
+            return;
+        };
+        if self.native_scrollback {
+            let first = self.stream_controller.committed().len() == drained.len();
+            self.history
+                .enqueue_cell(Box::new(AssistantStreamCell::new(&drained, first)));
+            self.sync_assistant_stream_tail_item();
+        } else {
             self.sync_assistant_stream_item();
         }
     }
 
-    fn finalize_assistant_stream(&mut self) {
-        let final_content = self.stream_controller.finalize();
-        if !final_content.is_empty() {
-            match self.transcript.last_mut() {
-                Some(TranscriptItem::Assistant(value)) => *value = final_content,
-                _ => self
-                    .transcript
-                    .push(TranscriptItem::Assistant(final_content)),
+    fn finalize_assistant_stream(&mut self) -> Option<String> {
+        let tail = self.stream_controller.live();
+        let first_tail = self.stream_controller.committed().is_empty();
+        if self.native_scrollback {
+            if let Some(drained) = self.stream_controller.drain_all_stable() {
+                let first = self.stream_controller.committed().len() == drained.len();
+                self.history
+                    .enqueue_cell(Box::new(AssistantStreamCell::new(&drained, first)));
             }
         }
+        let final_content = self.stream_controller.finalize();
+        if final_content.is_empty() {
+            return None;
+        }
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
+            if !tail.is_empty() {
+                self.history
+                    .enqueue_cell(Box::new(AssistantStreamCell::new(&tail, first_tail)));
+            }
+        } else {
+            match self.transcript.last_mut() {
+                Some(TranscriptItem::Assistant(value)) => *value = final_content.clone(),
+                _ => self
+                    .transcript
+                    .push(TranscriptItem::Assistant(final_content.clone())),
+            }
+        }
+        Some(final_content)
     }
 
     fn append_reasoning(&mut self, text: &str) {
@@ -3003,7 +3224,6 @@ impl App {
                 .push(TranscriptItem::Reasoning(text.to_string(), true)),
         }
     }
-
     fn add_notice(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.transcript_state.push_notice(text.clone());
@@ -3388,13 +3608,25 @@ impl App {
             SseEvent::StreamFinished {
                 message_id, usage, ..
             } => {
-                self.finalize_assistant_stream();
+                let final_content = self.finalize_assistant_stream();
                 self.transcript_state
                     .finish_assistant(message_id.as_deref(), usage.clone());
-                self.finalize_tool_cards_for_turn();
                 if self.native_scrollback {
-                    self.flush_finalized_state_assistant_to_history(message_id.as_deref());
+                    if final_content.is_some() {
+                        if let Some(message) =
+                            self.finalized_assistant_message(message_id.as_deref())
+                        {
+                            let key = render_message_key(
+                                message,
+                                "assistant",
+                                finalized_assistant_content_part(message),
+                            );
+                            self.record_state_history_key(key);
+                        }
+                    }
+                    self.schedule_final_stream_resize_reflow();
                 }
+                self.finalize_tool_cards_for_turn();
                 if let Some(usage) = usage {
                     self.update_usage_value(&usage);
                 } else {
@@ -4888,7 +5120,7 @@ impl App {
         let dispatch = self.keymap.dispatch(KeyContext::ModalPicker, key);
         match dispatch.action {
             Some(KeyAction::Cancel) => {
-                self.modal_picker = None;
+                self.cancel_modal_picker();
                 AppAction::None
             }
             Some(KeyAction::Accept) => {
@@ -4901,12 +5133,14 @@ impl App {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_prev();
                 }
+                self.preview_current_theme_picker_selection();
                 AppAction::None
             }
             Some(KeyAction::MoveDown) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_next();
                 }
+                self.preview_current_theme_picker_selection();
                 AppAction::None
             }
             Some(KeyAction::ToggleSelectedTool) => {
@@ -4930,6 +5164,7 @@ impl App {
                     self.update_slash_picker_filter();
                 } else if let Some(picker) = self.modal_picker.as_mut() {
                     picker.pop_filter();
+                    self.preview_current_theme_picker_selection();
                 }
                 AppAction::None
             }
@@ -4944,6 +5179,7 @@ impl App {
                         self.update_slash_picker_filter();
                     } else if let Some(picker) = self.modal_picker.as_mut() {
                         picker.push_filter(ch);
+                        self.preview_current_theme_picker_selection();
                     }
                 }
                 AppAction::None
@@ -5006,6 +5242,21 @@ impl App {
     pub fn test_set_keymap(&mut self, keymap: KeymapRegistry) {
         self.vim.set_enabled(keymap.vim_mode_enabled());
         self.keymap = keymap;
+    }
+
+    #[cfg(test)]
+    pub fn test_set_tui_config_path(&mut self, path: PathBuf) {
+        self.tui_config_path = Some(path);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_composer_text(&mut self, text: &str) {
+        self.composer.set_text(text);
+    }
+
+    #[cfg(test)]
+    pub fn test_insert_paste(&mut self, text: &str) {
+        self.composer.insert_paste(text);
     }
 
     #[cfg(test)]
@@ -5118,7 +5369,7 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
 #[derive(Debug)]
 enum RuntimeEvent {
     Input(Event),
-    Tick,
+    Frame,
     Chat {
         generation: u64,
         event: ChatEvent,
@@ -5408,7 +5659,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let mut subscriptions = SubscriptionManager::new();
     let mut daemon_events = DaemonEventSubscription::new();
     let mut input_task = spawn_input_task(tx.clone());
-    spawn_tick_task(tx.clone());
+    let (frame_requester, frame_rx) = FrameRequester::new();
+    let frame_task = spawn_frame_task(frame_rx, tx.clone());
     daemon_events.start(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
     if let Some(project_id) = app.current_project_id().map(str::to_string) {
@@ -5427,6 +5679,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         if app.should_quit() {
             break;
         }
+        schedule_next_frame(&app, &frame_requester);
         let Some(event) = rx.recv().await else {
             break;
         };
@@ -5463,8 +5716,12 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
             RuntimeEvent::Input(Event::FocusGained) => app.set_terminal_focus(true),
             RuntimeEvent::Input(Event::FocusLost) => app.set_terminal_focus(false),
-            RuntimeEvent::Input(Event::Resize(_, _)) => {}
-            RuntimeEvent::Tick => {
+            RuntimeEvent::Input(Event::Resize(width, _)) => {
+                if !app.note_terminal_resize_width(width) {
+                    app.note_terminal_height_resize();
+                }
+            }
+            RuntimeEvent::Frame => {
                 app.run_stream_commit_tick();
                 app.flush_pending_paste();
             }
@@ -5637,6 +5894,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             terminal.write_notification(&bytes)?;
         }
     }
+    frame_task.abort();
     Ok(())
 }
 
@@ -5656,8 +5914,111 @@ fn history_path_for_root(root: &std::path::Path) -> PathBuf {
 }
 
 fn load_tui_config_content() -> Option<String> {
-    let path = KeymapRegistry::default_config_path()?;
+    let path = default_tui_config_path()?;
     fs::read_to_string(path).ok()
+}
+
+fn default_tui_config_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        KeymapRegistry::default_config_path()
+    }
+}
+
+fn initialize_syntax_theme(theme: &TuiTheme, config_path: Option<&Path>) {
+    let theme_home = config_path
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
+    let _ = highlight::set_theme_override(Some(theme.syntax_theme_name().to_string()), theme_home);
+}
+
+fn persist_theme_name_to_path(path: &Path, name: &str) -> Result<(), String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read TUI config from {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let content = apply_theme_name_to_config(&content, name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create TUI config directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(path, content)
+        .map_err(|error| format!("Failed to save TUI theme to {}: {error}", path.display()))
+}
+
+fn apply_theme_name_to_config(content: &str, name: &str) -> String {
+    let name_line = format!("name = {}", toml_string(name));
+    if content.trim().is_empty() {
+        return format!("[theme]\n{name_line}\n");
+    }
+
+    let mut out = Vec::new();
+    let mut in_theme = false;
+    let mut found_theme = false;
+    let mut wrote_name = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let section = toml_section_name(trimmed);
+        if section.is_some() && in_theme && !wrote_name {
+            out.push(name_line.clone());
+            wrote_name = true;
+        }
+        if let Some(section) = section {
+            in_theme = section == "theme";
+            found_theme |= in_theme;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_theme && toml_key_name(trimmed) == Some("name") {
+            let indent = line
+                .chars()
+                .take_while(|ch| ch.is_whitespace())
+                .collect::<String>();
+            out.push(format!("{indent}{name_line}"));
+            wrote_name = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    if found_theme {
+        if in_theme && !wrote_name {
+            out.push(name_line);
+        }
+    } else {
+        out.push(String::new());
+        out.push("[theme]".to_string());
+        out.push(name_line);
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    content
+}
+
+fn toml_section_name(line: &str) -> Option<&str> {
+    Some(line.strip_prefix('[')?.strip_suffix(']')?.trim())
+}
+
+fn toml_key_name(line: &str) -> Option<&str> {
+    let (key, _) = line.split_once('=')?;
+    Some(key.trim())
+}
+
+fn toml_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn spawn_history_save_task(request: HistorySaveRequest, tx: mpsc::Sender<RuntimeEvent>) {
@@ -6339,16 +6700,44 @@ fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) -> JoinHandle<()> {
     })
 }
 
-fn spawn_tick_task(tx: mpsc::Sender<RuntimeEvent>) {
+fn spawn_frame_task(
+    mut frame_rx: mpsc::Receiver<()>,
+    tx: mpsc::Sender<RuntimeEvent>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
-        loop {
-            interval.tick().await;
-            if tx.send(RuntimeEvent::Tick).await.is_err() {
+        while frame_rx.recv().await.is_some() {
+            if tx.send(RuntimeEvent::Frame).await.is_err() {
                 break;
             }
         }
-    });
+    })
+}
+
+fn schedule_next_frame(app: &App, frame_requester: &FrameRequester) {
+    let mut delay = None;
+    if app.stream_has_committable_lines() {
+        delay = Some(TARGET_FRAME_INTERVAL);
+    }
+    if app.session_state().shows_working_indicator() {
+        delay = Some(min_frame_delay(delay, WORKING_ANIMATION_INTERVAL));
+    }
+    if let Some(paste_delay) = app.pending_paste_delay() {
+        delay = Some(min_frame_delay(delay, paste_delay));
+    }
+    if let Some(resize_delay) = app.resize_reflow_delay() {
+        delay = Some(min_frame_delay(delay, resize_delay));
+    }
+    if let Some(delay) = delay {
+        if delay.is_zero() {
+            frame_requester.schedule_frame();
+        } else {
+            frame_requester.schedule_frame_in(delay);
+        }
+    }
+}
+
+fn min_frame_delay(current: Option<Duration>, candidate: Duration) -> Duration {
+    current.map_or(candidate, |current| current.min(candidate))
 }
 
 fn spawn_worker_refresh_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
@@ -7288,8 +7677,18 @@ fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), Tui
     terminal.set_title(&app.terminal_title())?;
     if app.native_scrollback() {
         let width = terminal.terminal_mut().size()?.width;
-        for insertion in app.pending_history_insertions(width) {
-            insert_history(terminal.terminal_mut(), insertion)?;
+        app.note_terminal_resize_width(width);
+        if app.resize_reflow_is_due() {
+            let ran_during_stream = app.should_mark_resize_reflow_as_stream_time();
+            terminal.clear_for_resize_reflow()?;
+            for insertion in app.resize_reflow_insertions(width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
+            app.finish_resize_reflow(width, ran_during_stream);
+        } else {
+            for insertion in app.pending_history_insertions(width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
         }
     }
     terminal
@@ -8333,9 +8732,10 @@ new-chat = "ctrl-x"
             app.handle_key(key(KeyCode::Enter)),
             AppAction::LoadDaemonStatus
         );
-        assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Info(lines) if lines.iter().any(|line| line.contains("Daemon:")))
-        }));
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Status(_, _))));
     }
 
     #[test]
@@ -8398,13 +8798,19 @@ new-chat = "ctrl-x"
 
     #[test]
     fn theme_command_applies_theme_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("tui.toml");
         let mut app = App::new(project());
+        app.test_set_tui_config_path(config_path.clone());
         assert_eq!(app.theme().name(), "dark");
         assert_eq!(app.execute_command_name("theme light"), AppAction::None);
         assert_eq!(app.theme().name(), "light");
         assert!(app.visible_transcript().iter().any(|item| {
             matches!(item, TranscriptItem::Notice(text) if text.contains("Theme set to light"))
         }));
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("name = \"light\""));
 
         let mut app = App::new(project());
         assert_eq!(app.execute_command_name("theme"), AppAction::None);
@@ -8412,8 +8818,41 @@ new-chat = "ctrl-x"
         assert_eq!(picker.kind, PickerKind::Theme);
         assert_eq!(picker.filtered_items()[0].id, "dark");
         app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.theme().name(), "light");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
         assert_eq!(app.theme().name(), "light");
+    }
+
+    #[test]
+    fn theme_picker_cancel_restores_previewed_theme() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("theme"), AppAction::None);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.theme().name(), "light");
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+
+        assert!(app.modal_picker().is_none());
+        assert_eq!(app.theme().name(), "dark");
+    }
+
+    #[test]
+    fn theme_config_helpers_update_or_create_theme_section() {
+        assert_eq!(
+            apply_theme_name_to_config("", "light"),
+            "[theme]\nname = \"light\"\n"
+        );
+        assert_eq!(
+            apply_theme_name_to_config("vim = true\n\n[theme]\naccent = \"cyan\"\n", "plain"),
+            "vim = true\n\n[theme]\naccent = \"cyan\"\nname = \"plain\"\n"
+        );
+        assert_eq!(
+            apply_theme_name_to_config(
+                "[theme]\nname = \"dark\"\n\n[bindings]\nsend = \"ctrl-s\"\n",
+                "light"
+            ),
+            "[theme]\nname = \"light\"\n\n[bindings]\nsend = \"ctrl-s\"\n"
+        );
     }
 
     #[test]
@@ -8813,7 +9252,7 @@ new-chat = "ctrl-x"
         assert!(app
             .visible_transcript()
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Info(_))));
+            .any(|item| matches!(item, TranscriptItem::Status(_, _))));
 
         let mut app = App::new(project());
         assert!(matches!(
@@ -8879,22 +9318,40 @@ new-chat = "ctrl-x"
             app.execute_command_name("status"),
             AppAction::LoadDaemonStatus
         );
-        let text = app
+        let status = app
             .visible_transcript()
             .iter()
             .rev()
             .find_map(|item| match item {
-                TranscriptItem::Info(lines) => Some(lines.join("\n")),
+                TranscriptItem::Status(snapshot, theme) => Some((snapshot, theme)),
                 _ => None,
             })
             .unwrap();
-        assert_eq!(
-            text,
-            format!(
-                "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready · pid 42 · http 9000 · lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:off\nSession: {}\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left",
-                &app.chat_id()[..8]
-            )
-        );
+        let text = crate::ui::status_card::render_lines(100, status.0, status.1)
+            .iter()
+            .map(line_to_plain_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("refact (v"));
+        assert!(text.contains("Daemon:"));
+        assert!(text.contains("v1.2.3 on port 8488"));
+        assert!(text.contains("Worker:"));
+        assert!(text.contains("ready · pid 42 · http 9000 · lsp 9001"));
+        assert!(text.contains("Model:"));
+        assert!(text.contains("gpt-demo"));
+        assert!(text.contains("Mode:"));
+        assert!(text.contains("agent"));
+        assert!(text.contains("Reasoning:"));
+        assert!(text.contains("off"));
+        assert!(text.contains("Directory:"));
+        assert!(text.contains("/tmp/demo"));
+        assert!(text.contains("Permissions:"));
+        assert!(text.contains("auto_approve_editing_tools=true"));
+        assert!(text.contains("auto_approve_dangerous_commands=false"));
+        assert!(text.contains("Token usage:"));
+        assert!(text.contains("150 total (100 input + 50 output)"));
+        assert!(text.contains("Context window:"));
+        assert!(text.contains("85% left (150/1K)"));
         assert_eq!(
             app.permission_policy(),
             session::PermissionPolicy {

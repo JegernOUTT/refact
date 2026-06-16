@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const HISTORY_LIMIT: usize = 200;
+pub(crate) const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(35);
 const UNDO_LIMIT: usize = 100;
 const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(750);
@@ -30,9 +31,16 @@ pub struct ComposerState {
     editor: TextEditor,
     history: InputHistory,
     paste: PasteBurst,
+    pending_large_pastes: Vec<PendingLargePaste>,
     kill_buffer: String,
     undo: UndoHistory,
     history_search: Option<HistorySearch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingLargePaste {
+    placeholder: String,
+    text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +57,7 @@ impl ComposerState {
             editor: TextEditor::new(),
             history: InputHistory::new(history),
             paste: PasteBurst::new(),
+            pending_large_pastes: Vec::new(),
             kill_buffer: String::new(),
             undo: UndoHistory::new(),
             history_search: None,
@@ -65,6 +74,7 @@ impl ComposerState {
 
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.paste.reset();
+        self.pending_large_pastes.clear();
         self.history.reset_navigation();
         self.history_search = None;
         self.undo.clear();
@@ -73,6 +83,7 @@ impl ComposerState {
 
     pub fn clear(&mut self) {
         self.paste.reset();
+        self.pending_large_pastes.clear();
         self.history.reset_navigation();
         self.history_search = None;
         self.undo.clear();
@@ -124,8 +135,19 @@ impl ComposerState {
         self.paste.reset();
         self.history.reset_navigation();
         self.history_search = None;
+        self.prune_pending_large_pastes();
         let before = self.editor.snapshot();
-        self.editor.insert_str(text);
+        let char_count = text.chars().count();
+        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
+            let placeholder = large_paste_placeholder(char_count);
+            self.editor.insert_str(&placeholder);
+            self.pending_large_pastes.push(PendingLargePaste {
+                placeholder,
+                text: text.to_string(),
+            });
+        } else {
+            self.editor.insert_str(text);
+        }
         self.record_edit(before, UndoKind::Other, None);
     }
 
@@ -151,6 +173,10 @@ impl ComposerState {
         }
     }
 
+    pub fn pending_paste_delay(&self, now: Instant) -> Option<Duration> {
+        self.paste.pending_delay(now)
+    }
+
     pub fn flush_pending_paste_force(&mut self) -> bool {
         if let Some(text) = self.paste.take_pending() {
             let before = self.editor.snapshot();
@@ -164,7 +190,8 @@ impl ComposerState {
 
     pub fn submit_text(&mut self) -> Option<String> {
         self.flush_pending_paste_force();
-        let prompt = self.editor.text().to_string();
+        self.prune_pending_large_pastes();
+        let prompt = self.expand_pending_large_pastes(self.editor.text().to_string());
         if prompt.trim().is_empty() {
             return None;
         }
@@ -172,6 +199,7 @@ impl ComposerState {
         self.editor.clear();
         self.undo.clear();
         self.history_search = None;
+        self.pending_large_pastes.clear();
         self.paste.reset();
         Some(prompt)
     }
@@ -417,8 +445,20 @@ impl ComposerState {
         Some(search.view(self.history.entries()))
     }
 
+    pub(crate) fn pending_paste_placeholders(&self) -> Vec<String> {
+        let mut text = self.editor.text().to_string();
+        self.pending_large_pastes
+            .iter()
+            .filter_map(|paste| {
+                let index = text.find(&paste.placeholder)?;
+                text.replace_range(index..index + paste.placeholder.len(), "");
+                Some(paste.placeholder.clone())
+            })
+            .collect()
+    }
+
     pub fn height(&self, width: u16, max_rows: u16) -> u16 {
-        self.view(width, max_rows).lines.len().max(1) as u16 + 2
+        self.view(width, max_rows).lines.len().max(1) as u16
     }
 
     pub fn view(&self, width: u16, max_rows: u16) -> ComposerView {
@@ -471,6 +511,30 @@ impl ComposerState {
             self.editor.restore(search.draft.clone());
         }
     }
+
+    fn expand_pending_large_pastes(&self, mut text: String) -> String {
+        for paste in &self.pending_large_pastes {
+            if text.contains(&paste.placeholder) {
+                text = text.replacen(&paste.placeholder, &paste.text, 1);
+            }
+        }
+        text
+    }
+
+    fn prune_pending_large_pastes(&mut self) {
+        let mut text = self.editor.text().to_string();
+        self.pending_large_pastes.retain(|paste| {
+            let Some(index) = text.find(&paste.placeholder) else {
+                return false;
+            };
+            text.replace_range(index..index + paste.placeholder.len(), "");
+            true
+        });
+    }
+}
+
+fn large_paste_placeholder(char_count: usize) -> String {
+    format!("[Pasted {char_count} chars]")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1100,6 +1164,11 @@ impl PasteBurst {
         }
     }
 
+    fn pending_delay(&self, now: Instant) -> Option<Duration> {
+        let pending = self.pending.as_ref()?;
+        Some(PASTE_BURST_WINDOW.saturating_sub(now.duration_since(pending.last_at)))
+    }
+
     fn take_pending(&mut self) -> Option<String> {
         self.pending.take().map(|pending| pending.text)
     }
@@ -1432,6 +1501,25 @@ mod tests {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_paste("one\ntwo\n");
         assert_eq!(composer.text(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn large_paste_inserts_dim_placeholder_and_expands_on_submit() {
+        let mut composer = ComposerState::new(Vec::new());
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+
+        composer.insert_paste(&paste);
+
+        assert_eq!(
+            composer.pending_paste_placeholders(),
+            vec![format!("[Pasted {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 7)]
+        );
+        assert_eq!(
+            composer.text(),
+            format!("[Pasted {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 7)
+        );
+        assert_eq!(composer.submit_text().as_deref(), Some(paste.as_str()));
+        assert!(composer.pending_paste_placeholders().is_empty());
     }
 
     #[test]

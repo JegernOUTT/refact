@@ -1,12 +1,15 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, SessionState, SubscriptionStatus, UsageSummary};
 use crate::client::{worker_state_label, WorkerInfo};
+use crate::style::user_message_style;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
+
+const INTERRUPT_KEY: &str = "Esc";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FooterRuntimeState {
@@ -110,10 +113,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App, area: Rect) {
         footer_line(&FooterData::from_app(app)),
         area.width as usize,
     );
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(line).style(footer_surface_style()), area);
+}
+
+pub fn desired_height(_width: u16) -> u16 {
+    1
 }
 
 pub fn footer_line(data: &FooterData) -> Line<'static> {
@@ -131,7 +135,7 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
     spans.push(separator());
     spans.push(Span::raw(format!("reason:{}", data.reasoning)));
     spans.push(separator());
-    spans.push(runtime_span(data.runtime_state));
+    spans.extend(runtime_spans(data.runtime_state));
     spans.push(separator());
     spans.push(Span::raw(format!("daemon {}", data.daemon_label())));
     spans.push(separator());
@@ -144,7 +148,9 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
         ));
     }
     spans.push(Span::raw(" "));
-    Line::from(spans)
+    let mut line = Line::from(spans);
+    line.style = dim_style();
+    line
 }
 
 pub fn footer_text(data: &FooterData) -> String {
@@ -175,10 +181,35 @@ pub fn format_token_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
-    if tokens < 1_000_000 {
-        return format!("{:.1}k", tokens as f64 / 1_000.0);
+
+    let tokens = tokens as f64;
+    let (scaled, suffix) = if tokens >= 1_000_000_000_000.0 {
+        (tokens / 1_000_000_000_000.0, "T")
+    } else if tokens >= 1_000_000_000.0 {
+        (tokens / 1_000_000_000.0, "B")
+    } else if tokens >= 1_000_000.0 {
+        (tokens / 1_000_000.0, "M")
+    } else {
+        (tokens / 1_000.0, "K")
+    };
+
+    let decimals = if scaled < 10.0 {
+        2
+    } else if scaled < 100.0 {
+        1
+    } else {
+        0
+    };
+    let mut formatted = format!("{scaled:.decimals$}");
+    if formatted.contains('.') {
+        while formatted.ends_with('0') {
+            formatted.pop();
+        }
+        if formatted.ends_with('.') {
+            formatted.pop();
+        }
     }
-    format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    format!("{formatted}{suffix}")
 }
 
 fn context_left_percent(used: u64, window: u64) -> u64 {
@@ -189,15 +220,33 @@ fn context_left_percent(used: u64, window: u64) -> u64 {
     (((remaining as u128 * 100) + (window as u128 / 2)) / window as u128) as u64
 }
 
-fn runtime_span(state: FooterRuntimeState) -> Span<'static> {
-    Span::styled(
-        format!("{} {}", state.icon(), state.label()),
-        Style::default().fg(state.color()),
-    )
+fn runtime_spans(state: FooterRuntimeState) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(state.icon(), Style::default().fg(state.color())),
+        Span::raw(" "),
+        Span::styled(state.label(), Style::default().fg(state.color())),
+    ];
+    if state == FooterRuntimeState::Generating {
+        spans.push(separator());
+        spans.push(Span::styled(
+            INTERRUPT_KEY,
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw(" to interrupt"));
+    }
+    spans
 }
 
 fn separator() -> Span<'static> {
-    Span::styled(" · ", Style::default().fg(Color::DarkGray))
+    Span::styled(" · ", dim_style())
+}
+
+fn dim_style() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
+fn footer_surface_style() -> Style {
+    user_message_style()
 }
 
 fn worker_is_waking(worker: Option<&WorkerInfo>) -> bool {
@@ -238,12 +287,29 @@ mod tests {
 
         assert_eq!(
             usage_label(usage, Some(100_000)).as_deref(),
-            Some("88% context left (12.3k used)")
+            Some("88% context left (12.3K used)")
         );
         assert_eq!(format_token_count(999), "999");
-        assert_eq!(format_token_count(1_000), "1.0k");
-        assert_eq!(format_token_count(1_550), "1.6k");
-        assert_eq!(format_token_count(1_200_000), "1.2m");
+        assert_eq!(format_token_count(1_000), "1K");
+        assert_eq!(format_token_count(1_550), "1.55K");
+        assert_eq!(format_token_count(12_345), "12.3K");
+        assert_eq!(format_token_count(123_456), "123K");
+        assert_eq!(format_token_count(1_200_000), "1.2M");
+        assert_eq!(format_token_count(1_234_567_890), "1.23B");
+        assert_eq!(format_token_count(1_234_567_890_123), "1.23T");
+    }
+
+    #[test]
+    fn footer_uses_one_soft_dimmed_surface_row() {
+        let line = footer_line(&data(FooterRuntimeState::Idle));
+
+        assert_eq!(desired_height(80), 1);
+        assert_eq!(footer_surface_style(), crate::style::user_message_style());
+        assert!(line.style.add_modifier.contains(Modifier::DIM));
+        assert!(line
+            .spans
+            .iter()
+            .all(|span| span.style.fg != Some(Color::DarkGray)));
     }
 
     #[test]
@@ -275,7 +341,7 @@ mod tests {
 
         assert_eq!(
             snapshot,
-            " 90% context left (10 used) · demo · model · agent · reason:off · ● idle · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◆ generating · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◐ waking · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ○ offline · daemon offline · worker ready "
+            " 90% context left (10 used) · demo · model · agent · reason:off · ● idle · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◆ generating · Esc to interrupt · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◐ waking · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ○ offline · daemon offline · worker ready "
         );
 
         let colors = [
@@ -285,7 +351,7 @@ mod tests {
             FooterRuntimeState::Offline,
         ]
         .into_iter()
-        .map(|state| runtime_span(state).style.fg)
+        .map(|state| runtime_spans(state)[0].style.fg)
         .collect::<Vec<_>>();
         assert_eq!(
             colors,
@@ -295,6 +361,20 @@ mod tests {
                 Some(Color::Yellow),
                 Some(Color::Red)
             ]
+        );
+    }
+
+    #[test]
+    fn generating_runtime_segment_matches_interrupt_hint_shape() {
+        let spans = runtime_spans(FooterRuntimeState::Generating);
+        let rendered = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["◆", " ", "generating", " · ", "Esc", " to interrupt"]
         );
     }
 }

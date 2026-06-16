@@ -212,6 +212,7 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
             TranscriptItem::Info(lines) => format!("info:{}", lines.join("|")),
+            TranscriptItem::Status(_, _) => "status".to_string(),
             TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
             TranscriptItem::Session { title, subtitle } => {
                 format!(
@@ -530,21 +531,21 @@ fn streaming_final_output_matches_fixture_source_after_ticks() {
 fn render_snapshot_for_assistant_streaming_fixture() {
     let run = run_fixture("assistant_streaming.jsonl");
     let snapshot = rendered_snapshot(&run.app, 72, 16);
-    let expected = r#"refact fixture  Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mod
-you
-render a table
+    let expected = r#"refact fixture | Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mo
 
-assistant
-A   │ B
-━━━━━━━━━
-one │ two
-code · rust
-  fn main() {}
+  › render a table
 
-────────────────────────────────────────────────────────────────────────
-┌ message ─────────────────────────────────────────────────────────────┐
-│Ask Refact…                                                           │
-└──────────────────────────────────────────────────────────────────────┘
+
+  •  A      B
+    ━━━━━  ━━━━━
+     one    two
+
+
+    fn main() {}
+
+
+› Ask Refact…
+  Enter send   Ctrl-J newline
  30 used · fixture · gpt-demo · agent · reason:off · ● idle · daemon on…"#;
     assert_eq!(snapshot, expected);
 }
