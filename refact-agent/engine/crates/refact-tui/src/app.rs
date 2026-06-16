@@ -452,6 +452,7 @@ pub struct App {
     working_last_tick_at_ms: Option<u64>,
     working_detail: Option<String>,
     stream_controller: StreamController,
+    reasoning_stream_active: bool,
     plan_stream_controller: Option<PlanStreamController>,
     stream_chunking_policy: AdaptiveChunkingPolicy,
     history_render_mode: HistoryRenderMode,
@@ -553,6 +554,7 @@ impl App {
             working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            reasoning_stream_active: false,
             plan_stream_controller: None,
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             history_render_mode: HistoryRenderMode::Rich,
@@ -637,6 +639,7 @@ impl App {
             working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            reasoning_stream_active: false,
             plan_stream_controller: None,
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             history_render_mode: HistoryRenderMode::Rich,
@@ -866,6 +869,7 @@ impl App {
 
     fn clear_stream_controllers(&mut self) {
         self.stream_controller.clear();
+        self.reasoning_stream_active = false;
         self.plan_stream_controller = None;
         self.stream_chunking_policy.reset();
     }
@@ -3082,7 +3086,11 @@ impl App {
         self.sync_assistant_stream_item();
     }
 
-    fn append_plan_stream(&mut self, text: &str) {
+    fn append_plan_stream(&mut self, key: String, text: &str) {
+        if !self.record_state_history_key(key) && self.plan_stream_controller.is_some() {
+            self.sync_plan_stream_item();
+            return;
+        }
         if self.plan_stream_controller.is_none() {
             let mut controller = PlanStreamController::new(None, std::path::Path::new("."));
             controller.set_render_mode(self.history_render_mode);
@@ -3154,6 +3162,23 @@ impl App {
         self.push_recorded_state_history_item(item);
     }
 
+    fn push_state_reasoning_item(
+        &mut self,
+        key: String,
+        text: String,
+        collapsed: bool,
+        replace_live: bool,
+    ) {
+        if !self.record_state_history_key(key) {
+            return;
+        }
+        if replace_live {
+            self.replace_reasoning_stream_with_final(text, collapsed);
+        } else {
+            self.push_recorded_state_history_item(TranscriptItem::Reasoning(text, collapsed));
+        }
+    }
+
     fn record_state_history_key(&mut self, key: String) -> bool {
         if self
             .rendered_state_keys
@@ -3220,6 +3245,49 @@ impl App {
             *existing = text;
         } else {
             self.push_history_item(TranscriptItem::Assistant(text));
+        }
+    }
+
+    fn replace_reasoning_stream_with_final(&mut self, text: String, collapsed: bool) {
+        let collapsed = self
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Reasoning(_, collapsed) => Some(*collapsed),
+                _ => None,
+            })
+            .unwrap_or(collapsed);
+        self.reasoning_stream_active = false;
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Reasoning(_, _)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Reasoning)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+            self.history
+                .enqueue(TranscriptItem::Reasoning(text, collapsed));
+            return;
+        }
+        if let Some((existing, existing_collapsed)) =
+            self.transcript
+                .iter_mut()
+                .rev()
+                .find_map(|item| match item {
+                    TranscriptItem::Reasoning(existing, existing_collapsed) => {
+                        Some((existing, existing_collapsed))
+                    }
+                    _ => None,
+                })
+        {
+            *existing = text;
+            *existing_collapsed = collapsed;
+        } else {
+            self.push_history_item(TranscriptItem::Reasoning(text, collapsed));
         }
     }
 
@@ -3424,11 +3492,10 @@ impl App {
     }
 
     fn append_reasoning(&mut self, text: &str) {
+        self.reasoning_stream_active = true;
         match self.transcript.last_mut() {
             Some(TranscriptItem::Reasoning(value, _)) => value.push_str(text),
-            _ => self
-                .transcript
-                .push(TranscriptItem::Reasoning(text.to_string(), true)),
+            _ => self.push_live_item(TranscriptItem::Reasoning(text.to_string(), true)),
         }
     }
     fn add_notice(&mut self, text: impl Into<String>) {
@@ -3528,13 +3595,18 @@ impl App {
                 let mut part = 0usize;
                 if !message.reasoning.is_empty() {
                     if message.stream_finished {
-                        self.push_state_history_item(
+                        self.push_state_reasoning_item(
                             render_message_key(message, "reasoning", part),
-                            TranscriptItem::Reasoning(message.reasoning.clone(), true),
+                            message.reasoning.clone(),
+                            true,
+                            self.reasoning_stream_active,
                         );
                     } else {
-                        self.transcript
-                            .push(TranscriptItem::Reasoning(message.reasoning.clone(), true));
+                        self.reasoning_stream_active = true;
+                        self.push_live_item(TranscriptItem::Reasoning(
+                            message.reasoning.clone(),
+                            true,
+                        ));
                     }
                     part += 1;
                 }
@@ -3581,7 +3653,10 @@ impl App {
                 if message.stream_finished {
                     self.upsert_current_plan_item(render_message_key(message, "plan", 0));
                 } else {
-                    self.append_plan_stream(&message.content);
+                    self.append_plan_stream(
+                        render_message_key(message, "plan", 0),
+                        &message.content,
+                    );
                 }
             }
             TranscriptRole::Event => {
@@ -3589,7 +3664,10 @@ impl App {
                     if message.stream_finished {
                         self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
                     } else {
-                        self.append_plan_stream(&message.content);
+                        self.append_plan_stream(
+                            render_message_key(message, "plan_delta", 0),
+                            &message.content,
+                        );
                     }
                 } else {
                     self.push_internal_event(message);
@@ -3634,6 +3712,9 @@ impl App {
     }
 
     fn push_internal_event(&mut self, message: &TranscriptMessage) {
+        if !self.record_state_history_key(render_message_key(message, "event", 0)) {
+            return;
+        }
         let (subkind, source, payload) = event_metadata(message);
         self.events_pane.push_event(DaemonEventRecord {
             ts_ms: now_ms(),
@@ -3824,9 +3905,27 @@ impl App {
             SseEvent::StreamFinished {
                 message_id, usage, ..
             } => {
-                let final_content = self.finalize_assistant_stream();
                 self.transcript_state
                     .finish_assistant(message_id.as_deref(), usage.clone());
+                let reasoning_key = self
+                    .finalized_assistant_message(message_id.as_deref())
+                    .and_then(|message| {
+                        (!message.reasoning.is_empty()).then(|| {
+                            (
+                                render_message_key(message, "reasoning", 0),
+                                message.reasoning.clone(),
+                            )
+                        })
+                    });
+                if let Some((key, reasoning)) = reasoning_key {
+                    self.push_state_reasoning_item(
+                        key,
+                        reasoning,
+                        true,
+                        self.reasoning_stream_active,
+                    );
+                }
+                let final_content = self.finalize_assistant_stream();
                 if self.native_scrollback {
                     if final_content.is_some() {
                         if let Some(message) =
@@ -3946,15 +4045,19 @@ impl App {
                 for message in &messages {
                     next_keys.extend(rendered_state_keys_for_message(message));
                 }
-                self.replace_live_region_from_snapshot(&next_keys);
-                if include_header && self.rendered_state_cursor == 0 {
-                    self.push_session_header();
+                if !next_keys.is_empty() && self.rendered_state_keys == next_keys {
+                    self.rendered_state_cursor = self.rendered_state_keys.len();
+                } else {
+                    self.replace_live_region_from_snapshot(&next_keys);
+                    if include_header && self.rendered_state_cursor == 0 {
+                        self.push_session_header();
+                    }
+                    for message in &messages {
+                        self.append_render_message(message);
+                    }
+                    self.rendered_state_keys
+                        .truncate(self.rendered_state_cursor);
                 }
-                for message in &messages {
-                    self.append_render_message(message);
-                }
-                self.rendered_state_keys
-                    .truncate(self.rendered_state_cursor);
             } else {
                 self.rebuild_render_transcript_from_state();
                 if include_header {
@@ -4239,7 +4342,7 @@ impl App {
             return;
         }
         let replaces_active_stream = message.role == TranscriptRole::Assistant
-            && self.assistant_stream_active()
+            && (self.assistant_stream_active() || self.reasoning_stream_active)
             && self
                 .transcript_state
                 .messages()
@@ -8253,6 +8356,13 @@ mod tests {
             .collect::<String>()
     }
 
+    fn reasoning_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Reasoning(_, _)))
+            .count()
+    }
+
     fn injected_model_text() -> &'static str {
         "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
     }
@@ -8790,6 +8900,95 @@ mod tests {
         assert!(app.pending_history_insertions(80).is_empty());
         assert_eq!(app.history_inserted_cell_count(), inserted_after_first);
         assert_eq!(inserted_after_first - inserted_before, 2);
+    }
+
+    #[test]
+    fn reasoning_stream_finished_snapshot_reconciles_to_one_reasoning_cell() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_reasoning", "text": "think"}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(snapshot_event(
+            &app,
+            vec![json!({
+                "message_id": "a1",
+                "role": "assistant",
+                "reasoning": "think",
+                "stream_finished": true,
+            })],
+        ));
+
+        assert_eq!(reasoning_cell_count(&app), 1);
+        assert_eq!(reasoning_text(&app), "think");
+    }
+
+    #[test]
+    fn in_progress_plan_snapshot_replay_preserves_history_and_live_stream_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![json!({
+            "message_id": "p1",
+            "role": "plan",
+            "content": "- one\n- two\n- three\n- four\n- five\n",
+            "stream_finished": false,
+            "extra": {"plan": {"mode": "agent", "version": 1}}
+        })];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        let visible_before = app.visible_transcript().len();
+        let stream_text_before = plan_stream_text(&app);
+        assert!(stream_text_before.contains("- five"));
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.history_pending_count(), 0);
+        assert_eq!(app.visible_transcript().len(), visible_before);
+        assert_eq!(plan_stream_text(&app), stream_text_before);
+        assert_eq!(
+            app.visible_transcript()
+                .iter()
+                .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ordinary_event_snapshot_replay_does_not_duplicate_events() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![json!({
+            "message_id": "e1",
+            "role": "event",
+            "content": "Process exited with code 0",
+            "extra": {"event": {"subkind": "process_completed", "source": "exec.registry", "payload": {"exit_code": 0}}}
+        })];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        let events_before = app.events_pane().events().len();
+        let pending_before = app.history_pending_count();
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.events_pane().events().len(), events_before);
+        assert_eq!(app.history_pending_count(), pending_before);
     }
 
     #[test]
