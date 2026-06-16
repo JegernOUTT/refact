@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useCallback } from "react";
+import { shallowEqual } from "react-redux";
 import { useAppDispatch } from "./useAppDispatch";
 import { useAppSelector } from "./useAppSelector";
 import {
@@ -27,8 +28,9 @@ import {
 import { calculateBackoff } from "../utils/backoff";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { processCompleted } from "../features/Notifications";
+import { selectVisibleThreadIds } from "../features/ChatPanes/panesSlice";
 
-const DEFAULT_MAX_CHAT_SSE_SUBSCRIPTIONS = 4;
+const DEFAULT_MAX_CHAT_SSE_SUBSCRIPTIONS = 50;
 
 type FlushHandle =
   | { type: "timeout"; id: ReturnType<typeof setTimeout> }
@@ -54,6 +56,7 @@ function cancelScheduledFlush(handle: FlushHandle) {
 
 type PickDesiredChatSubscriptionsArgs = {
   openThreadIds: string[];
+  visibleThreadIds?: string[];
   activeChatId: string | null | undefined;
   subscribedThreadIds: string[];
   maxSubscriptions?: number;
@@ -61,6 +64,7 @@ type PickDesiredChatSubscriptionsArgs = {
 
 export function pickDesiredChatSubscriptions({
   openThreadIds,
+  visibleThreadIds = [],
   activeChatId,
   subscribedThreadIds,
   maxSubscriptions = DEFAULT_MAX_CHAT_SSE_SUBSCRIPTIONS,
@@ -73,6 +77,14 @@ export function pickDesiredChatSubscriptions({
     openUnique.push(id);
   }
 
+  const visibleSet = new Set<string>();
+  const visibleUnique: string[] = [];
+  for (const id of visibleThreadIds) {
+    if (!id || visibleSet.has(id)) continue;
+    visibleSet.add(id);
+    visibleUnique.push(id);
+  }
+
   const ordered: string[] = [];
   const seen = new Set<string>();
   const push = (id: string | null | undefined) => {
@@ -81,10 +93,14 @@ export function pickDesiredChatSubscriptions({
     ordered.push(id);
   };
 
+  for (const id of visibleUnique) {
+    push(id);
+  }
+
   push(activeChatId);
 
   for (const id of subscribedThreadIds) {
-    if (openSet.has(id) || id === activeChatId) {
+    if (openSet.has(id) || visibleSet.has(id) || id === activeChatId) {
       push(id);
     }
   }
@@ -123,6 +139,7 @@ export function useAllChatsSubscription() {
   );
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const openThreadIds = useAppSelector(selectOpenThreadIds);
+  const visibleThreadIds = useAppSelector(selectVisibleThreadIds, shallowEqual);
   const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);
 
   const subscriptionsRef = useRef<Map<string, () => void>>(new Map());
@@ -615,6 +632,7 @@ export function useAllChatsSubscription() {
     const subscribedIds = Array.from(subscriptionsRef.current.keys());
     const desiredOrder = pickDesiredChatSubscriptions({
       openThreadIds,
+      visibleThreadIds,
       activeChatId,
       subscribedThreadIds: subscribedIds,
     });
@@ -635,6 +653,7 @@ export function useAllChatsSubscription() {
   }, [
     activeChatId,
     openThreadIds,
+    visibleThreadIds,
     config.apiKey,
     hasEndpoint,
     config.lspPort,
