@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RootState } from "../../../app/store";
-import type {
-  DiffMessage,
-  ToolMessage,
-} from "../../../services/refact/types";
+import type { DiffMessage, ToolMessage } from "../../../services/refact/types";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type { ChatThreadRuntime, ThreadConfirmation } from "./types";
 import {
@@ -244,9 +241,7 @@ const worktreeB: WorktreeMeta = {
   enforce: true,
 };
 
-function makeRuntime(
-  id: "thread-A" | "thread-B",
-): ChatThreadRuntime {
+function makeRuntime(id: "thread-A" | "thread-B"): ChatThreadRuntime {
   const isA = id === "thread-A";
 
   return {

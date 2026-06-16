@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { createDefaultChatState, render, screen } from "../../../utils/test-utils";
+import {
+  createDefaultChatState,
+  render,
+  screen,
+} from "../../../utils/test-utils";
 import { ChatThreadProvider, useThreadId } from "./ChatThreadContext";
 
 function ThreadIdText() {
