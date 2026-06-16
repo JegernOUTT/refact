@@ -136,7 +136,40 @@ pub fn default_fg() -> Option<(u8, u8, u8)> {
 }
 
 pub fn default_bg() -> Option<(u8, u8, u8)> {
+    #[cfg(test)]
+    if let Some(bg) = default_bg_override_for_test() {
+        return bg;
+    }
+
     default_colors().map(|c| c.bg)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DEFAULT_BG_OVERRIDE: std::cell::Cell<Option<Option<(u8, u8, u8)>>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn default_bg_override_for_test() -> Option<Option<(u8, u8, u8)>> {
+    DEFAULT_BG_OVERRIDE.with(|override_value| override_value.get())
+}
+
+#[cfg(test)]
+pub(crate) struct DefaultBgOverrideGuard {
+    previous: Option<Option<(u8, u8, u8)>>,
+}
+
+#[cfg(test)]
+impl Drop for DefaultBgOverrideGuard {
+    fn drop(&mut self) {
+        DEFAULT_BG_OVERRIDE.with(|override_value| override_value.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_default_bg_for_test(bg: Option<(u8, u8, u8)>) -> DefaultBgOverrideGuard {
+    let previous = DEFAULT_BG_OVERRIDE.with(|override_value| override_value.replace(Some(bg)));
+    DefaultBgOverrideGuard { previous }
 }
 
 mod imp {

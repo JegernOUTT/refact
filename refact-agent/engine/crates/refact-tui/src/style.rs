@@ -2,6 +2,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::terminal_palette;
+
 const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (0, 95, 135);
 const TABLE_SEPARATOR_FG_ALPHA: f32 = 0.20;
 
@@ -58,8 +60,55 @@ pub fn proposed_plan_bg(terminal_bg: (u8, u8, u8)) -> Color {
 }
 
 pub(crate) fn default_terminal_bg() -> Option<(u8, u8, u8)> {
-    // TODO: Wire this to terminal_palette::default_bg() in R-4.
-    None
+    if !terminal_background_color_enabled() {
+        return None;
+    }
+    terminal_palette::default_bg()
+}
+
+fn terminal_background_color_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = color_enabled_override_for_test() {
+        return enabled;
+    }
+
+    terminal_background_color_enabled_for_env(
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+fn terminal_background_color_enabled_for_env(no_color: bool, term: Option<&str>) -> bool {
+    !no_color && term.map(|term| term != "dumb").unwrap_or(true)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static COLOR_ENABLED_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn color_enabled_override_for_test() -> Option<bool> {
+    COLOR_ENABLED_OVERRIDE.with(|override_value| override_value.get())
+}
+
+#[cfg(test)]
+struct ColorEnabledOverrideGuard {
+    previous: Option<bool>,
+}
+
+#[cfg(test)]
+impl Drop for ColorEnabledOverrideGuard {
+    fn drop(&mut self) {
+        COLOR_ENABLED_OVERRIDE.with(|override_value| override_value.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+fn override_color_enabled_for_test(enabled: bool) -> ColorEnabledOverrideGuard {
+    let previous =
+        COLOR_ENABLED_OVERRIDE.with(|override_value| override_value.replace(Some(enabled)));
+    ColorEnabledOverrideGuard { previous }
 }
 
 fn table_separator_style_for(
@@ -98,6 +147,53 @@ mod tests {
         let style = accent_style();
 
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn default_terminal_bg_uses_probe_when_color_enabled() {
+        let _color = override_color_enabled_for_test(true);
+        let _bg = terminal_palette::override_default_bg_for_test(Some((250, 250, 250)));
+
+        assert_eq!(default_terminal_bg(), Some((250, 250, 250)));
+        assert_eq!(accent_style().fg, Some(Color::Rgb(0, 95, 135)));
+        assert_eq!(user_message_style().bg, Some(Color::Rgb(240, 240, 240)));
+    }
+
+    #[test]
+    fn default_terminal_bg_falls_back_when_probe_unavailable() {
+        let _color = override_color_enabled_for_test(true);
+        let _bg = terminal_palette::override_default_bg_for_test(None);
+
+        assert_eq!(default_terminal_bg(), None);
+        assert_eq!(accent_style().fg, Some(Color::Cyan));
+        assert_eq!(user_message_style(), Style::default());
+    }
+
+    #[test]
+    fn default_terminal_bg_respects_disabled_color() {
+        let _color = override_color_enabled_for_test(false);
+        let _bg = terminal_palette::override_default_bg_for_test(Some((250, 250, 250)));
+
+        assert_eq!(default_terminal_bg(), None);
+        assert_eq!(accent_style().fg, Some(Color::Cyan));
+        assert_eq!(user_message_style(), Style::default());
+    }
+
+    #[test]
+    fn terminal_background_color_enabled_follows_env_contract() {
+        assert!(!terminal_background_color_enabled_for_env(
+            true,
+            Some("xterm-256color")
+        ));
+        assert!(!terminal_background_color_enabled_for_env(
+            false,
+            Some("dumb")
+        ));
+        assert!(terminal_background_color_enabled_for_env(
+            false,
+            Some("xterm-256color")
+        ));
+        assert!(terminal_background_color_enabled_for_env(false, None));
     }
 
     #[test]
