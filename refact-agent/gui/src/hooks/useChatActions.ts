@@ -3,14 +3,14 @@ import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 import {
-  selectChatId,
-  selectThread,
-  selectThreadImages,
-  selectSendImmediately,
-  selectMessages,
-  selectManualPreviewItems,
-  selectManualPreviewRan,
+  selectThreadById,
+  selectThreadImagesById,
+  selectSendImmediatelyById,
+  selectMessagesById,
+  selectManualPreviewItemsById,
+  selectManualPreviewRanById,
 } from "../features/Chat/Thread/selectors";
+import { useThreadId } from "../features/Chat/Thread";
 import {
   resetThreadImages,
   setSendImmediately,
@@ -68,17 +68,26 @@ function convertUserMessageContent(
   return mapped.length > 0 ? mapped : "";
 }
 
-export function useChatActions() {
+export function useChatActions(explicitChatId?: string) {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
-  const chatId = useAppSelector(selectChatId);
-  const thread = useAppSelector(selectThread);
-  const attachedImages = useAppSelector(selectThreadImages);
-  const sendImmediately = useAppSelector(selectSendImmediately);
-  const messages = useAppSelector(selectMessages);
-  const manualPreviewItems = useAppSelector(selectManualPreviewItems);
-  const manualPreviewRan = useAppSelector(selectManualPreviewRan);
+  const contextId = useThreadId();
+  const chatId = explicitChatId ?? contextId;
+  const thread = useAppSelector((state) => selectThreadById(state, chatId));
+  const attachedImages = useAppSelector((state) =>
+    selectThreadImagesById(state, chatId),
+  );
+  const sendImmediately = useAppSelector((state) =>
+    selectSendImmediatelyById(state, chatId),
+  );
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const manualPreviewItems = useAppSelector((state) =>
+    selectManualPreviewItemsById(state, chatId),
+  );
+  const manualPreviewRan = useAppSelector((state) =>
+    selectManualPreviewRanById(state, chatId),
+  );
 
   /**
    * Build message content with attached images if any.
@@ -154,7 +163,7 @@ export function useChatActions() {
       dispatch(clearManualPreviewItems({ chatId }));
 
       dispatch(resetThreadImages({ id: chatId }));
-      dispatch(setSendImmediately(false));
+      dispatch(setSendImmediately({ chatId, value: false }));
     },
     [
       chatId,

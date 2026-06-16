@@ -12,17 +12,17 @@ import { useGetCapsQuery } from "./useGetCapsQuery";
 import { useChatActions } from "./useChatActions";
 import {
   selectAreFollowUpsEnabled,
-  selectChatId,
-  selectIntegration,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-  selectModel,
-  selectThreadMode,
+  selectIntegrationById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectMessagesById,
+  selectModelById,
+  selectThreadModeById,
   setIncreaseMaxTokens,
   setIntegrationData,
   setIsNewChatSuggested,
 } from "../features/Chat";
+import { useThreadId } from "../features/Chat/Thread";
 import { DEFAULT_MODE } from "../features/Chat/Thread/types";
 import { useGoToLink } from "./useGoToLink";
 import { setError } from "../features/Errors/errorsSlice";
@@ -32,19 +32,31 @@ import { isAbsolutePath } from "../utils";
 
 export function useGetLinksFromLsp() {
   const dispatch = useAppDispatch();
+  const contextId = useThreadId();
 
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const messages = useAppSelector(selectMessages);
-  const chatId = useAppSelector(selectChatId);
-  const maybeIntegration = useAppSelector(selectIntegration);
-  const threadMode = useAppSelector(selectThreadMode);
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, contextId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, contextId),
+  );
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, contextId),
+  );
+  const maybeIntegration = useAppSelector((state) =>
+    selectIntegrationById(state, contextId),
+  );
+  const threadMode = useAppSelector((state) =>
+    selectThreadModeById(state, contextId),
+  );
   const areFollowUpsEnabled = useAppSelector(selectAreFollowUpsEnabled);
 
   // TODO: add the model
   const caps = useGetCapsQuery();
 
-  const model = useAppSelector(selectModel) || caps.data?.chat_default_model;
+  const model =
+    useAppSelector((state) => selectModelById(state, contextId)) ||
+    caps.data?.chat_default_model;
 
   const unCalledTools = React.useMemo(() => {
     if (messages.length === 0) return false;
@@ -80,7 +92,7 @@ export function useGetLinksFromLsp() {
 
   const linksResult = linksApi.useGetLinksForChatQuery(
     {
-      chat_id: chatId,
+      chat_id: contextId,
       messages,
       model: model ?? "",
       mode: threadMode ?? DEFAULT_MODE,
@@ -93,27 +105,36 @@ export function useGetLinksFromLsp() {
     if (linksResult.data?.new_chat_suggestion) {
       dispatch(
         setIsNewChatSuggested({
-          chatId,
+          chatId: contextId,
           value: linksResult.data.new_chat_suggestion,
         }),
       );
     }
-  }, [dispatch, linksResult.data, chatId]);
+  }, [dispatch, linksResult.data, contextId]);
 
   return linksResult;
 }
 
 export function useLinksFromLsp() {
   const dispatch = useAppDispatch();
+  const contextId = useThreadId();
   const { handleGoTo } = useGoToLink();
-  const { submit, setParams } = useChatActions();
+  const { submit, setParams } = useChatActions(contextId);
 
   const [applyCommit, _applyCommitResult] = linksApi.useSendCommitMutation();
 
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const messages = useAppSelector(selectMessages);
-  const maybeIntegration = useAppSelector(selectIntegration);
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, contextId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, contextId),
+  );
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, contextId),
+  );
+  const maybeIntegration = useAppSelector((state) =>
+    selectIntegrationById(state, contextId),
+  );
 
   const unCalledTools = React.useMemo(() => {
     if (messages.length === 0) return false;
@@ -157,16 +178,22 @@ export function useLinksFromLsp() {
           if (!isAbsolutePath(payload)) {
             dispatch(
               setIntegrationData({
-                name: payload,
-                path: undefined,
-                shouldIntermediatePageShowUp: payload !== "DEFAULT",
+                chatId: contextId,
+                value: {
+                  name: payload,
+                  path: undefined,
+                  shouldIntermediatePageShowUp: payload !== "DEFAULT",
+                },
               }),
             );
           } else {
             dispatch(
               setIntegrationData({
-                path: payload,
-                shouldIntermediatePageShowUp: false,
+                chatId: contextId,
+                value: {
+                  path: payload,
+                  shouldIntermediatePageShowUp: false,
+                },
               }),
             );
           }
@@ -198,7 +225,7 @@ export function useLinksFromLsp() {
 
       // TBD: It should be safe to remove this now?
       if (link.link_action === "regenerate-with-increased-context-size") {
-        dispatch(setIncreaseMaxTokens(true));
+        dispatch(setIncreaseMaxTokens({ chatId: contextId, value: true }));
         return;
       }
 
@@ -234,7 +261,8 @@ export function useLinksFromLsp() {
       if (isPostChatLink(link)) {
         dispatch(
           setIntegrationData({
-            path: link.link_payload.chat_meta.current_config_file,
+            chatId: contextId,
+            value: { path: link.link_payload.chat_meta.current_config_file },
           }),
         );
         debugRefact(`[DEBUG]: link messages: `, link.link_payload.messages);
@@ -255,7 +283,7 @@ export function useLinksFromLsp() {
       // eslint-disable-next-line no-console
       console.warn(`unknown action: ${JSON.stringify(link)}`);
     },
-    [applyCommit, dispatch, handleGoTo, submit, setParams],
+    [applyCommit, contextId, dispatch, handleGoTo, submit, setParams],
   );
 
   const linksResult = useGetLinksFromLsp();

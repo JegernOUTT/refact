@@ -277,6 +277,24 @@ const getCurrentRuntime = (
   return getRuntime(state, state.current_thread_id);
 };
 
+const payloadChatId = (payload: unknown): string | undefined => {
+  if (payload && typeof payload === "object" && "chatId" in payload) {
+    const chatId = (payload as { chatId?: unknown }).chatId;
+    return typeof chatId === "string" ? chatId : undefined;
+  }
+  return undefined;
+};
+
+const payloadBooleanValue = (payload: boolean | { value: boolean }): boolean =>
+  typeof payload === "boolean" ? payload : payload.value;
+
+const getRuntimeForOptionalPayloadChat = (
+  state: Draft<Chat>,
+  payload: unknown,
+): Draft<ChatThreadRuntime> | null => {
+  return getRuntime(state, payloadChatId(payload) ?? state.current_thread_id);
+};
+
 function rebuildMessageIndexById(
   messages: ChatMessages,
 ): Record<string, number> {
@@ -597,7 +615,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(setChatModel, (state, action) => {
-    const rt = getCurrentRuntime(state);
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
     if (!rt) return;
     rt.thread.model = action.payload.model;
     if (action.payload.modelMaxContextTokens !== undefined) {
@@ -774,7 +792,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(setEnabledCheckpoints, (state, action) => {
-    state.checkpoints_enabled = action.payload;
+    const value = payloadBooleanValue(action.payload);
+    const chatId = payloadChatId(action.payload);
+    if (!chatId) {
+      state.checkpoints_enabled = value;
+      return;
+    }
+    const rt = getRuntime(state, chatId);
+    if (rt) rt.thread.checkpoints_enabled = value;
   });
 
   builder.addCase(setBoostReasoning, (state, action) => {
@@ -1155,18 +1180,33 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(setSendImmediately, (state, action) => {
-    const rt = getCurrentRuntime(state);
-    if (rt) rt.send_immediately = action.payload;
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
+    if (rt) rt.send_immediately = payloadBooleanValue(action.payload);
   });
 
   builder.addCase(setChatMode, (state, action) => {
-    const rt = getCurrentRuntime(state);
-    if (rt) rt.thread.mode = action.payload;
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
+    if (rt) {
+      rt.thread.mode =
+        typeof action.payload === "string"
+          ? action.payload
+          : action.payload.mode;
+    }
   });
 
   builder.addCase(setIntegrationData, (state, action) => {
-    const rt = getCurrentRuntime(state);
-    if (rt) rt.thread.integration = action.payload;
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
+    if (!rt) return;
+    if (action.payload && "value" in action.payload) {
+      rt.thread.integration = action.payload.value;
+      return;
+    }
+    if (action.payload === null) {
+      rt.thread.integration = null;
+      return;
+    }
+    const { chatId: _chatId, ...integration } = action.payload;
+    rt.thread.integration = integration;
   });
 
   builder.addCase(setIsWaitingForResponse, (state, action) => {
@@ -1194,9 +1234,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(setMaxNewTokens, (state, action) => {
-    const rt = getCurrentRuntime(state);
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
     if (rt) {
-      syncThreadContextLimitToModelMax(rt.thread, action.payload);
+      syncThreadContextLimitToModelMax(
+        rt.thread,
+        typeof action.payload === "number"
+          ? action.payload
+          : action.payload.value,
+      );
     }
   });
 
@@ -1225,8 +1270,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(setIncreaseMaxTokens, (state, action) => {
-    const rt = getCurrentRuntime(state);
-    if (rt) rt.thread.increase_max_tokens = action.payload;
+    const rt = getRuntimeForOptionalPayloadChat(state, action.payload);
+    if (rt) rt.thread.increase_max_tokens = payloadBooleanValue(action.payload);
   });
 
   builder.addCase(setIncludeProjectInfo, (state, action) => {

@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { selectThreadMode } from "../features/Chat/Thread/selectors";
+import {
+  selectModelById,
+  selectThreadModeById,
+} from "../features/Chat/Thread/selectors";
 import { useAppSelector, useGetCapsQuery, useAppDispatch } from ".";
+import { useThreadId } from "../features/Chat/Thread";
 import { useGetChatModesQuery } from "../services/refact/chatModes";
 
-import { getSelectedChatModel, setChatModel } from "../features/Chat";
+import { setChatModel } from "../features/Chat";
 import { isLegacyRefactModel } from "../utils/modelProviders";
 
 export const PAID_AGENT_LIST = [
@@ -21,11 +25,16 @@ export function useCapsForToolUse() {
   const [wasAdjusted, setWasAdjusted] = useState(false);
   const caps = useGetCapsQuery();
   const modesQuery = useGetChatModesQuery(undefined);
-  const currentMode = useAppSelector(selectThreadMode);
+  const chatId = useThreadId();
+  const currentMode = useAppSelector((state) =>
+    selectThreadModeById(state, chatId),
+  );
   const dispatch = useAppDispatch();
 
   const defaultCap = caps.data?.chat_default_model ?? "";
-  const selectedModel = useAppSelector(getSelectedChatModel);
+  const selectedModel = useAppSelector((state) =>
+    selectModelById(state, chatId),
+  );
   const currentModel = selectedModel || defaultCap;
 
   const modeInfo = useMemo(() => {
@@ -53,6 +62,7 @@ export function useCapsForToolUse() {
       const previousTokens = caps.data?.chat_models[currentModel]?.n_ctx;
       dispatch(
         setChatModel({
+          chatId,
           model,
           modelMaxContextTokens: tokens,
           previousModelMaxContextTokens: previousTokens,
@@ -62,6 +72,7 @@ export function useCapsForToolUse() {
     [
       caps.data?.chat_default_model,
       caps.data?.chat_models,
+      chatId,
       currentModel,
       dispatch,
     ],

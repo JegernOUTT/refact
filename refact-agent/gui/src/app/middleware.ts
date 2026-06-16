@@ -1150,7 +1150,14 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "boolean"
+        ? state.chat.current_thread_id
+        : action.payload.chatId;
+    const value =
+      typeof action.payload === "boolean"
+        ? action.payload
+        : action.payload.value;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
@@ -1160,7 +1167,7 @@ startListening({
       );
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
-        patch: { checkpoints_enabled: action.payload },
+        patch: { checkpoints_enabled: value },
       });
     } catch {
       // Silently ignore - backend may not support this command
@@ -1201,7 +1208,12 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "string"
+        ? state.chat.current_thread_id
+        : action.payload.chatId ?? state.chat.current_thread_id;
+    const mode =
+      typeof action.payload === "string" ? action.payload : action.payload.mode;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1213,7 +1225,7 @@ startListening({
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
-          mode: action.payload,
+          mode,
           ...buildThreadScopePatch(runtime.thread),
         },
       });
@@ -1256,7 +1268,7 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId = action.payload.chatId ?? state.chat.current_thread_id;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1284,10 +1296,13 @@ startListening({
 
 startListening({
   actionCreator: setMaxNewTokens,
-  effect: async (_action, listenerApi) => {
+  effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "number"
+        ? state.chat.current_thread_id
+        : action.payload.chatId ?? state.chat.current_thread_id;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1333,7 +1348,22 @@ startListening({
     const state = listenerApi.getState();
     const chatId = setThreadMode.match(_action)
       ? _action.payload.chatId
-      : state.chat.current_thread_id;
+      : setChatModel.match(_action)
+        ? _action.payload.chatId ?? state.chat.current_thread_id
+        : setChatMode.match(_action)
+          ? typeof _action.payload === "string"
+            ? state.chat.current_thread_id
+            : _action.payload.chatId ?? state.chat.current_thread_id
+          : setEnabledCheckpoints.match(_action) &&
+              typeof _action.payload !== "boolean"
+            ? _action.payload.chatId
+            : setIncreaseMaxTokens.match(_action) &&
+                typeof _action.payload !== "boolean"
+              ? _action.payload.chatId
+              : setMaxNewTokens.match(_action) &&
+                  typeof _action.payload !== "number"
+                ? _action.payload.chatId ?? state.chat.current_thread_id
+                : state.chat.current_thread_id;
     const runtime = state.chat.threads[chatId];
     if (!runtime) return;
 
@@ -1358,7 +1388,8 @@ startListening({
       patch.increase_max_tokens = runtime.thread.increase_max_tokens;
       patch.include_project_info = runtime.thread.include_project_info;
       patch.system_prompt = state.chat.system_prompt;
-      patch.checkpoints_enabled = state.chat.checkpoints_enabled;
+      patch.checkpoints_enabled =
+        runtime.thread.checkpoints_enabled ?? state.chat.checkpoints_enabled;
       patch.follow_ups_enabled = state.chat.follow_ups_enabled;
     }
 
