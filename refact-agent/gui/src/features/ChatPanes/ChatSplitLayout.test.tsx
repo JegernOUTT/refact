@@ -55,6 +55,12 @@ function renderSplitLayout(dir: SplitNode["dir"]) {
 
   act(() => {
     view.store.dispatch(
+      createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+    );
+    view.store.dispatch(
+      createChatWithId({ id: "chat-b", title: "Chat Beta", mode: "agent" }),
+    );
+    view.store.dispatch(
       hydratePaneLayout({
         root: splitRoot(dir),
         focusedLeafId: "root",

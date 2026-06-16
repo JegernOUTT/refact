@@ -72,6 +72,7 @@ function reduceWithPaneInvariant(
     panes: reconcilePanesWithOpenThreads(
       nextState.panes,
       nextState.chat.open_thread_ids,
+      nextState.chat.current_thread_id,
     ),
   };
 }
@@ -167,14 +168,13 @@ describe("panesSlice", () => {
     expect(state.focusedLeafId).toBe(INITIAL_PANE_LEAF_ID);
 
     state = paneReducer(state, removeTabEverywhere("chat-b"));
-    expect(findLeaf(state.root, INITIAL_PANE_LEAF_ID)).toEqual(
-      leaf(INITIAL_PANE_LEAF_ID, [], null),
-    );
-
-    state = paneReducer(state, closePane(INITIAL_PANE_LEAF_ID));
     expect(state.root).toEqual(
       leaf("root:sibling:chat-a", ["chat-a"], "chat-a"),
     );
+    expect(state.focusedLeafId).toBe("root:sibling:chat-a");
+
+    state = paneReducer(state, closePane("root:sibling:chat-a"));
+    expect(state.root).toEqual(leaf("root:sibling:chat-a", [], null));
     expect(state.focusedLeafId).toBe("root:sibling:chat-a");
   });
 

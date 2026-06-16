@@ -45,10 +45,13 @@ import {
   updateChatRuntimeFromSessionState,
   openBuddyChat,
   newBuddyChatAction,
+  createChatWithId,
   buildThreadParamsPatch,
   buildThreadScopePatch,
   selectCurrentThreadId,
   hydratePersistedChatTabs,
+  removeChatFromCache,
+  closeThread,
   reorderOpenThreads,
 } from "../features/Chat/Thread";
 import { saveLastThreadParams } from "../utils/threadStorage";
@@ -86,8 +89,6 @@ import {
   setTaskActiveChat,
   taskSseEventReceived,
 } from "../features/Tasks/tasksSlice";
-import { closeThread } from "../features/Chat/Thread";
-import { createChatWithId } from "../features/Chat/Thread/actions";
 import {
   popBackTo,
   push,
@@ -196,10 +197,14 @@ function persistPaneLayout(state: RootState): void {
   });
 }
 
-function hydratePersistedChatUi(listenerApi: { dispatch: AppDispatch }): void {
+function hydratePersistedChatUi(listenerApi: {
+  dispatch: AppDispatch;
+  getState: () => RootState;
+}): void {
   listenerApi.dispatch(hydratePersistedChatTabs());
   if (isProjectStorageNamespaceTrusted()) {
     listenerApi.dispatch(hydratePaneLayout(loadPersistedPaneLayout()));
+    switchToFocusedPaneTab(listenerApi);
   }
 }
 
@@ -249,6 +254,7 @@ startListening({
     newChatAction,
     restoreChat,
     newIntegrationChat,
+    removeChatFromCache,
     closeThread,
     switchToThread,
     reorderOpenThreads,
@@ -288,6 +294,7 @@ startListening({
     newChatAction,
     restoreChat,
     newIntegrationChat,
+    removeChatFromCache,
     closeThread,
     switchToThread,
     reorderOpenThreads,
@@ -310,6 +317,15 @@ startListening({
     }
 
     persistPaneLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(closeThread, removeChatFromCache),
+  effect: (action, listenerApi) => {
+    if (!closeThread.match(action) && !removeChatFromCache.match(action)) return;
+    listenerApi.dispatch(removeTabEverywhere(action.payload.id));
+    switchToFocusedPaneTab(listenerApi);
   },
 });
 

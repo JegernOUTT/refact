@@ -165,6 +165,7 @@ const paneInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
   const nextPanes = reconcilePanesWithOpenThreads(
     state.panes,
     state.chat.open_thread_ids,
+    state.chat.current_thread_id,
   );
 
   if (nextPanes === state.panes) {

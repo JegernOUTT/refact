@@ -16,6 +16,7 @@ import {
   switchToThread,
 } from "./Chat";
 import { ChatSplitLayout } from "./ChatPanes/ChatSplitLayout";
+import { selectFocusedActiveTabId } from "./ChatPanes/panesSlice";
 
 import {
   useAppSelector,
@@ -101,6 +102,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const allThreads = useAppSelector(selectAllThreads);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
+  const focusedPaneActiveTabId = useAppSelector(selectFocusedActiveTabId);
 
   const isPageInHistory = useCallback(
     (pageName: string) => {
@@ -444,9 +446,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     }
 
     if (persistedActiveTab.type === "chat") {
-      if (!allThreads[persistedActiveTab.id]) return;
+      const restoredChatId =
+        focusedPaneActiveTabId && allThreads[focusedPaneActiveTabId]
+          ? focusedPaneActiveTabId
+          : persistedActiveTab.id;
+      if (!allThreads[restoredChatId]) return;
       restoredActiveTabRef.current = true;
-      dispatch(switchToThread({ id: persistedActiveTab.id }));
+      dispatch(switchToThread({ id: restoredChatId, openTab: false }));
       dispatch(popBackTo({ name: "history" }));
       dispatch(push({ name: "chat" }));
       return;
@@ -459,7 +465,14 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         push({ name: "task workspace", taskId: persistedActiveTab.taskId }),
       );
     }
-  }, [allThreads, canAccessApp, dispatch, isLoggedIn, openTasks]);
+  }, [
+    allThreads,
+    canAccessApp,
+    dispatch,
+    focusedPaneActiveTabId,
+    isLoggedIn,
+    openTasks,
+  ]);
 
   return (
     <Flex

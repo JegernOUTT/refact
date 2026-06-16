@@ -2,6 +2,7 @@ import { createSlice, PayloadAction } from "@reduxjs/toolkit";
 import {
   closeLeaf,
   collectLeafIds,
+  collectTabIds,
   findLeaf,
   findLeafByTab,
   moveTab,
@@ -25,6 +26,13 @@ const createInitialLeaf = (): LeafPane => ({
   id: INITIAL_PANE_LEAF_ID,
   tabIds: [],
   activeTabId: null,
+});
+
+const createFallbackLeaf = (tabId?: string | null): LeafPane => ({
+  kind: "leaf",
+  id: INITIAL_PANE_LEAF_ID,
+  tabIds: tabId ? [tabId] : [],
+  activeTabId: tabId ?? null,
 });
 
 const createInitialState = (): PanesState => ({
@@ -129,8 +137,45 @@ const removeTabFromTree = (root: PaneNode, tabId: string): PaneNode =>
     };
   });
 
+const findFirstEmptyLeafId = (node: PaneNode): string | null => {
+  if (node.kind === "leaf") {
+    return node.tabIds.length === 0 ? node.id : null;
+  }
+
+  for (const child of node.children) {
+    const found = findFirstEmptyLeafId(child);
+    if (found) return found;
+  }
+
+  return null;
+};
+
+const collapseEmptyNonRootLeaves = (root: PaneNode): PaneNode => {
+  if (collectTabIds(root).length === 0) {
+    return createInitialLeaf();
+  }
+
+  let next = normalizePaneRoot(root);
+
+  while (next.kind === "split") {
+    const emptyLeafId = findFirstEmptyLeafId(next);
+    if (!emptyLeafId) return normalizePaneRoot(next);
+    next = normalizePaneRoot(closeLeaf(next, emptyLeafId));
+  }
+
+  return normalizePaneRoot(next);
+};
+
+const fallbackEmptyPaneRoot = (root: PaneNode): PaneNode =>
+  collectTabIds(root).length === 0 ? createInitialLeaf() : root;
+
 const removeTabFromState = (state: PanesState, tabId: string): void => {
-  state.root = removeTabFromTree(state.root, tabId);
+  if (!collectTabIds(state.root).includes(tabId)) {
+    ensureFocusedLeaf(state);
+    return;
+  }
+
+  state.root = collapseEmptyNonRootLeaves(removeTabFromTree(state.root, tabId));
   ensureFocusedLeaf(state);
 };
 
@@ -176,15 +221,29 @@ const prunePaneNodeToOpenThreads = (
 export const reconcilePanesWithOpenThreads = (
   state: PanesState,
   openThreadIds: string[],
+  preferredTabId?: string | null,
 ): PanesState => {
   const result = prunePaneNodeToOpenThreads(state.root, new Set(openThreadIds));
+  const fallbackTabId =
+    preferredTabId && openThreadIds.includes(preferredTabId)
+      ? preferredTabId
+      : openThreadIds[0] ?? null;
+  const root = collapseEmptyNonRootLeaves(result.node);
+  const nextRoot =
+    collectTabIds(root).length === 0 && fallbackTabId
+      ? createFallbackLeaf(fallbackTabId)
+      : root;
 
-  if (!result.changed && findLeaf(state.root, state.focusedLeafId)) {
+  if (
+    !result.changed &&
+    findLeaf(state.root, state.focusedLeafId) &&
+    (collectTabIds(state.root).length > 0 || openThreadIds.length === 0)
+  ) {
     return state;
   }
 
   const nextState: PanesState = {
-    root: result.node,
+    root: nextRoot,
     focusedLeafId: state.focusedLeafId,
   };
   ensureFocusedLeaf(nextState);
@@ -351,7 +410,9 @@ export const panesSlice = createSlice({
       state,
       action: PayloadAction<{ root: PaneNode; focusedLeafId: string }>,
     ) => {
-      state.root = normalizePaneRoot(action.payload.root);
+      state.root = fallbackEmptyPaneRoot(
+        normalizePaneRoot(action.payload.root),
+      );
       state.focusedLeafId = action.payload.focusedLeafId;
       ensureFocusedLeaf(state);
     },
