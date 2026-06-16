@@ -5,6 +5,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, SessionState};
+use crate::keymap::{KeyAction, KeyContext, KeymapRegistry};
 use crate::render::wrapping::{line_width, RtOptions, word_wrap_lines};
 use crate::style::user_message_style;
 use crate::vendored::line_truncation::{
@@ -23,6 +24,7 @@ pub struct StatusIndicatorData {
     pub tick: u64,
     pub detail: Option<String>,
     pub reduced_motion: bool,
+    pub interrupt_key: String,
 }
 
 impl StatusIndicatorData {
@@ -33,6 +35,7 @@ impl StatusIndicatorData {
             tick: app.working_tick(),
             detail: app.working_detail().map(str::to_string),
             reduced_motion: motion::reduced_motion_from_env(),
+            interrupt_key: key_label(app.keymap(), KeyContext::Main, KeyAction::Cancel, "Esc"),
         }
     }
 
@@ -110,11 +113,23 @@ fn status_header_line(data: &StatusIndicatorData, width: u16) -> Line<'static> {
         indicator_style(data, Color::DarkGray),
     ));
     spans.push(Span::styled(
-        "Esc to interrupt",
+        format!("{} to interrupt", data.interrupt_key),
         indicator_style(data, Color::Yellow),
     ));
     spans.push(Span::styled(")", indicator_style(data, Color::DarkGray)));
     truncate_line_with_ellipsis_if_overflow(Line::from(spans), usize::from(width))
+}
+
+fn key_label(
+    keymap: &KeymapRegistry,
+    context: KeyContext,
+    action: KeyAction,
+    fallback: &str,
+) -> String {
+    keymap
+        .binding_label(context, action)
+        .and_then(|label| label.split('/').next().map(str::to_string))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 pub fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
@@ -238,6 +253,7 @@ mod tests {
             tick: 0,
             detail: Some("shell({\"cmd\":\"echo hi\"})".to_string()),
             reduced_motion,
+            interrupt_key: "Esc".to_string(),
         }
     }
 
@@ -310,5 +326,32 @@ mod tests {
         let rendered = line_texts(status_indicator_lines(&value, 80).unwrap());
 
         assert_eq!(rendered, vec![" ⠋ Working (1m 05s • Esc to interrupt)"]);
+    }
+
+    #[test]
+    fn status_hint_uses_supplied_interrupt_key() {
+        let mut value = data(SessionState::Generating, false);
+        value.interrupt_key = "Ctrl-C".to_string();
+        value.detail = None;
+
+        let rendered = line_texts(status_indicator_lines(&value, 80).unwrap());
+
+        assert_eq!(rendered, vec![" ⠋ Working (1m 05s • Ctrl-C to interrupt)"]);
+    }
+
+    #[test]
+    fn key_label_uses_keymap_registry_binding() {
+        let registry = KeymapRegistry::from_toml_str(
+            r#"
+[bindings]
+cancel = "ctrl-c"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            key_label(&registry, KeyContext::Main, KeyAction::Cancel, "Esc"),
+            "Ctrl-C"
+        );
     }
 }

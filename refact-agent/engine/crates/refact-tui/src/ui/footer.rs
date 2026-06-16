@@ -6,10 +6,10 @@ use ratatui::Frame;
 
 use crate::app::{App, SessionState, SubscriptionStatus, UsageSummary};
 use crate::client::{worker_state_label, WorkerInfo};
+use crate::keymap::{KeyAction, KeyContext, KeymapRegistry};
 use crate::style::user_message_style;
+use crate::text_formatting::format_tokens_compact;
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
-
-const INTERRUPT_KEY: &str = "Esc";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FooterRuntimeState {
@@ -77,6 +77,7 @@ pub struct FooterData {
     pub usage: Option<UsageSummary>,
     pub context_window_tokens: Option<u64>,
     pub retry_hint: Option<String>,
+    pub interrupt_key: String,
 }
 
 impl FooterData {
@@ -97,6 +98,7 @@ impl FooterData {
             usage: app.usage(),
             context_window_tokens: app.context_window_tokens(),
             retry_hint: app.retry_hint().map(str::to_string),
+            interrupt_key: key_label(app.keymap(), KeyContext::Main, KeyAction::Cancel, "Esc"),
         }
     }
 
@@ -135,7 +137,7 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
     spans.push(separator());
     spans.push(Span::raw(format!("reason:{}", data.reasoning)));
     spans.push(separator());
-    spans.extend(runtime_spans(data.runtime_state));
+    spans.extend(runtime_spans(data.runtime_state, &data.interrupt_key));
     spans.push(separator());
     spans.push(Span::raw(format!("daemon {}", data.daemon_label())));
     spans.push(separator());
@@ -171,45 +173,22 @@ pub fn usage_label(
         Some(window) => Some(format!(
             "{}% context left ({} used)",
             context_left_percent(used, window),
-            format_token_count(used)
+            format_tokens_compact(used)
         )),
-        None => Some(format!("{} used", format_token_count(used))),
+        None => Some(format!("{} used", format_tokens_compact(used))),
     }
 }
 
-pub fn format_token_count(tokens: u64) -> String {
-    if tokens < 1_000 {
-        return tokens.to_string();
-    }
-
-    let tokens = tokens as f64;
-    let (scaled, suffix) = if tokens >= 1_000_000_000_000.0 {
-        (tokens / 1_000_000_000_000.0, "T")
-    } else if tokens >= 1_000_000_000.0 {
-        (tokens / 1_000_000_000.0, "B")
-    } else if tokens >= 1_000_000.0 {
-        (tokens / 1_000_000.0, "M")
-    } else {
-        (tokens / 1_000.0, "K")
-    };
-
-    let decimals = if scaled < 10.0 {
-        2
-    } else if scaled < 100.0 {
-        1
-    } else {
-        0
-    };
-    let mut formatted = format!("{scaled:.decimals$}");
-    if formatted.contains('.') {
-        while formatted.ends_with('0') {
-            formatted.pop();
-        }
-        if formatted.ends_with('.') {
-            formatted.pop();
-        }
-    }
-    format!("{formatted}{suffix}")
+fn key_label(
+    keymap: &KeymapRegistry,
+    context: KeyContext,
+    action: KeyAction,
+    fallback: &str,
+) -> String {
+    keymap
+        .binding_label(context, action)
+        .and_then(|label| label.split('/').next().map(str::to_string))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn context_left_percent(used: u64, window: u64) -> u64 {
@@ -220,7 +199,7 @@ fn context_left_percent(used: u64, window: u64) -> u64 {
     (((remaining as u128 * 100) + (window as u128 / 2)) / window as u128) as u64
 }
 
-fn runtime_spans(state: FooterRuntimeState) -> Vec<Span<'static>> {
+fn runtime_spans(state: FooterRuntimeState, interrupt_key: &str) -> Vec<Span<'static>> {
     let mut spans = vec![
         Span::styled(state.icon(), Style::default().fg(state.color())),
         Span::raw(" "),
@@ -229,7 +208,7 @@ fn runtime_spans(state: FooterRuntimeState) -> Vec<Span<'static>> {
     if state == FooterRuntimeState::Generating {
         spans.push(separator());
         spans.push(Span::styled(
-            INTERRUPT_KEY,
+            interrupt_key.to_string(),
             Style::default().fg(Color::Yellow),
         ));
         spans.push(Span::raw(" to interrupt"));
@@ -274,6 +253,7 @@ mod tests {
             }),
             context_window_tokens: Some(100),
             retry_hint: None,
+            interrupt_key: "Esc".to_string(),
         }
     }
 
@@ -289,14 +269,14 @@ mod tests {
             usage_label(usage, Some(100_000)).as_deref(),
             Some("88% context left (12.3K used)")
         );
-        assert_eq!(format_token_count(999), "999");
-        assert_eq!(format_token_count(1_000), "1K");
-        assert_eq!(format_token_count(1_550), "1.55K");
-        assert_eq!(format_token_count(12_345), "12.3K");
-        assert_eq!(format_token_count(123_456), "123K");
-        assert_eq!(format_token_count(1_200_000), "1.2M");
-        assert_eq!(format_token_count(1_234_567_890), "1.23B");
-        assert_eq!(format_token_count(1_234_567_890_123), "1.23T");
+        assert_eq!(format_tokens_compact(999), "999");
+        assert_eq!(format_tokens_compact(1_000), "1K");
+        assert_eq!(format_tokens_compact(1_550), "1.55K");
+        assert_eq!(format_tokens_compact(12_345), "12.3K");
+        assert_eq!(format_tokens_compact(123_456), "123K");
+        assert_eq!(format_tokens_compact(1_200_000), "1.2M");
+        assert_eq!(format_tokens_compact(1_234_567_890), "1.23B");
+        assert_eq!(format_tokens_compact(1_234_567_890_123), "1.23T");
     }
 
     #[test]
@@ -351,7 +331,7 @@ mod tests {
             FooterRuntimeState::Offline,
         ]
         .into_iter()
-        .map(|state| runtime_spans(state)[0].style.fg)
+        .map(|state| runtime_spans(state, "Esc")[0].style.fg)
         .collect::<Vec<_>>();
         assert_eq!(
             colors,
@@ -366,7 +346,7 @@ mod tests {
 
     #[test]
     fn generating_runtime_segment_matches_interrupt_hint_shape() {
-        let spans = runtime_spans(FooterRuntimeState::Generating);
+        let spans = runtime_spans(FooterRuntimeState::Generating, "Esc");
         let rendered = spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -375,6 +355,36 @@ mod tests {
         assert_eq!(
             rendered,
             vec!["◆", " ", "generating", " · ", "Esc", " to interrupt"]
+        );
+    }
+
+    #[test]
+    fn generating_runtime_segment_uses_supplied_interrupt_key() {
+        let spans = runtime_spans(FooterRuntimeState::Generating, "Ctrl-C");
+        let rendered = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["◆", " ", "generating", " · ", "Ctrl-C", " to interrupt"]
+        );
+    }
+
+    #[test]
+    fn key_label_uses_keymap_registry_binding() {
+        let registry = KeymapRegistry::from_toml_str(
+            r#"
+[bindings]
+cancel = "ctrl-c"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            key_label(&registry, KeyContext::Main, KeyAction::Cancel, "Esc"),
+            "Ctrl-C"
         );
     }
 }

@@ -58,7 +58,7 @@ pub(crate) fn help_row_line(row: HelpRow, app: &App) -> Line<'static> {
             spans.push(Span::styled(", ", app.theme().style(ThemeRole::Muted)));
             key_width += 2;
         }
-        spans.push(key_hint::key(binding.to_string()));
+        spans.push(key_hint::key_with_theme(app.theme(), binding.to_string()));
         key_width += binding.len();
     }
 

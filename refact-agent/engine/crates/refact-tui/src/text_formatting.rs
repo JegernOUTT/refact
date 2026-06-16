@@ -295,6 +295,16 @@ pub fn format_tokens_compact(value: u64) -> String {
         return value.to_string();
     }
 
+    if value < 1_000_000 && value >= 999_950 {
+        return "1.0M".to_string();
+    }
+    if value < 1_000_000_000 && value >= 999_950_000 {
+        return "1.0B".to_string();
+    }
+    if value < 1_000_000_000_000 && value >= 999_950_000_000 {
+        return "1.0T".to_string();
+    }
+
     let value_f64 = value as f64;
     let (scaled, suffix) = if value >= 1_000_000_000_000 {
         (value_f64 / 1_000_000_000_000.0, "T")
@@ -314,6 +324,9 @@ pub fn format_tokens_compact(value: u64) -> String {
         0
     };
     let mut formatted = format!("{scaled:.decimals$}");
+    if formatted == "1000" {
+        formatted = "999".to_string();
+    }
     if formatted.contains('.') {
         while formatted.ends_with('0') {
             formatted.pop();
@@ -410,6 +423,8 @@ mod tests {
         assert_eq!(format_tokens_compact(1_234), "1.23K");
         assert_eq!(format_tokens_compact(12_340), "12.3K");
         assert_eq!(format_tokens_compact(123_400), "123K");
+        assert_eq!(format_tokens_compact(999_949), "999K");
+        assert_eq!(format_tokens_compact(999_950), "1.0M");
         assert_eq!(format_tokens_compact(1_234_000), "1.23M");
         assert_eq!(format_tokens_compact(1_234_000_000), "1.23B");
         assert_eq!(format_tokens_compact(1_234_000_000_000), "1.23T");
