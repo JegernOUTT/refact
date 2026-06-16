@@ -15,8 +15,11 @@ const MAX_TEXTAREA_ROWS: u16 = 4;
 const FOOTER_ROWS: u16 = 2;
 
 pub(crate) fn render_ask_form(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect) {
-    let width = area.width.saturating_sub(6).min(96).max(24);
-    let height = popup_height(form, area.height);
+    if area.is_empty() {
+        return;
+    }
+    let width = area.width.saturating_sub(6).min(96).max(24).min(area.width);
+    let height = popup_height(form, area.height).min(area.height);
     let popup = super::centered(area, width, height);
     frame.render_widget(Clear, popup);
     let inner = menu::render_menu_surface(popup, frame.buffer_mut());
@@ -301,6 +304,32 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn ask_form_clamps_to_tiny_areas() {
+        let form = form_with_questions(json!([
+            {"id":"confirm","type":"yes_no","text":"Proceed?"}
+        ]));
+
+        for (width, height) in [(2, 2), (1, 1)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render_ask_form(frame, &form, frame.area()))
+                .unwrap();
+            assert_eq!(terminal.backend().buffer().area.width, width);
+            assert_eq!(terminal.backend().buffer().area.height, height);
+        }
+
+        let backend = TestBackend::new(2, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_ask_form(frame, &form, Rect::new(0, 0, 0, frame.area().height));
+                render_ask_form(frame, &form, Rect::new(0, 0, frame.area().width, 0));
+            })
+            .unwrap();
     }
 
     #[test]

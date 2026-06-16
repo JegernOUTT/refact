@@ -42,6 +42,9 @@ pub(crate) fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area:
 }
 
 fn render_transcript_view(frame: &mut Frame<'_>, app: &mut App, area: Rect, empty_hint: &str) {
+    if area.is_empty() {
+        return;
+    }
     let children = prepare_transcript_children(app, area.width, empty_hint);
     app.note_rendered_messages(app.visible_transcript().len());
     render_prepared_children(frame.buffer_mut(), area, children, app.scroll_offset());
@@ -285,6 +288,23 @@ mod tests {
             16,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn full_transcript_ignores_empty_or_zero_width_area() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        let backend = TestBackend::new(8, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_full_transcript(frame, &mut app, Rect::new(0, 0, 0, frame.area().height));
+                render_full_transcript(frame, &mut app, Rect::new(0, 0, frame.area().width, 0));
+            })
+            .unwrap();
+
+        assert_eq!(app.rendered_message_count(), 0);
     }
 
     #[test]
