@@ -461,6 +461,16 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
+    async fn wait_for_path(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if tokio::fs::try_exists(path).await.unwrap_or(false) {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
+
     #[test]
     fn workflow_failure_report_classifies_model_tool_and_cancellation_errors() {
         let report = workflow_failure_report(
@@ -574,6 +584,7 @@ mod tests {
         let path = dir
             .path()
             .join(".refact/buddy/chats/workflows/commit_msg.json");
+        wait_for_path(&path).await;
         let value: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         let entry = &value["entries"][0];
