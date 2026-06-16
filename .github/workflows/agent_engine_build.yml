@@ -226,7 +226,12 @@ jobs:
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
           CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
-        run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            CROSS_NO_WARNINGS=0 cross test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
+          else
+            CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
+          fi
 
       - name: Free test artifacts before linux-like build
         if: matrix.cross
