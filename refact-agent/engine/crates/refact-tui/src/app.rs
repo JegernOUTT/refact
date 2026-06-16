@@ -10330,13 +10330,9 @@ new-chat = "ctrl-x"
     fn editor_round_trip_appends_with_fake_editor_script() {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(windows)]
-        let script = {
-            let path = dir.path().join("fake-editor.cmd");
-            std::fs::write(&path, "@echo off\r\necho extra>> \"%~1\"\r\n").unwrap();
-            path
-        };
+        let editor = "cmd /C echo extra>>".to_string();
         #[cfg(not(windows))]
-        let script = {
+        let editor = {
             let path = dir.path().join("fake-editor.sh");
             std::fs::write(&path, "#!/bin/sh\necho extra >> \"$1\"\n").unwrap();
             let mut perms = std::fs::metadata(&path).unwrap().permissions();
@@ -10346,11 +10342,10 @@ new-chat = "ctrl-x"
                 perms.set_mode(0o755);
                 std::fs::set_permissions(&path, perms).unwrap();
             }
-            path
+            path.to_string_lossy().to_string()
         };
 
-        let text =
-            edit_text_with_editor_command(script.to_str().unwrap(), "base\n".to_string()).unwrap();
+        let text = edit_text_with_editor_command(&editor, "base\n".to_string()).unwrap();
 
         assert_eq!(text.replace("\r\n", "\n"), "base\nextra\n");
     }
