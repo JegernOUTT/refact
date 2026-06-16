@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::ask_questions::{AskQuestionType, AskQuestionsForm};
@@ -14,19 +14,19 @@ use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 const MAX_TEXTAREA_ROWS: u16 = 4;
 const FOOTER_ROWS: u16 = 2;
 
+pub(crate) fn desired_height(form: &AskQuestionsForm, available_height: u16) -> u16 {
+    form_height(form).min(available_height).max(1)
+}
+
 pub(crate) fn render_ask_form(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect) {
     if area.is_empty() {
         return;
     }
-    let width = area.width.saturating_sub(6).min(96).max(24).min(area.width);
-    let height = popup_height(form, area.height).min(area.height);
-    let popup = super::centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let inner = menu::render_menu_surface(popup, frame.buffer_mut());
+    let inner = menu::render_menu_surface(area, frame.buffer_mut());
     render_ask_content(frame, form, inner);
 }
 
-fn popup_height(form: &AskQuestionsForm, available_height: u16) -> u16 {
+fn form_height(form: &AskQuestionsForm) -> u16 {
     let answer_rows = match form.current_question().question_type {
         AskQuestionType::FreeText => textarea_height(form),
         AskQuestionType::YesNo | AskQuestionType::SingleSelect | AskQuestionType::MultiSelect => {
@@ -39,10 +39,7 @@ fn popup_height(form: &AskQuestionsForm, available_height: u16) -> u16 {
         .saturating_add(answer_rows)
         .saturating_add(1)
         .saturating_add(FOOTER_ROWS);
-    content_height
-        .saturating_add(2)
-        .min(available_height.saturating_sub(2).max(8))
-        .max(8)
+    content_height.saturating_add(2)
 }
 
 fn render_ask_content(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect) {
@@ -68,8 +65,9 @@ fn render_ask_content(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect
         y = y.saturating_add(1);
     }
 
-    let footer_top = bottom.saturating_sub(FOOTER_ROWS);
-    let answer_bottom = footer_top.saturating_sub(1);
+    let footer_rows = FOOTER_ROWS.min(area.height.saturating_sub(4));
+    let footer_top = bottom.saturating_sub(footer_rows);
+    let answer_bottom = footer_top.saturating_sub(u16::from(footer_rows > 0));
     let answer_height = answer_bottom.saturating_sub(y);
     if answer_height > 0 {
         match form.current_question().question_type {
@@ -84,14 +82,14 @@ fn render_ask_content(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect
         }
     }
 
-    if footer_top < bottom {
+    if footer_rows > 0 {
         render_line(
             frame,
             menu::standard_popup_hint_line().dim(),
             row(area, footer_top),
         );
     }
-    if footer_top.saturating_add(1) < bottom {
+    if footer_rows > 1 {
         render_line(
             frame,
             Line::from(type_specific_hint(form.current_question().question_type)).dim(),
@@ -259,9 +257,10 @@ pub(crate) fn type_specific_hint(question_type: AskQuestionType) -> &'static str
 mod tests {
     use super::*;
     use crate::ask_questions::{AskQuestionsForm, AskQuestionsRequest};
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::Position;
     use ratatui::style::Color;
-    use ratatui::Terminal;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
     use serde_json::{json, Value};
 
     fn form_with_questions(questions: Value) -> AskQuestionsForm {
@@ -306,6 +305,31 @@ mod tests {
         None
     }
 
+    fn is_drawn_cell(cell: &ratatui::buffer::Cell) -> bool {
+        cell.symbol() != " "
+    }
+
+    fn assert_no_drawn_cells_outside(buffer: &ratatui::buffer::Buffer, bounds: Rect) -> bool {
+        let mut found = false;
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..buffer.area.right() {
+                let cell = &buffer[(x, y)];
+                if !is_drawn_cell(cell) {
+                    continue;
+                }
+                found = true;
+                assert!(
+                    x >= bounds.left()
+                        && x < bounds.right()
+                        && y >= bounds.top()
+                        && y < bounds.bottom(),
+                    "drawn cell ({x},{y}) escaped bounds {bounds:?}"
+                );
+            }
+        }
+        found
+    }
+
     #[test]
     fn ask_form_clamps_to_tiny_areas() {
         let form = form_with_questions(json!([
@@ -330,6 +354,57 @@ mod tests {
                 render_ask_form(frame, &form, Rect::new(0, 0, frame.area().width, 0));
             })
             .unwrap();
+    }
+
+    #[test]
+    fn ask_form_renders_inside_supplied_composer_rect() {
+        let form = form_with_questions(json!([
+            {"id":"confirm","type":"yes_no","text":"Proceed?"}
+        ]));
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let composer = Rect::new(0, 14, 80, 6);
+
+        terminal
+            .draw(|frame| render_ask_form(frame, &form, composer))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let question = find_text_start(buffer, "Proceed?").expect("question rendered");
+
+        assert!(question.1 >= composer.y);
+        assert!(question.1 < composer.bottom());
+        assert!(assert_no_drawn_cells_outside(buffer, composer));
+    }
+
+    #[test]
+    fn ask_form_stays_inside_inline_viewport() {
+        let form = form_with_questions(json!([
+            {"id":"areas","type":"multi_select","text":"Areas?","options":["Tests","Docs","Ui"]}
+        ]));
+        let viewport = Rect::new(0, 21, 72, 8);
+        let composer = Rect::new(0, 24, 72, 5);
+        let mut backend = TestBackend::new(viewport.width, viewport.y + viewport.height);
+        backend
+            .set_cursor_position(Position::new(0, viewport.y))
+            .unwrap();
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport.height),
+            },
+        )
+        .unwrap();
+
+        let completed = terminal
+            .draw(|frame| {
+                assert_eq!(frame.area(), viewport);
+                render_ask_form(frame, &form, composer);
+            })
+            .unwrap();
+        let buffer = completed.buffer.clone();
+
+        assert_eq!(buffer.area, viewport);
+        assert!(assert_no_drawn_cells_outside(&buffer, composer));
+        assert!(find_text_start(&buffer, "Areas?").is_some());
     }
 
     #[test]

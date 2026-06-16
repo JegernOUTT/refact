@@ -22,13 +22,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     let status_height = status_indicator::height(app, area.width);
     let footer_height = footer::desired_height(area.width);
+    let composer_height = app
+        .ask_questions_form()
+        .map(|form| ask::desired_height(form, area.height))
+        .unwrap_or_else(|| app.composer_height(area.width));
     let main_constraints = if app.events_pane().open {
         vec![
             Constraint::Length(1),
             Constraint::Percentage(62),
             Constraint::Percentage(38),
             Constraint::Length(status_height),
-            Constraint::Length(app.composer_height(area.width)),
+            Constraint::Length(composer_height),
             Constraint::Length(footer_height),
         ]
     } else {
@@ -36,7 +40,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(status_height),
-            Constraint::Length(app.composer_height(area.width)),
+            Constraint::Length(composer_height),
             Constraint::Length(footer_height),
         ]
     };
@@ -55,11 +59,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.events_pane().open {
         events::render_events_pane(frame, app, chunks[2]);
         status_indicator::render(frame, app, chunks[3]);
-        composer::render_composer(frame, app, composer_area);
+        render_composer_region(frame, app, composer_area);
         footer::render(frame, app, chunks[5]);
     } else {
         status_indicator::render(frame, app, chunks[2]);
-        composer::render_composer(frame, app, composer_area);
+        render_composer_region(frame, app, composer_area);
         footer::render(frame, app, chunks[4]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
@@ -67,9 +71,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(picker) = app.modal_picker() {
         picker::render_modal_picker(frame, picker, area, composer_area);
-    }
-    if let Some(form) = app.ask_questions_form() {
-        ask::render_ask_form(frame, form, area);
     }
     if app.transcript_overlay().is_some() {
         app.set_transcript_overlay_visible_height(overlay::transcript_overlay_body_height(area));
@@ -82,6 +83,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.help_open() {
         help::render_help(frame, app, area);
+    }
+}
+
+fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if let Some(form) = app.ask_questions_form() {
+        ask::render_ask_form(frame, form, area);
+    } else {
+        composer::render_composer(frame, app, area);
     }
 }
 
@@ -210,6 +219,45 @@ help = "f1"
             .position(|row| row.contains("Ask Refact"))
             .unwrap();
         assert!(status_row < composer_row);
+    }
+
+    #[test]
+    fn ask_form_replaces_composer_in_bottom_pane() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        let request = crate::ask_questions::AskQuestionsRequest::from_tool_content(
+            &serde_json::json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": [
+                    {"id":"confirm","type":"yes_no","text":"Proceed?"}
+                ],
+            })
+            .to_string(),
+            None,
+        )
+        .unwrap();
+        app.test_set_ask_questions_form(crate::ask_questions::AskQuestionsForm::new(request));
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let question_row = rows
+            .iter()
+            .position(|row| row.contains("Proceed?"))
+            .unwrap();
+        let footer_row = rows.iter().rposition(|row| row.contains("daemon")).unwrap();
+
+        assert!(!rows.join("\n").contains("Ask Refact"));
+        assert!(question_row < footer_row);
+        assert!(question_row >= footer_row.saturating_sub(8));
     }
 
     #[test]

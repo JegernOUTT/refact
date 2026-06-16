@@ -284,7 +284,7 @@ fn approval_overlay_golden_snapshot() {
 }
 
 #[test]
-fn ask_form_overlay_golden_snapshot() {
+fn ask_form_bottom_pane_golden_snapshot() {
     let mut app = App::new(project());
     let ask_content = json!({
         "type": "ask_questions",
@@ -331,21 +331,21 @@ fn ask_form_overlay_golden_snapshot() {
 
 
 
-     Question 1/2
-     Which file should get the parity snapshot?
-
-     › ◉ tests/tui_render_parity.rs
-       ○ src/ui/mod.rs
-
-     Press Enter to confirm or Esc to go back
-     ↑/↓ choose · ←/→ question
 
 
 
 
 
-? Ask Refact…
-  waiting for input   Enter send   Ctrl-J newline
+
+  Question 1/2
+  Which file should get the parity snapshot?
+
+  › ◉ tests/tui_render_parity.rs
+    ○ src/ui/mod.rs
+
+  Press Enter to confirm or Esc to go back
+  ↑/↓ choose · ←/→ question
+
  fixture · gpt-demo · agent · reason:off · ● idle · daemon online · worker ready"#,
     );
 }

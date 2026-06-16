@@ -1110,6 +1110,12 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_set_ask_questions_form(&mut self, form: AskQuestionsForm) {
+        self.ask_questions_form = Some(form);
+        self.set_session_state(SessionState::WaitingUserInput);
+    }
+
+    #[cfg(test)]
     fn approval_pending_clear_count(&self) -> usize {
         self.pending_approval_clears.len()
     }
@@ -4439,8 +4445,20 @@ impl App {
         if self.has_later_user_message_after_tool(&request.tool_call_id) {
             return;
         }
+        let tool_call_id = request.tool_call_id.clone();
         self.ask_questions_form = Some(AskQuestionsForm::new(request));
+        self.collapse_tool_card(&tool_call_id);
         self.session_state = SessionState::WaitingUserInput;
+    }
+
+    fn collapse_tool_card(&mut self, tool_call_id: &str) {
+        for item in &mut self.transcript {
+            if let TranscriptItem::Tool(card) = item {
+                if card.id == tool_call_id {
+                    card.expanded = false;
+                }
+            }
+        }
     }
 
     fn has_later_user_message_after_tool(&self, tool_call_id: &str) -> bool {
@@ -4635,6 +4653,10 @@ impl App {
         status: ToolStatus,
         completed_at_ms: u64,
     ) {
+        let active_ask_tool_id = self
+            .ask_questions_form
+            .as_ref()
+            .map(|form| form.tool_call_id().to_string());
         for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
             if let TranscriptItem::Tool(card) = item {
                 if card.id == id || id.is_empty() {
@@ -4642,6 +4664,9 @@ impl App {
                     card.status = status;
                     card.subchat_active = false;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
+                        card.expanded = false;
+                    }
                     let detail = card.summary();
                     self.selected_tool_index = Some(idx);
                     if self.session_state.shows_working_indicator() && !detail.is_empty() {
@@ -4656,6 +4681,9 @@ impl App {
         card.set_result(&result);
         card.status = status;
         card.duration_ms = Some(0);
+        if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
+            card.expanded = false;
+        }
         let item = TranscriptItem::Tool(card);
         self.push_live_item(item);
         self.selected_tool_index = Some(self.transcript.len() - 1);
@@ -8838,6 +8866,72 @@ mod tests {
 
         assert_eq!(questions_cell_count(&app), 1);
         assert!(app.ask_questions_form().is_some());
+    }
+
+    #[test]
+    fn active_ask_questions_cell_stays_compact() {
+        let mut app = App::new(project());
+        let questions = json!([
+            {"id": "file", "type": "free_text", "text": "Which file should I edit?"}
+        ]);
+        let assistant_message = json!({
+            "message_id": "a1",
+            "role": "assistant",
+            "stream_finished": true,
+            "tool_calls": [{
+                "id": "call-ask",
+                "function": {
+                    "name": "ask_questions",
+                    "arguments": json!({"questions": questions}).to_string(),
+                }
+            }]
+        });
+        let tool_message = tool_result_message(
+            "call-ask",
+            &json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": questions,
+            })
+            .to_string(),
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": assistant_message}),
+        });
+        let tool_card = app
+            .visible_transcript()
+            .iter()
+            .position(|item| matches!(item, TranscriptItem::Tool(card) if card.id == "call-ask"))
+            .unwrap();
+        app.selected_tool_index = Some(tool_card);
+        app.toggle_selected_tool();
+        assert!(
+            matches!(app.visible_transcript().get(tool_card), Some(TranscriptItem::Tool(card)) if card.expanded)
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_message}),
+        });
+        app.handle_chat_event(waiting_user_input_event(&app));
+
+        let rendered = app
+            .visible_transcript()
+            .iter()
+            .map(rendered_item_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(app.ask_questions_form().is_some());
+        assert!(
+            matches!(app.visible_transcript().get(tool_card), Some(TranscriptItem::Tool(card)) if !card.expanded)
+        );
+        assert_eq!(rendered.matches("Which file should I edit?").count(), 1);
     }
 
     #[test]
