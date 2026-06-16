@@ -1,16 +1,29 @@
 import classNames from "classnames";
+import { Columns3, Rows3 } from "lucide-react";
 import {
   CSSProperties,
   MouseEvent as ReactMouseEvent,
   useCallback,
+  useEffect,
   useRef,
   useState,
 } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useDashboardLayout } from "../Dashboard/hooks/useDashboardLayout";
+import { IconButton, Tooltip } from "../../components/ui";
 import type { PaneNode, SplitNode } from "./panesTree";
-import { resizeSplit, selectPaneRoot } from "./panesSlice";
+import { collectTabIds, findLeaf } from "./panesTree";
+import {
+  addTabToFocusedPane,
+  focusPane,
+  resizeSplit,
+  selectFocusedActiveTabId,
+  selectFocusedLeafId,
+  selectPaneRoot,
+  splitPane,
+} from "./panesSlice";
+import { selectCurrentThreadId, selectRuntimeById } from "../Chat/Thread";
 import { ChatPane } from "./ChatPane";
 import styles from "./ChatSplitLayout.module.css";
 
@@ -103,6 +116,65 @@ function PaneNodeView({ node, stacked }: { node: PaneNode; stacked: boolean }) {
   return <SplitView node={node} stacked={stacked} />;
 }
 
+function SplitLayoutToolbar() {
+  const dispatch = useAppDispatch();
+  const root = useAppSelector(selectPaneRoot);
+  const focusedLeafId = useAppSelector(selectFocusedLeafId);
+  const activeTabId = useAppSelector(selectFocusedActiveTabId);
+  const activeRuntime = useAppSelector((state) =>
+    activeTabId ? selectRuntimeById(state, activeTabId) : null,
+  );
+  const canSplit =
+    activeTabId !== null &&
+    activeRuntime !== null &&
+    !activeRuntime.thread.is_task_chat &&
+    !activeRuntime.thread.buddy_meta?.is_buddy_chat &&
+    findLeaf(root, focusedLeafId) !== null;
+
+  const handleSplitRight = useCallback(() => {
+    if (!activeTabId) return;
+    dispatch(focusPane(focusedLeafId));
+    dispatch(
+      splitPane({ leafId: focusedLeafId, dir: "row", tabId: activeTabId }),
+    );
+  }, [activeTabId, dispatch, focusedLeafId]);
+
+  const handleSplitDown = useCallback(() => {
+    if (!activeTabId) return;
+    dispatch(focusPane(focusedLeafId));
+    dispatch(
+      splitPane({ leafId: focusedLeafId, dir: "col", tabId: activeTabId }),
+    );
+  }, [activeTabId, dispatch, focusedLeafId]);
+
+  return (
+    <div className={styles.toolbar} aria-label="Chat split controls">
+      <Tooltip content="Split Right">
+        <IconButton
+          aria-label="Split Right"
+          className={styles.splitAction}
+          disabled={!canSplit}
+          icon={Columns3}
+          onClick={handleSplitRight}
+          size="sm"
+          variant="plain"
+        />
+      </Tooltip>
+      <Tooltip content="Split Down">
+        <IconButton
+          aria-label="Split Down"
+          className={styles.splitAction}
+          disabled={!canSplit}
+          icon={Rows3}
+          onClick={handleSplitDown}
+          size="sm"
+          variant="plain"
+        />
+      </Tooltip>
+    </div>
+  );
+}
+
 function SplitView({ node, stacked }: SplitViewProps) {
   const dispatch = useAppDispatch();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -183,10 +255,30 @@ function SplitView({ node, stacked }: SplitViewProps) {
 }
 
 export function ChatSplitLayout() {
+  const dispatch = useAppDispatch();
   const containerRef = useRef<HTMLDivElement>(null);
   const root = useAppSelector(selectPaneRoot);
+  const focusedLeafId = useAppSelector(selectFocusedLeafId);
+  const activeTabId = useAppSelector(selectFocusedActiveTabId);
+  const currentThreadId = useAppSelector(selectCurrentThreadId);
+  const currentRuntime = useAppSelector((state) =>
+    currentThreadId ? selectRuntimeById(state, currentThreadId) : null,
+  );
   const breakpoint = useDashboardLayout(containerRef);
   const stacked = breakpoint !== "wide";
+
+  useEffect(() => {
+    if (!currentThreadId || !currentRuntime) return;
+    if (currentRuntime.thread.is_task_chat) return;
+    if (currentRuntime.thread.buddy_meta?.is_buddy_chat) return;
+    if (collectTabIds(root).includes(currentThreadId)) return;
+    dispatch(addTabToFocusedPane(currentThreadId));
+  }, [currentRuntime, currentThreadId, dispatch, root]);
+
+  useEffect(() => {
+    if (!activeTabId) return;
+    dispatch(focusPane(focusedLeafId));
+  }, [activeTabId, dispatch, focusedLeafId]);
 
   return (
     <div
@@ -195,7 +287,10 @@ export function ChatSplitLayout() {
       data-breakpoint={breakpoint}
       data-stacked={stacked || undefined}
     >
-      <PaneNodeView node={root} stacked={stacked} />
+      <SplitLayoutToolbar />
+      <div className={styles.tree}>
+        <PaneNodeView node={root} stacked={stacked} />
+      </div>
     </div>
   );
 }

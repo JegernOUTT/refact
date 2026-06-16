@@ -1,19 +1,37 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "./store";
-import { setChatModel, setMaxNewTokens } from "../features/Chat/Thread";
+import {
+  newChatAction,
+  setChatModel,
+  setMaxNewTokens,
+  switchToThread,
+} from "../features/Chat/Thread";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
-
+import {
+  findLeaf,
+  focusPane,
+  setPaneActiveTab,
+  type PaneNode,
+} from "../features/ChatPanes";
 function makeThread(id: string): ChatThreadRuntime {
+  const mode = id.startsWith("chat-") ? "agent" : undefined;
+  const title = id
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
   return {
     thread: {
       id,
       messages: [],
-      title: "",
+      title,
       model: "",
       last_user_message_id: "",
       new_chat_suggested: { wasSuggested: false },
+      mode,
     },
+    session_state: "idle",
     streaming: false,
     waiting_for_response: false,
     prevent_send: false,
@@ -33,6 +51,41 @@ function makeThread(id: string): ChatThreadRuntime {
     memory_enrichment_user_touched: false,
     manual_preview_items: [],
     manual_preview_ran: false,
+  };
+}
+
+function makeChatState(currentThreadId: string, ids: string[]) {
+  return {
+    current_thread_id: currentThreadId,
+    open_thread_ids: ids,
+    threads: Object.fromEntries(ids.map((id) => [id, makeThread(id)])),
+    system_prompt: {},
+    tool_use: "explore" as const,
+    sse_refresh_requested: null,
+    stream_version: 0,
+  };
+}
+
+function twoPaneRoot(): PaneNode {
+  return {
+    kind: "split",
+    id: "root:split:row",
+    dir: "row",
+    sizes: [0.5, 0.5],
+    children: [
+      {
+        kind: "leaf",
+        id: "left",
+        tabIds: ["chat-a"],
+        activeTabId: "chat-a",
+      },
+      {
+        kind: "leaf",
+        id: "right",
+        tabIds: ["chat-b"],
+        activeTabId: "chat-b",
+      },
+    ],
   };
 }
 
@@ -75,6 +128,81 @@ describe("task delete middleware", () => {
     const state = store.getState();
     expect(state.chat.open_thread_ids).toContain(THREAD_ID);
     expect(state.chat.threads[THREAD_ID]).toBeDefined();
+  });
+});
+
+describe("chat pane routing middleware", () => {
+  it("places new chats in the focused pane", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      panes: { root: twoPaneRoot(), focusedLeafId: "right" },
+    });
+
+    store.dispatch(newChatAction({ title: "Chat C" }));
+
+    const newChatId = store.getState().chat.current_thread_id;
+    await waitFor(() => {
+      const right = findLeaf(store.getState().panes.root, "right");
+      expect(right?.activeTabId).toBe(newChatId);
+      expect(right?.tabIds).toContain(newChatId);
+    });
+    expect(store.getState().chat.open_thread_ids).toContain(newChatId);
+  });
+
+  it("places switched threads in the focused pane and keeps one pane owner", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      panes: { root: twoPaneRoot(), focusedLeafId: "left" },
+    });
+
+    store.dispatch(switchToThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      const left = findLeaf(store.getState().panes.root, "left");
+      const right = findLeaf(store.getState().panes.root, "right");
+      expect(left?.activeTabId).toBe("chat-b");
+      expect(left?.tabIds).toContain("chat-b");
+      expect(right?.tabIds).not.toContain("chat-b");
+    });
+    expect(store.getState().chat.current_thread_id).toBe("chat-b");
+  });
+
+  it("switches current_thread_id when pane tab selection changes", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      panes: {
+        root: {
+          kind: "leaf",
+          id: "root",
+          tabIds: ["chat-a", "chat-b"],
+          activeTabId: "chat-a",
+        },
+        focusedLeafId: "root",
+      },
+    });
+
+    store.dispatch(setPaneActiveTab({ leafId: "root", tabId: "chat-b" }));
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("switches current_thread_id when pane focus changes", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      panes: { root: twoPaneRoot(), focusedLeafId: "left" },
+    });
+
+    store.dispatch(focusPane("right"));
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
   });
 });
 

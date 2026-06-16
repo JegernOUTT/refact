@@ -1,11 +1,13 @@
 import { act } from "react-dom/test-utils";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor } from "../../utils/test-utils";
 
 import { render } from "../../utils/test-utils";
+import { createChatWithId } from "../Chat/Thread";
 import { hydratePaneLayout } from "./panesSlice";
 import { ChatSplitLayout } from "./ChatSplitLayout";
-import type { SplitNode } from "./panesTree";
+import { findLeaf, type LeafPane, type SplitNode } from "./panesTree";
 import styles from "./ChatSplitLayout.module.css";
 
 vi.mock("./ChatPane", async () => {
@@ -63,6 +65,14 @@ function renderSplitLayout(dir: SplitNode["dir"]) {
   return view;
 }
 
+function assertLeaf(node: LeafPane | null): LeafPane {
+  if (!node) {
+    throw new Error("expected leaf");
+  }
+
+  return node;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -111,5 +121,46 @@ describe("ChatSplitLayout", () => {
     expect(
       screen.queryByTestId("pane-vertical-divider"),
     ).not.toBeInTheDocument();
+  });
+
+  it("splits the focused pane to the right from the toolbar", async () => {
+    setMeasuredWidth(1024);
+    const view = renderSplitLayout("row");
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+      );
+      view.store.dispatch(
+        createChatWithId({ id: "chat-b", title: "Chat Beta", mode: "agent" }),
+      );
+      view.store.dispatch(
+        hydratePaneLayout({
+          root: {
+            kind: "leaf",
+            id: "root",
+            tabIds: ["chat-a", "chat-b"],
+            activeTabId: "chat-b",
+          },
+          focusedLeafId: "root",
+        }),
+      );
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Split Right" }));
+
+    await waitFor(() => {
+      const state = view.store.getState().panes;
+      expect(state.root.kind).toBe("split");
+      expect(state.focusedLeafId).toBe("root:sibling:chat-b");
+    });
+
+    const root = view.store.getState().panes.root;
+    const originalLeaf = assertLeaf(findLeaf(root, "root"));
+    const siblingLeaf = assertLeaf(findLeaf(root, "root:sibling:chat-b"));
+
+    expect(originalLeaf.tabIds).toEqual(["chat-a"]);
+    expect(siblingLeaf.tabIds).toEqual(["chat-b"]);
+    expect(siblingLeaf.activeTabId).toBe("chat-b");
   });
 });

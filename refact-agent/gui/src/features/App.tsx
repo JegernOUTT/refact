@@ -7,7 +7,6 @@ import React, {
 } from "react";
 import { Flex } from "@radix-ui/themes";
 import {
-  Chat,
   createChatWithId,
   selectAllThreads,
   selectBackgroundAgentsByThread,
@@ -16,6 +15,7 @@ import {
   selectThread,
   switchToThread,
 } from "./Chat";
+import { ChatSplitLayout } from "./ChatPanes/ChatSplitLayout";
 
 import {
   useAppSelector,
@@ -487,11 +487,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
             {!pageSwitching && renderedPage.name === "chat" && (
               <InternalLinkProvider onInternalLink={handleInternalLink}>
-                <Chat
-                  host={config.host}
-                  tabbed={config.tabbed}
-                  backFromChat={goBack}
-                />
+                <ChatSplitLayout />
               </InternalLinkProvider>
             )}
             {!pageSwitching && isSettingsPage(renderedPage) && (

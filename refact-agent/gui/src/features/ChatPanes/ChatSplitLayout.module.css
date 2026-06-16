@@ -1,4 +1,5 @@
 .layout {
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   width: 100%;
@@ -7,6 +8,44 @@
   min-height: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
+}
+
+.tree {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.toolbar {
+  position: absolute;
+  top: var(--rf-space-2);
+  right: var(--rf-space-2);
+  z-index: var(--rf-z-dropdown);
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.splitAction {
+  color: var(--rf-color-muted);
+}
+
+.splitAction:hover:not(:disabled) {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .toolbar {
+  backdrop-filter: none;
 }
 
 .split {
@@ -111,6 +150,11 @@
 .stackedLayout {
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+.stackedLayout .tree {
+  min-height: 100%;
+  overflow: visible;
 }
 
 .stackedSplit {

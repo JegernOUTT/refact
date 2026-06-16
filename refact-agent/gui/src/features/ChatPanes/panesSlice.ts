@@ -213,7 +213,20 @@ const addTabToLeaf = (
 ): PaneNode =>
   mapLeaves(root, (leaf) => {
     if (leaf.id !== leafId) {
-      return leaf;
+      if (!leaf.tabIds.includes(tabId)) {
+        return leaf;
+      }
+
+      const tabIds = leaf.tabIds.filter((id) => id !== tabId);
+      const activeTabId = tabIds.includes(leaf.activeTabId ?? "")
+        ? leaf.activeTabId
+        : tabIds[0] ?? null;
+
+      return {
+        ...leaf,
+        tabIds,
+        activeTabId,
+      };
     }
 
     const tabIds = leaf.tabIds.includes(tabId)

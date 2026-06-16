@@ -109,6 +109,22 @@ describe("panesSlice", () => {
     expect(selectFocusedActiveTabId({ panes: state })).toBe("chat-a");
   });
 
+  test("addTabToFocusedPane moves a tab out of its previous pane", () => {
+    let state = paneReducer(undefined, addTabToFocusedPane("chat-a"));
+    state = paneReducer(
+      state,
+      splitPane({ leafId: INITIAL_PANE_LEAF_ID, dir: "row", tabId: "chat-a" }),
+    );
+    state = paneReducer(state, focusPane(INITIAL_PANE_LEAF_ID));
+    state = paneReducer(state, addTabToFocusedPane("chat-a"));
+
+    expect(findLeaf(state.root, INITIAL_PANE_LEAF_ID)).toEqual(
+      leaf(INITIAL_PANE_LEAF_ID, ["chat-a"], "chat-a"),
+    );
+    expect(findLeaf(state.root, "root:sibling:chat-a")).toEqual(
+      leaf("root:sibling:chat-a", [], null),
+    );
+  });
   test("updates active tabs, focus, closing, moving, adding, and removing tabs", () => {
     let state = paneReducer(undefined, addTabToFocusedPane("chat-a"));
     state = paneReducer(

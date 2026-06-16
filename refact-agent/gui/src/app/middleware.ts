@@ -106,6 +106,13 @@ import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
 } from "../services/refact/apiUrl";
+import {
+  addTabToFocusedPane,
+  focusPane,
+  selectFocusedActiveTabId,
+  selectFocusedLeafId,
+  setPaneActiveTab,
+} from "../features/ChatPanes/panesSlice";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -168,6 +175,47 @@ function persistOpenChatTabs(state: RootState): void {
   });
 }
 
+function isPaneRoutableChat(
+  state: RootState,
+  chatId: string | null | undefined,
+): chatId is string {
+  if (!chatId) return false;
+  const runtime = state.chat.threads[chatId];
+  if (!runtime) return false;
+  if (runtime.thread.is_task_chat) return false;
+  if (runtime.thread.buddy_meta?.is_buddy_chat) return false;
+  return state.chat.open_thread_ids.includes(chatId);
+}
+
+function placeChatInFocusedPane(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+  chatId?: string,
+): void {
+  const state = listenerApi.getState();
+  const targetChatId = chatId ?? state.chat.current_thread_id;
+  if (!isPaneRoutableChat(state, targetChatId)) return;
+
+  listenerApi.dispatch(addTabToFocusedPane(targetChatId));
+  const focusedLeafId = selectFocusedLeafId(listenerApi.getState());
+  listenerApi.dispatch(
+    setPaneActiveTab({ leafId: focusedLeafId, tabId: targetChatId }),
+  );
+}
+
+function switchToFocusedPaneTab(listenerApi: {
+  dispatch: AppDispatch;
+  getState: () => RootState;
+}): void {
+  const state = listenerApi.getState();
+  const chatId = selectFocusedActiveTabId(state);
+  if (!isPaneRoutableChat(state, chatId)) return;
+  if (state.chat.current_thread_id === chatId) return;
+  listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
+}
+
 startListening({
   matcher: isAnyOf(
     newChatAction,
@@ -195,6 +243,51 @@ startListening({
     }
 
     persistOpenChatTabs(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(newChatAction, restoreChat, newIntegrationChat),
+  effect: (_action, listenerApi) => {
+    placeChatInFocusedPane(listenerApi);
+  },
+});
+
+startListening({
+  actionCreator: createChatWithId,
+  effect: (action, listenerApi) => {
+    placeChatInFocusedPane(listenerApi, action.payload.id);
+  },
+});
+
+startListening({
+  actionCreator: switchToThread,
+  effect: (action, listenerApi) => {
+    placeChatInFocusedPane(listenerApi, action.payload.id);
+  },
+});
+
+startListening({
+  actionCreator: setPaneActiveTab,
+  effect: (action, listenerApi) => {
+    const state = listenerApi.getState();
+    if (selectFocusedLeafId(state) !== action.payload.leafId) {
+      listenerApi.dispatch(focusPane(action.payload.leafId));
+    }
+
+    const nextState = listenerApi.getState();
+    if (nextState.chat.current_thread_id === action.payload.tabId) return;
+    if (!isPaneRoutableChat(nextState, action.payload.tabId)) return;
+    listenerApi.dispatch(
+      switchToThread({ id: action.payload.tabId, openTab: false }),
+    );
+  },
+});
+
+startListening({
+  actionCreator: focusPane,
+  effect: (_action, listenerApi) => {
+    switchToFocusedPaneTab(listenerApi);
   },
 });
 

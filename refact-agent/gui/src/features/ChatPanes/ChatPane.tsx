@@ -39,6 +39,8 @@ export function ChatPane({ leafId }: ChatPaneProps) {
       className={classNames(styles.pane, focused && styles.focused)}
       aria-label={`Chat pane ${leafId}`}
       data-focused={focused || undefined}
+      onMouseDownCapture={handleFocusPane}
+      onPointerDownCapture={handleFocusPane}
       onClick={handleFocusPane}
       onFocusCapture={handleFocusPane}
     >
