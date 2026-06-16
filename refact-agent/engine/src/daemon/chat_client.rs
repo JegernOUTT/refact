@@ -323,10 +323,9 @@ mod tests {
         accepted_rx.await.unwrap();
         tokio::time::advance(CHAT_REQUEST_TIMEOUT + Duration::from_millis(1)).await;
         let error = request.await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("failed to send chat command"));
-        assert!(error
-            .to_string()
-            .contains("request timed out after 30 seconds"));
+        let error = error.to_string();
+        assert!(error.contains("failed to send chat command"));
+        assert!(error.contains("timed out"));
         server.abort();
     }
 

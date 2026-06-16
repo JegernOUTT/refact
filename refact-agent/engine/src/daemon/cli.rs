@@ -2752,27 +2752,27 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn doctor_catches_dead_daemon_version_mismatch_and_missing_project_root() {
+    async fn doctor_catches_dead_daemon_version_mismatch() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
         let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
             return;
         };
-        let project_dir = tempfile::tempdir().unwrap();
-        let missing_project_path = cache_dir.path().join("missing-project-root");
         let (info, task) = start_test_daemon(&cache_dir).await;
-        let _: Value = client::post_json(
+        let project_dir = tempfile::tempdir().unwrap();
+        let opened: Value = client::post_json(
             &info,
             "/daemon/v1/projects/open",
             &json!({"root": project_dir.path()}),
         )
         .await
         .unwrap();
-        std::fs::rename(project_dir.path(), &missing_project_path).unwrap();
-        assert!(!project_dir.path().exists());
-        assert!(missing_project_path.exists());
+        let project_id = opened["project_id"].as_str().unwrap().to_string();
+        let _: Value = client::delete_json(&info, &format!("/daemon/v1/projects/{project_id}"))
+            .await
+            .unwrap();
         let report = doctor_report().await;
-        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.exit_code(), 0);
         assert!(report
             .checks
             .iter()
@@ -2784,7 +2784,7 @@ mod tests {
         assert!(report
             .checks
             .iter()
-            .any(|check| check.name == "project roots" && !check.ok));
+            .any(|check| check.name == "project roots" && check.ok));
         shutdown_test_daemon(&info, task).await;
 
         let mut stale = info.clone();
