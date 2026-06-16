@@ -4,12 +4,12 @@ import { Layers } from "lucide-react";
 import { IconButton } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectCurrentThreadId,
-  selectAutoEnrichmentEnabled,
-  selectMemoryEnrichmentUserTouched,
+  selectAutoEnrichmentEnabledById,
+  selectMemoryEnrichmentUserTouchedById,
   setAutoEnrichmentEnabled,
   markMemoryEnrichmentUserTouched,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { updateChatParams } from "../../services/refact/chatCommands";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 
@@ -21,9 +21,13 @@ export const AutoEnrichmentToggleButton = ({
   disabled,
 }: AutoEnrichmentToggleButtonProps) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
-  const isEnabled = useAppSelector(selectAutoEnrichmentEnabled);
-  const userTouched = useAppSelector(selectMemoryEnrichmentUserTouched);
+  const chatId = useThreadId();
+  const isEnabled = useAppSelector((state) =>
+    selectAutoEnrichmentEnabledById(state, chatId),
+  );
+  const userTouched = useAppSelector((state) =>
+    selectMemoryEnrichmentUserTouchedById(state, chatId),
+  );
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 

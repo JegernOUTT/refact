@@ -5,6 +5,7 @@ import { render } from "../../utils/test-utils";
 import { server, goodCaps } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { ChatSettingsDropdown } from "./ChatSettingsDropdown";
+import { ChatThreadProvider } from "../../features/Chat/Thread";
 
 function chatStateWithReasoning(enabled: boolean) {
   const chat = createDefaultChatState();
@@ -92,5 +93,41 @@ describe("ChatSettingsDropdown", () => {
     expect(thread?.boost_reasoning).toBe(false);
     expect(thread?.reasoning_effort).toBeNull();
     expect(thread?.thinking_budget).toBeNull();
+  });
+
+  test("selected model change only updates the scoped thread", async () => {
+    const chat = chatStateWithReasoning(false);
+    const currentId = chat.current_thread_id;
+    const otherId = "thread-b";
+    const otherRuntime = structuredClone(chat.threads[currentId]);
+    otherRuntime.thread.id = otherId;
+    otherRuntime.thread.model = "openai/gpt-4o";
+    chat.open_thread_ids.push(otherId);
+    chat.threads[otherId] = otherRuntime;
+
+    const { user, store } = render(
+      <ChatThreadProvider chatId={otherId}>
+        <ChatSettingsDropdown />
+      </ChatThreadProvider>,
+      {
+        preloadedState: {
+          chat,
+          config,
+        },
+      },
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /openai\/gpt-4o/ }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }),
+    );
+
+    const state = store.getState();
+    expect(state.chat.threads[currentId]?.thread.model).toBe("openai/o1");
+    expect(state.chat.threads[otherId]?.thread.model).toBe(
+      "openai/gpt-4o-mini",
+    );
   });
 });

@@ -2,10 +2,11 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { selectSelectedSnippet } from "../../features/Chat/selectedSnippet";
 import { FileInfo, selectActiveFile } from "../../features/Chat/activeFile";
 import { useConfig, useAppSelector } from "../../hooks";
-import { selectMessages } from "../../features/Chat/Thread/selectors";
+import { selectMessagesById } from "../../features/Chat/Thread/selectors";
 import { createSelector } from "@reduxjs/toolkit";
 import { filename } from "../../utils";
 import { ideAttachFileToChat } from "../../hooks";
+import { useThreadId } from "../../features/Chat/Thread";
 
 type CheckboxHelp = {
   text: string;
@@ -26,7 +27,7 @@ export type Checkbox = {
 };
 
 const messageLengthSelector = createSelector(
-  [selectMessages],
+  [selectMessagesById],
   (messages) => messages.length,
 );
 
@@ -132,8 +133,11 @@ const useAttachSelectedSnippet = (
   interacted: boolean,
 ): [Checkbox, () => void] => {
   const { host } = useConfig();
+  const chatId = useThreadId();
   const snippet = useAppSelector(selectSelectedSnippet);
-  const messageLength = useAppSelector(messageLengthSelector);
+  const messageLength = useAppSelector((state) =>
+    messageLengthSelector(state, chatId),
+  );
   const markdown = useMemo(() => {
     return "```" + snippet.language + "\n" + snippet.code + "\n```\n";
   }, [snippet.language, snippet.code]);

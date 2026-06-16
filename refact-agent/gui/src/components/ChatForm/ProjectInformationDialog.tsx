@@ -25,13 +25,13 @@ import {
   defaultProjectInformationConfig,
   SectionConfig,
 } from "../../services/refact/projectInformation";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
-import { selectCurrentThreadId } from "../../features/Chat";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
 import { Slider, Surface, Switch } from "../ui";
 
 type Props = {
+  chatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 };
@@ -365,11 +365,11 @@ const SectionRow: React.FC<SectionRowProps> = ({
 };
 
 export const ProjectInformationDialog: React.FC<Props> = ({
+  chatId,
   open,
   onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
   const { data: savedConfig, isLoading } = useGetProjectInformationQuery(
     undefined,
     {

@@ -5,10 +5,11 @@ import classNames from "classnames";
 
 import { useAppSelector } from "../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-} from "../../features/Chat";
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectMessagesById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import {
   AssistantMessage,
   isAssistantMessage,
@@ -50,9 +51,12 @@ function getTextLength(message: AssistantMessage | null): number {
 }
 
 export const StreamingTokenCounter: React.FC = () => {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const messages = useAppSelector(selectMessages);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
 
   const [visible, setVisible] = useState(() => isStreaming || isWaiting);
   const [displayTokens, setDisplayTokens] = useState(0);

@@ -55,6 +55,7 @@ export function useInputValue(
           setIsSendImmediately(payload.send_immediately);
           void dispatch(
             sendIdeMessagesToCurrentChat({
+              chatId,
               messages: payload.messages,
               priority: payload.send_immediately,
             }),

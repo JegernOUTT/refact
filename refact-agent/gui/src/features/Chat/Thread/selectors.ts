@@ -1097,51 +1097,67 @@ export const selectCurrentTasks = (() => {
   );
 })();
 
-export const selectCurrentTasksById = (state: RootState, chatId: string) => {
-  const messages = selectMessagesById(state, chatId);
-  const toolMessages = messages.filter(isToolMessage);
-  return deriveTasksFromMessages(messages, toolMessages);
-};
+export const selectCurrentTasksById = createSelector(
+  [(state: RootState, chatId: string) => selectMessagesById(state, chatId)],
+  (messages) => deriveTasksFromMessages(messages, messages.filter(isToolMessage)),
+);
 
 export const selectHasTasks = createSelector(
   [selectCurrentTasks],
   (tasks) => tasks.length > 0,
 );
 
-export const selectTasksEverUsed = createSelector(
-  [selectMessages, toolMessagesSelector],
-  (messages, toolMessages): boolean => {
-    const successfulToolIds = new Set(
-      toolMessages.filter((m) => !m.tool_failed).map((m) => m.tool_call_id),
-    );
+export const selectHasTasksById = (state: RootState, chatId: string) =>
+  selectCurrentTasksById(state, chatId).length > 0;
 
-    for (const msg of messages) {
-      if (!isAssistantMessage(msg) || !msg.tool_calls) continue;
-      for (const tc of msg.tool_calls) {
-        if (
-          isToolName(tc.function.name, "tasks_set") &&
-          tc.id &&
-          successfulToolIds.has(tc.id)
-        ) {
-          return true;
-        }
+function tasksEverUsedInMessages(
+  messages: ChatMessages,
+  toolMessages: ToolMessage[],
+): boolean {
+  const successfulToolIds = new Set(
+    toolMessages.filter((m) => !m.tool_failed).map((m) => m.tool_call_id),
+  );
+
+  for (const msg of messages) {
+    if (!isAssistantMessage(msg) || !msg.tool_calls) continue;
+    for (const tc of msg.tool_calls) {
+      if (
+        isToolName(tc.function.name, "tasks_set") &&
+        tc.id &&
+        successfulToolIds.has(tc.id)
+      ) {
+        return true;
       }
     }
-    return false;
-  },
+  }
+  return false;
+}
+
+export const selectTasksEverUsed = createSelector(
+  [selectMessages, toolMessagesSelector],
+  tasksEverUsedInMessages,
 );
+
+export const selectTasksEverUsedById = (state: RootState, chatId: string) => {
+  const messages = selectMessagesById(state, chatId);
+  return tasksEverUsedInMessages(messages, messages.filter(isToolMessage));
+};
+
+function deriveTaskProgress(tasks: TodoItem[]): TaskProgress {
+  const done = tasks.filter((t) => t.status === "completed").length;
+  const active = tasks.find((t) => t.status === "in_progress");
+  return {
+    done,
+    total: tasks.length,
+    activeTitle: active?.content,
+  };
+}
 
 export const selectTaskProgress = (() => {
   let prev: TaskProgress = { done: 0, total: 0, activeTitle: undefined };
 
   return createSelector([selectCurrentTasks], (tasks): TaskProgress => {
-    const done = tasks.filter((t) => t.status === "completed").length;
-    const active = tasks.find((t) => t.status === "in_progress");
-    const next = {
-      done,
-      total: tasks.length,
-      activeTitle: active?.content,
-    };
+    const next = deriveTaskProgress(tasks);
 
     if (sameTaskProgress(prev, next)) {
       return prev;
@@ -1151,6 +1167,11 @@ export const selectTaskProgress = (() => {
     return next;
   });
 })();
+
+export const selectTaskProgressById = createSelector(
+  [selectCurrentTasksById],
+  deriveTaskProgress,
+);
 
 export type TaskProgressInfo = {
   done: number;

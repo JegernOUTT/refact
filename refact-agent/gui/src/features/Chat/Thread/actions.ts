@@ -139,9 +139,12 @@ export interface TaskMeta {
 
 export const sendIdeMessagesToCurrentChat = createAsyncThunk(
   "chatThread/sendIdeMessagesToCurrentChat",
-  async (arg: { messages: ChatMessages; priority?: boolean }, api) => {
+  async (
+    arg: { chatId?: string; messages: ChatMessages; priority?: boolean },
+    api,
+  ) => {
     const state = api.getState() as RootState;
-    const chatId = selectCurrentThreadId(state);
+    const chatId = arg.chatId ?? selectCurrentThreadId(state);
     const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
     if (!chatId) return;

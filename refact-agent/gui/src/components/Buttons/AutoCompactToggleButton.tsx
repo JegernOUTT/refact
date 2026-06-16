@@ -4,10 +4,10 @@ import { Archive } from "lucide-react";
 import { IconButton } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectCurrentThreadId,
-  selectAutoCompactEnabled,
+  selectAutoCompactEnabledById,
   setAutoCompactEnabled,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { updateChatParams } from "../../services/refact/chatCommands";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 
@@ -19,8 +19,10 @@ export const AutoCompactToggleButton = ({
   disabled,
 }: AutoCompactToggleButtonProps) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
-  const isEnabled = useAppSelector(selectAutoCompactEnabled);
+  const chatId = useThreadId();
+  const isEnabled = useAppSelector((state) =>
+    selectAutoCompactEnabledById(state, chatId),
+  );
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 

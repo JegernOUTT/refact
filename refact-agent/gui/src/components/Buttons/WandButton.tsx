@@ -4,11 +4,11 @@ import { WandSparkles } from "lucide-react";
 import { IconButton } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectCurrentThreadId,
-  selectManualPreviewItems,
+  selectManualPreviewItemsById,
   setManualPreviewItems,
   clearManualPreviewItems,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { usePreviewMemoryEnrichmentMutation } from "../../services/refact/memoryEnrichment";
 import { selectLspPort } from "../../features/Config/configSlice";
 
@@ -24,9 +24,11 @@ export const WandButton = ({
   onUpdateText,
 }: WandButtonProps) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
+  const chatId = useThreadId();
   const port = useAppSelector(selectLspPort);
-  const previewItems = useAppSelector(selectManualPreviewItems);
+  const previewItems = useAppSelector((state) =>
+    selectManualPreviewItemsById(state, chatId),
+  );
   const [previewEnrichment, { isLoading }] =
     usePreviewMemoryEnrichmentMutation();
 

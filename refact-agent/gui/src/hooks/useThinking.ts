@@ -2,24 +2,28 @@ import { useCallback, useMemo } from "react";
 import { useCapsForToolUse } from "./useCapsForToolUse";
 import { useAppSelector } from "./useAppSelector";
 import {
-  selectChatId,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectThreadBoostReasoning,
-  selectModel,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectThreadBoostReasoningById,
+  selectModelById,
   setBoostReasoning,
-} from "../features/Chat";
+  useThreadId,
+} from "../features/Chat/Thread";
 import { useAppDispatch } from "./useAppDispatch";
 
 export function useThinking() {
   const dispatch = useAppDispatch();
+  const chatId = useThreadId();
 
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const chatId = useAppSelector(selectChatId);
-  const threadModel = useAppSelector(selectModel);
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const threadModel = useAppSelector((state) => selectModelById(state, chatId));
 
-  const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
+  const isBoostReasoningEnabled = useAppSelector((state) =>
+    selectThreadBoostReasoningById(state, chatId),
+  );
 
   const caps = useCapsForToolUse();
 

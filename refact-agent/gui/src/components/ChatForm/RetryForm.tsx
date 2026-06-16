@@ -17,7 +17,11 @@ import {
   UserMessage,
 } from "../../services/refact";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
-import { selectIsStreaming, selectIsWaiting } from "../../features/Chat";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { DialogImage } from "../DialogImage";
 import {
@@ -82,8 +86,11 @@ export const RetryForm: React.FC<{
   const inputImages = getImageFromUserMessage(props.value);
   const [textValue, onChangeTextValue] = useState(inputText);
   const [imageValue, onChangeImageValue] = useState(inputImages);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
   const formRef = useRef<HTMLDivElement>(null);
 
   const disableInput = useMemo(

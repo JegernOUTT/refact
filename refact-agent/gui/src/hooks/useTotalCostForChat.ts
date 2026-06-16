@@ -1,4 +1,4 @@
-import { selectMessages } from "../features/Chat";
+import { selectMessagesById, useThreadId } from "../features/Chat/Thread";
 import {
   getTotalTokenMeteringForMessages,
   getTotalUsdMeteringForMessages,
@@ -6,11 +6,13 @@ import {
 import { useAppSelector } from "./useAppSelector";
 
 export const useTotalTokenMeteringForChat = () => {
-  const messages = useAppSelector(selectMessages);
+  const chatId = useThreadId();
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
   return getTotalTokenMeteringForMessages(messages);
 };
 
 export const useTotalUsdForChat = () => {
-  const messages = useAppSelector(selectMessages);
+  const chatId = useThreadId();
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
   return getTotalUsdMeteringForMessages(messages);
 };

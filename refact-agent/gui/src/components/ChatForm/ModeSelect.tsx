@@ -15,8 +15,8 @@ import {
 import { DEFAULT_MODE } from "../../features/Chat/Thread/types";
 import { useAppSelector, useAppDispatch } from "../../hooks";
 import {
-  selectMessages,
-  selectCurrentThreadId,
+  selectMessagesById,
+  useThreadId,
 } from "../../features/Chat/Thread";
 import { push, selectCurrentPage } from "../../features/Pages/pagesSlice";
 import { Badge, Chip, Icon, Popover, Skeleton } from "../ui";
@@ -56,8 +56,10 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const { data, isLoading } = useGetChatModesQuery(undefined);
-  const messages = useAppSelector(selectMessages);
-  const currentChatId = useAppSelector(selectCurrentThreadId);
+  const currentChatId = useThreadId();
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, currentChatId),
+  );
   const currentPage = useAppSelector(selectCurrentPage);
 
   const taskId =
@@ -273,6 +275,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
       )}
 
       <TaskPlannerDialog
+        sourceChatId={currentChatId}
         open={taskPlannerDialogOpen}
         onOpenChange={setTaskPlannerDialogOpen}
         taskId={taskId}

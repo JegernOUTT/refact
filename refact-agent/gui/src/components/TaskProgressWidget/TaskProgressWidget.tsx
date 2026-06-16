@@ -5,14 +5,14 @@ import classNames from "classnames";
 
 import { useAppSelector, useAppDispatch } from "../../hooks";
 import {
-  selectChatId,
-  selectCurrentTasks,
-  selectHasTasks,
-  selectTasksEverUsed,
-  selectTaskProgress,
-  selectTaskWidgetExpanded,
-  selectIsStreaming,
+  selectCurrentTasksById,
+  selectHasTasksById,
+  selectTasksEverUsedById,
+  selectTaskProgressById,
+  selectTaskWidgetExpandedById,
+  selectIsStreamingById,
   setTaskWidgetExpanded,
+  useThreadId,
 } from "../../features/Chat/Thread";
 import type { TodoItem, TodoStatus } from "../../features/Chat/Thread/types";
 import { Chevron } from "../Collapsible";
@@ -92,13 +92,21 @@ const TaskRow: React.FC<TaskRowProps> = ({ task, isStreaming }) => {
 
 export const TaskProgressWidget: React.FC = () => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
-  const hasTasks = useAppSelector(selectHasTasks);
-  const everUsed = useAppSelector(selectTasksEverUsed);
-  const tasks = useAppSelector(selectCurrentTasks);
-  const isExpanded = useAppSelector(selectTaskWidgetExpanded);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const { done, total, activeTitle } = useAppSelector(selectTaskProgress);
+  const chatId = useThreadId();
+  const hasTasks = useAppSelector((state) => selectHasTasksById(state, chatId));
+  const everUsed = useAppSelector((state) =>
+    selectTasksEverUsedById(state, chatId),
+  );
+  const tasks = useAppSelector((state) => selectCurrentTasksById(state, chatId));
+  const isExpanded = useAppSelector((state) =>
+    selectTaskWidgetExpandedById(state, chatId),
+  );
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const { done, total, activeTitle } = useAppSelector((state) =>
+    selectTaskProgressById(state, chatId),
+  );
 
   useEffect(() => {
     const summary =

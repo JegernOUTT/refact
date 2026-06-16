@@ -3,11 +3,17 @@ import { Flex, HoverCard, Text } from "@radix-ui/themes";
 import { WandSparkles } from "lucide-react";
 import { useThinking } from "../../hooks/useThinking";
 import { useAppSelector } from "../../hooks";
-import { selectThreadBoostReasoning } from "../../features/Chat";
+import {
+  selectThreadBoostReasoningById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { Button, Skeleton } from "../ui";
 
 export const ThinkingButton: React.FC = () => {
-  const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
+  const chatId = useThreadId();
+  const isBoostReasoningEnabled = useAppSelector((state) =>
+    selectThreadBoostReasoningById(state, chatId),
+  );
   const {
     handleReasoningChange,
     shouldBeDisabled,
