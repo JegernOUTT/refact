@@ -94,6 +94,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+pub(crate) fn popup_anchored_above(bounds: Rect, anchor_y: u16, width: u16, height: u16) -> Rect {
+    let width = width.min(bounds.width);
+    let height = height.min(bounds.height);
+    let max_y = bounds
+        .y
+        .saturating_add(bounds.height.saturating_sub(height));
+    let y = anchor_y.saturating_sub(height).clamp(bounds.y, max_y);
+    Rect {
+        x: bounds
+            .x
+            .saturating_add(bounds.width.saturating_sub(width) / 2),
+        y,
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

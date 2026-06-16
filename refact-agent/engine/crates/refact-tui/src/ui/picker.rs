@@ -103,14 +103,7 @@ pub fn render_modal_picker(
         .collect::<Vec<_>>();
     let width = area.width.saturating_sub(8).min(86).max(1);
     let height = popup_height_for_rows(&rows, selected_idx, width, area.height);
-    let max_y = area.y.saturating_add(area.height.saturating_sub(height));
-    let wanted_y = composer.y.saturating_sub(height);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: wanted_y.min(max_y),
-        width,
-        height,
-    };
+    let popup = super::popup_anchored_above(area, composer.y, width, height);
     frame.render_widget(Clear, popup);
     let inner = menu::render_menu_surface(popup, frame.buffer_mut());
     let title = if picker.is_multi() {
@@ -146,14 +139,7 @@ fn render_composer_popup(frame: &mut Frame<'_>, picker: &PickerState, area: Rect
     let height = visible_rows
         .saturating_add(2)
         .min(area.height.saturating_sub(2).max(1) as usize) as u16;
-    let max_y = area.y.saturating_add(area.height.saturating_sub(height));
-    let wanted_y = composer.y.saturating_sub(height);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: wanted_y.min(max_y),
-        width,
-        height,
-    };
+    let popup = super::popup_anchored_above(area, composer.y, width, height);
     frame.render_widget(Clear, popup);
     let inner = menu::render_menu_surface(popup, frame.buffer_mut());
     let mut state = ScrollState {
@@ -384,9 +370,10 @@ mod tests {
     use super::*;
     use crate::client::ProjectEntry;
     use crate::pickers::{PickerItem, PickerKind};
-    use ratatui::backend::TestBackend;
-    use ratatui::style::Color;
-    use ratatui::Terminal;
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::Position;
+    use ratatui::style::{Color, Style};
+    use ratatui::{Terminal, TerminalOptions, Viewport};
 
     fn item(id: &str, title: &str, description: &str) -> PickerItem {
         PickerItem {
@@ -435,6 +422,65 @@ mod tests {
             }
         }
         None
+    }
+
+    fn inline_terminal(width: u16, viewport_y: u16, viewport_height: u16) -> Terminal<TestBackend> {
+        let mut backend = TestBackend::new(width, viewport_y.saturating_add(viewport_height));
+        backend
+            .set_cursor_position(Position::new(0, viewport_y))
+            .unwrap();
+        Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_height),
+            },
+        )
+        .unwrap()
+    }
+
+    fn is_drawn_cell(cell: &ratatui::buffer::Cell) -> bool {
+        cell.symbol() != " " || cell.style() != Style::default()
+    }
+
+    fn assert_no_drawn_cells_outside(buffer: &ratatui::buffer::Buffer, bounds: Rect) -> bool {
+        let mut found = false;
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..buffer.area.right() {
+                let cell = &buffer[(x, y)];
+                if !is_drawn_cell(cell) {
+                    continue;
+                }
+                found = true;
+                assert!(
+                    x >= bounds.left()
+                        && x < bounds.right()
+                        && y >= bounds.top()
+                        && y < bounds.bottom(),
+                    "drawn cell ({x},{y}) escaped bounds {bounds:?}"
+                );
+            }
+        }
+        found
+    }
+
+    fn draw_picker_in_inline_area(
+        picker: &PickerState,
+        width: u16,
+        viewport_y: u16,
+        viewport_height: u16,
+        composer_y: u16,
+    ) -> ratatui::buffer::Buffer {
+        let area = Rect::new(0, viewport_y, width, viewport_height);
+        let composer = Rect::new(0, composer_y, width, 2);
+        let mut terminal = inline_terminal(width, viewport_y, viewport_height);
+        let completed = terminal
+            .draw(|frame| {
+                assert_eq!(frame.area(), area);
+                render_modal_picker(frame, picker, area, composer);
+            })
+            .unwrap();
+        assert_eq!(completed.buffer.area, area);
+        completed.buffer.clone()
     }
 
     #[test]
@@ -547,6 +593,114 @@ mod tests {
             .style()
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn modal_picker_clamps_exact_inline_backtrace_geometry() {
+        let picker = PickerState::new(
+            PickerKind::Model,
+            (0..12)
+                .map(|idx| item(&format!("m{idx}"), &format!("Model {idx}"), "available"))
+                .collect(),
+        );
+        let area = Rect::new(0, 21, 128, 12);
+        let buffer = draw_picker_in_inline_area(&picker, 128, 21, 12, 30);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(assert_no_drawn_cells_outside(&buffer, area));
+        assert!(text.contains("models:"));
+        assert!(text.contains("Model 0"));
+    }
+
+    #[test]
+    fn modal_model_mode_and_session_pickers_stay_inside_inline_viewport() {
+        for (kind, title) in [
+            (PickerKind::Model, "models:"),
+            (PickerKind::Mode, "modes:"),
+            (PickerKind::Session, "sessions:"),
+        ] {
+            let picker = PickerState::new(
+                kind,
+                vec![item("a", "Alpha", "one"), item("b", "Beta", "two")],
+            );
+            let area = Rect::new(0, 21, 128, 12);
+            let buffer = draw_picker_in_inline_area(&picker, 128, 21, 12, 31);
+            let text = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+
+            assert!(assert_no_drawn_cells_outside(&buffer, area));
+            assert!(text.contains(title));
+            assert!(text.contains("Alpha"));
+        }
+    }
+
+    #[test]
+    fn composer_slash_popup_stays_inside_inline_viewport() {
+        let picker = PickerState::new(
+            PickerKind::SlashCommand,
+            (0..12)
+                .map(|idx| item(&format!("cmd{idx}"), &format!("/cmd{idx}"), "command"))
+                .collect(),
+        );
+        let area = Rect::new(0, 21, 128, 12);
+        let buffer = draw_picker_in_inline_area(&picker, 128, 21, 12, 30);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(assert_no_drawn_cells_outside(&buffer, area));
+        assert!(text.contains("/cmd0"));
+    }
+
+    #[test]
+    fn composer_file_popup_stays_inside_inline_viewport() {
+        let picker = PickerState::new(
+            PickerKind::FileMention,
+            (0..12)
+                .map(|idx| {
+                    item(
+                        &format!("src/file_{idx}.rs"),
+                        &format!("src/file_{idx}.rs"),
+                        "file mention",
+                    )
+                })
+                .collect(),
+        );
+        let area = Rect::new(0, 21, 128, 12);
+        let buffer = draw_picker_in_inline_area(&picker, 128, 21, 12, 30);
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(assert_no_drawn_cells_outside(&buffer, area));
+        assert!(text.contains("src/file_0.rs"));
+    }
+
+    #[test]
+    fn picker_popups_do_not_panic_in_tiny_inline_area() {
+        for picker in [
+            PickerState::new(PickerKind::Model, vec![item("a", "Alpha", "one")]),
+            PickerState::new(PickerKind::SlashCommand, vec![item("cmd", "/cmd", "one")]),
+            PickerState::new(
+                PickerKind::FileMention,
+                vec![item("src/lib.rs", "src/lib.rs", "file mention")],
+            ),
+        ] {
+            let area = Rect::new(0, 1, 40, 3);
+            let buffer = draw_picker_in_inline_area(&picker, 40, 1, 3, 2);
+            assert_no_drawn_cells_outside(&buffer, area);
+        }
     }
 
     #[test]
