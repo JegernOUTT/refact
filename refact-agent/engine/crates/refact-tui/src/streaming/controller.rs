@@ -4,19 +4,23 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::history::cells::{
+    raw_lines_from_source, AssistantStreamCell, HistoryCell, HistoryRenderMode, PlanStreamCell,
+};
 use crate::render::MarkdownRenderer;
+use crate::style::proposed_plan_style;
 use crate::table_detect::{is_table_delimiter_line, is_table_header_line};
 use crate::text_safety::sanitize_tool_text;
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
-use crate::vendored::terminal_hyperlinks::HyperlinkLine;
+use crate::vendored::terminal_hyperlinks::{
+    plain_hyperlink_lines, prefix_hyperlink_lines, HyperlinkLine,
+};
 
 use super::chunking::{AdaptiveChunkingPolicy, DrainPlan, QueueSnapshot};
-use super::commit_tick::drain_with_policy;
 use super::table_holdback::{TableHoldbackScanner, TableHoldbackState};
-
-pub trait CommitDrain {
-    fn run_commit_tick(&mut self) -> Option<String>;
-}
 
 #[derive(Debug, Clone)]
 struct QueuedLine {
@@ -46,6 +50,7 @@ pub struct StreamController {
     policy: AdaptiveChunkingPolicy,
     stable_prefix_len_cache: Option<StablePrefixLenCache>,
     width: Option<usize>,
+    render_mode: HistoryRenderMode,
 }
 
 impl StreamController {
@@ -63,6 +68,7 @@ impl StreamController {
             policy: AdaptiveChunkingPolicy::default(),
             stable_prefix_len_cache: None,
             width,
+            render_mode: HistoryRenderMode::Rich,
         }
     }
 
@@ -110,12 +116,35 @@ impl StreamController {
         }
         self.recompute_streaming_render();
         self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
+        self.stable_prefix_len_cache = None;
         if had_pending_queue
             && self.emitted_stable_len == self.rendered_lines.len()
             && self.emitted_stable_len > 0
         {
             self.emitted_stable_len -= 1;
         }
+        self.queue.clear();
+        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
+            self.enqueued_stable_len = self.rendered_lines.len();
+            self.enqueued_source_len = self.raw_source.len();
+            return;
+        }
+        self.rebuild_stable_queue_from_render();
+    }
+
+    pub fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        if self.render_mode == render_mode {
+            return;
+        }
+        let had_pending_queue = !self.queue.is_empty();
+        let had_live_tail = self.has_tail();
+        self.render_mode = render_mode;
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
+        self.stable_prefix_len_cache = None;
         self.queue.clear();
         if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
             self.enqueued_stable_len = self.rendered_lines.len();
@@ -201,6 +230,34 @@ impl StreamController {
         self.drain(DrainPlan::Batch(usize::MAX))
     }
 
+    pub fn run_commit_tick(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let snapshot = QueueSnapshot {
+            queued_lines: self.queued_lines(),
+            oldest_age: self.oldest_queued_age(now),
+        };
+        let mut policy = std::mem::take(&mut self.policy);
+        let decision = policy.decide(snapshot, now);
+        let drained = self.drain(decision.drain_plan);
+        self.policy = policy;
+        drained
+    }
+
+    pub(crate) fn drain_for_commit_tick(
+        &mut self,
+        plan: DrainPlan,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let drained = self.drain(plan);
+        let cell = drained.map(|drained| {
+            let first = self.committed().len() == drained.len();
+            Box::new(AssistantStreamCell::new_lines(
+                self.render_source(&drained),
+                first,
+            )) as Box<dyn HistoryCell>
+        });
+        (cell, self.queue.is_empty() && !self.has_live_tail())
+    }
+
     fn ingest_complete_source(&mut self, source: &str) {
         self.raw_source.push_str(source);
         self.table_scanner.push_source_chunk(source);
@@ -210,9 +267,11 @@ impl StreamController {
 
     fn render_source(&self, source: &str) -> Vec<HyperlinkLine> {
         if source.is_empty() {
-            Vec::new()
-        } else {
-            MarkdownRenderer::new(self.width).render_with_links(source)
+            return Vec::new();
+        }
+        match self.render_mode {
+            HistoryRenderMode::Rich => MarkdownRenderer::new(self.width).render_with_links(source),
+            HistoryRenderMode::Raw => plain_hyperlink_lines(raw_lines_from_source(source)),
         }
     }
 
@@ -228,6 +287,9 @@ impl StreamController {
 
     fn target_stable_source_len(&self) -> usize {
         let source_len = self.raw_source.len();
+        if self.render_mode == HistoryRenderMode::Raw {
+            return source_len;
+        }
         let target = match self.table_scanner.state() {
             TableHoldbackState::None => source_len,
             TableHoldbackState::PendingHeader { header_start }
@@ -359,6 +421,170 @@ impl StreamController {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PlanStreamController {
+    stream: StreamController,
+    header_emitted: bool,
+    top_padding_emitted: bool,
+}
+
+impl PlanStreamController {
+    pub fn new(width: Option<usize>, cwd: &Path) -> Self {
+        Self {
+            stream: StreamController::new(width, cwd),
+            header_emitted: false,
+            top_padding_emitted: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.stream.clear();
+        self.header_emitted = false;
+        self.top_padding_emitted = false;
+    }
+
+    pub fn set_width(&mut self, width: Option<usize>) {
+        self.stream.set_width(width);
+    }
+
+    pub fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        self.stream.set_render_mode(render_mode);
+    }
+
+    pub fn push_delta(&mut self, delta: &str) {
+        self.stream.push_delta(delta);
+    }
+
+    pub fn push_sanitized_delta(&mut self, delta: &str) {
+        self.stream.push_sanitized_delta(delta);
+    }
+
+    pub fn queued_lines(&self) -> usize {
+        self.stream.queued_lines()
+    }
+
+    pub fn stable_lines_ready(&self) -> bool {
+        self.stream.stable_lines_ready()
+    }
+
+    pub fn has_live_tail(&self) -> bool {
+        self.stream.has_live_tail()
+    }
+
+    pub fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.stream.oldest_queued_age(now)
+    }
+
+    pub fn current_tail_display_lines(&self) -> Vec<HyperlinkLine> {
+        let lines = self.stream.current_tail_lines();
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        self.render_display_lines(lines, false)
+    }
+
+    pub fn visible_display_lines(&self) -> Vec<HyperlinkLine> {
+        let source = self.stream.visible();
+        if source.is_empty() {
+            return Vec::new();
+        }
+        self.render_display_lines_with_state(
+            self.stream.render_source(&source),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn finalize(&mut self) -> Option<String> {
+        let source = self.stream.finalize();
+        self.header_emitted = false;
+        self.top_padding_emitted = false;
+        (!source.is_empty()).then_some(source)
+    }
+
+    pub(crate) fn drain_for_commit_tick(
+        &mut self,
+        plan: DrainPlan,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let drained = self.stream.drain(plan);
+        let cell = drained.and_then(|drained| self.emit_source(&drained, false));
+        (cell, !self.stable_lines_ready() && !self.has_live_tail())
+    }
+
+    fn emit_source(
+        &mut self,
+        source: &str,
+        include_bottom_padding: bool,
+    ) -> Option<Box<dyn HistoryCell>> {
+        let lines = self.stream.render_source(source);
+        let display_lines = self.render_display_lines(lines, include_bottom_padding);
+        if display_lines.is_empty() {
+            return None;
+        }
+        let continuation = self.header_emitted;
+        self.header_emitted = true;
+        self.top_padding_emitted = true;
+        Some(Box::new(PlanStreamCell::new(display_lines, continuation)))
+    }
+
+    fn render_display_lines(
+        &self,
+        lines: Vec<HyperlinkLine>,
+        include_bottom_padding: bool,
+    ) -> Vec<HyperlinkLine> {
+        self.render_display_lines_with_state(
+            lines,
+            include_bottom_padding,
+            self.header_emitted,
+            self.top_padding_emitted,
+        )
+    }
+
+    fn render_display_lines_with_state(
+        &self,
+        lines: Vec<HyperlinkLine>,
+        include_bottom_padding: bool,
+        header_emitted: bool,
+        top_padding_emitted: bool,
+    ) -> Vec<HyperlinkLine> {
+        if lines.is_empty() && header_emitted && !include_bottom_padding {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if !header_emitted {
+            out.push(HyperlinkLine::new(plan_header_line("Proposed Plan")));
+            out.push(HyperlinkLine::new(Line::from(" ")));
+        }
+
+        let mut card = Vec::new();
+        if !top_padding_emitted {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+        }
+        card.extend(prefix_hyperlink_lines(
+            lines,
+            Span::raw("  "),
+            Span::raw("  "),
+        ));
+        if include_bottom_padding {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+        }
+        let style = proposed_plan_style();
+        out.extend(card.into_iter().map(|line| line.style(style)));
+        out
+    }
+}
+
+fn plan_header_line(title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
 fn previous_char_boundary(source: &str, index: usize) -> usize {
     let mut index = index.min(source.len());
     while !source.is_char_boundary(index) {
@@ -423,27 +649,22 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
     table_start.map(|start| (start, source.len()))
 }
 
-impl CommitDrain for StreamController {
-    fn run_commit_tick(&mut self) -> Option<String> {
-        let now = Instant::now();
-        let snapshot = QueueSnapshot {
-            queued_lines: self.queued_lines(),
-            oldest_age: self.oldest_queued_age(now),
-        };
-        let mut policy = std::mem::take(&mut self.policy);
-        let drained = drain_with_policy(&mut policy, snapshot, now, |plan| self.drain(plan));
-        self.policy = policy;
-        drained
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::render_markdown;
+    use crate::render::wrapping::line_to_plain;
 
     fn controller() -> StreamController {
         StreamController::new(None, std::path::Path::new("."))
+    }
+
+    fn text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(line_to_plain)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -625,6 +846,33 @@ mod tests {
         while stream.run_commit_tick().is_some() {}
         assert!(stream.committed().starts_with(&emitted));
         assert_eq!(stream.finalize(), "alpha beta gamma\ndelta\n");
+    }
+
+    #[test]
+    fn raw_render_mode_streams_source_lines_without_markdown_rewrite() {
+        let mut stream = controller();
+        stream.push_delta("## Heading\n");
+        stream.set_render_mode(HistoryRenderMode::Raw);
+
+        let (cell, idle) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        let cell = cell.expect("raw stream cell");
+
+        assert!(idle);
+        assert_eq!(text(&cell.render(80)), "• ## Heading");
+    }
+
+    #[test]
+    fn plan_stream_controller_uses_raw_render_mode_for_source_lines() {
+        let mut plan = PlanStreamController::new(Some(80), std::path::Path::new("."));
+        plan.set_render_mode(HistoryRenderMode::Raw);
+        plan.push_delta("## Heading\n");
+
+        let (cell, idle) = plan.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        let rendered = text(&cell.expect("plan stream cell").render(80));
+
+        assert!(idle);
+        assert!(rendered.contains("Proposed Plan"));
+        assert!(rendered.contains("## Heading"));
     }
 
     fn utf8_chunks(source: &str, max_bytes: usize) -> Vec<&str> {

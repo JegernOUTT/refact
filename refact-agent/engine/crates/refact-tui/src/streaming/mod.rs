@@ -5,5 +5,6 @@ mod commit_tick;
 mod controller;
 mod table_holdback;
 
-pub use commit_tick::run_commit_tick;
-pub use controller::StreamController;
+pub(crate) use chunking::AdaptiveChunkingPolicy;
+pub(crate) use commit_tick::{run_commit_tick, CommitTickScope};
+pub use controller::{PlanStreamController, StreamController};

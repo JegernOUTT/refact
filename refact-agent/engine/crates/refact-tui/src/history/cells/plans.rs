@@ -51,6 +51,21 @@ impl PlanCell {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStreamCell {
+    lines: Vec<HyperlinkLine>,
+    is_stream_continuation: bool,
+}
+
+impl PlanStreamCell {
+    pub fn new(lines: Vec<HyperlinkLine>, is_stream_continuation: bool) -> Self {
+        Self {
+            lines,
+            is_stream_continuation,
+        }
+    }
+}
+
 impl HistoryCell for PlanCell {
     fn kind(&self) -> HistoryCellKind {
         HistoryCellKind::Plan
@@ -89,6 +104,46 @@ impl HistoryCell for PlanCell {
 
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.data))
+    }
+}
+
+impl HistoryCell for PlanStreamCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Plan
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        self.render_with_links(width)
+            .into_iter()
+            .map(|line| line.line)
+            .collect()
+    }
+
+    fn render_with_links(&self, _width: usize) -> Vec<HyperlinkLine> {
+        self.lines.clone()
+    }
+
+    fn is_stream_continuation(&self) -> bool {
+        self.is_stream_continuation
+    }
+
+    fn is_final(&self) -> bool {
+        false
+    }
+
+    fn revision(&self) -> u64 {
+        let text = self
+            .lines
+            .iter()
+            .map(|line| {
+                line.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        revision(&(self.kind(), text, self.is_stream_continuation))
     }
 }
 

@@ -36,7 +36,7 @@ pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
 pub use messages::{AssistantCell, AssistantStreamCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
 pub use patches::{DiffCell, DiffToolCell};
-pub use plans::{PlanCell, PlanCellData};
+pub use plans::{PlanCell, PlanCellData, PlanStreamCell};
 pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
 pub use server::{CitationCell, ServerContentBlockCell, ServerToolCell};
@@ -312,6 +312,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         }
         TranscriptItem::Tool(card) => cell_from_tool_card(card.clone(), selected),
         TranscriptItem::Plan(data) => Box::new(PlanCell::new(data.clone())),
+        TranscriptItem::PlanStream(lines) => Box::new(PlanStreamCell::new(lines.clone(), false)),
         TranscriptItem::Citation(text) => Box::new(CitationCell::new(text.clone())),
         TranscriptItem::ServerContentBlock(text) => {
             Box::new(ServerContentBlockCell::new(text.clone()))

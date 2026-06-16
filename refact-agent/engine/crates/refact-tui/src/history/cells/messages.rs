@@ -130,6 +130,10 @@ impl AssistantStreamCell {
             first,
         }
     }
+
+    pub fn new_lines(lines: Vec<HyperlinkLine>, first: bool) -> Self {
+        Self { lines, first }
+    }
 }
 
 impl HistoryCell for AssistantStreamCell {
@@ -160,6 +164,10 @@ impl HistoryCell for AssistantStreamCell {
 
     fn is_stream_continuation(&self) -> bool {
         !self.first
+    }
+
+    fn is_final(&self) -> bool {
+        false
     }
 
     fn revision(&self) -> u64 {
@@ -319,6 +327,14 @@ mod tests {
             text(&cell.render(40)),
             "•  A      B\n  ━━━━━  ━━━━━\n   one    two"
         );
+    }
+
+    #[test]
+    fn assistant_cell_rerenders_markdown_from_source_on_resize() {
+        let cell = AssistantCell::new("alpha beta gamma delta");
+
+        assert_eq!(text(&cell.render(80)), "• alpha beta gamma delta");
+        assert_eq!(text(&cell.render(8)), "• alpha\n  beta\n  gamma\n  delta");
     }
 
     #[test]

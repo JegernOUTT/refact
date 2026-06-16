@@ -207,6 +207,19 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Plan(plan) => {
                 format!("plan:{}:{}:{}", plan.mode, plan.version, plan.content)
             }
+            TranscriptItem::PlanStream(lines) => format!(
+                "plan_stream:{}",
+                lines
+                    .iter()
+                    .map(|line| line
+                        .line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
             TranscriptItem::Citation(text) => format!("citation:{text}"),
             TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Diff(text) => format!("diff:{text}"),

@@ -30,7 +30,7 @@ use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{
-    synthesize_plan_content, ApprovalOutcome, AssistantStreamCell, PlanCellData,
+    synthesize_plan_content, ApprovalOutcome, HistoryCellKind, HistoryRenderMode, PlanCellData,
 };
 use crate::history::{
     insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
@@ -54,7 +54,10 @@ use crate::render::highlight;
 use crate::sessions::{
     last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
 };
-use crate::streaming::{run_commit_tick, StreamController};
+use crate::streaming::{
+    run_commit_tick, AdaptiveChunkingPolicy, CommitTickScope, PlanStreamController,
+    StreamController,
+};
 use crate::terminal::{
     terminal_title, FrameRequester, TerminalSession, TerminalTitleConfig, TARGET_FRAME_INTERVAL,
 };
@@ -131,6 +134,7 @@ pub enum TranscriptItem {
     Reasoning(String, bool),
     Tool(ToolCard),
     Plan(PlanCellData),
+    PlanStream(Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>),
     Citation(String),
     ServerContentBlock(String),
     Diff(String),
@@ -149,6 +153,7 @@ impl TranscriptItem {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
             || matches!(self, Self::Approval(_, None))
             || matches!(self, Self::Plan(_))
+            || matches!(self, Self::PlanStream(_))
     }
 
     fn can_enter_history(&self) -> bool {
@@ -447,6 +452,9 @@ pub struct App {
     working_last_tick_at_ms: Option<u64>,
     working_detail: Option<String>,
     stream_controller: StreamController,
+    plan_stream_controller: Option<PlanStreamController>,
+    stream_chunking_policy: AdaptiveChunkingPolicy,
+    history_render_mode: HistoryRenderMode,
     notifications: NotificationManager,
     history: HistoryBuffer,
     resize_reflow: ResizeReflowState,
@@ -545,6 +553,9 @@ impl App {
             working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            plan_stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            history_render_mode: HistoryRenderMode::Rich,
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
             resize_reflow: ResizeReflowState::default(),
@@ -626,6 +637,9 @@ impl App {
             working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            plan_stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            history_render_mode: HistoryRenderMode::Rich,
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
             resize_reflow: ResizeReflowState::default(),
@@ -850,6 +864,12 @@ impl App {
         }
     }
 
+    fn clear_stream_controllers(&mut self) {
+        self.stream_controller.clear();
+        self.plan_stream_controller = None;
+        self.stream_chunking_policy.reset();
+    }
+
     fn latest_tool_detail(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|item| match item {
             TranscriptItem::Tool(card) if card.status == ToolStatus::Running => {
@@ -911,18 +931,31 @@ impl App {
     }
 
     fn update_stream_width_for_terminal(&mut self, width: u16) {
-        let should_sync =
+        let should_sync_assistant =
             self.stream_controller.has_live_tail() || self.stream_controller.stable_lines_ready();
+        let should_sync_plan = self
+            .plan_stream_controller
+            .as_ref()
+            .is_some_and(|controller| {
+                controller.has_live_tail() || controller.stable_lines_ready()
+            });
+        let should_sync = should_sync_assistant || should_sync_plan;
         if self.session_state != SessionState::Generating && !should_sync {
             return;
         }
         self.stream_controller
             .set_width(assistant_stream_width(width));
+        if let Some(controller) = &mut self.plan_stream_controller {
+            controller.set_width(assistant_stream_width(width));
+        }
         if should_sync {
-            if self.native_scrollback {
+            if should_sync_assistant && self.native_scrollback {
                 self.sync_assistant_stream_tail_item();
-            } else {
+            } else if should_sync_assistant {
                 self.sync_assistant_stream_item();
+            }
+            if should_sync_plan {
+                self.sync_plan_stream_tail_item();
             }
         }
     }
@@ -1042,6 +1075,10 @@ impl App {
 
     pub fn stream_has_committable_lines(&self) -> bool {
         self.stream_controller.stable_lines_ready()
+            || self
+                .plan_stream_controller
+                .as_ref()
+                .is_some_and(PlanStreamController::stable_lines_ready)
     }
 
     pub fn active_stream_committed(&self) -> &str {
@@ -2218,7 +2255,7 @@ impl App {
             project.slug,
             project.root.display()
         ));
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.composer_mode = ComposerMode::Chat;
@@ -2260,7 +2297,7 @@ impl App {
         self.clear_reasoning_level();
         self.replace_with_session(notice, Some(self.session_header_subtitle()));
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.clear_approvals();
@@ -2290,7 +2327,7 @@ impl App {
         self.clear_pending_target_params();
         self.replace_with_session(format!("Resuming {title}"), subtitle);
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.clear_approvals();
@@ -2413,7 +2450,7 @@ impl App {
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.set_session_state(SessionState::Generating);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.usage = None;
         self.retry_hint = None;
         self.clear_backtrack_selection();
@@ -2430,7 +2467,7 @@ impl App {
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.set_session_state(SessionState::Generating);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.usage = None;
         self.retry_hint = None;
         AppAction::SendMessage { prompt, params }
@@ -2556,7 +2593,7 @@ impl App {
         error: &str,
     ) -> AppAction {
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rollback_failed_send_transcript(&prompt);
         self.restore_failed_prompt(prompt, params);
         self.add_notice(format!("Command failed: {error}"));
@@ -3012,6 +3049,48 @@ impl App {
         self.sync_assistant_stream_item();
     }
 
+    fn append_plan_stream(&mut self, text: &str) {
+        if self.plan_stream_controller.is_none() {
+            let mut controller = PlanStreamController::new(None, std::path::Path::new("."));
+            controller.set_render_mode(self.history_render_mode);
+            self.plan_stream_controller = Some(controller);
+        }
+        if let Some(controller) = &mut self.plan_stream_controller {
+            controller.push_sanitized_delta(text);
+        }
+        self.sync_plan_stream_item();
+    }
+
+    fn sync_plan_stream_item(&mut self) {
+        let Some(controller) = self.plan_stream_controller.as_ref() else {
+            return;
+        };
+        let lines = controller.visible_display_lines();
+        self.sync_plan_stream_lines(lines);
+    }
+
+    fn sync_plan_stream_tail_item(&mut self) {
+        let Some(controller) = self.plan_stream_controller.as_ref() else {
+            return;
+        };
+        let lines = controller.current_tail_display_lines();
+        self.sync_plan_stream_lines(lines);
+    }
+
+    fn sync_plan_stream_lines(
+        &mut self,
+        lines: Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>,
+    ) {
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::PlanStream(_)) if lines.is_empty() => {
+                self.transcript.pop();
+            }
+            Some(TranscriptItem::PlanStream(value)) => *value = lines,
+            _ if !lines.is_empty() => self.push_live_item(TranscriptItem::PlanStream(lines)),
+            _ => {}
+        }
+    }
+
     fn sync_assistant_stream_item(&mut self) {
         let visible = self.stream_controller.visible();
         if visible.is_empty() {
@@ -3060,7 +3139,7 @@ impl App {
 
     fn replace_live_region_from_snapshot(&mut self, next_keys: &[String]) {
         self.transcript.clear();
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         if self.rendered_state_keys != next_keys {
             self.history.clear_pending();
         }
@@ -3190,29 +3269,29 @@ impl App {
 
     fn run_stream_commit_tick(&mut self) {
         self.tick_working_indicator();
-        let Some(drained) = run_commit_tick(&mut self.stream_controller) else {
+        let output = run_commit_tick(
+            &mut self.stream_chunking_policy,
+            Some(&mut self.stream_controller),
+            self.plan_stream_controller.as_mut(),
+            CommitTickScope::AnyMode,
+            Instant::now(),
+        );
+        if output.cells.is_empty() {
             return;
-        };
+        }
         if self.native_scrollback {
-            let first = self.stream_controller.committed().len() == drained.len();
-            self.history
-                .enqueue_cell(Box::new(AssistantStreamCell::new(&drained, first)));
+            for cell in output.cells {
+                self.history.enqueue_cell(cell);
+            }
             self.sync_assistant_stream_tail_item();
+            self.sync_plan_stream_tail_item();
         } else {
             self.sync_assistant_stream_item();
+            self.sync_plan_stream_item();
         }
     }
 
     fn finalize_assistant_stream(&mut self) -> Option<String> {
-        let tail = self.stream_controller.live();
-        let first_tail = self.stream_controller.committed().is_empty();
-        if self.native_scrollback {
-            if let Some(drained) = self.stream_controller.drain_all_stable() {
-                let first = self.stream_controller.committed().len() == drained.len();
-                self.history
-                    .enqueue_cell(Box::new(AssistantStreamCell::new(&drained, first)));
-            }
-        }
         let final_content = self.stream_controller.finalize();
         if final_content.is_empty() {
             return None;
@@ -3220,10 +3299,15 @@ impl App {
         if self.native_scrollback {
             self.transcript
                 .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
-            if !tail.is_empty() {
-                self.history
-                    .enqueue_cell(Box::new(AssistantStreamCell::new(&tail, first_tail)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Assistant)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
             }
+            self.history
+                .enqueue(TranscriptItem::Assistant(final_content.clone()));
         } else {
             match self.transcript.last_mut() {
                 Some(TranscriptItem::Assistant(value)) => *value = final_content.clone(),
@@ -3233,6 +3317,24 @@ impl App {
             }
         }
         Some(final_content)
+    }
+
+    fn finalize_plan_stream(&mut self) -> Option<String> {
+        let source = self
+            .plan_stream_controller
+            .as_mut()
+            .and_then(PlanStreamController::finalize);
+        if source.is_some() {
+            self.plan_stream_controller = None;
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::PlanStream(_)));
+            if self.native_scrollback
+                && self.history.remove_non_final_cells(HistoryCellKind::Plan) > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+        }
+        source
     }
 
     fn append_reasoning(&mut self, text: &str) {
@@ -3390,11 +3492,19 @@ impl App {
                 );
             }
             TranscriptRole::Plan => {
-                self.upsert_current_plan_item(render_message_key(message, "plan", 0));
+                if message.stream_finished {
+                    self.upsert_current_plan_item(render_message_key(message, "plan", 0));
+                } else {
+                    self.append_plan_stream(&message.content);
+                }
             }
             TranscriptRole::Event => {
                 if is_plan_delta_message(message) {
-                    self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
+                    if message.stream_finished {
+                        self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
+                    } else {
+                        self.append_plan_stream(&message.content);
+                    }
                 } else {
                     self.push_internal_event(message);
                 }
@@ -3423,6 +3533,7 @@ impl App {
         let Some(plan) = current_plan_cell_data(self.transcript_state.messages()) else {
             return;
         };
+        self.finalize_plan_stream();
         self.rendered_state_keys
             .truncate(self.rendered_state_cursor);
         self.rendered_state_keys.push(key);
@@ -3618,7 +3729,7 @@ impl App {
             SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
             SseEvent::StreamStarted { message_id } => {
                 self.set_session_state(SessionState::Generating);
-                self.stream_controller.clear();
+                self.clear_stream_controllers();
                 self.transcript_state.start_assistant(message_id.as_deref());
                 self.rebuild_render_transcript_from_state();
             }
@@ -7885,6 +7996,23 @@ mod tests {
             .collect()
     }
 
+    fn plan_stream_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::PlanStream(lines) => Some(
+                    lines
+                        .iter()
+                        .map(|line| line_to_plain_string(&line.line))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn tool_cards(app: &App) -> Vec<&ToolCard> {
         app.visible_transcript()
             .iter()
@@ -10770,6 +10898,108 @@ new-chat = "ctrl-x"
             raw: json!({}),
         });
         assert_eq!(assistant_text(&app), "# Title\npartial tail\n");
+    }
+
+    #[test]
+    fn unfinished_plan_message_streams_then_finalizes_to_plan_cell() {
+        let mut app = App::new(project());
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n- one\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        let streamed = plan_stream_text(&app);
+        assert!(streamed.contains("Proposed Plan"));
+        assert!(streamed.contains("## Plan"));
+        assert!(streamed.contains("- one"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n- one\n",
+                "stream_finished": true,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        assert!(plan_stream_text(&app).is_empty());
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Plan(data) if data.content.contains("- one"))
+        }));
+    }
+
+    #[test]
+    fn native_plan_stream_commits_non_final_plan_cells() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        app.apply_stream_commit_tick();
+        assert!(app.history_pending_count() > 0);
+        let pending_text = app
+            .pending_history_insertions(80)
+            .into_iter()
+            .flat_map(|insertion| insertion.lines)
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pending_text.contains("Proposed Plan"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n",
+                "stream_finished": true,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        assert!(plan_stream_text(&app).is_empty());
+        assert_eq!(app.history_pending_count(), 0);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Plan(data) if data.content.contains("- eight"))
+        }));
     }
 
     #[test]

@@ -229,6 +229,36 @@ impl HistoryBuffer {
         id
     }
 
+    pub fn remove_non_final_cells(&mut self, kind: cells::HistoryCellKind) -> usize {
+        let mut removed_ids = Vec::new();
+        self.history.retain(|entry| {
+            let remove = entry.cell.kind() == kind && !entry.cell.is_final();
+            if remove {
+                removed_ids.push(entry.id);
+            }
+            !remove
+        });
+        self.pending.retain(|entry| {
+            let remove = entry.cell.kind() == kind && !entry.cell.is_final();
+            if remove && !removed_ids.iter().any(|id| *id == entry.id) {
+                removed_ids.push(entry.id);
+            }
+            !remove
+        });
+        self.evict_cache_entries(&removed_ids);
+        removed_ids.len()
+    }
+
+    pub fn replace_non_final_cells(
+        &mut self,
+        kind: cells::HistoryCellKind,
+        cell: Box<dyn cells::HistoryCell>,
+    ) -> (u64, usize) {
+        let removed = self.remove_non_final_cells(kind);
+        let id = self.enqueue_cell(cell);
+        (id, removed)
+    }
+
     pub fn drain_pending(&mut self, width: u16) -> Vec<HistoryInsertion> {
         let insertions = self.pending_insertions(width);
         self.inserted_cell_count += insertions
