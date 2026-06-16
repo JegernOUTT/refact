@@ -361,6 +361,7 @@ fn status_footer_and_working_indicator_golden_snapshots() {
                 .to_string(),
         ),
         reduced_motion: true,
+        interrupt_key: "Esc".to_string(),
     };
     let status_lines = status_indicator::status_indicator_lines(&status_data, 72).unwrap();
     let status_actual = render_widget_snapshot(72, 4, |frame| {
@@ -387,6 +388,7 @@ fn status_footer_and_working_indicator_golden_snapshots() {
         }),
         context_window_tokens: Some(100000),
         retry_hint: Some("retry available".to_string()),
+        interrupt_key: "Esc".to_string(),
     };
     let footer_actual = render_widget_snapshot(100, 1, |frame| {
         Paragraph::new(footer::footer_line(&footer_data)).render(frame.area(), frame.buffer_mut());
