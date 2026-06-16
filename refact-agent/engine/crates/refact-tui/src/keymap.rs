@@ -820,7 +820,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::Quit, &["ctrl-q"]),
         entry(KeyContext::Main, KeyAction::NewChat, &["ctrl-n"]),
         entry(KeyContext::Main, KeyAction::OpenProjects, &["ctrl-p"]),
-        entry(KeyContext::Main, KeyAction::OpenModels, &["ctrl-m"]),
+        entry(KeyContext::Main, KeyAction::OpenModels, &["alt-m"]),
         entry(KeyContext::Main, KeyAction::OpenModes, &["ctrl-o"]),
         entry(
             KeyContext::Main,
@@ -1178,6 +1178,17 @@ newline = "enter"
             registry.action_for(KeyContext::Main, key(KeyCode::Char('r'), KeyModifiers::ALT)),
             Some(KeyAction::ToggleReasoning)
         );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::Char('m'), KeyModifiers::ALT)),
+            Some(KeyAction::OpenModels)
+        );
+        assert_ne!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('m'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::OpenModels)
+        );
         let rows = registry.help_rows();
         assert!(rows
             .iter()
@@ -1188,5 +1199,8 @@ newline = "enter"
         assert!(rows
             .iter()
             .any(|row| row.action == KeyAction::Redo && row.bindings.contains("Ctrl-Shift-Z")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::OpenModels && row.bindings.contains("Alt-M")));
     }
 }

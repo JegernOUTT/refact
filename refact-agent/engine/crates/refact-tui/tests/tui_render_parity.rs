@@ -161,7 +161,7 @@ fn transcript_cells_golden_snapshot() {
     let actual = render_app_snapshot(&mut app, 100, 66);
     assert_snapshot(
         actual,
-        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mode · ? help
+        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   ─ Parity sweep · fixture · gpt-demo · agent · <chat> ───────────────────────────────────────────
 
 
@@ -256,7 +256,7 @@ fn approval_overlay_golden_snapshot() {
     let actual = render_app_snapshot(&mut app, 90, 24);
     assert_snapshot(
         actual,
-        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mode · ? help
+        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   • Opened project fixture at /tmp/fixture
 
 
@@ -323,7 +323,7 @@ fn ask_form_overlay_golden_snapshot() {
     let actual = render_app_snapshot(&mut app, 90, 24);
     assert_snapshot(
         actual,
-        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mode · ? help
+        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   • Questions
   ▸ ✅  ask_questions({}) · <ms>
 

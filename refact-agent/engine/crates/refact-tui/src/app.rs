@@ -1165,7 +1165,17 @@ impl App {
         if items.is_empty() {
             self.add_notice("No models returned by caps");
         } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::Model, items));
+            let mut picker = PickerState::new(PickerKind::Model, items);
+            if let Some(model) = self
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                let selected =
+                    resolve_chat_model_id(&caps, model).unwrap_or_else(|| model.to_string());
+                picker.select_item_id(&selected);
+            }
+            self.modal_picker = Some(picker);
             self.composer_mode = ComposerMode::Chat;
         }
     }
@@ -1175,6 +1185,22 @@ impl App {
         self.model_reasoning_caps = model_reasoning_caps(caps);
         self.default_context_window_tokens =
             default_context_window(caps, &self.model_context_windows);
+        let mut changed = false;
+        if empty_optional_str(self.model.as_deref()) {
+            if let Some(model) = resolved_default_chat_model(caps) {
+                self.model = Some(model);
+                changed = true;
+            }
+        }
+        if empty_optional_str(self.mode.as_deref()) {
+            if let Some(mode) = default_chat_mode(caps) {
+                self.mode = Some(mode.to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_session_header_item();
+        }
     }
 
     fn open_mode_picker(&mut self, modes: Value) {
@@ -1182,7 +1208,14 @@ impl App {
         if items.is_empty() {
             self.add_notice("No modes returned by worker");
         } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::Mode, items));
+            let mut picker = PickerState::new(PickerKind::Mode, items);
+            let current = self
+                .mode
+                .as_deref()
+                .filter(|mode| !mode.trim().is_empty())
+                .unwrap_or("agent");
+            picker.select_item_id(current);
+            self.modal_picker = Some(picker);
             self.composer_mode = ComposerMode::Chat;
         }
     }
@@ -3878,16 +3911,16 @@ impl App {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             };
-            self.model = thread
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            self.mode = thread
-                .get("mode")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+            if let Some(model) = thread.get("model") {
+                if let Some(model) = model.as_str().filter(|value| !value.is_empty()) {
+                    self.model = Some(model.to_string());
+                }
+            }
+            if let Some(mode) = thread.get("mode") {
+                if let Some(mode) = mode.as_str().filter(|value| !value.is_empty()) {
+                    self.mode = Some(mode.to_string());
+                }
+            }
             self.boost_reasoning = thread
                 .get("boost_reasoning")
                 .and_then(Value::as_bool)
@@ -3949,19 +3982,28 @@ impl App {
             self.show_session_header = true;
         }
         if params.get("model").is_some() {
-            self.model = params
+            if let Some(model) = params
                 .get("model")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string);
+            {
+                self.model = Some(model.to_string());
+            }
         }
         if params.get("mode").is_some() || params.get("tool_use").is_some() {
-            self.mode = params
+            if let Some(mode) = params
                 .get("mode")
-                .or_else(|| params.get("tool_use"))
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string);
+                .or_else(|| {
+                    params
+                        .get("tool_use")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+            {
+                self.mode = Some(mode.to_string());
+            }
         }
         if let Some(value) = params.get("boost_reasoning").and_then(Value::as_bool) {
             self.boost_reasoning = value;
@@ -7431,6 +7473,15 @@ fn default_context_window(caps: &Value, windows: &HashMap<String, u64>) -> Optio
         })
 }
 
+fn resolved_default_chat_model(caps: &Value) -> Option<String> {
+    default_chat_model(caps)
+        .map(|model| resolve_chat_model_id(caps, model).unwrap_or_else(|| model.to_string()))
+        .or_else(|| {
+            let ids = chat_model_ids(caps);
+            (ids.len() == 1).then(|| ids[0].clone())
+        })
+}
+
 fn default_chat_model(caps: &Value) -> Option<&str> {
     caps.get("defaults")
         .and_then(|defaults| {
@@ -7457,10 +7508,100 @@ fn default_chat_model(caps: &Value) -> Option<&str> {
         })
 }
 
+fn default_chat_mode(caps: &Value) -> Option<&str> {
+    caps.get("defaults")
+        .and_then(|defaults| {
+            string_field(
+                defaults,
+                &[
+                    "chat_default_mode",
+                    "default_chat_mode",
+                    "chat_mode",
+                    "mode",
+                    "tool_use",
+                ],
+            )
+        })
+        .or_else(|| {
+            string_field(
+                caps,
+                &[
+                    "chat_default_mode",
+                    "default_chat_mode",
+                    "chat_mode",
+                    "mode",
+                    "tool_use",
+                ],
+            )
+        })
+}
+
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| value.get(*key)?.as_str())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn empty_optional_str(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => value.trim().is_empty(),
+        None => true,
+    }
+}
+
+fn resolve_chat_model_id(caps: &Value, model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let ids = chat_model_ids(caps);
+    if ids.iter().any(|id| id == model) {
+        return Some(model.to_string());
+    }
+    ids.into_iter()
+        .find(|id| id.rsplit('/').next().is_some_and(|suffix| suffix == model))
+}
+
+fn chat_model_ids(caps: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(models) = caps.get("chat_models") {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    if let Some(models) = caps.get("models").and_then(|models| models.get("chat")) {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    if let Some(models) = caps.get("available_models") {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    ids
+}
+
+fn collect_chat_model_ids(models: &Value, ids: &mut Vec<String>) {
+    match models {
+        Value::Object(map) => {
+            for (id, model) in map {
+                push_unique_model_id(ids, id);
+                if let Some(model_id) = model.get("id").and_then(Value::as_str) {
+                    push_unique_model_id(ids, model_id);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for model in items {
+                if let Some(model_id) = model.get("id").and_then(Value::as_str) {
+                    push_unique_model_id(ids, model_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_unique_model_id(ids: &mut Vec<String>, id: &str) {
+    let id = id.trim();
+    if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+        ids.push(id.to_string());
+    }
 }
 
 fn context_window_for_model(windows: &HashMap<String, u64>, model: &str) -> Option<u64> {
@@ -9891,6 +10032,78 @@ new-chat = "ctrl-x"
         let picker = app.modal_picker().unwrap();
         assert_eq!(picker.kind, PickerKind::Model);
         assert_eq!(picker.filtered_items()[0].id, "m1");
+    }
+
+    #[test]
+    fn caps_loaded_default_model_populates_footer_model_and_mode() {
+        let mut app = App::new(project());
+
+        app.apply_caps(&json!({
+            "defaults": {
+                "chat_default_model": "openai/gpt-demo",
+                "chat_default_mode": "agent"
+            },
+            "chat_models": {
+                "openai/gpt-demo": {"name": "GPT Demo", "n_ctx": 128_000}
+            }
+        }));
+
+        assert_eq!(app.model(), Some("openai/gpt-demo"));
+        assert_eq!(app.mode(), Some("agent"));
+        let footer = crate::ui::footer::FooterData::from_app(&app);
+        assert_eq!(footer.model, "openai/gpt-demo");
+        assert_ne!(footer.model, "default");
+        assert_eq!(footer.mode, "agent");
+    }
+
+    #[test]
+    fn empty_snapshot_keeps_caps_default_but_thread_updates_still_win() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "defaults": {"chat_default_model": "openai/gpt-demo"},
+            "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
+        }));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "", "mode": ""}, "messages": []}),
+        });
+        assert_eq!(app.model(), Some("openai/gpt-demo"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "thread_updated".to_string(),
+            raw: json!({"params": {"model": "openai/gpt-other", "mode": "chat"}}),
+        });
+        assert_eq!(app.model(), Some("openai/gpt-other"));
+        assert_eq!(app.mode(), Some("chat"));
+    }
+
+    #[test]
+    fn model_and_mode_pickers_preselect_current_values() {
+        let mut app = App::new(project());
+        app.handle_thread_updated(&json!({"model": "openai/gpt-small", "mode": "task_agent"}));
+
+        app.open_model_picker(json!({"chat_models": {
+            "openai/gpt-demo": {"name": "GPT Demo"},
+            "openai/gpt-small": {"name": "GPT Small"}
+        }}));
+        assert_eq!(
+            app.modal_picker().unwrap().selected_item().unwrap().id,
+            "openai/gpt-small"
+        );
+
+        app.open_mode_picker(json!({"modes": [
+            {"id": "agent", "title": "Agent"},
+            {"id": "task_agent", "title": "Task Agent"}
+        ]}));
+        assert_eq!(
+            app.modal_picker().unwrap().selected_item().unwrap().id,
+            "task_agent"
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let model = app
         .keymap()
         .binding_label(KeyContext::Main, KeyAction::OpenModels)
-        .unwrap_or_else(|| "Ctrl-M".to_string());
+        .unwrap_or_else(|| "Alt-M".to_string());
     let mode = app
         .keymap()
         .binding_label(KeyContext::Main, KeyAction::OpenModes)
