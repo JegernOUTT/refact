@@ -5,6 +5,7 @@ import { setInputValue, addInputValue } from "./actions";
 import { debugRefact } from "../../debugConfig";
 import { useDraftMessage } from "../../hooks/useDraftMessage";
 import { sendIdeMessagesToCurrentChat } from "../../features/Chat/Thread/actions";
+import { useThreadId } from "../../features/Chat/Thread";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
@@ -19,6 +20,7 @@ export function useInputValue(
     React.useState<boolean>(false);
   const dispatch = useAppDispatch();
   const pages = useAppSelector(selectPages);
+  const chatId = useThreadId();
 
   const setUpIfNotReady = useCallback(() => {
     const lastPage = pages[pages.length - 1];
@@ -41,6 +43,7 @@ export function useInputValue(
 
       if (addInputValue.match(event.data) || setInputValue.match(event.data)) {
         const { payload } = event.data;
+        if (payload.chatId !== undefined && payload.chatId !== chatId) return;
         debugRefact(
           `[DEBUG]: receiving event setInputValue/addInputValue with payload:`,
           payload,
@@ -83,7 +86,7 @@ export function useInputValue(
         return;
       }
     },
-    [setUpIfNotReady, dispatch, uncheckCheckboxes, setValue],
+    [setUpIfNotReady, dispatch, uncheckCheckboxes, setValue, chatId],
   );
 
   useEffect(() => {

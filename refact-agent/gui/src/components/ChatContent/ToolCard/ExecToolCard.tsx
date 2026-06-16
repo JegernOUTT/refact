@@ -5,7 +5,8 @@ import { FileText } from "lucide-react";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../../hooks";
-import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { selectHost } from "../../../features/Config/configSlice";
 import type {
   ExecOutputChunkMetadata,
@@ -366,8 +367,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const postMessage = usePostMessage();
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
+  const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
   const content =
     maybeResult && typeof maybeResult.content === "string"

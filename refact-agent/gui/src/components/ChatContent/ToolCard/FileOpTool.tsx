@@ -5,11 +5,12 @@ import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
-  selectToolResultById,
-  selectManyDiffMessageByIds,
-  selectIsStreaming,
-  selectIsWaiting,
+  selectToolResultByThreadAndId,
+  selectManyDiffMessageByThreadAndIds,
+  selectIsStreamingById,
+  selectIsWaitingById,
 } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import { basename } from "./utils";
@@ -63,11 +64,16 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const threadId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const diffIds = useMemo(
@@ -75,8 +81,8 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
     [toolCall.id],
   );
   const selectDiffs = useMemo(
-    () => selectManyDiffMessageByIds(diffIds),
-    [diffIds],
+    () => selectManyDiffMessageByThreadAndIds(threadId, diffIds),
+    [threadId, diffIds],
   );
   const toolDiffs = useAppSelector(selectDiffs);
 

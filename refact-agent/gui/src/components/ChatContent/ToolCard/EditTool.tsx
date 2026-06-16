@@ -4,16 +4,13 @@ import { Flex, Box } from "@radix-ui/themes";
 import { Icon } from "../../ui";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
-  selectManyDiffMessageByIds,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectManyDiffMessageByThreadAndIds,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
-import {
-  selectChatId,
-  selectCanPaste,
-  selectSelectedSnippet,
-} from "../../../features/Chat";
+import { useThreadId } from "../../../features/Chat/Thread";
+import { selectCanPaste, selectSelectedSnippet } from "../../../features/Chat";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
 import { toolsApi } from "../../../services/refact";
 import {
@@ -83,14 +80,19 @@ export const EditTool: React.FC<EditToolProps> = ({
   const { queryPathThenOpenFile, diffPasteBack, sendToolCallToIde } =
     useEventsBusForIDE();
   const [requestDryRun, dryRunResult] = toolsApi.useDryRunForEditToolMutation();
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const canPaste = useAppSelector(selectCanPaste);
   const selectedSnippet = useAppSelector(selectSelectedSnippet);
-  const chatId = useAppSelector(selectChatId);
 
   const hasResult = useAppSelector(
-    (state) => selectToolResultById(state, toolCall.id) !== undefined,
+    (state) =>
+      selectToolResultByThreadAndId(state, chatId, toolCall.id) !== undefined,
   );
 
   const diffIds = useMemo(
@@ -98,8 +100,8 @@ export const EditTool: React.FC<EditToolProps> = ({
     [toolCall.id],
   );
   const selectDiffs = useMemo(
-    () => selectManyDiffMessageByIds(diffIds),
-    [diffIds],
+    () => selectManyDiffMessageByThreadAndIds(chatId, diffIds),
+    [chatId, diffIds],
   );
   const toolDiffs = useAppSelector(selectDiffs);
 

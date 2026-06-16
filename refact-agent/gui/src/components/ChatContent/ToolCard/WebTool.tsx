@@ -6,7 +6,8 @@ import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
 import { useAppSelector } from "../../../hooks";
-import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { Link } from "../../Link";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
@@ -142,8 +143,9 @@ export const WebTool: React.FC<WebToolProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
 
+  const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const args = useMemo((): WebArgs | WebSearchArgs => {

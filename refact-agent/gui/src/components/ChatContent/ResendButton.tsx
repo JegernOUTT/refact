@@ -2,17 +2,23 @@ import React from "react";
 import { RefreshCw } from "lucide-react";
 import { useAppSelector, useChatActions } from "../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectMessagesById,
+  useThreadId,
 } from "../../features/Chat";
 import { IconButton, Popover } from "../ui";
 
 function useResendMessages() {
-  const messages = useAppSelector(selectMessages);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const { regenerate } = useChatActions();
+  const chatId = useThreadId();
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
+  const { regenerate } = useChatActions(chatId);
 
   const handleResend = React.useCallback(() => {
     void regenerate();

@@ -4,10 +4,11 @@ import { CircleAlert, FileText, Github } from "lucide-react";
 import groupBy from "lodash.groupby";
 import { useAppSelector } from "../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../features/Chat/Thread";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
 import { Button, Icon } from "../ui";
@@ -184,11 +185,16 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
 export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const threadId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
   const content =
     maybeResult && typeof maybeResult.content === "string"

@@ -14,10 +14,11 @@ import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import { Markdown } from "../../Markdown";
@@ -122,11 +123,16 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const threadId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const status: ToolStatus = useMemo(() => {

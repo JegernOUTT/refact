@@ -13,9 +13,10 @@ import { useStoredOpen } from "../useStoredOpen";
 import { Markdown } from "../../Markdown";
 import { useAppSelector, useChatActions } from "../../../hooks";
 import {
-  selectToolResultById,
-  selectMessages,
+  selectToolResultByThreadAndId,
+  selectMessagesById,
 } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import {
   ToolCall,
   isUserMessage,
@@ -244,14 +245,15 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     () => loadAskQuestionsDraft(toolCall.id)?.additionalText ?? "",
   );
   const hasCollapsedManualRef = useRef(false);
+  const threadId = useThreadId();
 
-  const { submit } = useChatActions();
+  const { submit } = useChatActions(threadId);
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
-  const messages = useAppSelector(selectMessages);
+  const messages = useAppSelector((state) => selectMessagesById(state, threadId));
 
   const data = useMemo((): AskQuestionsResult | null => {
     if (!maybeResult || typeof maybeResult.content !== "string") return null;

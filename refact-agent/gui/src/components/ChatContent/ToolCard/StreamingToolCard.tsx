@@ -5,7 +5,8 @@ import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
 import { useAppSelector } from "../../../hooks";
-import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { ToolCallTooltip } from "./ToolCallTooltip";
@@ -49,8 +50,9 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
   summary,
   meta,
 }) => {
+  const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
   const preserveScrollAnchor = useChatScrollAnchor();
   const prepareScrollAnchor = usePrepareChatScrollAnchor();

@@ -11,7 +11,8 @@ import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
-import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { ToolCallTooltip } from "./ToolCallTooltip";
@@ -87,8 +88,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   const { newFile, queryPathThenOpenFile } = useEventsBusForIDE();
   const [copied, setCopied] = useState(false);
 
+  const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const status: ToolStatus = useMemo(() => {

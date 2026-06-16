@@ -9,11 +9,10 @@ import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
 import { useChatActions } from "../../../hooks/useChatActions";
 import {
-  selectMessages,
   selectMessagesById,
-  selectToolResultById,
   selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import type {
   EventMessage,
   ToolCall,
@@ -212,18 +211,16 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const { abort } = useChatActions();
+  const contextThreadId = useThreadId();
+  const resolvedThreadId = threadId ?? contextThreadId;
+  const { abort } = useChatActions(resolvedThreadId);
 
   const sleepArgs = useMemo(() => parseSleepArgs(toolCall), [toolCall]);
   const messages = useAppSelector((state) =>
-    threadId === undefined
-      ? selectMessages(state)
-      : selectMessagesById(state, threadId),
+    selectMessagesById(state, resolvedThreadId),
   );
   const resultMessage = useAppSelector((state) =>
-    threadId === undefined
-      ? selectToolResultById(state, toolCall.id)
-      : selectToolResultByThreadAndId(state, threadId, toolCall.id),
+    selectToolResultByThreadAndId(state, resolvedThreadId, toolCall.id),
   );
   const sleepResult = useMemo(
     () => parseSleepResult(resultMessage),
@@ -244,8 +241,8 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     [messages],
   );
   const startedAtMs = useMemo(
-    () => resolveSleepStartedAtMs(threadId, toolCall.id),
-    [threadId, toolCall.id],
+    () => resolveSleepStartedAtMs(resolvedThreadId, toolCall.id),
+    [resolvedThreadId, toolCall.id],
   );
 
   useEffect(() => {
@@ -256,8 +253,8 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
 
   useEffect(() => {
     if (isRunning) return;
-    removeStoredSleepStartedAt(threadId, toolCall.id);
-  }, [isRunning, threadId, toolCall.id]);
+    removeStoredSleepStartedAt(resolvedThreadId, toolCall.id);
+  }, [isRunning, resolvedThreadId, toolCall.id]);
 
   const fallbackRemainingMs = Math.max(
     0,
@@ -288,9 +285,9 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   const handleWakeUp = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
-      void abort(threadId);
+      void abort(resolvedThreadId);
     },
-    [abort, threadId],
+    [abort, resolvedThreadId],
   );
 
   const icon = sleepResult?.interrupted ? (
