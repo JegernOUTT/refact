@@ -143,6 +143,54 @@ mod tests {
         }
     }
 
+    fn assert_rect_inside(rect: Rect, bounds: Rect) {
+        assert!(rect.x >= bounds.x);
+        assert!(rect.y >= bounds.y);
+        assert!(rect.x.saturating_add(rect.width) <= bounds.x.saturating_add(bounds.width));
+        assert!(rect.y.saturating_add(rect.height) <= bounds.y.saturating_add(bounds.height));
+    }
+
+    #[test]
+    fn popup_anchored_above_clamps_height_to_bounds() {
+        let bounds = Rect::new(2, 4, 20, 5);
+        let rect = popup_anchored_above(bounds, 8, 12, 99);
+
+        assert_eq!(rect.height, bounds.height);
+        assert_eq!(rect.y, bounds.y);
+        assert_rect_inside(rect, bounds);
+    }
+
+    #[test]
+    fn popup_anchored_above_clamps_anchor_above_bounds() {
+        let bounds = Rect::new(5, 10, 30, 12);
+        let rect = popup_anchored_above(bounds, 3, 10, 4);
+
+        assert_eq!(rect.y, bounds.y);
+        assert_rect_inside(rect, bounds);
+    }
+
+    #[test]
+    fn popup_anchored_above_handles_empty_and_one_row_bounds() {
+        let empty = Rect::new(4, 6, 0, 0);
+        let empty_rect = popup_anchored_above(empty, 6, 20, 5);
+        assert_eq!(empty_rect, Rect::new(4, 6, 0, 0));
+        assert_rect_inside(empty_rect, empty);
+
+        let one_row = Rect::new(4, 6, 7, 1);
+        let one_row_rect = popup_anchored_above(one_row, 6, 20, 5);
+        assert_eq!(one_row_rect, Rect::new(4, 6, 7, 1));
+        assert_rect_inside(one_row_rect, one_row);
+    }
+
+    #[test]
+    fn popup_anchored_above_uses_room_above_anchor() {
+        let bounds = Rect::new(0, 0, 80, 24);
+        let rect = popup_anchored_above(bounds, 20, 30, 6);
+
+        assert_eq!(rect, Rect::new(25, 14, 30, 6));
+        assert_rect_inside(rect, bounds);
+    }
+
     #[test]
     fn help_rows_are_generated_from_active_keymap() {
         let mut app = App::new(project());

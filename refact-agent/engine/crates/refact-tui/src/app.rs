@@ -3301,7 +3301,12 @@ impl App {
         self.transcript.clear();
         self.clear_stream_controllers();
         if self.rendered_state_keys != next_keys {
+            let inserted = self.native_scrollback && self.history.inserted_cell_count() > 0;
             self.history.clear_pending();
+            self.rendered_state_keys.clear();
+            if inserted {
+                self.resize_reflow.schedule_immediate();
+            }
         }
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
@@ -4923,6 +4928,7 @@ impl App {
         if is_ctrl_c_key(key) {
             return self.ctrl_c_action();
         }
+        self.last_ctrl_c = None;
         if self.help_open {
             self.help_open = false;
             return AppAction::None;
@@ -8997,6 +9003,47 @@ mod tests {
     }
 
     #[test]
+    fn changed_snapshot_after_insertions_reflows_native_scrollback_region() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let initial = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "stale answer", "stream_finished": true}),
+        ];
+
+        app.handle_chat_event(snapshot_event(&app, initial));
+        assert!(app.resize_reflow_is_due());
+        let first_reflow = app.resize_reflow_insertions(80);
+        app.finish_resize_reflow(80, false);
+        let first_text = first_reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_text.contains("stale answer"));
+
+        let changed = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "fresh answer", "stream_finished": true}),
+        ];
+        app.handle_chat_event(snapshot_event(&app, changed));
+
+        assert!(app.resize_reflow_is_due());
+        let changed_reflow = app.resize_reflow_insertions(80);
+        let changed_text = changed_reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(changed_text.contains("fresh answer"));
+        assert!(!changed_text.contains("stale answer"));
+        assert_eq!(app.history_pending_count(), 0);
+    }
+
+    #[test]
     fn reasoning_stream_finished_snapshot_reconciles_to_one_reasoning_cell() {
         let mut app = App::new(project());
         app.handle_chat_event(ChatEvent {
@@ -11437,6 +11484,29 @@ new-chat = "ctrl-x"
             AppAction::None
         );
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn normal_key_between_idle_ctrl_c_presses_resets_quit_arming() {
+        let mut app = App::new(project());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.last_ctrl_c.is_some());
+        assert!(!app.should_quit());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('x'))), AppAction::None);
+        assert_eq!(app.composer(), "x");
+        assert!(app.last_ctrl_c.is_none());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(!app.should_quit());
+        assert!(app.last_ctrl_c.is_some());
     }
 
     #[test]
