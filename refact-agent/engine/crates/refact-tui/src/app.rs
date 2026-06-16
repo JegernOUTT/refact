@@ -3118,7 +3118,7 @@ impl App {
         if !self.record_state_history_key(key) {
             return;
         }
-        self.push_history_item(item);
+        self.push_recorded_state_history_item(item);
     }
 
     fn record_state_history_key(&mut self, key: String) -> bool {
@@ -3130,11 +3130,64 @@ impl App {
             self.rendered_state_cursor += 1;
             return false;
         }
+        if state_key_has_stable_identity(&key)
+            && self.rendered_state_keys[..self.rendered_state_cursor]
+                .iter()
+                .any(|existing| existing == &key)
+        {
+            return false;
+        }
         self.rendered_state_keys
             .truncate(self.rendered_state_cursor);
         self.rendered_state_keys.push(key);
         self.rendered_state_cursor += 1;
         true
+    }
+
+    fn push_recorded_state_history_item(&mut self, item: TranscriptItem) {
+        match item {
+            TranscriptItem::Assistant(text) if self.assistant_stream_active() => {
+                self.replace_assistant_stream_with_final(text);
+            }
+            item => self.push_history_item(item),
+        }
+    }
+
+    fn assistant_stream_active(&self) -> bool {
+        !self.stream_controller.visible().is_empty()
+            || self.stream_controller.has_live_tail()
+            || self.stream_controller.stable_lines_ready()
+    }
+
+    fn replace_assistant_stream_with_final(&mut self, text: String) {
+        self.stream_controller.clear();
+        self.stream_chunking_policy.reset();
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Assistant)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+            self.history.enqueue(TranscriptItem::Assistant(text));
+            return;
+        }
+        if let Some(existing) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Assistant(existing) => Some(existing),
+                _ => None,
+            })
+        {
+            *existing = text;
+        } else {
+            self.push_history_item(TranscriptItem::Assistant(text));
+        }
     }
 
     fn replace_live_region_from_snapshot(&mut self, next_keys: &[String]) {
@@ -3534,10 +3587,9 @@ impl App {
             return;
         };
         self.finalize_plan_stream();
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
-        self.rendered_state_keys.push(key);
-        self.rendered_state_cursor += 1;
+        if !self.record_state_history_key(key) {
+            return;
+        }
         if let Some(existing) = self.transcript.iter_mut().find_map(|item| match item {
             TranscriptItem::Plan(existing) => Some(existing),
             _ => None,
@@ -4124,25 +4176,69 @@ impl App {
     }
 
     fn handle_message_added_payload(&mut self, message: Option<&Value>) {
-        let Some(message) = message else {
+        let Some(raw_message) = message else {
             return;
         };
-        let added = self.transcript_state.add_message(message);
-        if !added && message.get("role").and_then(Value::as_str) == Some("assistant") {
+        let message = TranscriptMessage::from_wire(raw_message);
+        let state_keys = rendered_state_keys_for_message(&message);
+        let replayed = !state_keys.is_empty()
+            && state_keys.into_iter().all(|key| {
+                state_key_has_stable_identity(&key)
+                    && self
+                        .rendered_state_keys
+                        .iter()
+                        .any(|existing| existing == &key)
+            });
+        if replayed {
             return;
         }
-        match message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-        {
-            "tool" => self.handle_tool_message(message),
-            "assistant" | "user" | "plan" | "event" => {
-                let message = TranscriptMessage::from_wire(message);
-                self.append_render_message(&message);
-            }
+        if message.role == TranscriptRole::Tool && self.replace_state_tool_message(&message) {
+            self.rebuild_remote_transcript_from_state();
+            return;
+        }
+        let replaces_active_stream = message.role == TranscriptRole::Assistant
+            && self.assistant_stream_active()
+            && self
+                .transcript_state
+                .messages()
+                .iter()
+                .any(|existing| active_assistant_matches_message(existing, &message));
+        let added = self.transcript_state.add_message(raw_message);
+        if !added && !replaces_active_stream {
+            self.rebuild_remote_transcript_from_state();
+            return;
+        }
+        match message.role {
+            TranscriptRole::Tool => self.push_state_tool_result(&message),
+            TranscriptRole::Assistant
+            | TranscriptRole::User
+            | TranscriptRole::Plan
+            | TranscriptRole::Event => self.append_render_message(&message),
             _ => {}
         }
+    }
+
+    fn replace_state_tool_message(&mut self, message: &TranscriptMessage) -> bool {
+        let Some(tool_call_id) = message
+            .tool_call_id
+            .as_deref()
+            .filter(|tool_call_id| !tool_call_id.is_empty())
+        else {
+            return false;
+        };
+        let Some(existing) = self
+            .transcript_state
+            .messages_mut()
+            .iter_mut()
+            .find(|existing| {
+                existing.role == TranscriptRole::Tool
+                    && existing.tool_call_id.as_deref() == Some(tool_call_id)
+            })
+        else {
+            return false;
+        };
+        *existing = message.clone();
+        true
     }
 
     fn handle_message_updated_payload(
@@ -4166,11 +4262,6 @@ impl App {
     fn handle_messages_truncated(&mut self, from_index: usize) {
         self.transcript_state.truncate_messages(from_index);
         self.rebuild_remote_transcript_from_state();
-    }
-
-    fn handle_tool_message(&mut self, message: &Value) {
-        let message = TranscriptMessage::from_wire(message);
-        self.push_state_tool_result(&message);
     }
 
     fn maybe_open_ask_questions_form(&mut self, message: &TranscriptMessage) {
@@ -4225,18 +4316,9 @@ impl App {
     fn push_state_tool_result(&mut self, message: &TranscriptMessage) {
         let key = render_message_key(message, "tool", 0);
         self.maybe_open_ask_questions_form(message);
-        if self
-            .rendered_state_keys
-            .get(self.rendered_state_cursor)
-            .is_some_and(|existing| existing == &key)
-        {
-            self.rendered_state_cursor += 1;
+        if !self.record_state_history_key(key) {
             return;
         }
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
-        self.rendered_state_keys.push(key);
-        self.rendered_state_cursor += 1;
         self.complete_tool(
             message.tool_call_id.as_deref().unwrap_or_default(),
             message.content.clone(),
@@ -6211,6 +6293,16 @@ fn is_empty_live_assistant(message: &TranscriptMessage) -> bool {
         && message.unknown_delta_ops.is_empty()
 }
 
+fn active_assistant_matches_message(
+    existing: &TranscriptMessage,
+    next: &TranscriptMessage,
+) -> bool {
+    existing.role == TranscriptRole::Assistant
+        && !existing.stream_finished
+        && next.role == TranscriptRole::Assistant
+        && existing.message_id == next.message_id
+}
+
 async fn run_action(
     app: &mut App,
     action: AppAction,
@@ -7632,6 +7724,19 @@ fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> 
     }
 }
 
+fn state_key_has_stable_identity(key: &str) -> bool {
+    let Some((identity, rest)) = key.split_once(':') else {
+        return false;
+    };
+    if rest.split(':').count() != 3 {
+        return false;
+    }
+    !matches!(
+        identity,
+        "user" | "assistant" | "tool" | "notice" | "plan" | "event" | "session"
+    )
+}
+
 fn session_header_key(title: &str, subtitle: &str) -> String {
     format!(
         "session:header:0:{:016x}",
@@ -7985,6 +8090,13 @@ mod tests {
             .collect::<String>()
     }
 
+    fn assistant_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Assistant(_)))
+            .count()
+    }
+
     fn reasoning_text(app: &App) -> String {
         app.visible_transcript()
             .iter()
@@ -8055,6 +8167,76 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn questions_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| rendered_item_plain_text(item).contains("Questions"))
+            .count()
+    }
+
+    fn rendered_item_plain_text(item: &TranscriptItem) -> String {
+        crate::history::cells::cell_from_transcript_item(item, false)
+            .render(80)
+            .iter()
+            .map(line_to_plain_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assistant_added_event(app: &App, id: &str, content: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": id,
+                "role": "assistant",
+                "content": content,
+                "stream_finished": true,
+            }}),
+        }
+    }
+
+    fn snapshot_event(app: &App, messages: Vec<Value>) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": messages}),
+        }
+    }
+
+    fn tool_call_delta_event(app: &App, tool_call_id: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{
+                "id": tool_call_id,
+                "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}
+            }]}]}),
+        }
+    }
+
+    fn tool_result_message(tool_call_id: &str, content: &str) -> Value {
+        json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "tool_failed": false,
+            "content": content,
+            "stream_finished": true,
+        })
+    }
+
+    fn tool_result_event(app: &App, tool_call_id: &str, content: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_result_message(tool_call_id, content)}),
+        }
     }
 
     fn ask_questions_tool_event(app: &App, tool_call_id: &str, questions: Value) -> ChatEvent {
@@ -8306,6 +8488,162 @@ mod tests {
                 .sum::<usize>(),
             1
         );
+    }
+
+    #[test]
+    fn stream_added_snapshot_reconciles_to_one_assistant_cell() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_content", "text": "hello"}]}),
+        });
+        app.handle_chat_event(assistant_added_event(&app, "a1", "hello"));
+        app.handle_chat_event(snapshot_event(
+            &app,
+            vec![json!({
+                "message_id": "a1",
+                "role": "assistant",
+                "content": "hello",
+                "stream_finished": true,
+            })],
+        ));
+
+        assert_eq!(assistant_cell_count(&app), 1);
+        assert_eq!(assistant_text(&app), "hello");
+    }
+
+    #[test]
+    fn repeated_identical_message_added_does_not_duplicate_assistant() {
+        let mut app = App::new(project());
+        let event = assistant_added_event(&app, "a1", "hello");
+
+        app.handle_chat_event(event.clone());
+        app.handle_chat_event(event);
+
+        assert_eq!(assistant_cell_count(&app), 1);
+        assert_eq!(assistant_text(&app), "hello");
+    }
+
+    #[test]
+    fn ask_questions_message_and_waiting_snapshot_keep_one_questions_cell() {
+        let mut app = App::new(project());
+        let questions = json!([
+            {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+        ]);
+        let assistant_message = json!({
+            "message_id": "a1",
+            "role": "assistant",
+            "stream_finished": true,
+            "tool_calls": [{
+                "id": "call-ask",
+                "function": {
+                    "name": "ask_questions",
+                    "arguments": json!({"questions": questions}).to_string(),
+                }
+            }]
+        });
+        let tool_message = tool_result_message(
+            "call-ask",
+            &json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": questions,
+            })
+            .to_string(),
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": assistant_message.clone()}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_message.clone()}),
+        });
+        app.handle_chat_event(waiting_user_input_event(&app));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "waiting_user_input"}, "messages": [assistant_message, tool_message]}),
+        });
+
+        assert_eq!(questions_cell_count(&app), 1);
+        assert!(app.ask_questions_form().is_some());
+    }
+
+    #[test]
+    fn completed_tool_card_transitions_to_history_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+
+        app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
+        app.handle_chat_event(tool_result_event(&app, "call-1", "done"));
+        app.handle_chat_event(tool_result_event(&app, "call-1", "done"));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+
+        assert_eq!(tool_cards(&app).len(), 0);
+        assert_eq!(app.history_pending_count(), 1);
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+    }
+
+    #[test]
+    fn identical_snapshot_after_insertions_adds_no_history_entries() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "hi", "stream_finished": true}),
+        ];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        assert_eq!(app.history_pending_count(), 2);
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            2
+        );
+        let inserted_after_first = app.history_inserted_cell_count();
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.history_pending_count(), 0);
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count(), inserted_after_first);
+        assert_eq!(inserted_after_first - inserted_before, 2);
     }
 
     #[test]
