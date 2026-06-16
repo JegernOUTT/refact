@@ -9,6 +9,7 @@ import {
   splitLeaf,
   type LeafPane,
   type PaneNode,
+  type SplitPlacement,
   type SplitNode,
 } from "./panesTree";
 
@@ -271,13 +272,17 @@ export const panesSlice = createSlice({
         leafId: string;
         dir: SplitNode["dir"];
         tabId: string;
+        placement?: SplitPlacement;
       }>,
     ) => {
-      const { leafId, dir, tabId } = action.payload;
+      const { leafId, dir, tabId, placement } = action.payload;
       if (!findLeaf(state.root, leafId)) return;
 
       const previousLeafIds = collectLeafIds(state.root);
-      state.root = normalizePaneRoot(splitLeaf(state.root, leafId, dir, tabId));
+      state.root = removeTabFromTree(state.root, tabId);
+      state.root = normalizePaneRoot(
+        splitLeaf(state.root, leafId, dir, tabId, placement),
+      );
       const nextLeafId = collectLeafIds(state.root).find(
         (id) => !previousLeafIds.includes(id),
       );

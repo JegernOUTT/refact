@@ -33,6 +33,70 @@
   overflow: hidden;
 }
 
+.edgeDropZones {
+  position: absolute;
+  inset: var(--rf-control-h-lg) 0 0;
+  z-index: var(--rf-z-dropdown);
+  pointer-events: none;
+}
+
+.edgeDropZone {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.edgeDropZone::before {
+  content: "";
+  position: absolute;
+  inset: var(--rf-space-2);
+  background: var(--rf-color-accent-soft);
+  border: var(--rf-hairline) solid var(--rf-color-accent);
+  border-radius: var(--rf-radius-card);
+  opacity: 0.72;
+  transition:
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.edgeDropZone:hover::before,
+.edgeDropZone:focus-visible::before {
+  opacity: 1;
+  transform: scale(1.02);
+}
+
+.edgeDropLeft,
+.edgeDropRight {
+  top: 0;
+  bottom: 0;
+  width: calc(var(--rf-space-6) * 2);
+}
+
+.edgeDropLeft {
+  left: 0;
+}
+
+.edgeDropRight {
+  right: 0;
+}
+
+.edgeDropTop,
+.edgeDropBottom {
+  right: 0;
+  left: 0;
+  height: calc(var(--rf-space-6) * 2);
+}
+
+.edgeDropTop {
+  top: 0;
+}
+
+.edgeDropBottom {
+  bottom: 0;
+}
+
 .emptyPane {
   display: flex;
   align-items: center;
@@ -44,7 +108,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pane {
+  .pane,
+  .edgeDropZone::before {
     transition: none;
   }
 }

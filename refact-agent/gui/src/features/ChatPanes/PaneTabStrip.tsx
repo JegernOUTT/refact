@@ -30,15 +30,16 @@ import {
 } from "../Chat/Thread";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import { useGetChatModesQuery } from "../../services/refact/chatModes";
-import { findLeaf } from "./panesTree";
+import { findLeaf, findLeafByTab } from "./panesTree";
 import {
+  moveTabToPane,
   removeTabEverywhere,
   selectFocusedActiveTabId,
   selectFocusedLeafId,
   selectPaneRoot,
   setPaneActiveTab,
 } from "./panesSlice";
-import { parseTabDragData, tabDragData } from "./tabDrag";
+import { readTabDragData, setTabDragData } from "./tabDrag";
 import styles from "./PaneTabStrip.module.css";
 
 export type PaneTabStripProps = {
@@ -70,6 +71,7 @@ function statusLabel(
 export function PaneTabStrip({ leafId }: PaneTabStripProps) {
   const dispatch = useAppDispatch();
   const activeTabRef = useRef<HTMLDivElement | null>(null);
+  const root = useAppSelector(selectPaneRoot);
   const leaf = useAppSelector((state) =>
     findLeaf(selectPaneRoot(state), leafId),
   );
@@ -180,7 +182,7 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
 
   const handleDragStart = useCallback((event: DragEvent, id: string) => {
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", tabDragData("chat", id));
+    setTabDragData(event.dataTransfer, "chat", id);
     setDraggingTabId(id);
   }, []);
 
@@ -193,16 +195,44 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
     event.dataTransfer.dropEffect = "move";
   }, []);
 
-  const handleDrop = useCallback(
+  const handleDropOnTab = useCallback(
     (event: DragEvent, id: string) => {
       event.preventDefault();
-      const dragged = parseTabDragData(
-        event.dataTransfer.getData("text/plain"),
-      );
+      event.stopPropagation();
+      const dragged = readTabDragData(event.dataTransfer);
       if (!dragged || dragged.type !== "chat" || dragged.id === id) return;
+      const sourceLeaf = findLeafByTab(root, dragged.id);
+      if (!sourceLeaf) return;
+      if (sourceLeaf.id !== leafId) {
+        dispatch(
+          moveTabToPane({
+            fromLeafId: sourceLeaf.id,
+            toLeafId: leafId,
+            tabId: dragged.id,
+          }),
+        );
+      }
       dispatch(reorderOpenThreads({ sourceId: dragged.id, targetId: id }));
     },
-    [dispatch],
+    [dispatch, leafId, root],
+  );
+
+  const handleDropOnStrip = useCallback(
+    (event: DragEvent) => {
+      event.preventDefault();
+      const dragged = readTabDragData(event.dataTransfer);
+      if (!dragged || dragged.type !== "chat") return;
+      const sourceLeaf = findLeafByTab(root, dragged.id);
+      if (!sourceLeaf || sourceLeaf.id === leafId) return;
+      dispatch(
+        moveTabToPane({
+          fromLeafId: sourceLeaf.id,
+          toLeafId: leafId,
+          tabId: dragged.id,
+        }),
+      );
+    },
+    [dispatch, leafId, root],
   );
 
   if (!leaf) {
@@ -210,7 +240,11 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
   }
 
   return (
-    <div className={styles.paneTabStrip}>
+    <div
+      className={styles.paneTabStrip}
+      onDragOver={handleDragOver}
+      onDrop={handleDropOnStrip}
+    >
       <KitTabs
         className={classNames(styles.tabsContainer, "scrollX")}
         value={activeTabId ?? undefined}
@@ -257,7 +291,7 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
                   draggingTabId === tab.id && styles.tabWrapDragging,
                 )}
                 onDragOver={handleDragOver}
-                onDrop={(event) => handleDrop(event, tab.id)}
+                onDrop={(event) => handleDropOnTab(event, tab.id)}
                 ref={isActive ? activeTabRef : undefined}
               >
                 <KitTabs.Trigger value={tab.id} asChild>

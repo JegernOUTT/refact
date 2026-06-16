@@ -15,6 +15,8 @@ export type SplitNode = {
 
 export type PaneNode = LeafPane | SplitNode;
 
+export type SplitPlacement = "before" | "after";
+
 const makeSiblingLeafId = (leafId: string, tabId: string): string =>
   `${leafId}:sibling:${tabId}`;
 
@@ -145,6 +147,7 @@ export function splitLeaf(
   leafId: string,
   dir: SplitNode["dir"],
   movedTabId: string,
+  placement: SplitPlacement = "after",
 ): PaneNode {
   if (tree.kind === "leaf") {
     if (tree.id !== leafId) {
@@ -163,13 +166,16 @@ export function splitLeaf(
       kind: "split",
       id: makeSplitId(leafId, dir),
       dir,
-      children: [originalLeaf, siblingLeaf],
+      children:
+        placement === "before"
+          ? [siblingLeaf, originalLeaf]
+          : [originalLeaf, siblingLeaf],
       sizes: evenSizes(2),
     };
   }
 
   const children = tree.children.map((child) =>
-    splitLeaf(child, leafId, dir, movedTabId),
+    splitLeaf(child, leafId, dir, movedTabId, placement),
   );
 
   return {
