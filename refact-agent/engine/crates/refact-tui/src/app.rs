@@ -10327,6 +10327,10 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners crash when this test spawns cmd"
+    )]
     fn editor_round_trip_appends_with_fake_editor_script() {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(windows)]
