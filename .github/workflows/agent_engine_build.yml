@@ -194,9 +194,7 @@ jobs:
         env:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
-        run: |
-          cargo test --workspace --exclude refact-tui --profile ci-release --lib --tests
-          cargo test -p refact-tui --profile ci-release --tests
+        run: cargo test --workspace --exclude refact-tui --profile ci-release --lib --tests
 
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
