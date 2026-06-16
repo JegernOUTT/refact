@@ -341,6 +341,14 @@ fn compress_chat_apply_head_output(
         if msg.tool_call_id.is_empty() {
             continue;
         }
+        if msg.preserve == Some(true) {
+            continue;
+        }
+        if let Some(name) = request.tool_call_names.get(&msg.tool_call_id) {
+            if should_preserve_tool(name) {
+                continue;
+            }
+        }
         if request.drop_tool_outputs.contains(&msg.tool_call_id) {
             msg.content =
                 ChatContent::SimpleText("Tool result removed by compress_chat_apply".to_string());
@@ -348,11 +356,6 @@ fn compress_chat_apply_head_output(
             continue;
         }
         if request.truncate_tool_outputs.contains(&msg.tool_call_id) {
-            if let Some(name) = request.tool_call_names.get(&msg.tool_call_id) {
-                if should_preserve_tool(name) {
-                    continue;
-                }
-            }
             let content = msg.content.content_text_only();
             if content.len() > TOOL_OUTPUT_TRUNCATE_LIMIT {
                 let redacted = redact_sensitive(&content);
@@ -1073,6 +1076,52 @@ mod tests {
                 message.role == "tool" && message.content.content_text_only() == long_output
             }));
         }
+    }
+
+    #[test]
+    fn apply_tool_drop_and_truncate_preserves_explicit_preserve_results() {
+        let long_output = "explicit preserved tool output ".repeat(30);
+        let mut drop_tool = tool_message("drop_call", &long_output);
+        drop_tool.preserve = Some(true);
+        let mut truncate_tool = tool_message("truncate_call", &long_output);
+        truncate_tool.preserve = Some(true);
+        let messages = vec![
+            user_message("old user"),
+            assistant_tool_call_message("drop_call", "shell"),
+            drop_tool,
+            assistant_tool_call_message("truncate_call", "shell"),
+            truncate_tool,
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::from(["truncate_call".to_string()]);
+        let drop_tool_outputs = HashSet::from(["drop_call".to_string()]);
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::from([
+            ("drop_call".to_string(), "shell".to_string()),
+            ("truncate_call".to_string(), "shell".to_string()),
+        ]);
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.tool_truncated, 0);
+        assert_eq!(stats.tool_dropped, 0);
+        assert_eq!(
+            after
+                .iter()
+                .filter(|message| message.role == "tool"
+                    && message.content.content_text_only() == long_output)
+                .count(),
+            2
+        );
     }
 
     #[test]

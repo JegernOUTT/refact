@@ -21,7 +21,7 @@ use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 use refact_chat_history::trajectory_ops::{
     build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
-    should_preserve_tool, COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE, TOOLS_TO_PRESERVE,
+    should_preserve_tool, COMPRESSION_REPORT_KIND, COMPRESSION_REPORT_ROLE,
 };
 
 pub const MAX_SEGMENT_SUMMARY_ATTEMPTS: usize = 2;
@@ -1513,6 +1513,63 @@ fn message_by_id<'a>(
         .find(|message| message.message_id == source_message_id)
 }
 
+fn source_tool_name_for_result<'a>(
+    source_messages: &'a [ChatMessage],
+    result: &ChatMessage,
+) -> Option<&'a str> {
+    let tool_call_id = result.tool_call_id.as_str();
+    if tool_call_id.is_empty() {
+        return None;
+    }
+    source_messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .find(|tool_call| tool_call.id == tool_call_id)
+        .map(|tool_call| tool_call.function.name.as_str())
+}
+
+fn protected_tool_result(source_messages: &[ChatMessage], message: &ChatMessage) -> bool {
+    message.preserve == Some(true)
+        || source_tool_name_for_result(source_messages, message).is_some_and(should_preserve_tool)
+}
+
+fn preserved_agentic_tool_source_ids(source_messages: &[ChatMessage]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for message in source_messages {
+        if !matches!(message.role.as_str(), "tool" | "diff") {
+            continue;
+        }
+        if message.message_id.is_empty() || !protected_tool_result(source_messages, message) {
+            continue;
+        }
+        if seen.insert(message.message_id.clone()) {
+            ids.push(message.message_id.clone());
+        }
+    }
+    ids
+}
+
+fn split_summarized_and_preserved_source_ids(
+    source_ids: &[String],
+    preserved_source_ids: Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut preserved = Vec::new();
+    let mut seen = HashSet::new();
+    for id in preserved_source_ids {
+        if !id.is_empty() && seen.insert(id.clone()) {
+            preserved.push(id);
+        }
+    }
+    let summarized = source_ids
+        .iter()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect();
+    (summarized, preserved)
+}
+
 fn context_file_paths(message: &ChatMessage, fallback_file_name: Option<&str>) -> Vec<String> {
     match &message.content {
         ChatContent::ContextFiles(files) => files
@@ -1635,6 +1692,9 @@ fn parse_structured_summary_decision(
             if !matches!(message.role.as_str(), "tool" | "diff") {
                 continue;
             }
+            if protected_tool_result(source_messages, message) {
+                continue;
+            }
             let Some(summary) =
                 sanitized_json_string(entry, "summary", MAX_STRUCTURED_TOOL_SUMMARY_CHARS)
             else {
@@ -1734,9 +1794,11 @@ fn make_segment_summary_message(
     let summary = render_structured_summary_text(&decision);
     let source_hash = source_hash_for_messages(source_messages);
     let source_ids = source_message_ids(source_messages);
+    let mut preserved_source_ids = decision.preserved_context_file_ids.clone();
+    preserved_source_ids.extend(preserved_agentic_tool_source_ids(source_messages));
+    let (summarized_source_ids, preserved_source_ids) =
+        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_ids);
     let created_at = chrono::Utc::now().to_rfc3339();
-    let preserved_context_file_count = decision.preserved_context_file_ids.len();
-    let compressed_tool_output_count = decision.compressed_tool_outputs.len();
     let mut extra = serde_json::Map::new();
     extra.insert(
         "compression".to_string(),
@@ -1746,10 +1808,10 @@ fn make_segment_summary_message(
             "insert_mode": SUMMARY_INSERT_MODE,
             "source_hash": source_hash,
             "source_message_ids": source_ids,
-            "summarized_source_message_ids": source_ids,
-            "preserved_source_message_ids": decision.preserved_context_file_ids,
-            "preserved_context_file_count": preserved_context_file_count,
-            "compressed_tool_output_count": compressed_tool_output_count,
+            "summarized_source_message_ids": summarized_source_ids,
+            "preserved_source_message_ids": preserved_source_ids,
+            "preserved_context_file_count": decision.preserved_context_file_ids.len(),
+            "compressed_tool_output_count": decision.compressed_tool_outputs.len(),
             "preserved_context_file_paths": decision.preserved_context_file_paths,
             "created_at": created_at,
             "summary_model": summary_model,
@@ -1786,6 +1848,8 @@ fn refresh_segment_summary_metadata(
     let summary_metadata = summary.extra.get("compression");
     let preserved_source_message_ids =
         compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
+    let (summarized_source_message_ids, preserved_source_message_ids) =
+        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_message_ids);
     let preserved_context_file_paths =
         compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
     let preserved_context_file_count =
@@ -1807,7 +1871,7 @@ fn refresh_segment_summary_metadata(
             "insert_mode": SUMMARY_INSERT_MODE,
             "source_hash": source_hash,
             "source_message_ids": source_ids,
-            "summarized_source_message_ids": source_ids,
+            "summarized_source_message_ids": summarized_source_message_ids,
             "preserved_source_message_ids": preserved_source_message_ids,
             "preserved_context_file_count": preserved_context_file_count,
             "compressed_tool_output_count": compressed_tool_output_count,
@@ -1844,6 +1908,8 @@ fn make_segment_compression_report_message_with_benefit(
     let summary_metadata = summary.extra.get("compression");
     let preserved_source_message_ids =
         compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
+    let (summarized_source_message_ids, preserved_source_message_ids) =
+        split_summarized_and_preserved_source_ids(&source_ids, preserved_source_message_ids);
     let preserved_context_file_paths =
         compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
     let preserved_context_file_count =
@@ -1874,7 +1940,7 @@ fn make_segment_compression_report_message_with_benefit(
             "created_at": created_at,
             "source_message_count": source_messages.len(),
             "source_message_ids": source_ids,
-            "summarized_source_message_ids": source_ids,
+            "summarized_source_message_ids": summarized_source_message_ids,
             "preserved_source_message_ids": preserved_source_message_ids,
             "preserved_context_file_count": preserved_context_file_count,
             "compressed_tool_output_count": compressed_tool_output_count,
@@ -3107,6 +3173,7 @@ mod tests {
     use crate::call_validation::{
         ChatContent, ChatToolCall, ChatToolFunction, ContextFile, MultimodalElement,
     };
+    use refact_chat_history::trajectory_ops::TOOLS_TO_PRESERVE;
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
 
@@ -3553,6 +3620,205 @@ mod tests {
             report.extra["compression_report"]["compressed_tool_output_count"],
             json!(1)
         );
+    }
+
+    #[test]
+    fn structured_summary_preserves_agentic_tool_outputs_from_suppression() {
+        let protected_names = [
+            "subagent",
+            "code_review",
+            "strategic_planning",
+            "deep_research",
+            "plan",
+            "review",
+            "research",
+            "task",
+            "t_review",
+            "t_plan",
+            "t_research",
+        ];
+        for name in protected_names {
+            let protected_output = format!("full {name} report {}", "x".repeat(500));
+            let source = vec![
+                with_message_id(
+                    assistant_with_named_tool_call("call_agentic", name),
+                    "assistant-source",
+                ),
+                with_message_id(
+                    tool_with_id("call_agentic", &protected_output),
+                    "tool-source",
+                ),
+                with_message_id(assistant("routine assistant output"), "assistant-routine"),
+            ];
+            let raw = structured_summary_json(
+                "Routine summary remains.",
+                json!([]),
+                json!([{
+                    "source_message_id": "tool-source",
+                    "tool_name": name,
+                    "title": "agentic report",
+                    "summary": "compressed report text"
+                }]),
+            );
+
+            let summary = make_segment_summary_message(raw, &source, "test-model");
+            let metadata = &summary.extra["compression"];
+            let text = summary.content.content_text_only();
+
+            assert!(!text.contains("## Compressed Tool Outputs"), "{name}");
+            assert_eq!(metadata["compressed_tool_output_count"], json!(0), "{name}");
+            assert_eq!(
+                metadata["preserved_source_message_ids"],
+                json!(["tool-source"]),
+                "{name}"
+            );
+            assert_eq!(
+                metadata["summarized_source_message_ids"],
+                json!(["assistant-source", "assistant-routine"]),
+                "{name}"
+            );
+
+            let messages = vec![
+                user("before"),
+                source[0].clone(),
+                source[1].clone(),
+                source[2].clone(),
+                summary,
+                user("after"),
+            ];
+            let linearized = crate::chat::linearize::apply_summarization_linearize(messages);
+            let linearized_text = linearized
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(linearized_text.contains(&protected_output), "{name}");
+            assert!(
+                !linearized_text.contains("routine assistant output"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_summary_refresh_preserves_agentic_tool_output_metadata() {
+        let protected_output = format!("full delegate report {}", "x".repeat(500));
+        let mut messages = vec![
+            user("before"),
+            with_message_id(
+                assistant_with_named_tool_call("call_delegate", "t_delegate"),
+                "assistant-source",
+            ),
+            with_message_id(
+                tool_with_id("call_delegate", &protected_output),
+                "tool-source",
+            ),
+            with_message_id(assistant("routine assistant output"), "assistant-routine"),
+        ];
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "Routine summary remains.",
+            "test-model",
+        ));
+
+        let summary = messages
+            .iter()
+            .find(|message| is_segment_summary(message))
+            .expect("summary inserted");
+        let report = messages
+            .iter()
+            .find(|message| message.role == COMPRESSION_REPORT_ROLE)
+            .expect("report inserted");
+        let summary_metadata = &summary.extra["compression"];
+        let report_metadata = &report.extra["compression_report"];
+
+        assert_eq!(
+            summary_metadata["preserved_source_message_ids"],
+            json!(["tool-source"])
+        );
+        assert_eq!(
+            summary_metadata["summarized_source_message_ids"],
+            json!(["assistant-source", "assistant-routine"])
+        );
+        assert_eq!(
+            report_metadata["preserved_source_message_ids"],
+            json!(["tool-source"])
+        );
+        assert_eq!(
+            report_metadata["summarized_source_message_ids"],
+            json!(["assistant-source", "assistant-routine"])
+        );
+
+        let linearized = crate::chat::linearize::apply_summarization_linearize(messages);
+        let linearized_text = linearized
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(linearized_text.contains(&protected_output));
+        assert!(!linearized_text.contains("routine assistant output"));
+    }
+
+    #[test]
+    fn structured_summary_preserves_explicit_preserve_tool_output_from_suppression() {
+        let mut tool = tool_with_id(
+            "call_shell",
+            &format!("explicit preserve {}", "x".repeat(500)),
+        );
+        tool.preserve = Some(true);
+        let source = vec![
+            with_message_id(
+                assistant_with_named_tool_call("call_shell", "shell"),
+                "assistant-source",
+            ),
+            with_message_id(tool, "tool-source"),
+            with_message_id(assistant("routine assistant output"), "assistant-routine"),
+        ];
+        let raw = structured_summary_json(
+            "Routine summary remains.",
+            json!([]),
+            json!([{
+                "source_message_id": "tool-source",
+                "tool_name": "shell",
+                "title": "preserved shell",
+                "summary": "compressed shell text"
+            }]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+        let metadata = &summary.extra["compression"];
+
+        assert!(!summary
+            .content
+            .content_text_only()
+            .contains("## Compressed Tool Outputs"));
+        assert_eq!(metadata["compressed_tool_output_count"], json!(0));
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            json!(["tool-source"])
+        );
+        assert_eq!(
+            metadata["summarized_source_message_ids"],
+            json!(["assistant-source", "assistant-routine"])
+        );
+
+        let messages = vec![
+            user("before"),
+            source[0].clone(),
+            source[1].clone(),
+            source[2].clone(),
+            summary,
+            user("after"),
+        ];
+        let linearized = crate::chat::linearize::apply_summarization_linearize(messages);
+        let linearized_text = linearized
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(linearized_text.contains("explicit preserve"));
+        assert!(!linearized_text.contains("routine assistant output"));
     }
 
     #[test]
