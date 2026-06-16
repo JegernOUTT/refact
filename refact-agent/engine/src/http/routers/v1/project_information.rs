@@ -15,12 +15,26 @@ use crate::chat::system_context::{
 use crate::memories::load_memories_by_tags;
 
 pub use crate::yaml_configs::project_information::{
-    ProjectInformationConfig, load_project_information_config, save_project_information_config,
-    to_relative_path, sanitize_overrides,
+    ProjectInformationConfig, load_project_information_config, override_key,
+    save_project_information_config, sanitize_overrides, to_relative_path,
 };
 
 async fn get_project_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     crate::files_correction::get_project_dirs(gcx).await
+}
+
+async fn override_allowed_roots(gcx: Arc<GlobalContext>, project_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = project_roots.to_vec();
+    roots.push(crate::memories::get_global_knowledge_dir(gcx.clone()).await);
+    roots.push(gcx.config_dir.clone());
+    for file in find_instruction_files(project_roots).await {
+        if to_relative_path(&file.file_path, project_roots).is_none() {
+            if let Some(parent) = std::path::Path::new(&file.file_path).parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+    }
+    roots
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,12 +71,13 @@ pub async fn handle_v1_project_information_save(
 ) -> Result<StatusCode, ScratchError> {
     let gcx = app.gcx.clone();
     let project_roots = get_project_dirs(gcx.clone()).await;
+    let allowed_roots = override_allowed_roots(gcx.clone(), &project_roots).await;
     config.sections.instruction_files.overrides =
-        sanitize_overrides(&config.sections.instruction_files.overrides, &project_roots);
+        sanitize_overrides(&config.sections.instruction_files.overrides, &allowed_roots);
     config.sections.project_configs.overrides =
-        sanitize_overrides(&config.sections.project_configs.overrides, &project_roots);
+        sanitize_overrides(&config.sections.project_configs.overrides, &allowed_roots);
     config.sections.memories.overrides =
-        sanitize_overrides(&config.sections.memories.overrides, &project_roots);
+        sanitize_overrides(&config.sections.memories.overrides, &allowed_roots);
     save_project_information_config(gcx, &config)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -83,8 +98,8 @@ struct TruncateResult {
 fn truncate_to_chars(s: &str, max_chars: usize) -> TruncateResult {
     let original_char_count = s.chars().count();
     if original_char_count > max_chars {
-        let content: String = s.chars().take(max_chars).collect();
-        let char_count = max_chars;
+        let content = crate::chat::system_context::truncate_to_chars(s, max_chars);
+        let char_count = content.chars().count();
         TruncateResult {
             content,
             truncated: true,
@@ -255,27 +270,23 @@ pub async fn handle_v1_project_information_preview(
 
     if config.sections.instruction_files.enabled {
         let instruction_files = find_instruction_files(&project_dirs).await;
-        let max_items = config.sections.instruction_files.max_items.unwrap_or(20);
         let default_max_chars = config
             .sections
             .instruction_files
             .max_chars_per_item
             .unwrap_or(8000);
         let overrides = &config.sections.instruction_files.overrides;
-        let list_truncated = instruction_files.len() > max_items;
-        let files_to_show: Vec<_> = instruction_files.into_iter().take(max_items).collect();
 
-        for (idx, file) in files_to_show.iter().enumerate() {
-            // Use relative path as the override key (consistent with UI and sanitization)
-            let override_key = to_relative_path(&file.file_path, &project_dirs);
-            let file_override = override_key.as_ref().and_then(|k| overrides.get(k));
+        for (idx, file) in instruction_files.iter().enumerate() {
+            let key = override_key(&file.file_path, &project_dirs);
+            let file_override = overrides.get(&key);
             let file_enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
             let max_chars_per_item = file_override
                 .and_then(|o| o.max_chars)
                 .unwrap_or(default_max_chars);
 
             let raw_content = if let Some(ref processed) = file.processed_content {
-                processed.clone()
+                format!("# Filtered content\n\n{}", processed)
             } else {
                 match tokio::fs::read_to_string(&file.file_path).await {
                     Ok(c) => c,
@@ -287,8 +298,7 @@ pub async fn handle_v1_project_information_preview(
                 id: format!("instruction_file_{}", idx),
                 section: "instruction_files".into(),
                 title: file.file_name.clone(),
-                // Return relative path as the key for UI to use when saving overrides
-                path: override_key.or_else(|| Some(file.file_path.clone())),
+                path: Some(key),
                 char_count: if file_enabled { tr.char_count } else { 0 },
                 original_char_count: if tr.truncated {
                     Some(tr.original_char_count)
@@ -301,7 +311,7 @@ pub async fn handle_v1_project_information_preview(
             });
         }
 
-        if files_to_show.is_empty() {
+        if instruction_files.is_empty() {
             let content = "No instruction files found (AGENTS.md, .cursorrules, etc.)".to_string();
             blocks.push(ProjectInfoBlock {
                 id: "instruction_files_empty".into(),
@@ -314,11 +324,6 @@ pub async fn handle_v1_project_information_preview(
                 truncated: false,
                 enabled: true,
             });
-        } else if list_truncated {
-            warnings.push(format!(
-                "Instruction files truncated to {} items",
-                max_items
-            ));
         }
     }
 
@@ -361,11 +366,8 @@ pub async fn handle_v1_project_information_preview(
 
         for (idx, memo) in memories.iter().enumerate() {
             let abs_path_str = memo.file_path.as_ref().map(|p| p.display().to_string());
-            // Use relative path as the override key (consistent with UI and sanitization)
-            let override_key = abs_path_str
-                .as_ref()
-                .and_then(|p| to_relative_path(p, &project_dirs));
-            let file_override = override_key.as_ref().and_then(|k| overrides.get(k));
+            let key = abs_path_str.as_ref().map(|p| override_key(p, &project_dirs));
+            let file_override = key.as_ref().and_then(|k| overrides.get(k));
             let file_enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
             let max_chars_per_item = file_override
                 .and_then(|o| o.max_chars)
@@ -382,8 +384,7 @@ pub async fn handle_v1_project_information_preview(
                 id: format!("memory_{}", idx),
                 section: "memories".into(),
                 title,
-                // Return relative path as the key for UI to use when saving overrides
-                path: override_key.or(abs_path_str),
+                path: key.or(abs_path_str),
                 char_count: if file_enabled { tr.char_count } else { 0 },
                 original_char_count: if tr.truncated {
                     Some(tr.original_char_count)

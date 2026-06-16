@@ -67,7 +67,6 @@ const DEFAULT_CONFIG: ProjectInformationConfig = {
     project_tree: { enabled: true, max_depth: 4, max_chars: 16000 },
     instruction_files: {
       enabled: true,
-      max_items: 20,
       max_chars_per_item: 8000,
     },
     project_configs: { enabled: true, max_items: 30, max_chars_per_item: 4000 },

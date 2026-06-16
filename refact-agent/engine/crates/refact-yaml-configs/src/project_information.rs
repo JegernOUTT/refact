@@ -103,7 +103,6 @@ impl Default for ProjectInformationSections {
             },
             instruction_files: SectionConfig {
                 enabled: true,
-                max_items: Some(20),
                 max_chars_per_item: Some(8000),
                 ..Default::default()
             },
@@ -213,13 +212,42 @@ pub fn to_relative_path(absolute_path: &str, project_roots: &[PathBuf]) -> Optio
     None
 }
 
+pub fn override_key(absolute_path: &str, project_roots: &[PathBuf]) -> String {
+    to_relative_path(absolute_path, project_roots).unwrap_or_else(|| absolute_path.replace('\\', "/"))
+}
+
+fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
+    for root in roots {
+        if path.starts_with(root) {
+            return true;
+        }
+        if let (Ok(path_canonical), Ok(root_canonical)) = (path.canonicalize(), root.canonicalize()) {
+            if dunce::simplified(&path_canonical).starts_with(dunce::simplified(&root_canonical)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn is_allowed_override_key(path: &str, allowed_roots: &[PathBuf]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let path_obj = Path::new(path);
+    if path_obj.is_absolute() {
+        return is_under_any_root(path_obj, allowed_roots);
+    }
+    is_safe_relative_path(path, allowed_roots)
+}
+
 pub fn sanitize_overrides(
     overrides: &HashMap<String, FileOverride>,
-    project_roots: &[PathBuf],
+    allowed_roots: &[PathBuf],
 ) -> HashMap<String, FileOverride> {
     overrides
         .iter()
-        .filter(|(path, _)| is_safe_relative_path(path, project_roots))
+        .filter(|(path, _)| is_allowed_override_key(path, allowed_roots))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -351,6 +379,54 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_overrides_keeps_absolute_under_allowed_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let external = temp_dir.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let memo = external.join("memory.md");
+        std::fs::write(&memo, "note").unwrap();
+
+        let project_root = temp_dir.path().join("proj");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let key = memo.to_string_lossy().replace('\\', "/");
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            key.clone(),
+            FileOverride {
+                enabled: Some(false),
+                max_chars: None,
+            },
+        );
+
+        let allowed_roots = vec![project_root, external];
+        let result = sanitize_overrides(&overrides, &allowed_roots);
+        assert!(result.contains_key(&key));
+    }
+
+    #[test]
+    fn test_override_key_relative_in_root_absolute_out_of_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().to_path_buf();
+        let in_root = root.join("sub").join("AGENTS.md");
+        std::fs::create_dir_all(in_root.parent().unwrap()).unwrap();
+        std::fs::write(&in_root, "x").unwrap();
+        let roots = vec![root];
+        assert_eq!(
+            override_key(&in_root.to_string_lossy(), &roots),
+            "sub/AGENTS.md".to_string()
+        );
+
+        let other = TempDir::new().unwrap();
+        let outside = other.path().join("MEMORY.md");
+        std::fs::write(&outside, "y").unwrap();
+        assert_eq!(
+            override_key(&outside.to_string_lossy(), &roots),
+            outside.to_string_lossy().replace('\\', "/")
+        );
+    }
+
+    #[test]
     fn test_default_config_has_reasonable_limits() {
         let config = ProjectInformationConfig::default();
 
@@ -366,7 +442,7 @@ mod tests {
         assert_eq!(config.sections.project_tree.max_chars, Some(16000));
 
         assert!(config.sections.instruction_files.enabled);
-        assert_eq!(config.sections.instruction_files.max_items, Some(20));
+        assert_eq!(config.sections.instruction_files.max_items, None);
         assert_eq!(
             config.sections.instruction_files.max_chars_per_item,
             Some(8000)
