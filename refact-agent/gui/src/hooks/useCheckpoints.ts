@@ -33,7 +33,9 @@ export const useCheckpoints = () => {
   const dispatch = useAppDispatch();
   const chatId = useThreadId();
   const messages = useAppSelector((state) => selectMessagesById(state, chatId));
-  const chatMode = useAppSelector((state) => selectThreadModeById(state, chatId));
+  const chatMode = useAppSelector((state) =>
+    selectThreadModeById(state, chatId),
+  );
   const configIdeHost = useAppSelector(selectConfig).host;
 
   const { setForceReloadFileByPath } = useEventsBusForIDE();

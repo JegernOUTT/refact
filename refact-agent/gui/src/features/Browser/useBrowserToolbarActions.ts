@@ -238,7 +238,10 @@ export function useBrowserToolbarActions(chatId: string) {
             action === "summarize"
               ? "Summarize this page"
               : "Extract data as JSON from tables/lists";
-          insertBrowserDraft(formatBrowserDraftBlock("Browser Task", message), chatId);
+          insertBrowserDraft(
+            formatBrowserDraftBlock("Browser Task", message),
+            chatId,
+          );
           break;
         }
 

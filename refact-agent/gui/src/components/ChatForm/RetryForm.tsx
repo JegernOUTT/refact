@@ -90,7 +90,9 @@ export const RetryForm: React.FC<{
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
-  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const formRef = useRef<HTMLDivElement>(null);
 
   const disableInput = useMemo(

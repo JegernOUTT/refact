@@ -90,7 +90,9 @@ function useGetCommandPreviewQuery(
   const currentThreadMode = useAppSelector((state) =>
     selectThreadModeById(state, chatId),
   );
-  const currentModel = useAppSelector((state) => selectModelById(state, chatId));
+  const currentModel = useAppSelector((state) =>
+    selectModelById(state, chatId),
+  );
 
   const userMessage: UserMessage = useMemo(() => {
     if (attachedImages.length === 0) {

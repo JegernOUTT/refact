@@ -97,7 +97,9 @@ export const TaskProgressWidget: React.FC = () => {
   const everUsed = useAppSelector((state) =>
     selectTasksEverUsedById(state, chatId),
   );
-  const tasks = useAppSelector((state) => selectCurrentTasksById(state, chatId));
+  const tasks = useAppSelector((state) =>
+    selectCurrentTasksById(state, chatId),
+  );
   const isExpanded = useAppSelector((state) =>
     selectTaskWidgetExpandedById(state, chatId),
   );

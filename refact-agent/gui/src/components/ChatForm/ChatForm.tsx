@@ -206,7 +206,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
-  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const caps = useCapsForToolUse();
   const { isMultimodalitySupportedForCurrentModel } = caps;
   const config = useConfig();

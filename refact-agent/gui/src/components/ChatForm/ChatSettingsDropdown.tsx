@@ -157,7 +157,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
-  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const threadModel = useAppSelector((state) => selectModelById(state, chatId));
   const messages = useAppSelector((state) => selectMessagesById(state, chatId));
   const isBoostReasoningEnabled = useAppSelector((state) =>

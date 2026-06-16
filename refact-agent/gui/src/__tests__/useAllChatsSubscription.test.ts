@@ -45,13 +45,7 @@ describe("pickDesiredChatSubscriptions", () => {
       maxSubscriptions: 5,
     });
 
-    expect(result).toEqual([
-      "chat-2",
-      "chat-9",
-      "chat-4",
-      "chat-10",
-      "chat-1",
-    ]);
+    expect(result).toEqual(["chat-2", "chat-9", "chat-4", "chat-10", "chat-1"]);
   });
 
   it("preserves non-visible ordering with active then subscribed then open tabs", () => {

@@ -1099,7 +1099,8 @@ export const selectCurrentTasks = (() => {
 
 export const selectCurrentTasksById = createSelector(
   [(state: RootState, chatId: string) => selectMessagesById(state, chatId)],
-  (messages) => deriveTasksFromMessages(messages, messages.filter(isToolMessage)),
+  (messages) =>
+    deriveTasksFromMessages(messages, messages.filter(isToolMessage)),
 );
 
 export const selectHasTasks = createSelector(

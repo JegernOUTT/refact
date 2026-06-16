@@ -55,7 +55,9 @@ export const StreamingTokenCounter: React.FC = () => {
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
-  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const messages = useAppSelector((state) => selectMessagesById(state, chatId));
 
   const [visible, setVisible] = useState(() => isStreaming || isWaiting);

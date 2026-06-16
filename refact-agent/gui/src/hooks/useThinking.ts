@@ -18,7 +18,9 @@ export function useThinking() {
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
-  const isWaiting = useAppSelector((state) => selectIsWaitingById(state, chatId));
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const threadModel = useAppSelector((state) => selectModelById(state, chatId));
 
   const isBoostReasoningEnabled = useAppSelector((state) =>
