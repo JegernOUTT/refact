@@ -890,7 +890,7 @@ fn is_spillover_row(row: &TableBodyRow, next_row: Option<&TableBodyRow>) -> bool
         return false;
     };
 
-    if !row.has_table_pipe_syntax {
+    if row.cells.len() == 1 && !row.has_table_pipe_syntax {
         return true;
     }
 
@@ -995,6 +995,7 @@ fn widest_line_width(lines: &[HyperlinkLine]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     use ratatui::style::Modifier;
 
     fn make_cell(text: &str) -> TableCell {
@@ -1008,6 +1009,69 @@ mod tests {
             cells,
             has_table_pipe_syntax,
         }
+    }
+
+    fn render_source_table(source: &str) -> RenderedTable {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TABLES);
+        let mut table = None;
+        for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+            match event {
+                Event::Start(Tag::Table(alignments)) => table = Some(TableState::new(alignments)),
+                Event::Start(Tag::TableHead) => {
+                    if let Some(table) = &mut table {
+                        table.start_header();
+                    }
+                }
+                Event::Start(Tag::TableRow) => {
+                    let has_table_pipe_syntax = source
+                        .get(range)
+                        .map(|source| {
+                            let source = source.trim();
+                            source.starts_with('|') || source.ends_with('|')
+                        })
+                        .unwrap_or(false);
+                    if let Some(table) = &mut table {
+                        table.start_row(has_table_pipe_syntax);
+                    }
+                }
+                Event::Start(Tag::TableCell) => {
+                    if let Some(table) = &mut table {
+                        table.start_cell();
+                    }
+                }
+                Event::Text(text) => {
+                    if let Some(table) = &mut table {
+                        table.push_span_to_current_cell(Span::raw(text.to_string()));
+                    }
+                }
+                Event::End(TagEnd::TableCell) => {
+                    if let Some(table) = &mut table {
+                        table.end_cell();
+                    }
+                }
+                Event::End(TagEnd::TableRow) => {
+                    if let Some(table) = &mut table {
+                        table.end_row();
+                    }
+                }
+                Event::End(TagEnd::TableHead) => {
+                    if let Some(table) = &mut table {
+                        table.end_header();
+                    }
+                }
+                Event::End(TagEnd::Table) => break,
+                _ => {}
+            }
+        }
+        render_table(
+            table.unwrap(),
+            Some(24),
+            TableRenderStyles {
+                header: Style::default().add_modifier(Modifier::BOLD),
+                separator: Style::default(),
+            },
+        )
     }
 
     #[test]
@@ -1063,6 +1127,8 @@ mod tests {
     fn spillover_detects_parser_artifacts() {
         let row = make_body_row(vec![make_cell("some trailing text")], false);
         assert!(is_spillover_row(&row, None));
+        let row = make_body_row(vec![make_cell("some sparse value"), make_cell("")], false);
+        assert!(!is_spillover_row(&row, None));
         let row = make_body_row(vec![make_cell("some sparse value")], true);
         assert!(!is_spillover_row(&row, None));
         let row = make_body_row(
@@ -1074,6 +1140,27 @@ mod tests {
             false,
         );
         assert!(is_spillover_row(&row, Some(&next)));
+    }
+
+    #[test]
+    fn renders_no_outer_pipe_multicell_rows_in_grid() {
+        let rendered = render_source_table("a | b\n--- | ---\nc | d\ne | f");
+        let text = rendered
+            .table_lines
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+        assert!(rendered.spillover_lines.is_empty());
+        assert_eq!(
+            text,
+            vec![
+                " a      b",
+                "━━━━━  ━━━━━",
+                " c      d",
+                "─────  ─────",
+                " e      f",
+            ]
+        );
     }
 
     #[test]
