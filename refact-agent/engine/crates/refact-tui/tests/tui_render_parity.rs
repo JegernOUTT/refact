@@ -528,8 +528,8 @@ fn picker_golden_snapshots() {
 
 
 
-      /status  show daemon status
-      /theme   choose TUI theme"#,
+      /status               show daemon status
+      /theme                choose TUI theme"#,
     );
 }
 

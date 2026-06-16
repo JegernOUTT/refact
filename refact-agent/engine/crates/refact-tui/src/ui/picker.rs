@@ -159,7 +159,7 @@ fn render_composer_popup(frame: &mut Frame<'_>, picker: &PickerState, area: Rect
                 &state,
                 MAX_POPUP_ROWS,
                 empty_message,
-                ColumnWidthConfig::new(ColumnWidthMode::AutoAllRows, None),
+                ColumnWidthConfig::new(ColumnWidthMode::Fixed, None),
             );
         }
         PickerKind::FileMention => {
@@ -419,6 +419,16 @@ mod tests {
                 .collect::<String>();
             if candidate == text {
                 return Some((x, y));
+            }
+        }
+        None
+    }
+
+    fn find_text_start(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
+        let area = buffer.area;
+        for y in area.top()..area.bottom() {
+            if let Some(position) = find_text_start_on_row(buffer, text, y) {
+                return Some(position);
             }
         }
         None
@@ -734,6 +744,15 @@ mod tests {
         assert!(!text.contains("commands:"));
         assert!(!text.contains("Press Enter"));
         assert!(!text.contains("┌"));
+        let model_pos = find_text_start(buffer, "/model").expect("model row rendered");
+        let model_desc_pos = find_text_start_on_row(buffer, "switch model", model_pos.1)
+            .expect("model description rendered");
+        let mode_pos = find_text_start(buffer, "/mode").expect("mode row rendered");
+        let mode_desc_pos = find_text_start_on_row(buffer, "switch mode", mode_pos.1)
+            .expect("mode description rendered");
+        assert_eq!(model_desc_pos.0 - model_pos.0, 14);
+        assert_eq!(mode_desc_pos.0 - mode_pos.0, 14);
+        assert_eq!(mode_desc_pos.0, model_desc_pos.0);
         let model_x = text.find("/model").expect("slash command rendered");
         assert!(buffer.content()[model_x + 1]
             .style()

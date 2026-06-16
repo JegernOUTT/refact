@@ -39,7 +39,6 @@ pub(crate) struct GenericDisplayRow {
 pub(crate) enum ColumnWidthMode {
     #[default]
     AutoVisible,
-    AutoAllRows,
     Fixed,
 }
 
@@ -65,59 +64,11 @@ pub(crate) struct ScrollState {
 }
 
 impl ScrollState {
-    pub(crate) fn new() -> Self {
-        Self {
-            selected_idx: None,
-            scroll_top: 0,
-        }
-    }
-
     pub(crate) fn clamp_selection(&mut self, len: usize) {
         if self.clear_if_empty(len) {
             return;
         }
         self.selected_idx = Some(self.selected_idx.unwrap_or(0).min(len - 1));
-    }
-
-    pub(crate) fn move_up_wrap(&mut self, len: usize) {
-        if self.clear_if_empty(len) {
-            return;
-        }
-        self.selected_idx = Some(match self.selected_idx {
-            Some(idx) if idx > 0 => idx - 1,
-            Some(_) => len - 1,
-            None => 0,
-        });
-    }
-
-    pub(crate) fn move_down_wrap(&mut self, len: usize) {
-        if self.clear_if_empty(len) {
-            return;
-        }
-        self.selected_idx = Some(match self.selected_idx {
-            Some(idx) if idx + 1 < len => idx + 1,
-            _ => 0,
-        });
-    }
-
-    pub(crate) fn page_up_clamped(&mut self, len: usize, visible_rows: usize) {
-        if self.clear_if_empty(len) {
-            return;
-        }
-        let step = visible_rows.max(1);
-        let current = self.selected_idx.unwrap_or(0).min(len - 1);
-        self.selected_idx = Some(current.saturating_sub(step));
-        self.ensure_visible(len, visible_rows);
-    }
-
-    pub(crate) fn page_down_clamped(&mut self, len: usize, visible_rows: usize) {
-        if self.clear_if_empty(len) {
-            return;
-        }
-        let step = visible_rows.max(1);
-        let current = self.selected_idx.unwrap_or(0).min(len - 1);
-        self.selected_idx = Some(current.saturating_add(step).min(len - 1));
-        self.ensure_visible(len, visible_rows);
     }
 
     pub(crate) fn ensure_visible(&mut self, len: usize, visible_rows: usize) {
@@ -544,16 +495,12 @@ fn compute_desc_col(
         ColumnWidthMode::Fixed => ((content_width as usize * FIXED_LEFT_COLUMN_NUMERATOR)
             / FIXED_LEFT_COLUMN_DENOMINATOR)
             .clamp(1, max_desc_col),
-        ColumnWidthMode::AutoVisible | ColumnWidthMode::AutoAllRows => {
-            let rows = match column_width.mode {
-                ColumnWidthMode::AutoVisible => rows_all
-                    .iter()
-                    .skip(start_idx)
-                    .take(visible_items)
-                    .collect::<Vec<_>>(),
-                ColumnWidthMode::AutoAllRows => rows_all.iter().collect::<Vec<_>>(),
-                ColumnWidthMode::Fixed => Vec::new(),
-            };
+        ColumnWidthMode::AutoVisible => {
+            let rows = rows_all
+                .iter()
+                .skip(start_idx)
+                .take(visible_items)
+                .collect::<Vec<_>>();
             let measured = rows
                 .iter()
                 .map(|row| name_line_width(row))
@@ -717,30 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn scroll_state_wraps_and_pages() {
-        let mut state = ScrollState::new();
-        let len = 10;
-        let visible = 4;
-
-        state.clamp_selection(len);
-        assert_eq!(state.selected_idx, Some(0));
-        state.move_up_wrap(len);
-        state.ensure_visible(len, visible);
-        assert_eq!(state.selected_idx, Some(9));
-        assert_eq!(state.scroll_top, 6);
-        state.move_down_wrap(len);
-        state.ensure_visible(len, visible);
-        assert_eq!(state.selected_idx, Some(0));
-        assert_eq!(state.scroll_top, 0);
-        state.page_down_clamped(len, visible);
-        assert_eq!(state.selected_idx, Some(4));
-        assert_eq!(state.scroll_top, 1);
-        state.page_up_clamped(len, visible);
-        assert_eq!(state.selected_idx, Some(0));
-        assert_eq!(state.scroll_top, 0);
-    }
-
-    #[test]
     fn selected_rows_use_accent_style() {
         let rows = vec![GenericDisplayRow {
             name: "Alpha".to_string(),
@@ -842,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_column_modes_are_available_for_callers() {
+    fn fixed_column_mode_uses_codex_split() {
         let rows = vec![GenericDisplayRow {
             name: "Alpha".to_string(),
             description: Some("desc".to_string()),
@@ -864,17 +787,15 @@ mod tests {
             "no rows",
             ColumnWidthConfig::new(ColumnWidthMode::Fixed, None),
         );
-        let stable_rendered = render_rows_single_line_with_config(
-            area,
-            &mut buffer,
+        let desc_col = compute_desc_col(
             &rows,
-            &state,
+            0,
             1,
-            "no rows",
-            ColumnWidthConfig::new(ColumnWidthMode::AutoAllRows, None),
+            area.width,
+            ColumnWidthConfig::new(ColumnWidthMode::Fixed, None),
         );
 
         assert_eq!(rendered, 1);
-        assert_eq!(stable_rendered, 1);
+        assert_eq!(desc_col, 9);
     }
 }

@@ -16,7 +16,7 @@ pub fn proposed_plan_style() -> Style {
 }
 
 pub(crate) fn table_separator_style() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
+    table_separator_style_for(terminal_palette::default_fg(), default_terminal_bg())
 }
 
 pub(crate) fn accent_style() -> Style {
@@ -116,7 +116,7 @@ fn table_separator_style_for(
     terminal_bg: Option<(u8, u8, u8)>,
 ) -> Style {
     let (Some(fg), Some(bg)) = (terminal_fg, terminal_bg) else {
-        return table_separator_style();
+        return Style::default().add_modifier(Modifier::DIM);
     };
     Style::default().fg(best_color(blend(fg, bg, TABLE_SEPARATOR_FG_ALPHA)))
 }

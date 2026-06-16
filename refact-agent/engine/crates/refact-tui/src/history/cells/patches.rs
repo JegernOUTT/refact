@@ -174,7 +174,6 @@ fn file_changes_from_unified_diff(source: &str) -> HashMap<PathBuf, FileChange> 
 enum ParsedFileChange {
     Add,
     Delete,
-    Update,
 }
 
 fn parsed_file_change(line: &str) -> Option<ParsedFileChange> {

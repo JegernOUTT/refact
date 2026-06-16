@@ -996,7 +996,7 @@ fn widest_line_width(lines: &[HyperlinkLine]) -> usize {
 mod tests {
     use super::*;
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     fn make_cell(text: &str) -> TableCell {
         let mut cell = TableCell::default();
@@ -1199,5 +1199,49 @@ mod tests {
             text,
             vec![" Name     Count", "━━━━━━━  ━━━━━━━", " frogs       12"]
         );
+    }
+
+    #[test]
+    fn grid_separator_uses_separator_style() {
+        let mut table = TableState::new(vec![Alignment::None, Alignment::None]);
+        table.start_header();
+        table.start_row(true);
+        table.start_cell();
+        table.push_span_to_current_cell(Span::raw("A"));
+        table.end_cell();
+        table.start_cell();
+        table.push_span_to_current_cell(Span::raw("B"));
+        table.end_cell();
+        table.end_row();
+        table.end_header();
+        table.start_row(true);
+        table.start_cell();
+        table.push_span_to_current_cell(Span::raw("one"));
+        table.end_cell();
+        table.start_cell();
+        table.push_span_to_current_cell(Span::raw("two"));
+        table.end_cell();
+        table.end_row();
+        let separator = Style::default().fg(Color::Magenta);
+
+        let rendered = render_table(
+            table,
+            Some(24),
+            TableRenderStyles {
+                header: Style::default().add_modifier(Modifier::BOLD),
+                separator,
+            },
+        );
+
+        let separator_line = rendered
+            .table_lines
+            .iter()
+            .find(|line| line_to_plain(&line.line).contains(TABLE_HEADER_SEPARATOR_CHAR))
+            .expect("separator line rendered");
+        assert!(separator_line
+            .line
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(Color::Magenta)));
     }
 }

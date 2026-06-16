@@ -15,6 +15,7 @@ use super::highlight::highlight_code_to_lines;
 use super::line_utils::line_to_static;
 use super::markdown_table::{render_table, TableRenderStyles, TableState};
 use super::wrapping::{adaptive_wrap_line, RtOptions};
+use crate::style::table_separator_style;
 use crate::vendored::decoded_text_merge::DecodedTextMerge;
 use crate::vendored::terminal_hyperlinks::{
     annotate_web_urls_in_line, plain_hyperlink_lines, remap_wrapped_line, visible_lines,
@@ -168,7 +169,7 @@ impl MarkdownStyles {
             link: color(Color::Cyan).add_modifier(Modifier::UNDERLINED),
             blockquote: color(Color::Green),
             muted: color(Color::DarkGray),
-            table_separator: color(Color::DarkGray),
+            table_separator: table_separator_style(),
         }
     }
 
@@ -1455,6 +1456,23 @@ mod tests {
         let expected = " Name      Count       Note\n━━━━━━━━  ━━━━━━━  ━━━━━━━━━━━━━\n α             2       small\n────────  ───────  ─────────────\n longer       12      wrapped\n                    words here";
         assert_eq!(rendered, expected);
         assert!(rendered.lines().all(|line| line.width() <= 32));
+    }
+
+    #[test]
+    fn table_separator_uses_shared_separator_style() {
+        let lines = render_markdown_with_options(
+            "| A | B |\n|---|---|\n| one | two |",
+            RenderOptions::plain(Some(40)),
+        );
+        let separator = lines
+            .iter()
+            .find(|line| line_to_plain(line).contains('━'))
+            .expect("separator rendered");
+
+        assert!(separator
+            .spans
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::DIM)));
     }
 
     #[test]
