@@ -2758,18 +2758,9 @@ mod tests {
         let Some(_guard) = EnvGuard::set(cache_dir.path(), config_dir.path()) else {
             return;
         };
-        let missing_project_dir = tempfile::tempdir().unwrap();
-        let missing_project_path = missing_project_dir.path().to_path_buf();
         let project_dir = tempfile::tempdir().unwrap();
+        let missing_project_path = cache_dir.path().join("missing-project-root");
         let (info, task) = start_test_daemon(&cache_dir).await;
-        let _: Value = client::post_json(
-            &info,
-            "/daemon/v1/projects/open",
-            &json!({"root": missing_project_path}),
-        )
-        .await
-        .unwrap();
-        drop(missing_project_dir);
         let _: Value = client::post_json(
             &info,
             "/daemon/v1/projects/open",
@@ -2777,6 +2768,9 @@ mod tests {
         )
         .await
         .unwrap();
+        std::fs::rename(project_dir.path(), &missing_project_path).unwrap();
+        assert!(!project_dir.path().exists());
+        assert!(missing_project_path.exists());
         let report = doctor_report().await;
         assert_eq!(report.exit_code(), 1);
         assert!(report
