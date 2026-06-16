@@ -186,10 +186,10 @@ pub fn create_diff_summary(
 
 pub fn display_path_for(path: &Path, cwd: &Path) -> String {
     if path.is_relative() {
-        return path.display().to_string();
+        return render_path_text(path);
     }
     if let Ok(stripped) = path.strip_prefix(cwd) {
-        let rendered = stripped.display().to_string();
+        let rendered = render_path_text(stripped);
         return if rendered.is_empty() {
             ".".to_string()
         } else {
@@ -197,14 +197,18 @@ pub fn display_path_for(path: &Path, cwd: &Path) -> String {
         };
     }
     if let Some(stripped) = relativize_to_home(path) {
-        let rendered = stripped.display().to_string();
+        let rendered = render_path_text(&stripped);
         return if rendered.is_empty() {
             "~".to_string()
         } else {
             format!("~/{}", rendered)
         };
     }
-    path.display().to_string()
+    render_path_text(path)
+}
+
+fn render_path_text(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }
 
 pub fn calculate_add_remove_from_diff(diff: &str) -> (usize, usize) {
@@ -1255,11 +1259,9 @@ mod tests {
 
     #[test]
     fn displays_paths_relative_to_cwd_and_home() {
-        let cwd = PathBuf::from("/tmp/project");
-        assert_eq!(
-            display_path_for(Path::new("/tmp/project/src/main.rs"), &cwd),
-            "src/main.rs"
-        );
+        let cwd = std::env::current_dir().unwrap();
+        let nested = cwd.join("src").join("main.rs");
+        assert_eq!(display_path_for(&nested, &cwd), "src/main.rs");
         assert_eq!(
             display_path_for(Path::new("src/lib.rs"), &cwd),
             "src/lib.rs"
