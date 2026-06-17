@@ -300,12 +300,6 @@ impl Tool for ToolHandoffToMode {
             SessionState::Generating => {
                 return Err("Cannot handoff while model is generating. Wait for the current response to complete.".to_string());
             }
-            SessionState::ExecutingTools => {
-                return Err(
-                    "Cannot handoff while tools are executing. Wait for tools to finish."
-                        .to_string(),
-                );
-            }
             SessionState::Paused => {
                 return Err(
                     "Cannot handoff while session is paused. Resume or abort first.".to_string(),
@@ -327,7 +321,7 @@ impl Tool for ToolHandoffToMode {
                     );
                 }
             }
-            SessionState::Idle | SessionState::Completed => {}
+            SessionState::ExecutingTools | SessionState::Idle | SessionState::Completed => {}
         }
         if messages.is_empty() {
             return Err("Cannot handoff an empty chat".to_string());
@@ -352,7 +346,11 @@ impl Tool for ToolHandoffToMode {
                 })
                 .map(|m| m.tool_call_id.as_str())
                 .collect();
-            let mut missing_ids: Vec<&str> = call_ids.difference(&result_ids).copied().collect();
+            let mut missing_ids: Vec<&str> = call_ids
+                .difference(&result_ids)
+                .copied()
+                .filter(|id| *id != tool_call_id.as_str())
+                .collect();
             if !missing_ids.is_empty() {
                 missing_ids.sort();
                 return Err(format!(
@@ -878,11 +876,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_rejects_executing_tools_state() {
+    async fn handoff_allows_executing_tools_state() {
         let mut snap = source_snapshot();
         snap.session_state = SessionState::ExecutingTools;
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("tools are executing"), "{err}");
+        tool_with_snapshot(snap).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handoff_succeeds_through_real_facade_with_pending_self_call() {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+
+        let chat_id = "real-exec-chat";
+        {
+            let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+            session.thread.mode = "agent".to_string();
+            session.thread.tool_use = "agent".to_string();
+            session.thread.model = "model".to_string();
+            session.add_message(ChatMessage::new(
+                "user".to_string(),
+                "Please create a plan.".to_string(),
+            ));
+            session.add_message(ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "handoff-call".to_string(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "switch_mode".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            });
+            session.set_runtime_state(SessionState::ExecutingTools, None);
+            app.gcx.chat_sessions.write().await.insert(
+                chat_id.to_string(),
+                Arc::new(tokio::sync::Mutex::new(session)),
+            );
+        }
+
+        let observed = app
+            .chat
+            .facade
+            .session_snapshot(chat_id)
+            .await
+            .unwrap()
+            .session_state;
+        assert_eq!(observed, SessionState::ExecutingTools);
+
+        let ccx = handoff_ccx_with_chat_id(app, chat_id).await;
+        let mut tool = ToolHandoffToMode {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
+
+        let (_, messages) = tool
+            .tool_execute(ccx, &"handoff-call".to_string(), &args)
+            .await
+            .unwrap();
+        let result = tool_result_json(&messages);
+        assert_eq!(result["target_mode"], "task_planner");
     }
 
     #[tokio::test]

@@ -2443,18 +2443,10 @@ async fn run_streaming_generation(
 
         let mut result = results.into_iter().next().unwrap_or_default();
 
-        if let Some(count) = cloud_input_usage.clone() {
-            let usage = count.usage;
-            result.usage = Some(match result.usage.take() {
-                Some(provider_usage) => ChatUsage {
-                    prompt_tokens: usage.prompt_tokens,
-                    total_tokens: usage
-                        .prompt_tokens
-                        .saturating_add(provider_usage.completion_tokens),
-                    ..provider_usage
-                },
-                None => usage,
-            });
+        if result.usage.is_none() {
+            if let Some(count) = cloud_input_usage.clone() {
+                result.usage = Some(count.usage);
+            }
         }
         if let Some(usage) = result.usage.clone() {
             let mut session = session_arc.lock().await;
