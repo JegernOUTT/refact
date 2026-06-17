@@ -13,6 +13,7 @@ mod help;
 pub(crate) mod menu;
 mod overlay;
 pub mod picker;
+pub mod session_tabs;
 pub mod status_card;
 pub mod status_indicator;
 mod transcript;
@@ -20,6 +21,7 @@ mod transcript;
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.begin_frame_render();
     let area = frame.area();
+    let session_tabs_height = session_tabs::height(app);
     let status_height = status_indicator::height(app, area.width);
     let footer_height = footer::desired_height(area.width);
     let composer_height = app
@@ -29,6 +31,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let main_constraints = if app.events_pane().open {
         vec![
             Constraint::Length(1),
+            Constraint::Length(session_tabs_height),
             Constraint::Percentage(62),
             Constraint::Percentage(38),
             Constraint::Length(status_height),
@@ -38,6 +41,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         vec![
             Constraint::Length(1),
+            Constraint::Length(session_tabs_height),
             Constraint::Min(1),
             Constraint::Length(status_height),
             Constraint::Length(composer_height),
@@ -50,21 +54,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
 
     header::render_header(frame, app, chunks[0]);
-    transcript::render_transcript(frame, app, chunks[1]);
+    if session_tabs_height > 0 {
+        session_tabs::render(frame, app, chunks[1]);
+    }
+    transcript::render_transcript(frame, app, chunks[2]);
     let composer_area = if app.events_pane().open {
-        chunks[4]
+        chunks[5]
     } else {
-        chunks[3]
+        chunks[4]
     };
     if app.events_pane().open {
-        events::render_events_pane(frame, app, chunks[2]);
+        events::render_events_pane(frame, app, chunks[3]);
+        status_indicator::render(frame, app, chunks[4]);
+        render_composer_region(frame, app, composer_area);
+        footer::render(frame, app, chunks[6]);
+    } else {
         status_indicator::render(frame, app, chunks[3]);
         render_composer_region(frame, app, composer_area);
         footer::render(frame, app, chunks[5]);
-    } else {
-        status_indicator::render(frame, app, chunks[2]);
-        render_composer_region(frame, app, composer_area);
-        footer::render(frame, app, chunks[4]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
         picker::render_project_picker(frame, app.project_picker(), area);

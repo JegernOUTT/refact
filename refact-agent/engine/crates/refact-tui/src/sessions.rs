@@ -40,6 +40,14 @@ pub struct TrajectoryMeta {
     pub root_chat_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTab {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub is_current: bool,
+}
+
 pub fn session_items_from_trajectories(
     mut trajectories: Vec<TrajectoryMeta>,
     now: DateTime<Utc>,
@@ -78,6 +86,15 @@ pub fn session_picker_item(trajectory: &TrajectoryMeta, now: DateTime<Utc>) -> P
         id: trajectory.id.clone(),
         title,
         description: parts.join(" · "),
+    }
+}
+
+pub fn session_tab_from_picker_item(item: PickerItem, current_chat_id: &str) -> SessionTab {
+    SessionTab {
+        is_current: item.id == current_chat_id,
+        id: item.id,
+        title: item.title,
+        description: item.description,
     }
 }
 

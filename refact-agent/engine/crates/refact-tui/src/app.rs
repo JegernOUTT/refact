@@ -51,7 +51,10 @@ use crate::read_only_views::{
     memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
 };
 use crate::render::highlight;
-use crate::sessions::{last_branch_message_id, session_items_from_trajectories, TrajectoryMeta};
+use crate::sessions::{
+    last_branch_message_id, session_items_from_trajectories, session_tab_from_picker_item,
+    SessionTab, TrajectoryMeta,
+};
 use crate::streaming::{
     run_commit_tick, AdaptiveChunkingPolicy, CommitTickScope, PlanStreamController,
     StreamController,
@@ -413,6 +416,7 @@ pub struct App {
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
     session_title: Option<String>,
+    recent_sessions: Vec<PickerItem>,
     show_session_header: bool,
     model: Option<String>,
     mode: Option<String>,
@@ -515,6 +519,7 @@ impl App {
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
             session_title: None,
+            recent_sessions: Vec::new(),
             show_session_header: false,
             model: None,
             mode: None,
@@ -600,6 +605,7 @@ impl App {
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
             session_title: None,
+            recent_sessions: Vec::new(),
             show_session_header: false,
             model: None,
             mode: None,
@@ -749,6 +755,14 @@ impl App {
 
     pub fn session_title(&self) -> Option<&str> {
         self.session_title.as_deref()
+    }
+
+    pub fn session_tabs(&self) -> Vec<SessionTab> {
+        self.recent_sessions
+            .iter()
+            .cloned()
+            .map(|item| session_tab_from_picker_item(item, &self.chat_id))
+            .collect()
     }
 
     pub fn session_header_subtitle(&self) -> String {
@@ -1250,6 +1264,7 @@ impl App {
     }
 
     fn open_session_picker(&mut self, items: Vec<PickerItem>) {
+        self.set_recent_sessions(items.clone());
         if items.is_empty() {
             self.add_notice("No recent chats for this project yet. Continue this new chat or press Ctrl-N for another fresh one.");
             self.modal_picker = None;
@@ -1264,6 +1279,72 @@ impl App {
         let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
         self.open_session_picker(items);
     }
+
+    fn refresh_recent_sessions_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
+        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
+        self.set_recent_sessions(items);
+    }
+
+    fn set_recent_sessions(&mut self, mut items: Vec<PickerItem>) {
+        items.retain(|item| !item.id.trim().is_empty());
+        if !items.iter().any(|item| item.id == self.chat_id) {
+            items.insert(
+                0,
+                PickerItem {
+                    id: self.chat_id.clone(),
+                    title: self.session_header_title(),
+                    description: self.session_header_subtitle(),
+                },
+            );
+        }
+        let mut seen = HashSet::new();
+        items.retain(|item| seen.insert(item.id.clone()));
+        self.recent_sessions = items;
+    }
+
+    fn sync_current_session_in_recent(&mut self) {
+        let title = self.session_header_title();
+        let description = self.session_header_subtitle();
+        if let Some(item) = self
+            .recent_sessions
+            .iter_mut()
+            .find(|item| item.id == self.chat_id)
+        {
+            item.title = title;
+            item.description = description;
+        } else {
+            self.recent_sessions.insert(
+                0,
+                PickerItem {
+                    id: self.chat_id.clone(),
+                    title,
+                    description,
+                },
+            );
+        }
+    }
+
+    fn switch_recent_session(&mut self, delta: isize) -> AppAction {
+        self.sync_current_session_in_recent();
+        if self.recent_sessions.len() <= 1 {
+            self.add_notice("No other recent chats for this project yet");
+            return AppAction::RefreshRecentSessions;
+        }
+        let len = self.recent_sessions.len();
+        let current = self
+            .recent_sessions
+            .iter()
+            .position(|item| item.id == self.chat_id)
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            current.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (current + 1) % len
+        };
+        let item = self.recent_sessions[next].clone();
+        self.resume_chat(item.id, item.title, Some(item.description))
+    }
+
     fn open_permissions_picker(&mut self) {
         self.modal_picker = Some(PickerState::multi_with_selected(
             PickerKind::Permissions,
@@ -2284,6 +2365,7 @@ impl App {
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_title = None;
+        self.recent_sessions.clear();
         self.show_session_header = true;
         self.set_session_state(SessionState::Idle);
         self.replace_with_notice(format!(
@@ -2308,6 +2390,7 @@ impl App {
         self.clear_ask_questions_state();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
     }
 
     fn new_chat(&mut self) {
@@ -2344,6 +2427,7 @@ impl App {
         self.usage = None;
         self.clear_ask_questions_state();
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
     }
 
     fn resume_chat(
@@ -2377,6 +2461,7 @@ impl App {
         self.usage = None;
         self.clear_ask_questions_state();
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
         AppAction::SubscribeCurrent
     }
 
@@ -2427,6 +2512,7 @@ impl App {
     fn apply_renamed_chat(&mut self, title: String) {
         self.session_title = Some(title);
         self.show_session_header = true;
+        self.sync_current_session_in_recent();
     }
 
     fn archive_chat(&mut self) -> AppAction {
@@ -5148,6 +5234,8 @@ impl App {
                 self.new_chat();
                 AppAction::SubscribeCurrent
             }
+            Some(KeyAction::PreviousSession) => self.switch_recent_session(-1),
+            Some(KeyAction::NextSession) => self.switch_recent_session(1),
             Some(KeyAction::OpenProjects) => AppAction::LoadProjects,
             Some(KeyAction::OpenModels) => AppAction::LoadModels,
             Some(KeyAction::OpenModes) => AppAction::LoadModes,
@@ -5701,6 +5789,11 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_set_recent_sessions(&mut self, items: Vec<PickerItem>) {
+        self.set_recent_sessions(items);
+    }
+
+    #[cfg(test)]
     pub fn test_insert_paste(&mut self, text: &str) {
         self.composer.insert_paste(text);
     }
@@ -5734,6 +5827,7 @@ pub enum AppAction {
         scope: String,
     },
     LoadSessions,
+    RefreshRecentSessions,
     RefreshWorkers,
     LoadDaemonStatus,
     OpenProject(PathBuf),
@@ -5856,7 +5950,11 @@ enum RuntimeEvent {
     CompetitorImportViewLoaded(Result<CompetitorImportInfoResponse, String>),
     CompetitorImportSourcesLoaded(Result<CompetitorImportInfoResponse, String>),
     CompetitorImportFinished(Result<CompetitorImportRunResponse, String>),
-    SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
+    SessionsLoaded {
+        project_id: String,
+        open_picker: bool,
+        result: Result<Vec<TrajectoryMeta>, String>,
+    },
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     HistorySaved(Result<(), String>),
@@ -6117,7 +6215,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             app.chat_id().to_string(),
             tx.clone(),
         );
-        load_caps(client.clone(), tx.clone(), project_id);
+        load_caps(client.clone(), tx.clone(), project_id.clone());
+        load_recent_sessions(client.clone(), tx.clone(), project_id, false);
     }
 
     loop {
@@ -6241,7 +6340,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         tx.clone(),
                     );
                     daemon_events.restart(client.clone(), tx.clone());
-                    load_caps(client.clone(), tx.clone(), project_id);
+                    load_caps(client.clone(), tx.clone(), project_id.clone());
+                    load_recent_sessions(client.clone(), tx.clone(), project_id, false);
                 }
             }
             RuntimeEvent::ProjectOpened(Err(error)) => {
@@ -6290,14 +6390,23 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::CompetitorImportFinished(result) => {
                 app.handle_competitor_import_finished(result)
             }
-            RuntimeEvent::SessionsLoaded(Ok(trajectories)) => {
-                app.open_session_picker_from_trajectories(trajectories)
-            }
-            RuntimeEvent::SessionsLoaded(Err(error)) => {
-                app.retry_hint = retry_hint_from_message(&error);
-                app.add_notice(format!("Failed to load recent chats: {error}"));
-                app.open_session_picker(Vec::new());
-            }
+            RuntimeEvent::SessionsLoaded {
+                project_id,
+                open_picker,
+                result,
+            } => match result {
+                _ if app.current_project_id() != Some(project_id.as_str()) => {}
+                Ok(trajectories) if open_picker => {
+                    app.open_session_picker_from_trajectories(trajectories)
+                }
+                Ok(trajectories) => app.refresh_recent_sessions_from_trajectories(trajectories),
+                Err(error) if open_picker => {
+                    app.retry_hint = retry_hint_from_message(&error);
+                    app.add_notice(format!("Failed to load recent chats: {error}"));
+                    app.open_session_picker(Vec::new());
+                }
+                Err(error) => app.retry_hint = retry_hint_from_message(&error),
+            },
             RuntimeEvent::DaemonStatusLoaded(Ok((status, base_url))) => {
                 app.apply_daemon_status(status, base_url)
             }
@@ -6696,15 +6805,12 @@ async fn run_action(
         }
         AppAction::LoadSessions => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
-                let client = client.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let result = client
-                        .list_trajectories(&project_id, 50)
-                        .await
-                        .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::SessionsLoaded(result)).await;
-                });
+                load_recent_sessions(client.clone(), tx.clone(), project_id, true);
+            }
+        }
+        AppAction::RefreshRecentSessions => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                load_recent_sessions(client.clone(), tx.clone(), project_id, false);
             }
         }
         AppAction::RefreshWorkers => refresh_workers(client.clone(), tx.clone()),
@@ -7226,6 +7332,27 @@ fn load_caps(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>, project_id: S
             .await
             .map_err(|error| error.to_string());
         let _ = tx.send(RuntimeEvent::CapsLoaded(result)).await;
+    });
+}
+
+fn load_recent_sessions(
+    client: DaemonClient,
+    tx: mpsc::Sender<RuntimeEvent>,
+    project_id: String,
+    open_picker: bool,
+) {
+    tokio::spawn(async move {
+        let result = client
+            .list_trajectories(&project_id, 50)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx
+            .send(RuntimeEvent::SessionsLoaded {
+                project_id,
+                open_picker,
+                result,
+            })
+            .await;
     });
 }
 
@@ -9548,6 +9675,68 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn recent_session_next_key_switches_to_next_chat() {
+        let mut app = App::new(project());
+        let current = app.chat_id().to_string();
+        app.test_set_recent_sessions(vec![
+            PickerItem {
+                id: current.clone(),
+                title: "Current".to_string(),
+                description: "now".to_string(),
+            },
+            PickerItem {
+                id: "chat-next".to_string(),
+                title: "Next chat".to_string(),
+                description: "recent".to_string(),
+            },
+        ]);
+
+        let action = app.handle_key(key(KeyCode::F(7)));
+
+        assert_eq!(action, AppAction::SubscribeCurrent);
+        assert_eq!(app.chat_id(), "chat-next");
+        assert_eq!(app.session_title(), Some("Next chat"));
+        assert!(app
+            .session_tabs()
+            .iter()
+            .any(|tab| { tab.id == "chat-next" && tab.is_current }));
+    }
+
+    #[test]
+    fn recent_session_previous_key_wraps_and_switches() {
+        let mut app = App::new(project());
+        let current = app.chat_id().to_string();
+        app.test_set_recent_sessions(vec![
+            PickerItem {
+                id: current,
+                title: "Current".to_string(),
+                description: "now".to_string(),
+            },
+            PickerItem {
+                id: "chat-last".to_string(),
+                title: "Last chat".to_string(),
+                description: "recent".to_string(),
+            },
+        ]);
+
+        let action = app.handle_key(key(KeyCode::F(6)));
+
+        assert_eq!(action, AppAction::SubscribeCurrent);
+        assert_eq!(app.chat_id(), "chat-last");
+    }
+
+    #[test]
+    fn recent_session_key_with_empty_cache_requests_refresh() {
+        let mut app = App::new(project());
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::F(7))),
+            AppAction::RefreshRecentSessions
+        );
+        assert_eq!(app.session_tabs().len(), 1);
+    }
+
+    #[test]
     fn app_vim_mode_basic_motions_and_delete_line() {
         let mut app = App::new(project());
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
@@ -10915,6 +11104,10 @@ new-chat = "ctrl-x"
             Some(TranscriptItem::Session { title, .. }) if title == "Saved chat"
         ));
         assert!(session_text(&app).contains("directory: /tmp/demo"));
+        assert!(app
+            .session_tabs()
+            .iter()
+            .any(|tab| { tab.id == "chat-resume" && tab.is_current }));
     }
 
     #[test]
