@@ -19,6 +19,20 @@ import java.io.File
 import java.nio.file.Paths
 
 
+internal fun ensureBackendStartedForConfig(
+    backendReady: Boolean,
+    connectionStatus: LSPBackendConnectionStatus,
+    ensureStarted: () -> Unit,
+) {
+    val shouldStart = !backendReady &&
+        (connectionStatus == LSPBackendConnectionStatus.CONNECTING ||
+            connectionStatus == LSPBackendConnectionStatus.FAILED)
+    if (shouldStart) {
+        ensureStarted()
+    }
+}
+
+
 class Editor (val project: Project) {
     private fun getLanguage(fm: FileEditorManager): Language? {
         val editor = fm.selectedTextEditor
@@ -111,7 +125,7 @@ class Editor (val project: Project) {
         val connectionStatus = lspHolder?.backendConnectionStatus() ?: LSPBackendConnectionStatus.CONNECTING
         val backendReady = lspHolder?.backendReady() ?: false
         val rawPort = if (backendReady) lspHolder?.baseUrlOrNull()?.port ?: 0 else 0
-        if (!backendReady && connectionStatus == LSPBackendConnectionStatus.CONNECTING) {
+        ensureBackendStartedForConfig(backendReady, connectionStatus) {
             lspHolder?.ensureStartedAsync("editor-config-request")
         }
         val lspPort = if (rawPort > 0) rawPort else 0

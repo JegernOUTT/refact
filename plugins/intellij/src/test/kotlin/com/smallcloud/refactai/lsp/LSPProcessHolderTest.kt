@@ -474,6 +474,34 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
+    fun testEnsureStartedAsyncRetriesAfterFailedStatus() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("first open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-failed") }
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            fake.openProjectError = null
+            holder.ensureStartedAsync("failed-config-request")
+
+            val deadline = System.currentTimeMillis() + 3000
+            while (holder.hasPendingLifecycleWork() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(25)
+            }
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
     fun testConfigPayloadContainsBackendReadiness() {
         val payload = Events.Config.UpdatePayload(
             Events.Config.Features(true, false),
