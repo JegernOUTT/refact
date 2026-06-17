@@ -11,10 +11,13 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, DiffChunk};
 use crate::files_correction::{
-    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    preprocess_path_for_normalization,
+    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename,
+    get_unscoped_project_dirs, preprocess_path_for_normalization,
 };
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::{
+    get_file_text_from_memory_or_disk, remove_memory_document_for_path,
+    remove_memory_documents_under_path,
+};
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
     json_schema_from_params,
@@ -127,7 +130,7 @@ impl Tool for ToolMv {
                 corrections,
             )
         } else {
-            let project_dirs = get_project_dirs(gcx.clone()).await;
+            let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
             let src_file_candidates =
                 correct_to_nearest_filename(gcx.clone(), &src_str, false, top_n).await;
@@ -267,27 +270,7 @@ impl Tool for ToolMv {
                 fs::remove_dir_all(&dst_true_path).await.map_err(|e| {
                     format!("Failed to remove existing directory '{}': {}", dst_str, e)
                 })?;
-                // Invalidate cache entries for all files under the removed directory
-                {
-                    let gcx_write = gcx.clone();
-                    let paths_to_remove: Vec<_> = gcx_write
-                        .documents_state
-                        .memory_document_map
-                        .lock()
-                        .await
-                        .keys()
-                        .filter(|p| p.starts_with(&dst_true_path))
-                        .cloned()
-                        .collect();
-                    for p in paths_to_remove {
-                        gcx_write
-                            .documents_state
-                            .memory_document_map
-                            .lock()
-                            .await
-                            .remove(&p);
-                    }
-                }
+                remove_memory_documents_under_path(gcx.clone(), &dst_true_path).await;
             } else {
                 if !dst_metadata.is_dir() {
                     dst_file_content = fs::read_to_string(&dst_true_path)
@@ -297,12 +280,7 @@ impl Tool for ToolMv {
                 fs::remove_file(&dst_true_path)
                     .await
                     .map_err(|e| format!("Failed to remove existing file '{}': {}", dst_str, e))?;
-                // Invalidate cache entry for the removed file
-                gcx.documents_state
-                    .memory_document_map
-                    .lock()
-                    .await
-                    .remove(&dst_true_path);
+                remove_memory_document_for_path(gcx.clone(), &dst_true_path).await;
             }
         }
 
@@ -332,20 +310,12 @@ impl Tool for ToolMv {
                 )
             })?;
 
-        {
-            let gcx_write = gcx.clone();
-            gcx_write
-                .documents_state
-                .memory_document_map
-                .lock()
-                .await
-                .remove(&src_true_path);
-            gcx_write
-                .documents_state
-                .memory_document_map
-                .lock()
-                .await
-                .remove(&dst_true_path);
+        if src_is_dir {
+            remove_memory_documents_under_path(gcx.clone(), &src_true_path).await;
+            remove_memory_documents_under_path(gcx.clone(), &dst_true_path).await;
+        } else {
+            remove_memory_document_for_path(gcx.clone(), &src_true_path).await;
+            remove_memory_document_for_path(gcx.clone(), &dst_true_path).await;
         }
 
         let mut messages = vec![];

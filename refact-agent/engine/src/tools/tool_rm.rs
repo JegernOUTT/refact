@@ -11,10 +11,13 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, DiffChunk};
 use crate::files_correction::{
-    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename, get_project_dirs,
-    preprocess_path_for_normalization,
+    canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename,
+    get_unscoped_project_dirs, preprocess_path_for_normalization,
 };
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::{
+    get_file_text_from_memory_or_disk, remove_memory_document_for_path,
+    remove_memory_documents_under_path,
+};
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::resolve_path_with_scope;
 use crate::tools::tools_description::{
@@ -169,7 +172,7 @@ impl Tool for ToolRm {
                     corrections,
                 )
             } else {
-                let project_dirs = get_project_dirs(gcx.clone()).await;
+                let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
                 let file_candidates =
                     correct_to_nearest_filename(gcx.clone(), &path_str, false, top_n).await;
@@ -288,27 +291,7 @@ impl Tool for ToolRm {
             fs::remove_dir_all(&true_path)
                 .await
                 .map_err(|e| format!("Failed to remove directory '{}': {}", corrected_path, e))?;
-            // Invalidate cache entries for all files under the deleted directory
-            {
-                let gcx_write = gcx.clone();
-                let paths_to_remove: Vec<_> = gcx_write
-                    .documents_state
-                    .memory_document_map
-                    .lock()
-                    .await
-                    .keys()
-                    .filter(|p| p.starts_with(&true_path))
-                    .cloned()
-                    .collect();
-                for p in paths_to_remove {
-                    gcx_write
-                        .documents_state
-                        .memory_document_map
-                        .lock()
-                        .await
-                        .remove(&p);
-                }
-            }
+            remove_memory_documents_under_path(gcx.clone(), &true_path).await;
             messages.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
                 content: ChatContent::SimpleText(format!("Removed directory '{}'", corrected_path)),
@@ -333,12 +316,7 @@ impl Tool for ToolRm {
             fs::remove_file(&true_path)
                 .await
                 .map_err(|e| format!("Failed to remove file '{}': {}", corrected_path, e))?;
-            // Invalidate cache entry for the deleted file
-            gcx.documents_state
-                .memory_document_map
-                .lock()
-                .await
-                .remove(&true_path);
+            remove_memory_document_for_path(gcx.clone(), &true_path).await;
             if !file_content.is_empty() {
                 let diff_chunk = DiffChunk {
                     file_name: corrected_path.clone(),

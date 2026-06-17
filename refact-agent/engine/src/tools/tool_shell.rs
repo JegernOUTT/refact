@@ -22,7 +22,7 @@ use crate::files_correction::canonicalize_normalized_path;
 use crate::files_correction::check_if_its_inside_a_workspace_or_config;
 use crate::files_correction::correct_to_nearest_dir_path;
 use crate::files_correction::get_active_project_path;
-use crate::files_correction::get_project_dirs;
+use crate::files_correction::get_unscoped_project_dirs;
 use crate::files_correction::preprocess_path_for_normalization;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
@@ -757,7 +757,7 @@ async fn workspace_containing_path(
     path: &std::path::Path,
 ) -> Option<PathBuf> {
     let path = normalize_workspace_path(path);
-    get_project_dirs(gcx)
+    get_unscoped_project_dirs(gcx)
         .await
         .into_iter()
         .map(|workspace| normalize_workspace_path(&workspace))
@@ -810,7 +810,7 @@ async fn resolve_shell_workdir(
         check_if_its_inside_a_workspace_or_config(gcx.clone(), &path).await?;
         path
     } else {
-        let project_dirs = get_project_dirs(gcx.clone()).await;
+        let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
         let candidates = correct_to_nearest_dir_path(gcx.clone(), &path_str, false, 3).await;
         canonical_path(
             return_one_candidate_or_a_good_error(

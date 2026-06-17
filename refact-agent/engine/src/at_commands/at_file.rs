@@ -11,7 +11,8 @@ use crate::at_commands::execute_at::{AtCommandMember, correct_at_arg};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::call_validation::{ChatMessage, ContextFile, ContextEnum};
 use crate::files_correction::{
-    correct_to_nearest_filename, correct_to_nearest_dir_path, shortify_paths, get_project_dirs,
+    canonicalize_normalized_path, correct_to_nearest_filename, correct_to_nearest_dir_path,
+    get_unscoped_project_dirs, project_dirs_for_unscoped_paths, shortify_paths,
 };
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{format_scope_notices, resolve_existing_path_with_execution_scope};
@@ -35,7 +36,7 @@ pub async fn resolve_file_path_directly(
         return None;
     }
 
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
     let mut matches = Vec::new();
 
     for pd in &project_dirs {
@@ -210,6 +211,11 @@ pub async fn return_one_candidate_or_a_good_error(
     dirs: bool,
 ) -> Result<String, String> {
     let mut f_path = PathBuf::from(file_path);
+    let project_paths = if project_paths.is_empty() {
+        get_unscoped_project_dirs(gcx.clone()).await
+    } else {
+        project_dirs_for_unscoped_paths(gcx.cache_dir.as_path(), project_paths.as_slice())
+    };
 
     if candidates.is_empty() {
         let similar_paths_str = if dirs {
@@ -280,6 +286,8 @@ pub async fn return_one_candidate_or_a_good_error(
         }
     }
 
+    let candidates = candidates_for_project_relative_path(file_path, candidates, &project_paths)?;
+
     if candidates.len() > 1 {
         return Err(format!(
             "The path {:?} is ambiguous. It could be interpreted as:\n{}",
@@ -294,6 +302,41 @@ pub async fn return_one_candidate_or_a_good_error(
         return Err(format!("The path {:?} was not found on disk.", candidate));
     }
     Ok(candidate)
+}
+
+fn candidates_for_project_relative_path(
+    file_path: &String,
+    candidates: &Vec<String>,
+    project_paths: &Vec<PathBuf>,
+) -> Result<Vec<String>, String> {
+    if !PathBuf::from(file_path).is_relative() || project_paths.is_empty() {
+        return Ok(candidates.clone());
+    }
+
+    let normalized_project_paths = project_paths
+        .iter()
+        .map(|path| canonicalize_normalized_path(path.clone()))
+        .collect::<Vec<_>>();
+
+    let project_candidates = candidates
+        .iter()
+        .filter(|candidate| {
+            let candidate_path = canonicalize_normalized_path(PathBuf::from(candidate));
+            normalized_project_paths
+                .iter()
+                .any(|project_path| candidate_path.starts_with(project_path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if project_candidates.is_empty() {
+        return Err(format!(
+            "The path {:?} does not exist inside project directories:\n{:?}",
+            file_path, project_paths
+        ));
+    }
+
+    Ok(project_candidates)
 }
 
 #[derive(Debug)]
@@ -338,7 +381,7 @@ impl AtParam for AtParamFilePath {
         }
         let file_path = PathBuf::from(value);
         if file_path.is_relative() {
-            let project_dirs = get_project_dirs(gcx.clone()).await;
+            let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
             let options = project_dirs
                 .iter()
                 .map(|x| x.join(&file_path))
@@ -584,6 +627,53 @@ impl AtCommand for AtFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_worktrees::types::{WorktreeMeta, WorktreeRegistry, WorktreeRegistryRecord};
+    use std::fs;
+    use std::path::Path;
+
+    fn worktree_root(cache_dir: &Path, source: &Path, id: &str) -> PathBuf {
+        cache_dir
+            .join("worktrees")
+            .join(refact_worktrees::service::project_hash_for_path(source))
+            .join(id)
+    }
+
+    fn write_worktree_registry(cache_dir: &Path, source: &Path, worktree: &Path) {
+        let hash = refact_worktrees::service::project_hash_for_path(source);
+        let registry_dir = cache_dir.join("worktrees").join(&hash);
+        fs::create_dir_all(&registry_dir).unwrap();
+        let registry = WorktreeRegistry {
+            schema_version: 1,
+            source_workspace_root: source.to_path_buf(),
+            project_hash: hash,
+            records: vec![WorktreeRegistryRecord {
+                meta: WorktreeMeta {
+                    id: "wt".to_string(),
+                    kind: "chat".to_string(),
+                    root: worktree.to_path_buf(),
+                    source_workspace_root: source.to_path_buf(),
+                    repo_root: source.to_path_buf(),
+                    branch: Some("refact/chat/test".to_string()),
+                    base_branch: Some("main".to_string()),
+                    base_commit: None,
+                    task_id: None,
+                    card_id: None,
+                    agent_id: None,
+                    enforce: true,
+                },
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                last_seen_at: None,
+                references: Vec::new(),
+                last_known_status: None,
+            }],
+        };
+        fs::write(
+            registry_dir.join("index.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn test_file_range() {
@@ -640,5 +730,38 @@ mod tests {
             let result = colon_lines_range_from_arg(&mut value);
             assert_eq!(result, None);
         }
+    }
+
+    #[tokio::test]
+    async fn relative_candidates_ignore_detached_cache_worktree_when_source_exists() {
+        let source_temp = tempfile::tempdir().unwrap();
+        let source = source_temp.path().join("source");
+        fs::create_dir_all(source.join("src")).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        let source_file = source.join("src").join("lib.rs");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        fs::write(&source_file, "fn source() {}\n").unwrap();
+        fs::write(&worktree_file, "fn worktree() {}\n").unwrap();
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+
+        let candidates = vec![
+            worktree_file.to_string_lossy().to_string(),
+            source_file.to_string_lossy().to_string(),
+        ];
+        let project_paths = vec![worktree, source];
+
+        let resolved = return_one_candidate_or_a_good_error(
+            gcx,
+            &"src/lib.rs".to_string(),
+            &candidates,
+            &project_paths,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved, source_file.to_string_lossy().to_string());
     }
 }

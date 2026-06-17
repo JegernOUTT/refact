@@ -12,7 +12,9 @@ use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ChatMessage, ContextEnum};
-use crate::files_correction::{correct_to_nearest_dir_path, get_project_dirs, paths_from_anywhere};
+use crate::files_correction::{
+    correct_to_nearest_dir_path, get_unscoped_project_dirs, paths_from_anywhere,
+};
 use crate::tools::scope_utils::{
     format_scope_notices, is_worktree_root_alias, list_execution_scope_root,
     list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
@@ -381,7 +383,7 @@ impl AtCommand for AtTree {
         } else {
             paths_from_anywhere(gcx.clone()).await
         };
-        let project_dirs = get_project_dirs(gcx.clone()).await;
+        let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
         let filtered_paths: Vec<PathBuf> = paths_from_anywhere
             .into_iter()
             .filter(|path| project_dirs.iter().any(|pd| path.starts_with(pd)))

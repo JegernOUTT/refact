@@ -51,29 +51,82 @@ pub use refact_files::correction_cache::CacheCorrection;
 
 pub use refact_ast::Document;
 
+fn normalize_path_for_workspace_state(gcx: &Arc<GlobalContext>, path: &Path) -> PathBuf {
+    let worktree_mappings =
+        crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    crate::files_correction::normalize_path_for_unscoped_root_selection(path, &worktree_mappings)
+        .unwrap_or_else(|| crate::files_correction::canonical_path(path.to_string_lossy()))
+}
+
+fn path_for_blocklist(path: &Path, roots: &[PathBuf]) -> PathBuf {
+    roots
+        .iter()
+        .filter_map(|root| path.strip_prefix(root).ok().map(|rel| (root, rel)))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, rel)| rel.to_path_buf())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+pub async fn remove_memory_document_for_path(gcx: Arc<GlobalContext>, path: &PathBuf) -> bool {
+    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy());
+    let normalized_path = normalize_path_for_workspace_state(&gcx, path);
+    let mut doc_map = gcx.documents_state.memory_document_map.lock().await;
+    let mut removed = doc_map.remove(&canonical_path).is_some();
+    if normalized_path != canonical_path {
+        removed |= doc_map.remove(&normalized_path).is_some();
+    }
+    removed
+}
+
+pub async fn remove_memory_documents_under_path(gcx: Arc<GlobalContext>, path: &PathBuf) -> usize {
+    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy());
+    let normalized_path = normalize_path_for_workspace_state(&gcx, path);
+    let mut doc_map = gcx.documents_state.memory_document_map.lock().await;
+    let paths_to_remove = doc_map
+        .keys()
+        .filter(|p| p.starts_with(&canonical_path) || p.starts_with(&normalized_path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = paths_to_remove.len();
+    for path in paths_to_remove {
+        doc_map.remove(&path);
+    }
+    removed
+}
+
 pub async fn get_file_text_from_memory_or_disk(
     global_context: Arc<GlobalContext>,
     file_path: &PathBuf,
 ) -> Result<String, String> {
+    let requested_path = crate::files_correction::canonical_path(file_path.to_string_lossy());
+    let mapped_path = normalize_path_for_workspace_state(&global_context, &requested_path);
     check_file_privacy(
         load_privacy_if_needed(global_context.clone()).await,
-        &file_path,
+        &requested_path,
         &FilePrivacyLevel::AllowToSendAnywhere,
     )?;
 
-    if let Some(doc) = global_context
-        .documents_state
-        .memory_document_map
-        .lock()
-        .await
-        .get(file_path)
-    {
+    let doc = {
+        let doc_map = global_context
+            .documents_state
+            .memory_document_map
+            .lock()
+            .await;
+        doc_map.get(&requested_path).cloned().or_else(|| {
+            if mapped_path != requested_path {
+                doc_map.get(&mapped_path).cloned()
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(doc) = doc {
         let doc = doc.read().await;
         if doc.doc_text.is_some() {
             return Ok(doc.doc_text.as_ref().unwrap().to_string());
         }
     }
-    read_file_from_disk_without_privacy_check(&file_path)
+    read_file_from_disk_without_privacy_check(&requested_path)
         .await
         .map(|x| x.to_string())
         .map_err(|e| format!("Not found in memory, not found on disk: {}", e))
@@ -209,10 +262,12 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
         }
     };
 
-    let workspace_folders: Arc<StdMutex<Vec<PathBuf>>> =
-        gcx.documents_state.workspace_folders.clone();
+    let mut watch_folders = crate::files_correction::get_raw_project_dirs(gcx.clone()).await;
+    watch_folders.extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
+    watch_folders.sort();
+    watch_folders.dedup();
 
-    for folder in workspace_folders.lock().unwrap().iter() {
+    for folder in &watch_folders {
         info!("ADD WATCHER (1): {}", folder.display());
         let _ = watcher.watch(folder, RecursiveMode::Recursive);
     }
@@ -690,11 +745,27 @@ pub fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
 }
 
 async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: bool) {
-    info!("detected {} modified/added/removed files", paths.len());
-    for d in paths.iter().take(5) {
+    let worktree_mappings =
+        crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let workspace_files_changed = normalize_workspace_files_for_unscoped(&gcx, &worktree_mappings);
+    let normalized_paths = paths
+        .iter()
+        .filter_map(|path| {
+            crate::files_correction::normalize_path_for_unscoped_paths(
+                &PathBuf::from(path),
+                &worktree_mappings,
+            )
+        })
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    info!(
+        "detected {} modified/added/removed files",
+        normalized_paths.len()
+    );
+    for d in normalized_paths.iter().take(5) {
         info!("    {}", crate::nicer_logs::last_n_chars(&d, 30));
     }
-    if paths.len() > 5 {
+    if normalized_paths.len() > 5 {
         info!("    ...");
     }
     let (vec_db_module, ast_service) = {
@@ -703,25 +774,21 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
         (cx.vec_db.clone(), ast_service)
     };
     if let Some(ref mut db) = *vec_db_module.lock().await {
-        db.vectorizer_enqueue_files(&paths, force).await;
+        db.vectorizer_enqueue_files(&normalized_paths, force).await;
     }
     if let Some(ast) = &ast_service {
-        ast_indexer_enqueue_files(ast.clone(), paths, force).await;
+        ast_indexer_enqueue_files(ast.clone(), &normalized_paths, force).await;
     }
     let cache_correction_arc =
         crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
     let mut moar_files: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        if cache_correction_arc
-            .filenames
-            .find_matches(&PathBuf::from(p))
-            .len()
-            == 0
-        {
-            moar_files.push(PathBuf::from(p.clone()));
+    for p in normalized_paths {
+        let path = PathBuf::from(p);
+        if cache_correction_arc.filenames.find_matches(&path).len() == 0 {
+            moar_files.push(path);
         }
     }
-    if moar_files.len() > 0 {
+    if workspace_files_changed || !moar_files.is_empty() {
         info!("this made file cache dirty");
         let dirty_arc = {
             gcx.documents_state
@@ -739,17 +806,35 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
     }
 }
 
+fn normalize_workspace_files_for_unscoped(
+    gcx: &Arc<GlobalContext>,
+    worktree_mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> bool {
+    let mut seen = HashSet::new();
+    let normalized = {
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap();
+        workspace_files
+            .iter()
+            .filter_map(|path| {
+                crate::files_correction::normalize_path_for_unscoped_paths(path, worktree_mappings)
+            })
+            .filter(|path| seen.insert(path.clone()))
+            .collect::<Vec<_>>()
+    };
+    let mut workspace_files = gcx.documents_state.workspace_files.lock().unwrap();
+    if *workspace_files == normalized {
+        return false;
+    }
+    *workspace_files = normalized;
+    true
+}
+
 pub async fn enqueue_all_files_from_workspace_folders(
     gcx: Arc<GlobalContext>,
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders = gcx
-        .documents_state
-        .workspace_folders
-        .lock()
-        .unwrap()
-        .clone();
+    let folders = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
 
     info!(
         "enqueue_all_files_from_workspace_folders started files search with {} folders",
@@ -858,7 +943,8 @@ pub async fn on_did_open(
     if path_is_refact_import_internal(cpath) {
         return;
     }
-    let mut doc = Document::new(cpath);
+    let normalized_path = normalize_path_for_workspace_state(&gcx, cpath);
+    let mut doc = Document::new(&normalized_path);
     doc.update_text(text);
     info!(
         "on_did_open {}",
@@ -881,21 +967,11 @@ pub async fn on_did_close(gcx: Arc<GlobalContext>, cpath: &PathBuf) {
         "on_did_close {}",
         crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30)
     );
-    {
-        let cx = gcx.clone();
-        if cx
-            .documents_state
-            .memory_document_map
-            .lock()
-            .await
-            .remove(cpath)
-            .is_none()
-        {
-            tracing::error!(
-                "on_did_close: failed to remove from memory_document_map {:?}",
-                cpath.display()
-            );
-        }
+    if !remove_memory_document_for_path(gcx.clone(), cpath).await {
+        tracing::error!(
+            "on_did_close: failed to remove from memory_document_map {:?}",
+            normalize_path_for_workspace_state(&gcx, cpath).display()
+        );
     }
 }
 
@@ -904,8 +980,9 @@ pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &Strin
         return;
     }
     let t0 = Instant::now();
+    let normalized_path = normalize_path_for_workspace_state(&gcx, path);
     let (doc_arc, dirty_arc, mark_dirty) = {
-        let mut doc = Document::new(path);
+        let mut doc = Document::new(&normalized_path);
         doc.update_text(text);
         let (doc_arc, dirty_arc, set_mark_dirty) =
             mem_overwrite_or_create_document(gcx.clone(), doc).await;
@@ -924,9 +1001,13 @@ pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &Strin
 
     let mut go_ahead = true;
     {
-        let is_it_good = is_valid_file(path, false, false);
+        let is_it_good = is_valid_file(&normalized_path, false, false);
         if is_it_good.is_err() {
-            info!("{:?} ignoring changes: {}", path, is_it_good.err().unwrap());
+            info!(
+                "{:?} ignoring changes: {}",
+                normalized_path,
+                is_it_good.err().unwrap()
+            );
             go_ahead = false;
         }
     }
@@ -960,11 +1041,7 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
 
     let (vec_db_module, ast_service, dirty_arc) = {
         let cx = gcx.clone();
-        cx.documents_state
-            .memory_document_map
-            .lock()
-            .await
-            .remove(path);
+        remove_memory_document_for_path(cx.clone(), path).await;
         let ast_service = cx.ast_service.lock().unwrap().clone();
         (
             cx.vec_db.clone(),
@@ -979,15 +1056,23 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         .as_secs_f64();
     (*dirty_arc.lock().await) = now;
 
+    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy());
+    let normalized_path = normalize_path_for_workspace_state(&gcx, path);
+    let delete_path = if normalized_path != canonical_path && normalized_path.exists() {
+        canonical_path
+    } else {
+        normalized_path
+    };
+
     match *vec_db_module.lock().await {
-        Some(ref mut db) => match db.remove_file(path).await {
+        Some(ref mut db) => match db.remove_file(&delete_path).await {
             Ok(_) => {}
             Err(err) => info!("VECDB Error removing: {}", err),
         },
         None => {}
     }
     if let Some(ast) = &ast_service {
-        let cpath = path.to_string_lossy().to_string();
+        let cpath = delete_path.to_string_lossy().to_string();
         ast_indexer_enqueue_files(ast.clone(), &vec![cpath], false).await;
     }
 }
@@ -1158,23 +1243,49 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
                 .await;
             }
         }
+        let (worktree_mappings, blocklist_roots) = if let Some(gcx) = gcx_weak.clone().upgrade() {
+            let mut blocklist_roots = gcx
+                .documents_state
+                .workspace_vcs_roots
+                .lock()
+                .unwrap()
+                .clone();
+            blocklist_roots
+                .extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
+            blocklist_roots.sort();
+            blocklist_roots.dedup();
+            (
+                crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path()),
+                blocklist_roots,
+            )
+        } else {
+            return;
+        };
         for p in &event.paths {
             if path_is_refact_import_internal(p) {
                 continue;
             }
-            let indexing_settings = indexing_everywhere_arc.indexing_for_path(p);
-            if is_blocklisted(&indexing_settings, &p) {
-                // important to filter BEFORE canonical_path
+            let normalized_path =
+                crate::files_correction::normalize_path_for_unscoped_root_selection(
+                    p,
+                    &worktree_mappings,
+                )
+                .unwrap_or_else(|| crate::files_correction::canonical_path(p.to_string_lossy()));
+            let indexing_settings = indexing_everywhere_arc.indexing_for_path(&normalized_path);
+            let blocklist_path = path_for_blocklist(&normalized_path, &blocklist_roots);
+            if is_blocklisted(&indexing_settings, &blocklist_path) {
                 continue;
             }
-            if crate::file_filter::is_generated_index_path(p) {
+            if crate::file_filter::is_generated_index_path(&normalized_path) {
                 continue;
             }
 
-            // If it's a removed file or a valid existing file, then we can enqueue it
-            if (!p.exists() && p.extension().is_some()) || is_valid_file(p, false, false).is_ok() {
-                let cpath = crate::files_correction::canonical_path(p.to_string_lossy());
-                docs.push(cpath.to_string_lossy().to_string());
+            if (normalized_path.exists() && is_valid_file(&normalized_path, false, false).is_ok())
+                || (!p.exists()
+                    && !normalized_path.exists()
+                    && normalized_path.extension().is_some())
+            {
+                docs.push(normalized_path.to_string_lossy().to_string());
             }
         }
         if docs.is_empty() {
@@ -1349,6 +1460,53 @@ mod tests {
         crate::files_correction::canonical_path(path.to_string_lossy().to_string())
     }
 
+    fn worktree_root(cache_dir: &Path, source: &Path, id: &str) -> PathBuf {
+        let source = normalized(source);
+        cache_dir
+            .join("worktrees")
+            .join(refact_worktrees::service::project_hash_for_path(&source))
+            .join(id)
+    }
+
+    fn write_worktree_registry(cache_dir: &Path, source: &Path, worktree: &Path) {
+        let source = normalized(source);
+        let worktree = normalized(worktree);
+        let hash = refact_worktrees::service::project_hash_for_path(&source);
+        let registry_dir = cache_dir.join("worktrees").join(&hash);
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let registry = refact_worktrees::types::WorktreeRegistry {
+            schema_version: 1,
+            source_workspace_root: source.clone(),
+            project_hash: hash,
+            records: vec![refact_worktrees::types::WorktreeRegistryRecord {
+                meta: refact_worktrees::types::WorktreeMeta {
+                    id: "wt".to_string(),
+                    kind: "chat".to_string(),
+                    root: worktree,
+                    source_workspace_root: source.clone(),
+                    repo_root: source,
+                    branch: Some("refact/chat/test".to_string()),
+                    base_branch: Some("main".to_string()),
+                    base_commit: None,
+                    task_id: None,
+                    card_id: None,
+                    agent_id: None,
+                    enforce: true,
+                },
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                last_seen_at: None,
+                references: Vec::new(),
+                last_known_status: None,
+            }],
+        };
+        std::fs::write(
+            registry_dir.join("index.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+    }
+
     async fn scan_workspace(root: &Path) -> Vec<PathBuf> {
         let mut indexing_everywhere = IndexingEverywhere::default();
         let (files, _) = retrieve_files_in_workspace_folders(
@@ -1365,6 +1523,21 @@ mod tests {
         let dirty = { gcx.documents_state.cache_dirty.clone() };
         let value = *dirty.lock().await;
         value
+    }
+
+    fn allow_all_privacy(gcx: &Arc<GlobalContext>) {
+        let loaded_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked: Vec::new(),
+            },
+            loaded_ts,
+        });
     }
 
     #[tokio::test]
@@ -1437,6 +1610,145 @@ mod tests {
 
         assert!(files.contains(&normalized(&regular)));
         assert!(!files.contains(&normalized(&generated)));
+    }
+
+    #[tokio::test]
+    async fn on_did_change_maps_registered_worktree_file_to_source_cache_path() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn old() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn old() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![normalized(&worktree_file)];
+        *gcx.documents_state.cache_dirty.lock().await = 1.0;
+        crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
+
+        on_did_change(
+            gcx.clone(),
+            &worktree_file,
+            &"fn changed() {}\n".to_string(),
+        )
+        .await;
+
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+        assert!(workspace_files.contains(&normalized(&source_file)));
+        assert!(!workspace_files.contains(&normalized(&worktree_file)));
+    }
+
+    #[tokio::test]
+    async fn open_worktree_buffer_is_read_through_mapped_source_path() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn disk() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree_disk() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+
+        let unsaved_text = "fn unsaved_from_ide() {}\n".to_string();
+        on_did_open(
+            gcx.clone(),
+            &worktree_file,
+            &unsaved_text,
+            &"rust".to_string(),
+        )
+        .await;
+
+        let read_text = get_file_text_from_memory_or_disk(gcx.clone(), &source_file)
+            .await
+            .unwrap();
+        assert_eq!(read_text, unsaved_text);
+
+        let memory_doc_map = gcx.documents_state.memory_document_map.lock().await;
+        assert!(memory_doc_map.contains_key(&normalized(&source_file)));
+        assert!(!memory_doc_map.contains_key(&normalized(&worktree_file)));
+    }
+
+    #[tokio::test]
+    async fn raw_worktree_invalidation_removes_mapped_source_buffer() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn disk() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree_disk() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+
+        let unsaved_text = "fn unsaved_from_ide() {}\n".to_string();
+        on_did_open(
+            gcx.clone(),
+            &worktree_file,
+            &unsaved_text,
+            &"rust".to_string(),
+        )
+        .await;
+        assert_eq!(
+            get_file_text_from_memory_or_disk(gcx.clone(), &source_file)
+                .await
+                .unwrap(),
+            unsaved_text
+        );
+
+        assert!(remove_memory_document_for_path(gcx.clone(), &worktree_file).await);
+        assert_eq!(
+            get_file_text_from_memory_or_disk(gcx.clone(), &source_file)
+                .await
+                .unwrap(),
+            "fn disk() {}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_worktree_watcher_event_uses_source_blocklist_after_mapping() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let source_file = source.join("src").join("blocked.rs");
+        write_file(&source_file, "fn blocked() {}\n");
+        write_file(
+            &source.join(".refact").join("indexing.yaml"),
+            "blocklist:\n  - 'src/blocked.rs'\n",
+        );
+
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("blocked.rs");
+        write_file(&worktree_file, "fn blocked_worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![worktree.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![source.clone()];
+
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(worktree_file.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+
+        let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+        assert!(!workspace_files.contains(&normalized(&source_file)));
+        assert!(!workspace_files.contains(&normalized(&worktree_file)));
     }
 
     #[tokio::test]

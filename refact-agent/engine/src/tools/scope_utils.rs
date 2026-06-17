@@ -9,7 +9,7 @@ pub use refact_scope_utils::{
 
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::call_validation::ContextFile;
-use crate::files_correction::{canonical_path, correct_to_nearest_dir_path, get_project_dirs};
+use crate::files_correction::{canonical_path, correct_to_nearest_dir_path, get_unscoped_project_dirs};
 use crate::files_in_workspace::{check_file_privacy_for_send, filter_privacy_allowed_files, ls_files};
 use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
@@ -20,7 +20,12 @@ fn path_to_string(p: &Path) -> String {
 }
 
 async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
-    gcx.documents_state.workspace_files.lock().unwrap().clone()
+    let files = gcx.documents_state.workspace_files.lock().unwrap().clone();
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
+    files
+        .into_iter()
+        .filter(|file| project_dirs.iter().any(|dir| file.starts_with(dir)))
+        .collect()
 }
 
 pub async fn resolve_existing_path_with_execution_scope(
@@ -99,7 +104,7 @@ async fn resolve_scope_legacy(gcx: Arc<GlobalContext>, scope: &str) -> Result<Ve
             .collect());
     }
 
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
     let scope_string = scope.to_string();
     let scope_is_dir = scope.ends_with('/') || scope.ends_with('\\');
 
@@ -254,7 +259,7 @@ async fn create_scope_filter_legacy(
         return Ok(None);
     }
 
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
     let scope_string = scope.to_string();
     let scope_is_dir = scope.ends_with('/') || scope.ends_with('\\');
 

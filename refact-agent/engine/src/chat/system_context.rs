@@ -8,7 +8,7 @@ use git2::Repository;
 
 use crate::at_commands::at_tree::TreeNode;
 use crate::call_validation::{ChatMessage, ChatContent, ContextFile};
-use crate::files_correction::{get_project_dirs, paths_from_anywhere};
+use crate::files_correction::{get_unscoped_project_dirs, paths_from_anywhere};
 use crate::memories::{load_memories_by_tags, MemoRecord};
 use crate::yaml_configs::project_information::{load_project_information_config, override_key};
 
@@ -1262,7 +1262,7 @@ pub async fn generate_compact_project_tree(
     max_depth: usize,
 ) -> Result<String, String> {
     let paths = paths_from_anywhere(gcx.clone()).await;
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
     let mut result = String::new();
 
@@ -1509,7 +1509,7 @@ pub async fn gather_system_context(
     }
 
     let system_info = SystemInfo::gather();
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
     let need_environments = config.sections.detected_environments.enabled
         || config.sections.environment_instructions.enabled;
@@ -1617,11 +1617,7 @@ pub async fn gather_system_context(
             .max_items
             .unwrap_or(MAX_MEMORIES_IN_CONTEXT);
         let overrides = &config.sections.memories.overrides;
-        let default_max_chars = config
-            .sections
-            .memories
-            .max_chars_per_item
-            .unwrap_or(2000);
+        let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
 
         load_memories_by_tags(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
             .await
