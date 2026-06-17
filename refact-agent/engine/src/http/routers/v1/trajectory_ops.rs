@@ -18,6 +18,11 @@ use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
+use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
+
+fn canonical_transition_mode(raw_mode: &str) -> String {
+    map_legacy_mode_to_id(raw_mode.trim()).to_string()
+}
 
 fn reset_transition_snapshot_identity(snapshot: &mut TrajectorySnapshot) {
     snapshot.previous_response_id = None;
@@ -468,7 +473,8 @@ pub async fn handle_mode_transition_apply(
     let gcx = app.gcx.clone();
     let req: ModeTransitionApplyRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
-    if req.target_mode.trim().eq_ignore_ascii_case("task_planner") {
+    let target_mode = canonical_transition_mode(&req.target_mode);
+    if target_mode == "task_planner" {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Use /v1/tasks/:task_id/planner-chats/from-transition for task_planner transitions"
@@ -512,7 +518,7 @@ pub async fn handle_mode_transition_apply(
     let decisions = analyze_mode_transition(
         gcx.clone(),
         &messages,
-        &req.target_mode,
+        &target_mode,
         &req.target_mode_description,
     )
     .await
@@ -536,7 +542,7 @@ pub async fn handle_mode_transition_apply(
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
-        mode: req.target_mode.clone(),
+        mode: target_mode.clone(),
         tool_use: thread.tool_use.clone(),
         messages: new_messages.clone(),
         created_at: now,
@@ -603,6 +609,20 @@ pub async fn handle_planner_from_transition(
     let req: PlannerFromTransitionRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
+    let target_mode = req
+        .target_mode
+        .clone()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "task_planner".to_string());
+    let target_mode = canonical_transition_mode(&target_mode);
+    if target_mode != "task_planner" {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Only task_planner chats can be created here".to_string(),
+        ));
+    }
+
     // Verify the task exists before doing any work
     crate::tasks::storage::load_task_meta(gcx.clone(), &task_id)
         .await
@@ -636,19 +656,6 @@ pub async fn handle_planner_from_transition(
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Cannot transition an empty chat".to_string(),
-        ));
-    }
-
-    let target_mode = req
-        .target_mode
-        .clone()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| "task_planner".to_string());
-    if target_mode.eq_ignore_ascii_case("task_agent") {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            "task_agent chats cannot be created here".to_string(),
         ));
     }
 
@@ -880,14 +887,48 @@ mod tests {
         assert!(raw.get("initial_plan_error").is_none());
     }
 
-    #[test]
-    fn generic_mode_transition_rejects_task_planner_target_before_session_lookup() {
-        let req = ModeTransitionApplyRequest {
-            target_mode: " TASK_PLANNER ".to_string(),
-            target_mode_description: String::new(),
-        };
+    #[tokio::test]
+    async fn generic_mode_transition_rejects_task_planner_target_before_session_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx).await;
+        let body = hyper::body::Bytes::from_static(br#"{"target_mode":" TASK_PLANNER "}"#);
 
-        assert!(req.target_mode.trim().eq_ignore_ascii_case("task_planner"));
+        let err = handle_mode_transition_apply(State(app), Path("missing-chat".to_string()), body)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "Use /v1/tasks/:task_id/planner-chats/from-transition for task_planner transitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn planner_from_transition_rejects_non_planner_target_before_task_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx).await;
+        let body = hyper::body::Bytes::from_static(
+            br#"{"source_chat_id":"source-chat","target_mode":"agent"}"#,
+        );
+
+        let err =
+            handle_planner_from_transition(State(app), Path("missing-task".to_string()), body)
+                .await
+                .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "Only task_planner chats can be created here");
     }
 
     #[tokio::test]

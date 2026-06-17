@@ -9,6 +9,7 @@ import { server } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
 import { ModeSelect } from "./ModeSelect";
 import type { ChatModeInfo } from "../../services/refact/chatModes";
+import type { Page } from "../../features/Pages/pagesSlice";
 
 const modeDefaults = {
   include_project_info: true,
@@ -55,11 +56,13 @@ function useChatModes(modesResponse = modes) {
 function renderModeSelect(
   ui: React.ReactElement,
   chat = createDefaultChatState(),
+  pages?: Page[],
 ) {
   return render(ui, {
     preloadedState: {
       chat,
       config,
+      ...(pages ? { pages } : {}),
     },
   });
 }
@@ -72,6 +75,17 @@ function chatStateWithMessages() {
   runtime.thread.messages = [
     { role: "user", content: "hello", message_id: "user-1" },
   ];
+  return chat;
+}
+
+function taskChatStateWithMessages() {
+  const chat = chatStateWithMessages();
+  const threadId = chat.current_thread_id;
+  chat.threads[threadId].thread.task_meta = {
+    task_id: "task-1",
+    role: "agents",
+    card_id: "T-1",
+  };
   return chat;
 }
 
@@ -151,6 +165,45 @@ describe("ModeSelect", () => {
     expect(
       await screen.findByRole("button", { name: "Switch Mode" }),
     ).toBeInTheDocument();
+  });
+
+  test("selecting a non-task mode in a task workspace still uses the generic transition dialog", async () => {
+    let genericTransitionCalled = false;
+    let plannerTransitionCalled = false;
+    server.use(
+      http.post("*/v1/chats/*/trajectory/mode-transition/apply", () => {
+        genericTransitionCalled = true;
+        return HttpResponse.json({ new_chat_id: "new-chat", messages_count: 1 });
+      }),
+      http.post("*/v1/tasks/task-1/planner-chats/from-transition", () => {
+        plannerTransitionCalled = true;
+        return HttpResponse.json({ new_chat_id: "planner-chat", messages_count: 1 });
+      }),
+      http.get("*/v1/trajectories/all", () => HttpResponse.json([])),
+      http.post("*/v1/chats/new-chat/commands", () =>
+        HttpResponse.json({ status: "queued" }),
+      ),
+    );
+    const { user } = renderModeSelect(
+      <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
+      taskChatStateWithMessages(),
+      [{ name: "chat" }, { name: "task workspace", taskId: "task-1" }],
+    );
+
+    await user.click(await screen.findByRole("button", { name: /Agent/ }));
+    await user.click(screen.getByRole("button", { name: /Ask/ }));
+
+    expect(
+      await screen.findByRole("button", { name: "Switch Mode" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Create Task Planner Chat"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Switch Mode" }));
+
+    await waitFor(() => expect(genericTransitionCalled).toBe(true));
+    expect(plannerTransitionCalled).toBe(false);
   });
 
   test("Create new mode navigates to customization modes page", async () => {
