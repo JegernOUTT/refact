@@ -53,7 +53,8 @@ export type PersistedChatTabsState = {
 export type PersistedActiveTab =
   | { type: "dashboard" }
   | { type: "chat"; id: string }
-  | { type: "task"; taskId: string };
+  | { type: "task"; taskId: string }
+  | { type: "buddy" };
 
 export type PersistedTaskActiveChat =
   | { type: "planner"; chatId: string }
@@ -611,6 +612,7 @@ export function savePersistedWorkspace(workspace: WorkspaceState): void {
 function normalizeActiveTab(value: unknown): PersistedActiveTab | null {
   if (!isRecord(value)) return null;
   if (value.type === "dashboard") return { type: "dashboard" };
+  if (value.type === "buddy") return { type: "buddy" };
 
   if (value.type === "chat") {
     const id = stringOrUndefined(value.id)?.trim();

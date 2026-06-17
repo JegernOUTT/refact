@@ -259,6 +259,9 @@ describe("chatUiPersistence", () => {
     savePersistedActiveTab({ type: "chat", id: "chat-1" });
     expect(loadPersistedActiveTab()).toEqual({ type: "chat", id: "chat-1" });
 
+    savePersistedActiveTab({ type: "buddy" });
+    expect(loadPersistedActiveTab()).toEqual({ type: "buddy" });
+
     savePersistedActiveTab({ type: "dashboard" });
     expect(loadPersistedActiveTab()).toEqual({ type: "dashboard" });
   });

@@ -14,6 +14,12 @@ import {
 import { Badge, Icon, StatusDot } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
+  popBackTo,
+  push,
+  selectCurrentPage,
+  selectPages,
+} from "../Pages/pagesSlice";
+import {
   selectAllThreads,
   selectTabsDisplayData,
   type TabDisplayData,
@@ -28,6 +34,12 @@ import {
   setTabDragData,
   type TabDragKind,
 } from "../ChatPanes/tabDrag";
+import {
+  closeTask,
+  reorderOpenTasks,
+  selectOpenTasksFromRoot,
+  type OpenTask,
+} from "../Tasks/tasksSlice";
 import {
   closeTab,
   reorderTabs,
@@ -46,8 +58,13 @@ import {
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
 
+const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
+
+type TabSurfaceKind = "chat" | "task" | "buddy" | "dashboard";
+
 type DisplayInfo = {
   title: string;
+  kind: TabSurfaceKind;
   session_state?: string;
   is_buddy_chat?: boolean;
   is_task_chat?: boolean;
@@ -80,6 +97,7 @@ function fallbackSurfaceTitle(surfaceKey: SurfaceKey): string {
   try {
     const parsed = parseSurfaceKey(surfaceKey);
     if (parsed.kind === "dashboard") return "Dashboard";
+    if (parsed.kind === "buddy") return "Buddy";
     const prefix = parsed.kind[0].toUpperCase();
     return `${prefix}${parsed.kind.slice(1)} ${parsed.id}`;
   } catch {
@@ -92,6 +110,24 @@ function activeGroupSurfaceKey(group: PaneGroup): SurfaceKey | null {
   if (focusedLeaf?.activeTabId) return focusedLeaf.activeTabId;
   if (focusedLeaf?.tabIds[0]) return focusedLeaf.tabIds[0];
   return collectTabIds(group.root)[0] ?? null;
+}
+
+function uniqueSurfaceKeys(keys: SurfaceKey[]): SurfaceKey[] {
+  const seen = new Set<SurfaceKey>();
+  return keys.filter((key) => {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function taskSessionState(task: OpenTask | undefined): string | undefined {
+  const activeChat = task?.activeChat;
+  if (activeChat?.type === "planner") {
+    return task?.plannerChats.find((planner) => planner.id === activeChat.chatId)
+      ?.sessionState;
+  }
+  return task?.plannerChats[0]?.sessionState;
 }
 
 function isSurfaceKind(type: TabDragKind): type is "chat" | "task" | "buddy" {
@@ -127,10 +163,41 @@ function displayInfoForSurface(
   surfaceKey: SurfaceKey,
   tabsById: ReadonlyMap<string, TabDisplayData>,
   threads: ReturnType<typeof selectAllThreads>,
+  tasksById: ReadonlyMap<string, OpenTask>,
 ): DisplayInfo {
-  if (!isChatSurface(surfaceKey)) {
+  let parsed: ReturnType<typeof parseSurfaceKey>;
+  try {
+    parsed = parseSurfaceKey(surfaceKey);
+  } catch {
     return {
       title: fallbackSurfaceTitle(surfaceKey),
+      kind: "dashboard",
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "task") {
+    const task = tasksById.get(parsed.id);
+    return {
+      title: task?.name ?? fallbackSurfaceTitle(surfaceKey),
+      kind: "task",
+      session_state: taskSessionState(task),
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "buddy") {
+    return {
+      title: "Buddy",
+      kind: "buddy",
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "dashboard") {
+    return {
+      title: "Dashboard",
+      kind: "dashboard",
       unreadNotificationCount: 0,
     };
   }
@@ -138,12 +205,13 @@ function displayInfoForSurface(
   const chatId = surfaceKey.slice("chat:".length);
   const tab = tabsById.get(chatId);
   if (tab) {
-    return tab;
+    return { ...tab, kind: "chat" };
   }
 
   const runtime = threads[chatId];
   return {
     title: runtime?.thread.title ?? fallbackSurfaceTitle(surfaceKey),
+    kind: "chat",
     session_state: runtime?.session_state,
     is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
     is_task_chat: Boolean(runtime?.thread.is_task_chat),
@@ -162,6 +230,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
   const groups = useAppSelector(selectWorkspaceGroups);
   const tabDisplayData = useAppSelector(selectTabsDisplayData);
   const threads = useAppSelector(selectAllThreads);
+  const openTasks = useAppSelector(selectOpenTasksFromRoot);
+  const currentPage = useAppSelector(selectCurrentPage);
+  const pages = useAppSelector(selectPages);
   const [draggingTabId, setDraggingTabId] = useState<SurfaceKey | null>(null);
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
@@ -173,9 +244,44 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [tabDisplayData],
   );
 
+  const tasksById = useMemo(
+    () => new Map(openTasks.map((task) => [task.id, task])),
+    [openTasks],
+  );
+
+  const taskSurfaceKeys = useMemo(
+    () => openTasks.map((task) => makeSurfaceKey("task", task.id)),
+    [openTasks],
+  );
+
+  const currentTaskSurfaceKey =
+    currentPage?.name === "task workspace"
+      ? makeSurfaceKey("task", currentPage.taskId)
+      : null;
+  const buddySurfaceOpen = pages.some((page) => page.name === "buddy");
+
+  const visibleTabKeys = useMemo(
+    () =>
+      uniqueSurfaceKeys([
+        ...tabs,
+        ...taskSurfaceKeys,
+        ...(currentTaskSurfaceKey ? [currentTaskSurfaceKey] : []),
+        ...(buddySurfaceOpen ? [BUDDY_SURFACE_KEY] : []),
+      ]),
+    [buddySurfaceOpen, currentTaskSurfaceKey, tabs, taskSurfaceKeys],
+  );
+
+  const activeSurfaceKey = useMemo(() => {
+    if (currentPage?.name === "task workspace") {
+      return makeSurfaceKey("task", currentPage.taskId);
+    }
+    if (currentPage?.name === "buddy") return BUDDY_SURFACE_KEY;
+    return activeTabId;
+  }, [activeTabId, currentPage]);
+
   const tabItems = useMemo(
     () =>
-      tabs.map((tabId) => {
+      visibleTabKeys.map((tabId) => {
         const group = groups[tabId] ?? null;
         const isGroup = Boolean(group);
         const groupSurfaceKeys = group ? collectTabIds(group.root) : [tabId];
@@ -186,11 +292,12 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           displaySurfaceKey,
           tabsById,
           threads,
+          tasksById,
         );
         const unreadNotificationCount = groupSurfaceKeys.reduce(
           (count, surfaceKey) =>
             count +
-            displayInfoForSurface(surfaceKey, tabsById, threads)
+            displayInfoForSurface(surfaceKey, tabsById, threads, tasksById)
               .unreadNotificationCount,
           0,
         );
@@ -198,31 +305,80 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         return {
           id: tabId,
           title: display.title,
+          kind: display.kind,
           status: getStatusFromSessionState(display.session_state),
           unreadNotificationCount,
           is_buddy_chat: display.is_buddy_chat,
           is_task_chat: display.is_task_chat,
           isGroup,
           paneCount: group ? collectLeafIds(group.root).length : 1,
+          draggable: isChatSurface(tabId) || taskSurfaceKeys.includes(tabId),
+          closable: display.kind !== "buddy" || currentPage?.name === "buddy",
         };
       }),
-    [groups, tabs, tabsById, threads],
+    [
+      currentPage?.name,
+      groups,
+      tabsById,
+      taskSurfaceKeys,
+      tasksById,
+      threads,
+      visibleTabKeys,
+    ],
   );
 
   const handleTabClick = useCallback(
     (tabId: SurfaceKey) => {
-      dispatch(setActiveTab(tabId));
+      const parsed = parseSurfaceKey(tabId);
+      if (parsed.kind === "chat") {
+        dispatch(setActiveTab(tabId));
+        if (currentPage?.name !== "chat") {
+          dispatch(push({ name: "chat" }));
+        }
+        return;
+      }
+      if (parsed.kind === "task") {
+        if (
+          currentPage?.name !== "task workspace" ||
+          currentPage.taskId !== parsed.id
+        ) {
+          dispatch(push({ name: "task workspace", taskId: parsed.id }));
+        }
+        return;
+      }
+      if (parsed.kind === "buddy") {
+        if (currentPage?.name !== "buddy") {
+          dispatch(push({ name: "buddy" }));
+        }
+      }
     },
-    [dispatch],
+    [currentPage, dispatch],
   );
 
   const handleCloseTab = useCallback(
     (event: MouseEvent<HTMLButtonElement>, tabId: SurfaceKey) => {
       event.preventDefault();
       event.stopPropagation();
+      const parsed = parseSurfaceKey(tabId);
+      if (parsed.kind === "task") {
+        dispatch(closeTask(parsed.id));
+        if (
+          currentPage?.name === "task workspace" &&
+          currentPage.taskId === parsed.id
+        ) {
+          dispatch(popBackTo({ name: "history" }));
+        }
+        return;
+      }
+      if (parsed.kind === "buddy") {
+        if (currentPage?.name === "buddy") {
+          dispatch(popBackTo({ name: "history" }));
+        }
+        return;
+      }
       dispatch(closeTab(tabId));
     },
-    [dispatch],
+    [currentPage, dispatch],
   );
 
   const stopClosePointerEvent = useCallback(
@@ -259,14 +415,20 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       const sourceKey = surfaceKeyFromDragData(
         readTabDragData(event.dataTransfer),
       );
-      if (!sourceKey || sourceKey === targetKey || !tabs.includes(sourceKey)) {
+      const chatReorder =
+        sourceKey && tabs.includes(sourceKey) && tabs.includes(targetKey);
+      const taskReorder =
+        sourceKey &&
+        taskSurfaceKeys.includes(sourceKey) &&
+        taskSurfaceKeys.includes(targetKey);
+      if (!sourceKey || sourceKey === targetKey || (!chatReorder && !taskReorder)) {
         return;
       }
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       setDragTargetTabId(targetKey);
     },
-    [tabs],
+    [tabs, taskSurfaceKeys],
   );
 
   const handleTabDragLeave = useCallback(
@@ -289,9 +451,24 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
       );
       setDragTargetTabId(null);
       if (!sourceKey || sourceKey === targetKey) return;
-      dispatch(reorderTabs({ sourceKey, targetKey }));
+      if (tabs.includes(sourceKey) && tabs.includes(targetKey)) {
+        dispatch(reorderTabs({ sourceKey, targetKey }));
+        return;
+      }
+      if (
+        taskSurfaceKeys.includes(sourceKey) &&
+        taskSurfaceKeys.includes(targetKey)
+      ) {
+        const source = parseSurfaceKey(sourceKey);
+        const target = parseSurfaceKey(targetKey);
+        if (source.kind === "task" && target.kind === "task") {
+          dispatch(
+            reorderOpenTasks({ sourceId: source.id, targetId: target.id }),
+          );
+        }
+      }
     },
-    [dispatch],
+    [dispatch, tabs, taskSurfaceKeys],
   );
 
   const handleBarDragOver = useCallback((event: DragEvent) => {
@@ -333,7 +510,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           aria-label="Open workspace tabs"
         >
           {tabItems.map((tab) => {
-            const isActive = activeTabId === tab.id;
+            const isActive = activeSurfaceKey === tab.id;
             const unreadText =
               tab.unreadNotificationCount > 9
                 ? "9+"
@@ -362,7 +539,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   role="tab"
                   aria-selected={isActive}
                   className={styles.tabButton}
-                  draggable
+                  draggable={tab.draggable}
                   onClick={() => handleTabClick(tab.id)}
                   onDragStart={(event) => handleDragStart(event, tab.id)}
                   onDragEnd={handleDragEnd}
@@ -387,7 +564,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                       {tab.paneCount}
                     </Badge>
                   )}
-                  {tab.is_buddy_chat && (
+                  {(tab.kind === "buddy" || tab.is_buddy_chat) && (
                     <Badge
                       tone="accent"
                       size="xs"
@@ -397,7 +574,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                       Buddy
                     </Badge>
                   )}
-                  {tab.is_task_chat && (
+                  {(tab.kind === "task" || tab.is_task_chat) && (
                     <Badge
                       tone="muted"
                       size="xs"
@@ -419,19 +596,21 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                     </Badge>
                   )}
                 </button>
-                <button
-                  type="button"
-                  className={styles.tabClose}
-                  title="Close tab"
-                  aria-label={`Close ${tab.title}`}
-                  draggable={false}
-                  onMouseDown={stopClosePointerEvent}
-                  onPointerDown={stopClosePointerEvent}
-                  onDragStart={stopCloseDragEvent}
-                  onClick={(event) => handleCloseTab(event, tab.id)}
-                >
-                  <Icon icon={X} size="sm" tone="muted" />
-                </button>
+                {tab.closable ? (
+                  <button
+                    type="button"
+                    className={styles.tabClose}
+                    title="Close tab"
+                    aria-label={`Close ${tab.title}`}
+                    draggable={false}
+                    onMouseDown={stopClosePointerEvent}
+                    onPointerDown={stopClosePointerEvent}
+                    onDragStart={stopCloseDragEvent}
+                    onClick={(event) => handleCloseTab(event, tab.id)}
+                  >
+                    <Icon icon={X} size="sm" tone="muted" />
+                  </button>
+                ) : null}
               </div>
             );
           })}

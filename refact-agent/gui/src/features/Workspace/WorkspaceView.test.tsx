@@ -14,6 +14,7 @@ import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { WorkspaceView } from "./WorkspaceView";
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
+const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
 
 function createDataTransferStub(): DataTransfer {
   const data = new Map<string, string>();
@@ -90,6 +91,21 @@ describe("WorkspaceView", () => {
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Down" })).toBeNull();
+  });
+
+  it("does not render a pane or split affordance for a non-chat active tab", () => {
+    const store = setUpStore({
+      workspace: {
+        tabs: [task("task-a")],
+        activeTabId: task("task-a"),
+        groups: {},
+      },
+    });
+    renderWorkspaceView(store);
+
+    expect(document.querySelector(`[data-surface-key="${task("task-a")}"]`)).toBeNull();
+    expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Split active tab" })).toBeNull();
   });
 
   it("reconciles current thread to the active workspace chat on entry", async () => {

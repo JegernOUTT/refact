@@ -564,7 +564,7 @@ const openChatSurface = (
   key: SurfaceKey,
   openThreadIds: ReadonlySet<string>,
 ): boolean =>
-  !isChatSurface(key) || openThreadIds.has(key.slice("chat:".length));
+  isChatSurface(key) && openThreadIds.has(key.slice("chat:".length));
 
 const pruneNodeToOpenThreads = (
   node: PaneNode,
@@ -605,13 +605,15 @@ const pruneNodeToOpenThreads = (
 const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
   const normalized = normalizeGroup(group);
   const leafCount = collectLeafIds(normalized.root).length;
-  const surfaceCount = collectTabIds(normalized.root).length;
+  const surfaces = collectTabIds(normalized.root);
+  const surfaceCount = surfaces.length;
 
   if (
     leafCount < 2 ||
     leafCount > MAX_GROUP_LEAVES ||
     surfaceCount === 0 ||
-    surfaceCount > MAX_WORKSPACE_TABS
+    surfaceCount > MAX_WORKSPACE_TABS ||
+    surfaces.some((key) => !isChatSurface(key))
   ) {
     return null;
   }
@@ -688,6 +690,7 @@ export const reconcileWorkspaceState = (
 
   for (const [tabId, group] of Object.entries(state.groups)) {
     if (!group) continue;
+    if (!openChatSurface(tabId, openThreads)) continue;
 
     const pruned = pruneNodeToOpenThreads(group.root, openThreads);
     const nextGroup = {
@@ -714,6 +717,7 @@ export const workspaceSlice = createSlice({
   initialState,
   reducers: {
     openTab: (state, action: PayloadAction<SurfaceKey>) => {
+      if (!isChatSurface(action.payload)) return;
       if (!state.tabs.includes(action.payload)) {
         if (state.tabs.length >= MAX_WORKSPACE_TABS) return;
         state.tabs.push(action.payload);
@@ -758,6 +762,7 @@ export const workspaceSlice = createSlice({
       }>,
     ) => {
       const { tabId, dir, placement } = action.payload;
+      if (!isChatSurface(tabId)) return;
       if (!state.tabs.includes(tabId)) return;
 
       const currentGroup =
@@ -775,6 +780,7 @@ export const workspaceSlice = createSlice({
       );
       const surfaceKey =
         focusedLeaf?.activeTabId ?? focusedLeaf?.tabIds[0] ?? null;
+      if (surfaceKey && !isChatSurface(surfaceKey)) return;
       if (!focusedLeaf || !surfaceKey) return;
 
       const splitResult = splitLeafWithEmptySibling(
@@ -865,6 +871,7 @@ export const workspaceSlice = createSlice({
       }>,
     ) => {
       const { tabId, leafId, surfaceKey } = action.payload;
+      if (!isChatSurface(tabId) || !isChatSurface(surfaceKey)) return;
       const group = state.groups[tabId];
       if (!group || !findLeaf(group.root, leafId)) return;
 
@@ -902,6 +909,7 @@ export const workspaceSlice = createSlice({
       }>,
     ) => {
       const { tabId, leafId, surfaceKey, dir, placement } = action.payload;
+      if (!isChatSurface(tabId) || !isChatSurface(surfaceKey)) return;
       const group = state.groups[tabId];
       if (!group || !findLeaf(group.root, leafId)) return;
 
@@ -969,22 +977,26 @@ export const workspaceSlice = createSlice({
       action: PayloadAction<{ openThreadIds: string[] }>,
     ) => reconcileWorkspaceState(state, action.payload.openThreadIds),
     hydrateWorkspace: (_state, action: PayloadAction<WorkspaceState>) => {
-      const tabs = unique(action.payload.tabs).slice(0, MAX_WORKSPACE_TABS);
+      const tabs = unique(action.payload.tabs)
+        .filter(isChatSurface)
+        .slice(0, MAX_WORKSPACE_TABS);
       const groups: Record<SurfaceKey, PaneGroup> = {};
 
       for (const [tabId, group] of Object.entries(action.payload.groups)) {
+        if (!isChatSurface(tabId)) continue;
         if (!tabs.includes(tabId) || !group) continue;
         const normalized = normalizeHydratedGroup(group);
         if (!normalized) continue;
         groups[tabId] = normalized;
       }
 
+      const activeTabId = action.payload.activeTabId;
+
       return {
         tabs,
         activeTabId:
-          action.payload.activeTabId &&
-          tabs.includes(action.payload.activeTabId)
-            ? action.payload.activeTabId
+          activeTabId && isChatSurface(activeTabId) && tabs.includes(activeTabId)
+            ? activeTabId
             : tabs[0] ?? null,
         groups,
       };

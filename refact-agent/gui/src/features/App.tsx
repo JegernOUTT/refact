@@ -402,6 +402,11 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         taskName: "",
       };
     }
+    if (desiredPage.name === "buddy") {
+      return {
+        type: "buddy",
+      };
+    }
     if (desiredPage.name === "knowledge graph") {
       return {
         type: "dashboard",
@@ -416,6 +421,11 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
     if (activeTab.type === "task") {
       savePersistedActiveTab({ type: "task", taskId: activeTab.taskId });
+      return;
+    }
+
+    if (activeTab.type === "buddy") {
+      savePersistedActiveTab({ type: "buddy" });
       return;
     }
 
@@ -438,6 +448,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (persistedActiveTab.type === "dashboard") {
       restoredActiveTabRef.current = true;
       dispatch(popBackTo({ name: "history" }));
+      return;
+    }
+
+    if (persistedActiveTab.type === "buddy") {
+      restoredActiveTabRef.current = true;
+      dispatch(popBackTo({ name: "history" }));
+      dispatch(push({ name: "buddy" }));
       return;
     }
 

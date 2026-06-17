@@ -47,7 +47,11 @@ export type TaskTab = {
   taskName: string;
 };
 
-export type Tab = DashboardTab | ChatTab | TaskTab;
+export type BuddyTab = {
+  type: "buddy";
+};
+
+export type Tab = DashboardTab | ChatTab | TaskTab | BuddyTab;
 
 export type ToolbarProps = {
   activeTab: Tab;
@@ -238,7 +242,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         />
       </div>
 
-      {activeTab.type === "chat" && (
+      {activeTab.type !== "dashboard" && (
         <>
           <div className={styles.toolbarDivider} />
           <TabBar placement="toolbar" />

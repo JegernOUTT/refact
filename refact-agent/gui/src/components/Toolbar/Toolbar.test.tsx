@@ -9,6 +9,7 @@ import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { Toolbar, type Tab } from "./Toolbar";
 import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
+import { push } from "../../features/Pages/pagesSlice";
 import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
@@ -74,6 +75,9 @@ function pagesForActiveTab(activeTab: Tab) {
       { name: "task workspace" as const, taskId: activeTab.taskId },
     ];
   }
+  if (activeTab.type === "buddy") {
+    return [{ name: "history" as const }, { name: "buddy" as const }];
+  }
   return [{ name: "history" as const }, { name: "chat" as const }];
 }
 
@@ -130,7 +134,7 @@ describe("Dropdown navigation", () => {
 });
 
 describe("Toolbar single workspace tab row", () => {
-  it("renders the unified workspace tab bar on chat pages without task KitTabs", () => {
+  it("renders the unified workspace tab bar on chat and task pages without legacy KitTabs", () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
     const view = renderToolbar(activeTab);
@@ -152,11 +156,26 @@ describe("Toolbar single workspace tab row", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
     expect(
-      screen.queryByRole("tab", { name: /Task Alpha/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("tab", { name: /Task Alpha/ }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      view.store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
+    });
+    rerenderToolbar(view, {
+      type: "task",
+      taskId: "task-a",
+      taskName: "Task Alpha",
+    });
+
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
-  it("does not render an empty or task-only tab strip outside chat", () => {
+  it("does not render an empty or task-only tab strip on dashboard", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
 

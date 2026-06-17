@@ -12,7 +12,7 @@ import {
 import { collectTabIds } from "../ChatPanes/panesTree";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
-import { makeSurfaceKey } from "./surfaceKey";
+import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
 import {
   openTab,
   selectActiveTabId,
@@ -50,6 +50,7 @@ export function WorkspaceView() {
   const isSplit = useAppSelector((state) =>
     activeTabId ? selectIsTabSplit(state, activeTabId) : false,
   );
+  const activeTabCanSplit = activeTabId ? isChatSurface(activeTabId) : false;
 
   useEffect(() => {
     if (
@@ -75,9 +76,9 @@ export function WorkspaceView() {
   }, [focusedChatId, focusedChatIsOpen, currentThreadId, dispatch]);
 
   const handleSplitActiveSurface = useCallback(() => {
-    if (!activeTabId) return;
+    if (!activeTabCanSplit || !activeTabId) return;
     dispatch(splitTab({ tabId: activeTabId, dir: "row" }));
-  }, [activeTabId, dispatch]);
+  }, [activeTabCanSplit, activeTabId, dispatch]);
 
   return (
     <div className={styles.workspaceView}>
@@ -89,12 +90,12 @@ export function WorkspaceView() {
           isSplit ? "rf-enter-scale" : "rf-enter",
         )}
       >
-        {activeTabId && isSplit ? (
+        {activeTabId && activeTabCanSplit && isSplit ? (
           <GroupSplitView tabId={activeTabId} />
         ) : (
           <div className={styles.unsplitSurfaceWrap}>
             <SurfacePane surfaceKey={activeTabId} />
-            {activeTabId ? (
+            {activeTabCanSplit ? (
               <div className={styles.unsplitSplitAffordance}>
                 <Tooltip content="Split this tab">
                   <IconButton

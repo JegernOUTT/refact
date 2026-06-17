@@ -1,3 +1,4 @@
+import { act } from "react-dom/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
 import { type AppStore, setUpStore } from "../../app/store";
@@ -8,6 +9,8 @@ import {
 } from "../Chat/Thread";
 import { notificationAdded } from "../Notifications";
 import type { ProcessCompletedNotification } from "../Notifications/notificationsSlice";
+import { push } from "../Pages/pagesSlice";
+import { openTask } from "../Tasks/tasksSlice";
 import {
   addSurfaceToPane,
   closeTab,
@@ -20,6 +23,7 @@ import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { TabBar } from "./TabBar";
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
+const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
 
 function renderTabBar(store: AppStore) {
   return render(<TabBar />, { store });
@@ -181,6 +185,74 @@ describe("TabBar", () => {
     expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
     expect(store.getState().workspace.tabs).toEqual([
       chat("chat-a"),
+      chat("chat-c"),
+    ]);
+  });
+
+  it("renders task and buddy navigation tabs without split controls", async () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    store.dispatch(push({ name: "buddy" }));
+    store.dispatch(push({ name: "chat" }));
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    const view = renderTabBar(store);
+
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Buddy/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Split/ })).toBeNull();
+
+    await view.user.click(screen.getByRole("tab", { name: /Task Alpha/ }));
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      push({ name: "task workspace", taskId: "task-a" }),
+    );
+    expect(store.getState().pages.at(-1)).toEqual({
+      name: "task workspace",
+      taskId: "task-a",
+    });
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    await view.user.click(screen.getByRole("tab", { name: /Buddy/ }));
+
+    expect(dispatchSpy).toHaveBeenCalledWith(push({ name: "buddy" }));
+    expect(store.getState().pages.at(-1)).toEqual({ name: "buddy" });
+  });
+
+  it("closes task and active buddy navigation tabs without closing chat tabs", async () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      within(getTabWrap(/Task Alpha/)).getByLabelText("Close Task Alpha"),
+    );
+
+    expect(store.getState().tasksUI.openTasks).toEqual([]);
+    expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-a"),
+      chat("chat-b"),
+      chat("chat-c"),
+    ]);
+    expect(dispatchSpy).not.toHaveBeenCalledWith(closeTab(task("task-a")));
+
+    act(() => {
+      store.dispatch(push({ name: "buddy" }));
+    });
+
+    await view.user.click(
+      within(getTabWrap(/Buddy/)).getByLabelText("Close Buddy"),
+    );
+
+    expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-a"),
+      chat("chat-b"),
       chat("chat-c"),
     ]);
   });

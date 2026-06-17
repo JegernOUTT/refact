@@ -7,6 +7,7 @@ import { restoreChat } from "../features/Chat/Thread";
 import type { ChatHistoryItem } from "../features/History/historySlice";
 import { setBackendStatus } from "../features/Connection";
 import { render, screen } from "../utils/test-utils";
+import { openTask } from "../features/Tasks";
 import {
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
@@ -101,6 +102,36 @@ vi.mock("../features/Workspace/WorkspaceView", async () => {
         ),
       );
     },
+  };
+});
+
+vi.mock("../features/Tasks", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  const actual = await vi.importActual<typeof import("../features/Tasks")>(
+    "../features/Tasks",
+  );
+
+  return {
+    ...actual,
+    TaskWorkspace: ({ taskId }: { taskId: string }) =>
+      React.createElement(
+        "section",
+        { "data-testid": "task-workspace", "data-task-id": taskId },
+        `Task workspace ${taskId}`,
+      ),
+  };
+});
+
+vi.mock("../features/Buddy/BuddyHome", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+
+  return {
+    BuddyHome: () =>
+      React.createElement(
+        "section",
+        { "data-testid": "buddy-home" },
+        "Buddy home",
+      ),
   };
 });
 
@@ -219,6 +250,26 @@ function renderChatPage(item: ChatHistoryItem) {
   return render(<InnerApp />, { store });
 }
 
+function renderAppWithNavigationTabs() {
+  server.use(...appHandlers);
+  const store = setUpStore({
+    config: baseConfig,
+    current_project: {
+      name: "refact-test",
+      workspaceRoots: ["/tmp/refact-test"],
+    },
+    pages: [{ name: "history" }, { name: "buddy" }, { name: "chat" }],
+  });
+  store.dispatch(setBackendStatus({ status: "online" }));
+  store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+  setProjectStorageNamespaceFromProjectInfo({
+    workspaceRoots: ["/tmp/refact-test"],
+    projectName: "refact-test",
+  });
+
+  return render(<InnerApp />, { store });
+}
+
 afterEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -258,5 +309,28 @@ describe("App buddy chat page rendering", () => {
 
     expect(workspaceView).toHaveAttribute("data-chat-id", "normal-chat-1");
     expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
+  });
+
+  it("routes task and buddy tabs to their existing full pages", async () => {
+    const { store, user } = renderAppWithNavigationTabs();
+
+    await screen.findByTestId("workspace-view");
+    await user.click(screen.getByRole("tab", { name: /Task Alpha/ }));
+
+    expect(store.getState().pages.at(-1)).toEqual({
+      name: "task workspace",
+      taskId: "task-a",
+    });
+    expect(await screen.findByTestId("task-workspace")).toHaveAttribute(
+      "data-task-id",
+      "task-a",
+    );
+    expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /Buddy/ }));
+
+    expect(store.getState().pages.at(-1)).toEqual({ name: "buddy" });
+    expect(await screen.findByTestId("buddy-home")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
   });
 });

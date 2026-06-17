@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   collectLeafIds,
+  collectTabIds,
   findLeaf,
   type LeafPane,
 } from "../ChatPanes/panesTree";
@@ -11,6 +12,7 @@ import {
   focusPane,
   MAX_GROUP_LEAVES,
   MAX_WORKSPACE_TABS,
+  hydrateWorkspace,
   openTab,
   reconcileWorkspace,
   reorderTabs,
@@ -40,6 +42,7 @@ import {
 const reducer = workspaceSlice.reducer;
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
+const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
 
 const leaf = (
   id: string,
@@ -115,6 +118,96 @@ describe("workspaceSlice", () => {
     state = reducer(state, closeTab(chatA));
     expect(state.tabs).toEqual([chatB, chatC]);
     expect(state.activeTabId).toBe(chatC);
+  });
+
+  test("keeps task and buddy surfaces out of pane-backed workspace state", () => {
+    const chatA = chat("a");
+    const taskA = task("a");
+    const buddyHome = makeSurfaceKey("buddy", "home");
+    let state = reducer(undefined, openTab(taskA));
+    state = reducer(state, openTab(buddyHome));
+
+    expect(state.tabs).toEqual([]);
+    expect(state.activeTabId).toBeNull();
+
+    state = reducer(state, openTab(chatA));
+    state = reducer(state, splitTab({ tabId: taskA, dir: "row" }));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    const leafIdsBefore = collectLeafIds(groupFor(state, chatA).root);
+
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: taskA,
+      }),
+    );
+    state = reducer(
+      state,
+      splitPaneWithSurface({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: buddyHome,
+        dir: "row",
+      }),
+    );
+
+    expect(state.tabs).toEqual([chatA]);
+    expect(collectLeafIds(groupFor(state, chatA).root)).toEqual(leafIdsBefore);
+    expect(collectTabIds(groupFor(state, chatA).root)).toEqual([chatA]);
+  });
+
+  test("hydrate and reconcile defensively drop non-chat pane state", () => {
+    const chatA = chat("a");
+    const taskA = task("a");
+    const buddyHome = makeSurfaceKey("buddy", "home");
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA, taskA, buddyHome],
+        activeTabId: taskA,
+        groups: {
+          [chatA]: {
+            focusedLeafId: "right",
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                leaf("left", [chatA], chatA),
+                leaf("right", [taskA], taskA),
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(hydrated.tabs).toEqual([chatA]);
+    expect(hydrated.activeTabId).toBe(chatA);
+    expect(hydrated.groups).toEqual({});
+
+    const reconciled = reducer(
+      {
+        tabs: [chatA, taskA],
+        activeTabId: taskA,
+        groups: {
+          [taskA]: {
+            focusedLeafId: "root",
+            root: leaf("root", [taskA], taskA),
+          },
+        },
+      },
+      reconcileWorkspace({ openThreadIds: ["a"] }),
+    );
+
+    expect(reconciled).toEqual({
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {},
+    });
   });
 
   test("splitTab creates a group with the surface kept and an empty sibling", () => {

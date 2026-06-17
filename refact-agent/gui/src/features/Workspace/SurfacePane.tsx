@@ -1,5 +1,5 @@
 import classNames from "classnames";
-import { MessageSquare, PanelsTopLeft } from "lucide-react";
+import { MessageSquare } from "lucide-react";
 import { useCallback } from "react";
 
 import { EmptyState } from "../../components/ui";
@@ -12,17 +12,6 @@ import styles from "./SurfacePane.module.css";
 export type SurfacePaneProps = {
   surfaceKey?: SurfaceKey | null;
 };
-
-function surfaceLabel(surfaceKey: SurfaceKey): string {
-  try {
-    const parsed = parseSurfaceKey(surfaceKey);
-    if (parsed.kind === "dashboard") return "Dashboard";
-    const prefix = parsed.kind[0].toUpperCase();
-    return `${prefix}${parsed.kind.slice(1)} ${parsed.id}`;
-  } catch {
-    return surfaceKey;
-  }
-}
 
 export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
   const config = useConfig();
@@ -59,32 +48,8 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
       );
     }
 
-    return (
-      <div
-        className={classNames(styles.placeholder, "rf-enter-rise")}
-        data-surface-key={surfaceKey}
-      >
-        <EmptyState
-          icon={PanelsTopLeft}
-          title={`${surfaceLabel(surfaceKey)} placeholder`}
-          description="This surface type will become pane-hostable in a later phase."
-          variant="full"
-        />
-      </div>
-    );
+    return null;
   } catch {
-    return (
-      <div
-        className={classNames(styles.placeholder, "rf-enter-rise")}
-        data-surface-key={surfaceKey}
-      >
-        <EmptyState
-          icon={PanelsTopLeft}
-          title="Unsupported surface"
-          description={surfaceKey}
-          variant="full"
-        />
-      </div>
-    );
+    return null;
   }
 }

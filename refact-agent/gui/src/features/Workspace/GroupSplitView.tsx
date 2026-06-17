@@ -21,8 +21,8 @@ import {
   splitPaneWithSurface,
   splitTab,
 } from "./workspaceSlice";
-import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
-import { hasTabDragType, readTabDragData } from "../ChatPanes/tabDrag";
+import { isChatSurface, makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { readTabDragData } from "../ChatPanes/tabDrag";
 import { SurfacePane } from "./SurfacePane";
 import styles from "./GroupSplitView.module.css";
 
@@ -113,16 +113,12 @@ function resizeAtDivider(
 }
 
 function hasSurfaceTabDrag(dataTransfer: DataTransfer): boolean {
-  return (
-    hasTabDragType(dataTransfer, "chat") ||
-    hasTabDragType(dataTransfer, "task") ||
-    hasTabDragType(dataTransfer, "buddy") ||
-    hasTabDragType(dataTransfer, "surface")
-  );
+  const surfaceKey = surfaceKeyFromDragData(dataTransfer);
+  return Boolean(surfaceKey && isChatSurface(surfaceKey));
 }
 
-function surfaceKeyFromDrag(event: DragEvent): SurfaceKey | null {
-  const dragged = readTabDragData(event.dataTransfer);
+function surfaceKeyFromDragData(dataTransfer: DataTransfer): SurfaceKey | null {
+  const dragged = readTabDragData(dataTransfer);
   if (!dragged) return null;
   if (dragged.surfaceKey) return dragged.surfaceKey;
   if (dragged.type === "surface") return dragged.id;
@@ -269,8 +265,8 @@ function LeafView({
       event.preventDefault();
       event.stopPropagation();
       setSurfaceDragActive(false);
-      const draggedSurfaceKey = surfaceKeyFromDrag(event);
-      if (!draggedSurfaceKey) return;
+      const draggedSurfaceKey = surfaceKeyFromDragData(event.dataTransfer);
+      if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) return;
       dispatch(
         splitPaneWithSurface({
           tabId,
