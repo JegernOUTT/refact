@@ -1,13 +1,16 @@
 .rootFlex {
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 .integrationsPagePadding {
   height: calc(100vh - 50px);
+  height: calc(100dvh - 50px);
 }
 
 @media print {
