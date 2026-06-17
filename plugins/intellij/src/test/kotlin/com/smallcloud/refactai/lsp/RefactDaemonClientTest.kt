@@ -1,7 +1,12 @@
+@file:OptIn(okhttp3.ExperimentalOkHttpApi::class)
+
 package com.smallcloud.refactai.lsp
 
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -67,12 +72,45 @@ class RefactDaemonClientTest {
     }
 
     @Test
+    fun binaryResolverPrefersSharedHomeBinaryBeforePath() {
+        val root = Files.createTempDirectory("refact-binary-resolver-home-first")
+        val pathDir = root.resolve("path-bin")
+        val homeDir = root.resolve("home")
+        val pathRefact = pathDir.resolve("refact")
+        val homeRefact = sharedRefactBinaryPath(homeDir, "Linux")
+
+        try {
+            Files.createDirectories(pathRefact.parent)
+            Files.createDirectories(homeRefact.parent)
+            Files.writeString(pathRefact, "")
+            Files.writeString(homeRefact, "")
+
+            val resolved = RefactBinaryResolver.resolve(
+                RefactBinaryResolverOptions(
+                    minVersion = "8.1.0",
+                    pinnedVersion = "8.1.0",
+                    cacheDir = root.resolve("cache"),
+                    pathEnv = pathDir.toString(),
+                    homeDir = homeDir,
+                    osName = "Linux",
+                    arch = "amd64",
+                    versionReader = { "refact 8.1.0" },
+                )
+            )
+
+            assertEquals(homeRefact.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun binaryResolverSkipsOldPathBinaryAndUsesHomeBinary() {
         val root = Files.createTempDirectory("refact-binary-resolver-home")
         val pathDir = root.resolve("path-bin")
         val homeDir = root.resolve("home")
         val pathRefact = pathDir.resolve("refact")
-        val homeRefact = homeDir.resolve(".refact").resolve("bin").resolve("refact")
+        val homeRefact = sharedRefactBinaryPath(homeDir, "Linux")
 
         try {
             Files.createDirectories(pathRefact.parent)
@@ -105,7 +143,7 @@ class RefactDaemonClientTest {
         val pathDir = root.resolve("path-bin")
         val homeDir = root.resolve("home")
         val pathRefact = pathDir.resolve("refact")
-        val homeRefact = homeDir.resolve(".refact").resolve("bin").resolve("refact")
+        val homeRefact = sharedRefactBinaryPath(homeDir, "Linux")
         val downloads = mutableListOf<String>()
 
         try {
@@ -122,7 +160,9 @@ class RefactDaemonClientTest {
                     homeDir = homeDir,
                     osName = "Linux",
                     arch = "amd64",
-                    versionReader = { path -> if (path.toString().contains("cache")) "refact 8.1.0" else "refact 7.9.0" },
+                    versionReader = { path ->
+                        if (Files.isRegularFile(path) && Files.readString(path) == "new-binary") "refact 8.1.0" else "refact 7.9.0"
+                    },
                     downloader = { uri, dest ->
                         downloads.add(uri.toString())
                         Files.createDirectories(dest.parent)
@@ -133,12 +173,14 @@ class RefactDaemonClientTest {
                             Files.writeString(dest, "archive")
                         }
                     },
-                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "") },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "new-binary") },
                     chmod = {},
                 )
             )
 
-            assertEquals(root.resolve("cache").resolve("8.1.0").resolve("x86_64-unknown-linux-gnu").resolve("refact").toString(), resolved)
+            assertEquals(homeRefact.toString(), resolved)
+            assertEquals("new-binary", Files.readString(homeRefact))
+            assertFalse(Files.exists(root.resolve("cache").resolve("8.1.0").resolve("x86_64-unknown-linux-gnu").resolve("refact")))
             assertEquals(
                 listOf(
                     "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
@@ -178,6 +220,22 @@ class RefactDaemonClientTest {
 
         assertEquals(listOf(DaemonSpawnCommand(listOf(bin, "daemon"))), commands)
         assertFalse(commands.any { it.argv.contains("cmd") || it.argv.contains("start") })
+    }
+
+    @Test
+    fun linuxDaemonCommandKeepsDetachedFallbacks() {
+        val bin = "/home/user/.refact/bin/refact"
+
+        val commands = daemonCommandCandidates(bin, DaemonSpawnOs.Linux)
+
+        assertEquals(
+            listOf(
+                DaemonSpawnCommand(listOf("setsid", bin, "daemon")),
+                DaemonSpawnCommand(listOf("nohup", bin, "daemon")),
+                DaemonSpawnCommand(listOf(bin, "daemon")),
+            ),
+            commands,
+        )
     }
 
     @Test
@@ -295,6 +353,58 @@ class RefactDaemonClientTest {
         assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 33, version = "8.2.0"), "8.2.0", 33))
         assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.1.0"), "8.2.0", 33))
         assertTrue(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.2.0"), "8.2.0", 33))
+    }
+
+    @Test
+    fun daemonStatusDiscoversTokenFromDaemonJson() {
+        val root = Files.createTempDirectory("refact-daemon-info")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            val daemonDir = root.resolve(".cache").resolve("refact").resolve("daemon")
+            Files.createDirectories(daemonDir)
+            Files.writeString(daemonDir.resolve("daemon.json"), "{\"port\":${server.port},\"auth_token\":\"secret-token\"}")
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":77,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":2}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":77,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":2}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"project-token\"}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val status = client.status()
+            val project = client.openProject(root.toString(), LSPConfig())
+
+            assertEquals("secret-token", status.authToken)
+            assertEquals("project-token", project.projectId)
+            assertEquals("/daemon/v1/status", server.takeRequest().path)
+            assertEquals("/daemon/v1/status", server.takeRequest().path)
+            val openRequest = server.takeRequest()
+            assertEquals("/daemon/v1/projects/open", openRequest.path)
+            assertEquals("Bearer secret-token", openRequest.headers["Authorization"])
+            assertNotNull(openRequest.body.readUtf8())
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
     }
 }
 

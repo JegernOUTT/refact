@@ -345,18 +345,19 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             closeAttachedProject()
             terminate()
             if (!newConfig.isValid) return
-            val bin = BIN_PATH
-            if (bin == null) {
-                logger.warn("LSP daemon attach BIN_PATH is null")
-                return
-            }
             val root = projectRootPath()
             if (root == null) {
                 logger.warn("LSP daemon attach project root is null")
                 return
             }
-            logger.debug("LSP daemon attach $bin ${newConfig.toSafeLogString()}")
-            daemonClient.ensureDaemon(bin)
+            val daemonStatus = compatibleDaemonStatusOrNull()
+            if (daemonStatus == null) {
+                val bin = binaryPathForDaemon() ?: return
+                logger.debug("LSP daemon spawn/upgrade $bin ${newConfig.toSafeLogString()}")
+                daemonClient.ensureDaemon(bin)
+            } else {
+                logger.debug("LSP daemon attach existing pid=${daemonStatus.pid} version=${daemonStatus.version} ${newConfig.toSafeLogString()}")
+            }
             val openedProject = daemonClient.openProject(root, newConfig)
             attachedProject = openedProject
             lastConfig = newConfig
@@ -377,6 +378,24 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         } finally {
             startupInProgress = false
         }
+    }
+
+    private fun compatibleDaemonStatusOrNull(): DaemonStatus? {
+        val status = runCatching { daemonClient.status() }
+            .onFailure { logger.debug("LSP daemon status probe failed: ${it.message}") }
+            .getOrNull()
+            ?: return null
+        val requiredVersion = requiredDaemonVersion()
+        return if (versionIsOlder(status.version, requiredVersion)) {
+            logger.info("LSP daemon version ${status.version} is older than plugin $requiredVersion")
+            null
+        } else {
+            status
+        }
+    }
+
+    protected open fun requiredDaemonVersion(): String {
+        return Resources.version
     }
 
     protected open fun refreshAttachedWorkerState() {
@@ -417,12 +436,14 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     fun wakeWorkerForRetry(reason: String): Boolean {
-        val bin = BIN_PATH ?: return false
         val root = projectRootPath() ?: return false
         val config = lastConfig ?: currentConfig()
         return try {
             logger.debug("LSP daemon wake retry: $reason")
-            daemonClient.ensureDaemon(bin)
+            if (compatibleDaemonStatusOrNull() == null) {
+                val bin = binaryPathForDaemon() ?: return false
+                daemonClient.ensureDaemon(bin)
+            }
             attachedProject = daemonClient.openProject(root, config)
             lastConfig = config
             isWorking = true
@@ -634,13 +655,11 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
 
         @Synchronized
-        fun initialize() {
-            logger.warn("LSP initialize start")
-            if (initialized.get()) return
+        fun binaryPathForDaemon(): String? {
             if (ApplicationManager.getApplication().isUnitTestMode && BIN_PATH != null) {
-                initialized.set(true)
-                return
+                return BIN_PATH
             }
+            BIN_PATH?.let { return it }
             val resolvedPath = try {
                 RefactBinaryResolver.resolve(
                     RefactBinaryResolverOptions(
@@ -652,14 +671,20 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 )
             } catch (e: Exception) {
                 emitError("Refact binary is not available for host operating system: ${e.message}")
-                logger.warn("LSP initialize failed: ${e.message}", e)
-                logger.warn("LSP initialize finished")
-                return
+                logger.warn("LSP binary resolution failed: ${e.message}", e)
+                return null
             }
             BIN_PATH = resolvedPath
+            logger.warn("LSP initialize BIN_PATH=$BIN_PATH")
+            return resolvedPath
+        }
+
+        @Synchronized
+        fun initialize() {
+            logger.warn("LSP initialize start")
+            if (initialized.get()) return
             initialized.set(true)
             logger.warn("LSP initialize finished")
-            logger.warn("LSP initialize BIN_PATH=$BIN_PATH")
         }
 
         fun cleanup() {

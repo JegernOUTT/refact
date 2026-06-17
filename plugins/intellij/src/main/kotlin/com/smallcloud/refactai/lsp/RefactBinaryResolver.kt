@@ -5,9 +5,11 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.Comparator
 import java.util.zip.GZIPInputStream
@@ -57,6 +59,10 @@ internal object RefactBinaryResolver {
 
 internal fun refactBinaryName(osName: String = System.getProperty("os.name")): String {
     return if (osName.lowercase().contains("win")) "refact.exe" else "refact"
+}
+
+internal fun sharedRefactBinaryPath(homeDir: Path, osName: String = System.getProperty("os.name")): Path {
+    return homeDir.resolve(".refact").resolve("bin").resolve(refactBinaryName(osName)).toAbsolutePath().normalize()
 }
 
 internal fun refactReleaseTarget(osName: String = System.getProperty("os.name"), arch: String = System.getProperty("os.arch")): String {
@@ -170,13 +176,17 @@ private fun Int.coerceSign(): Int = when {
 
 private fun systemRefactCandidates(pathEnv: String, homeDir: Path, osName: String): List<Path> {
     val binaryName = refactBinaryName(osName)
-    val candidates = pathEnv.split(File.pathSeparator)
+    val candidates = mutableListOf(sharedRefactBinaryPath(homeDir, osName))
+    candidates.addAll(pathEnv.split(pathSeparator(osName))
         .asSequence()
         .filter { it.isNotBlank() }
         .map { Path.of(it, binaryName).toAbsolutePath().normalize() }
-        .toMutableList()
-    candidates.add(homeDir.resolve(".refact").resolve("bin").resolve(binaryName).toAbsolutePath().normalize())
+        .toList())
     return candidates.distinctBy { it.toString() }
+}
+
+private fun pathSeparator(osName: String): String {
+    return if (osName.lowercase().contains("win")) ";" else File.pathSeparator
 }
 
 private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionReader: (Path) -> String?): Boolean {
@@ -188,12 +198,22 @@ private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionR
 private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): String {
     val target = refactReleaseTarget(options.osName, options.arch)
     val binaryName = refactBinaryName(options.osName)
-    val targetDir = options.cacheDir.resolve(options.pinnedVersion).resolve(target)
-    val binPath = targetDir.resolve(binaryName)
-    if (isCompatibleRefactBinary(binPath, options.minVersion, options.versionReader)) {
-        return binPath.toString()
-    }
+    val sharedBinPath = sharedRefactBinaryPath(options.homeDir, options.osName)
+    return withSharedInstallLock(sharedBinPath) {
+        if (isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
+            return@withSharedInstallLock sharedBinPath.toString()
+        }
 
+        downloadPinnedRefactBinaryToSharedPath(options, target, binaryName, sharedBinPath)
+    }
+}
+
+private fun downloadPinnedRefactBinaryToSharedPath(
+    options: RefactBinaryResolverOptions,
+    target: String,
+    binaryName: String,
+    sharedBinPath: Path,
+): String {
     val asset = refactReleaseAsset(options.pinnedVersion, target, options.osName)
     val tmpDir = options.cacheDir.resolve("tmp-${ProcessHandle.current().pid()}-${System.nanoTime()}")
     val archivePath = tmpDir.resolve(asset.archiveName)
@@ -209,18 +229,55 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
         if (!Files.isRegularFile(extractedBin)) {
             throw IOException("downloaded Refact archive did not contain $binaryName")
         }
-        options.chmod(extractedBin)
-        deleteRecursively(targetDir)
-        Files.createDirectories(targetDir.parent)
-        Files.move(extractDir, targetDir, StandardCopyOption.REPLACE_EXISTING)
-        options.chmod(binPath)
-        if (!isCompatibleRefactBinary(binPath, options.minVersion, options.versionReader)) {
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(extractedBin)
+        }
+        promoteSharedBinary(extractedBin, sharedBinPath, options)
+        if (!isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
             throw IOException("downloaded Refact binary is older than ${options.minVersion}")
         }
-        return binPath.toString()
+        return sharedBinPath.toString()
     } finally {
         deleteRecursively(tmpDir)
     }
+}
+
+private fun <T> withSharedInstallLock(sharedBinPath: Path, block: () -> T): T {
+    val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
+    Files.createDirectories(sharedDir)
+    val lockPath = sharedDir.resolve(".refact-install.lock")
+    FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
+        channel.lock().use {
+            return block()
+        }
+    }
+}
+
+private fun promoteSharedBinary(extractedBin: Path, sharedBinPath: Path, options: RefactBinaryResolverOptions) {
+    val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
+    Files.createDirectories(sharedDir)
+    val tmpTarget = sharedDir.resolve(".${sharedBinPath.fileName}.tmp.${ProcessHandle.current().pid()}.${System.nanoTime()}")
+    try {
+        Files.copy(extractedBin, tmpTarget, StandardCopyOption.REPLACE_EXISTING)
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(tmpTarget)
+        }
+        Files.move(
+            tmpTarget,
+            sharedBinPath,
+            StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.ATOMIC_MOVE,
+        )
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(sharedBinPath)
+        }
+    } finally {
+        Files.deleteIfExists(tmpTarget)
+    }
+}
+
+private fun isWindowsOs(osName: String): Boolean {
+    return osName.lowercase().contains("win")
 }
 
 private fun readRefactVersion(binPath: Path): String? {
