@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { STUB_CAPS_RESPONSE } from "../__fixtures__/caps";
 import { setUpStore } from "../app/store";
+import { updateConfig } from "../features/Config/configSlice";
 import { setBackendStatus } from "../features/Connection";
 import { LoginPage } from "../features/Login";
 import {
@@ -101,6 +102,9 @@ describe("provider bootstrap gate", () => {
 
     const { store } = renderLoginPage();
 
+    store.dispatch(
+      updateConfig({ backendReady: true, connectionStatus: "ready" }),
+    );
     store.dispatch(setBackendStatus({ status: "online" }));
 
     expect(
@@ -122,6 +126,9 @@ describe("provider bootstrap gate", () => {
 
     const { store } = renderLoginPage();
 
+    store.dispatch(
+      updateConfig({ backendReady: true, connectionStatus: "ready" }),
+    );
     store.dispatch(setBackendStatus({ status: "online" }));
 
     expect(
@@ -167,5 +174,38 @@ describe("provider bootstrap gate", () => {
         store.getState(),
       ).data,
     ).toBeUndefined();
+  });
+
+  it("does not show provider setup from stale data while plugin backend is not ready", async () => {
+    const store = createStore();
+
+    store.dispatch(
+      updateConfig({
+        lspUrl: "http://127.0.0.1:8001",
+        browserUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "starting",
+      }),
+    );
+    store.dispatch(setBackendStatus({ status: "online" }));
+    void store.dispatch(
+      providersApi.util.upsertQueryData("getConfiguredProviders", undefined, {
+        providers: [inactiveProvider],
+        error_log: [],
+      }),
+    );
+    mockCapsReady(store);
+
+    render(<LoginPage />, { store });
+
+    expect(
+      await screen.findByRole("heading", { name: "Connecting to Refact" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Set Up Providers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /OpenAI/i }),
+    ).not.toBeInTheDocument();
   });
 });

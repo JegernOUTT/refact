@@ -3,8 +3,13 @@ import type { RootState } from "../app/store";
 import { capsApi, providersApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
 import { selectBackendStatus } from "../features/Connection";
+import { selectConfig } from "../features/Config/configSlice";
 import { hasAnyUsableActiveProvider } from "../features/Login/providerAccess";
 import { useGetCapsQuery } from "./useGetCapsQuery";
+import {
+  hasReadyPluginBackend,
+  hasUsableEngineEndpoint,
+} from "../services/refact/apiUrl";
 
 export type ProviderBootstrapStatus =
   | "backend_connecting"
@@ -16,8 +21,9 @@ export type ProviderBootstrapStatus =
 
 export function useGetConfiguredProvidersQuery() {
   const backendStatus = useAppSelector(selectBackendStatus);
+  const config = useAppSelector(selectConfig);
   return providersApi.useGetConfiguredProvidersQuery(undefined, {
-    skip: backendStatus !== "online",
+    skip: backendStatus !== "online" || !hasUsableEngineEndpoint(config),
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,
@@ -31,6 +37,7 @@ function selectCapsQueryIsReady(state: RootState) {
 
 export function useProviderBootstrapState() {
   const backendStatus = useAppSelector(selectBackendStatus);
+  const config = useAppSelector(selectConfig);
   const providersQuery = useGetConfiguredProvidersQuery();
   const capsQuery = useGetCapsQuery();
   const capsQueryIsReady = useAppSelector(selectCapsQueryIsReady);
@@ -44,7 +51,12 @@ export function useProviderBootstrapState() {
   const capsLoading = !capsQueryIsReady && !capsQuery.isError;
 
   let status: ProviderBootstrapStatus = "provider_loading";
-  if (backendStatus === "unknown") {
+  if (!hasReadyPluginBackend(config)) {
+    status =
+      config.connectionStatus === "failed"
+        ? "backend_offline"
+        : "backend_connecting";
+  } else if (backendStatus === "unknown") {
     status = "backend_connecting";
   } else if (backendStatus === "offline") {
     status = "backend_offline";

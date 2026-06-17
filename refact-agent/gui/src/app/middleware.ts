@@ -160,7 +160,9 @@ function endpointConfigChanged(
     previous.dev !== next.dev ||
     previous.engineServed !== next.engineServed ||
     previous.lspPort !== next.lspPort ||
-    previous.lspUrl !== next.lspUrl
+    previous.lspUrl !== next.lspUrl ||
+    previous.backendReady !== next.backendReady ||
+    previous.connectionStatus !== next.connectionStatus
   );
 }
 

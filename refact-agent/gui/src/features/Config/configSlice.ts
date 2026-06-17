@@ -2,6 +2,13 @@ import { createReducer, createAction, createSelector } from "@reduxjs/toolkit";
 import { type ThemeProps } from "../../components/Theme";
 import { RootState } from "../../app/store";
 
+export type RefactBackendConnectionStatus =
+  | "connecting"
+  | "starting"
+  | "installing"
+  | "ready"
+  | "failed";
+
 export type Config = {
   host: "web" | "ide" | "vscode" | "jetbrains";
   lspPort: number;
@@ -10,6 +17,8 @@ export type Config = {
   browserUrl?: string;
   dev?: boolean;
   engineServed?: boolean;
+  backendReady?: boolean;
+  connectionStatus?: RefactBackendConnectionStatus;
   // todo: handle light / darkmode
   themeProps: Omit<ThemeProps, "children">;
   features?: {
@@ -59,6 +68,9 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
   builder.addCase(updateConfig, (state, action) => {
     state.dev = action.payload.dev ?? state.dev;
     state.engineServed = action.payload.engineServed ?? state.engineServed;
+    state.backendReady = action.payload.backendReady ?? state.backendReady;
+    state.connectionStatus =
+      action.payload.connectionStatus ?? state.connectionStatus;
 
     state.features = action.payload.features
       ? { ...state.features, ...action.payload.features }
