@@ -9,6 +9,7 @@ import { KimiIcon } from "./Kimi";
 import { LMStudioIcon } from "./LMStudio";
 import { MiniMaxIcon } from "./MiniMax";
 import { OllamaIcon } from "./Ollama";
+import { OpenCodeIcon } from "./OpenCode";
 import { OpenAIIcon } from "./OpenAI";
 import { OpenRouterIcon } from "./OpenRouter";
 import { QwenIcon } from "./Qwen";
@@ -27,6 +28,7 @@ export const iconsMap: Record<string, JSX.Element> = {
   deepseek: <DeepSeekIcon />,
   groq: <GroqIcon />,
   ollama: <OllamaIcon />,
+  opencode: <OpenCodeIcon />,
   lmstudio: <LMStudioIcon />,
   vllm: <VllmIcon />,
   xai: <XaiIcon />,

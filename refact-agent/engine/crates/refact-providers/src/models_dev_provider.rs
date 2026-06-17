@@ -21,6 +21,7 @@ pub enum ModelsDevProviderFamily {
     Kimi,
     Zai,
     MiniMax,
+    OpenCode,
     GitHubCopilot,
     Unknown,
 }
@@ -459,6 +460,7 @@ fn allowed_hosts(family: ModelsDevProviderFamily) -> &'static [&'static str] {
         ModelsDevProviderFamily::Kimi => &["api.moonshot.ai", "api.moonshot.cn"],
         ModelsDevProviderFamily::Zai => &["api.z.ai", "open.bigmodel.cn"],
         ModelsDevProviderFamily::MiniMax => &["api.minimax.io", "api.minimaxi.com"],
+        ModelsDevProviderFamily::OpenCode => &["opencode.ai"],
         ModelsDevProviderFamily::GitHubCopilot => &["api.githubcopilot.com"],
         ModelsDevProviderFamily::Unknown => &[],
     }

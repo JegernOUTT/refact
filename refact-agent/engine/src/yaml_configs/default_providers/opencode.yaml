@@ -1,0 +1,8 @@
+wire_format: openai_chat_completions
+chat_endpoint: https://opencode.ai/zen/go/v1/chat/completions
+supports_completion: false
+
+api_key: "$OPENCODE_API_KEY"
+models_dev_provider_id: opencode-go
+usage_endpoint: ""
+custom_models: {}

@@ -15,6 +15,7 @@ import type {
   OpenAICodexRateLimit,
   OpenAICodexUsageData,
   OpenAICodexUsageWindow,
+  OpenCodeUsageData,
 } from "../../../services/refact";
 import { Badge, Button, Surface } from "../../../components/ui";
 
@@ -24,6 +25,7 @@ import {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
   useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
 import {
@@ -395,6 +397,72 @@ const CodexUsagePanel: React.FC<{
   );
 };
 
+type OpenCodeUsageWindowKey = keyof Pick<
+  OpenCodeUsageData,
+  "rolling" | "weekly" | "monthly"
+>;
+
+const OPENCODE_USAGE_WINDOWS: {
+  key: OpenCodeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "rolling", label: "Rolling" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
+const OpenCodeUsagePanel: React.FC<{ data: OpenCodeUsageData }> = ({
+  data,
+}) => {
+  const windowRows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: OpenCodeUsageWindowKey;
+      label: string;
+      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
+    } => Boolean(row.window),
+  );
+
+  return (
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageTitle}>Usage</div>
+      <div className={styles.usageRows}>
+        {data.plan_type ? (
+          <InfoRow label="Plan" value={data.plan_type} />
+        ) : null}
+        {data.workspace_id ? (
+          <InfoRow label="Workspace" value={data.workspace_id} />
+        ) : null}
+        {typeof data.balance === "number" ? (
+          <InfoRow
+            label="Zen balance"
+            value={data.balance.toLocaleString(undefined, {
+              maximumFractionDigits: 2,
+            })}
+          />
+        ) : null}
+        {windowRows.length > 0 ? (
+          windowRows.map(({ key, label, window }) => (
+            <CodexWindowRow
+              key={key}
+              label={formatWindowLabel(label, window.limit_window_seconds)}
+              w={window}
+              limitReached={window.status === "rate-limited"}
+            />
+          ))
+        ) : (
+          <div className={styles.usageMeta}>Quota windows not reported.</div>
+        )}
+      </div>
+    </Surface>
+  );
+};
+
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
@@ -416,6 +484,11 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     { providerName: currentProvider.name, useInstanceRoute: true },
     { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
   );
+  const { data: openCodeUsage, isError: openCodeUsageError } =
+    useGetOpenCodeUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: true },
+      { skip: baseProvider !== "opencode", pollingInterval: 60_000 },
+    );
   const {
     areShowingExtraFields,
     formValues,
@@ -475,6 +548,15 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         {codexUsage?.error != null || codexUsageError ? (
           <div className={styles.defaultDescription}>
             Usage: {codexUsage?.error ?? "Failed to load"}
+          </div>
+        ) : null}
+
+        {openCodeUsage?.data && !openCodeUsage.error ? (
+          <OpenCodeUsagePanel data={openCodeUsage.data} />
+        ) : null}
+        {openCodeUsage?.error != null || openCodeUsageError ? (
+          <div className={styles.defaultDescription}>
+            Usage: {openCodeUsage?.error ?? "Failed to load"}
           </div>
         ) : null}
 

@@ -19,6 +19,8 @@ import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
+  type OpenCodeUsageData,
 } from "../../../services/refact/providers";
 import { useGetConfiguredProvidersQuery } from "../../../hooks";
 import { Spinner } from "../../../components/Spinner";
@@ -118,6 +120,27 @@ const QuotaLine: React.FC<{
     </div>
   );
 };
+
+type OpenCodeUsageWindowKey = keyof Pick<
+  OpenCodeUsageData,
+  "rolling" | "weekly" | "monthly"
+>;
+
+const OPENCODE_USAGE_WINDOWS: {
+  key: OpenCodeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "rolling", label: "Rolling" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
+function hasOpenCodeQuotaData(data: OpenCodeUsageData): boolean {
+  return (
+    typeof data.balance === "number" ||
+    OPENCODE_USAGE_WINDOWS.some(({ key }) => Boolean(data[key]))
+  );
+}
 
 const ClaudeCodeInstanceCard: React.FC<{
   providerName: string;
@@ -260,6 +283,117 @@ const OpenAICodexInstanceCard: React.FC<{
   );
 };
 
+const OpenCodeInstanceCard: React.FC<{
+  providerName: string;
+  displayName: string;
+  data: OpenCodeUsageData;
+}> = ({ providerName, displayName, data }) => {
+  const windows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: OpenCodeUsageWindowKey;
+      label: string;
+      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
+    } => Boolean(row.window),
+  );
+  if (!hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <Card animated="rise" className={styles.quotaCard}>
+      <div className={styles.quotaHeader}>
+        <div className={styles.quotaLabel}>
+          <Icon icon={Bot} size="md" tone="accent" />
+          <span className={styles.quotaName}>{displayName}</span>
+          {data.plan_type && <Badge tone="accent">{data.plan_type}</Badge>}
+        </div>
+        <span className={styles.quotaProvider}>{providerName}</span>
+      </div>
+      {data.workspace_id && (
+        <span className={styles.quotaExtra}>
+          Workspace: {data.workspace_id}
+        </span>
+      )}
+      {typeof data.balance === "number" && (
+        <span className={styles.quotaExtra}>
+          Zen balance:{" "}
+          {data.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </span>
+      )}
+      {windows.map(({ key, label, window }) => (
+        <div key={key}>
+          <QuotaLine
+            label={
+              formatLimitWindowSeconds(window.limit_window_seconds) ?? label
+            }
+            pct={window.used_percent}
+            resetAt={window.reset_at}
+            limitReached={window.status === "rate-limited"}
+            windowSeconds={window.limit_window_seconds}
+          />
+          <UsageBar pct={window.used_percent} />
+        </div>
+      ))}
+    </Card>
+  );
+};
+
+const OpenCodeProviderQuotaCard: React.FC<{
+  providerName: string;
+  displayName: string;
+}> = ({ providerName, displayName }) => {
+  const { data: openCodeUsage } = useGetOpenCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 5 * 60_000 },
+  );
+  const data = openCodeUsage?.data;
+  if (!data || !hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <section className={styles.root}>
+      <h3 className={styles.sectionTitle}>
+        <Icon icon={Gauge} size="md" tone="accent" />
+        OpenCode Quota
+      </h3>
+      <div className={`${styles.quotaGrid} rf-stagger`}>
+        <OpenCodeInstanceCard
+          providerName={providerName}
+          displayName={displayName}
+          data={data}
+        />
+      </div>
+    </section>
+  );
+};
+
+const OpenCodeProviderQuotaSections: React.FC = () => {
+  const { data: providersData } = useGetConfiguredProvidersQuery();
+  const providers = useMemo(
+    () => providersData?.providers ?? [],
+    [providersData],
+  );
+  const openCodeInstances = useMemo(
+    () => providers.filter((p) => p.base_provider === "opencode" && p.enabled),
+    [providers],
+  );
+
+  return (
+    <>
+      {openCodeInstances.map((p) => (
+        <OpenCodeProviderQuotaCard
+          key={`opencode:${p.name}`}
+          providerName={p.name}
+          displayName={p.display_name}
+        />
+      ))}
+    </>
+  );
+};
+
 const ProviderQuotaSection: React.FC = () => {
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const providers = useMemo(
@@ -277,7 +411,6 @@ const ProviderQuotaSection: React.FC = () => {
       providers.filter((p) => p.base_provider === "openai_codex" && p.enabled),
     [providers],
   );
-
   if (claudeInstances.length === 0 && codexInstances.length === 0) return null;
 
   return (
@@ -345,6 +478,7 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   return (
     <div className={styles.root}>
       <ProviderQuotaSection />
+      <OpenCodeProviderQuotaSections />
       {!hasStats && (
         <p className={styles.emptyText}>
           No usage data yet. Start chatting to see stats!

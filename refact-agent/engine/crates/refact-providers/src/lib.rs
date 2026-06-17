@@ -26,6 +26,7 @@ pub mod openai;
 pub mod openai_codex;
 pub mod openai_codex_oauth;
 pub mod openai_responses;
+pub mod opencode;
 pub mod openrouter;
 pub mod qwen;
 pub mod vllm;
