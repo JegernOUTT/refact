@@ -377,7 +377,10 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 44, version = "9.0.0")
             },
             shutdown = { _, _ -> shutdowns += 1 },
-            waitUntilDown = { waitUntilDowns += 1 },
+            waitUntilDown = { _, _ ->
+                waitUntilDowns += 1
+                null
+            },
         )
 
         assertEquals(current, status)
@@ -405,7 +408,12 @@ class RefactDaemonClientTest {
                 DaemonStatus(pid = 44, version = "8.2.0")
             },
             shutdown = { _, _ -> shutdowns += 1 },
-            waitUntilDown = { waits += 1 },
+            waitUntilDown = { current, expectedVersion ->
+                assertEquals(33, current.pid)
+                assertEquals("8.2.0", expectedVersion)
+                waits += 1
+                null
+            },
         )
 
         assertEquals(DaemonStatus(pid = 44, version = "8.2.0"), status)
@@ -415,6 +423,40 @@ class RefactDaemonClientTest {
         assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 33, version = "8.2.0"), "8.2.0", 33))
         assertFalse(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.1.0"), "8.2.0", 33))
         assertTrue(spawnedDaemonStatusAccepted(DaemonStatus(pid = 44, version = "8.2.0"), "8.2.0", 33))
+    }
+
+    @Test
+    fun upgradeWaitReturnsDifferentCompatibleDaemonWithoutSpawning() {
+        val current = DaemonStatus(pid = 33, version = "8.1.0", port = 8488)
+        val compatible = DaemonStatus(pid = 44, version = "8.2.0", port = 9499)
+        var spawns = 0
+        var polls = 0
+        var shutdowns = 0
+        var waits = 0
+
+        val status = ensureDaemonWithHealthGate(
+            status = { current },
+            pluginVersion = "8.2.0",
+            commands = listOf(DaemonSpawnCommand(listOf("refact", "daemon"))),
+            spawnCandidate = { spawns += 1 },
+            pollCandidate = { _, _ ->
+                polls += 1
+                compatible
+            },
+            shutdown = { _, _ -> shutdowns += 1 },
+            waitUntilDown = { oldDaemon, expectedVersion ->
+                assertEquals(current, oldDaemon)
+                assertEquals("8.2.0", expectedVersion)
+                waits += 1
+                compatible
+            },
+        )
+
+        assertEquals(compatible, status)
+        assertEquals(0, spawns)
+        assertEquals(0, polls)
+        assertEquals(1, shutdowns)
+        assertEquals(1, waits)
     }
 
     @Test
@@ -456,8 +498,12 @@ class RefactDaemonClientTest {
 
             assertEquals("secret-token", status.authToken)
             assertEquals("project-token", project.projectId)
-            assertEquals("/daemon/v1/status", server.takeRequest().path)
-            assertEquals("/daemon/v1/status", server.takeRequest().path)
+            val statusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", statusRequest.path)
+            assertEquals("Bearer secret-token", statusRequest.headers["Authorization"])
+            val openStatusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", openStatusRequest.path)
+            assertEquals("Bearer secret-token", openStatusRequest.headers["Authorization"])
             val openRequest = server.takeRequest()
             assertEquals("/daemon/v1/projects/open", openRequest.path)
             assertEquals("Bearer secret-token", openRequest.headers["Authorization"])
@@ -468,6 +514,97 @@ class RefactDaemonClientTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun daemonStatusPrefersCompatibleDiskDaemonOverOldPreferredDaemon() {
+        val root = Files.createTempDirectory("refact-daemon-compatible-disk")
+        val originalHome = System.getProperty("user.home")
+        val preferredServer = MockWebServer()
+        val diskServer = MockWebServer()
+        try {
+            preferredServer.start()
+            diskServer.start()
+            System.setProperty("user.home", root.toString())
+            writeDaemonJson(root, diskServer.port, "disk-token")
+            preferredServer.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":11,\"version\":\"8.1.0\",\"port\":${preferredServer.port},\"workers\":1}")
+                    .build()
+            )
+            diskServer.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":22,\"version\":\"8.2.0\",\"port\":${diskServer.port},\"workers\":2}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { preferredServer.port }, pluginVersionProvider = { "8.2.0" })
+            val status = client.status()
+
+            assertEquals(22, status.pid)
+            assertEquals("8.2.0", status.version)
+            assertEquals(diskServer.port, status.port)
+            assertEquals("disk-token", status.authToken)
+            val preferredRequest = preferredServer.takeRequest()
+            assertEquals("/daemon/v1/status", preferredRequest.path)
+            assertEquals(null, preferredRequest.headers["Authorization"])
+            val diskRequest = diskServer.takeRequest()
+            assertEquals("/daemon/v1/status", diskRequest.path)
+            assertEquals("Bearer disk-token", diskRequest.headers["Authorization"])
+        } finally {
+            preferredServer.shutdown()
+            diskServer.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun upgradeWaitAcceptsOldPidGoneOrDifferentCompatibleDaemon() {
+        val oldDaemon = DaemonStatus(pid = 33, version = "8.1.0", port = 8488)
+
+        assertTrue(
+            daemonUpgradeWaitFinished(
+                oldDaemon,
+                DaemonStatus(pid = 44, version = "8.2.0", port = 9499),
+                DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
+                "8.2.0",
+            )
+        )
+        assertTrue(
+            daemonUpgradeWaitFinished(
+                oldDaemon,
+                DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
+                null,
+                "8.2.0",
+            )
+        )
+        assertFalse(
+            daemonUpgradeWaitFinished(
+                oldDaemon,
+                DaemonStatus(pid = 33, version = "8.2.0", port = 8488),
+                DaemonStatus(pid = 33, version = "8.2.0", port = 8488),
+                "8.2.0",
+            )
+        )
+        assertFalse(
+            daemonUpgradeWaitFinished(
+                oldDaemon,
+                DaemonStatus(pid = 44, version = "8.1.0", port = 9499),
+                DaemonStatus(pid = 33, version = "8.1.0", port = 8488),
+                "8.2.0",
+            )
+        )
+    }
+}
+
+private fun writeDaemonJson(root: Path, port: Int, authToken: String) {
+    val daemonDir = root.resolve(".cache").resolve("refact").resolve("daemon")
+    Files.createDirectories(daemonDir)
+    Files.writeString(daemonDir.resolve("daemon.json"), "{\"port\":$port,\"auth_token\":\"$authToken\"}")
 }
 
 private fun Path.deleteRecursively() {

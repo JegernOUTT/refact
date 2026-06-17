@@ -96,7 +96,7 @@ internal fun ensureDaemonWithHealthGate(
     spawnCandidate: (DaemonSpawnCommand) -> Unit,
     pollCandidate: (String, Int?) -> DaemonStatus,
     shutdown: (DaemonStatus, String) -> Unit,
-    waitUntilDown: () -> Unit,
+    waitUntilDown: (DaemonStatus, String) -> DaemonStatus?,
 ): DaemonStatus {
     val current = runCatching { status() }.getOrNull()
     if (current != null) {
@@ -104,7 +104,8 @@ internal fun ensureDaemonWithHealthGate(
             return current
         }
         shutdown(current, "upgrade")
-        waitUntilDown()
+        val compatible = waitUntilDown(current, pluginVersion)
+        if (compatible != null) return compatible
     }
     return spawnDaemonCandidateUntilHealthy(commands, spawnCandidate) {
         pollCandidate(pluginVersion, current?.pid)
@@ -117,6 +118,31 @@ internal fun spawnedDaemonStatusAccepted(status: DaemonStatus, pluginVersion: St
     return true
 }
 
+internal fun daemonUpgradeWaitSatisfied(
+    oldDaemon: DaemonStatus,
+    discovered: DaemonStatus?,
+    pluginVersion: String,
+): Boolean {
+    if (discovered == null) return false
+    if (versionIsOlder(discovered.version, pluginVersion)) return false
+    return discovered.pid != oldDaemon.pid || discovered.port != oldDaemon.port
+}
+
+internal fun daemonUpgradeWaitFinished(
+    oldDaemon: DaemonStatus,
+    discovered: DaemonStatus?,
+    oldEndpointStatus: DaemonStatus?,
+    pluginVersion: String,
+): Boolean {
+    if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, pluginVersion)) return true
+    return oldEndpointStatus == null || oldEndpointStatus.pid != oldDaemon.pid
+}
+
+private data class DaemonEndpoint(
+    val port: Int,
+    val authToken: String? = null,
+)
+
 class HttpRefactDaemonClient(
     private val portProvider: () -> Int = { InferenceGlobalContext.xDebugLSPPort?.takeIf { it > 0 } ?: DEFAULT_REFACT_DAEMON_PORT },
     private val pluginVersionProvider: () -> String = { Resources.version },
@@ -124,29 +150,19 @@ class HttpRefactDaemonClient(
     private val gson = Gson()
 
     override fun status(): DaemonStatus {
-        val preferredPort = portProvider()
-        val diskInfo = readDaemonInfoFromDisk()
-        val ports = listOfNotNull(preferredPort, diskInfo?.port)
-            .distinct()
+        val pluginVersion = pluginVersionProvider()
+        var olderStatus: DaemonStatus? = null
         var lastError: Throwable? = null
-        for (port in ports) {
+        for (endpoint in daemonEndpointCandidates()) {
             try {
-                val body = request(URI("http://127.0.0.1:$port/daemon/v1/status"), "GET", null, null)
-                val parsed = gson.fromJson(body, DaemonStatusWire::class.java)
-                val resolvedPort = parsed.port ?: port
-                return DaemonStatus(
-                    pid = parsed.pid ?: 0,
-                    version = parsed.version.orEmpty(),
-                    port = resolvedPort,
-                    startedAtMs = parsed.startedAtMs ?: 0,
-                    uptimeSecs = parsed.uptimeSecs ?: 0,
-                    workers = parsed.workers ?: 0,
-                    authToken = diskInfo?.takeIf { it.port == resolvedPort }?.authToken,
-                )
+                val status = statusForEndpoint(endpoint)
+                if (!versionIsOlder(status.version, pluginVersion)) return status
+                if (olderStatus == null) olderStatus = status
             } catch (error: Throwable) {
                 lastError = error
             }
         }
+        if (olderStatus != null) return olderStatus
         throw IOException("daemon status request failed", lastError)
     }
 
@@ -158,7 +174,7 @@ class HttpRefactDaemonClient(
             spawnCandidate = { spawnDaemonProcess(it) },
             pollCandidate = { expectedVersion, rejectedPid -> pollStatus(expectedVersion, rejectedPid) },
             shutdown = { current, reason -> shutdown(current, reason) },
-            waitUntilDown = { waitUntilDown() },
+            waitUntilDown = { current, expectedVersion -> waitUntilDown(current, expectedVersion) },
         )
     }
 
@@ -203,13 +219,17 @@ class HttpRefactDaemonClient(
         throw IOException("daemon did not become ready before timeout", lastError)
     }
 
-    private fun waitUntilDown() {
+    private fun waitUntilDown(oldDaemon: DaemonStatus, pluginVersion: String): DaemonStatus? {
+        val oldEndpoint = DaemonEndpoint(oldDaemon.port, oldDaemon.authToken)
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
         while (System.nanoTime() < deadline) {
-            if (runCatching { status() }.isFailure) return
+            val discovered = runCatching { status() }.getOrNull()
+            if (daemonUpgradeWaitSatisfied(oldDaemon, discovered, pluginVersion)) return discovered
+            val oldStatus = runCatching { statusForEndpoint(oldEndpoint) }.getOrNull()
+            if (daemonUpgradeWaitFinished(oldDaemon, discovered, oldStatus, pluginVersion)) return null
             Thread.sleep(200)
         }
-        throw IOException("daemon did not shut down before timeout")
+        throw IOException("daemon pid=${oldDaemon.pid} on port ${oldDaemon.port} did not shut down before timeout")
     }
 
     private fun shutdown(status: DaemonStatus, reason: String) {
@@ -226,6 +246,39 @@ class HttpRefactDaemonClient(
         runCatching { process.outputStream.close() }
         runCatching { process.inputStream.close() }
         runCatching { process.errorStream.close() }
+    }
+
+    private fun daemonEndpointCandidates(): List<DaemonEndpoint> {
+        val preferredPort = normalizeDaemonPort(portProvider())
+        val diskInfo = readDaemonInfoFromDisk()
+        val diskPort = diskInfo?.port?.takeIf { it > 0 }
+        val diskToken = diskInfo?.authToken?.trim()?.takeIf { it.isNotEmpty() }
+        val endpoints = mutableListOf(
+            DaemonEndpoint(preferredPort, if (diskPort == preferredPort) diskToken else null)
+        )
+        if (diskPort != null && diskPort != preferredPort) {
+            endpoints.add(DaemonEndpoint(diskPort, diskToken))
+        }
+        return endpoints
+    }
+
+    private fun statusForEndpoint(endpoint: DaemonEndpoint): DaemonStatus {
+        val body = request(
+            URI("http://127.0.0.1:${endpoint.port}/daemon/v1/status"),
+            "GET",
+            null,
+            endpoint.authToken,
+        )
+        val parsed = gson.fromJson(body, DaemonStatusWire::class.java)
+        return DaemonStatus(
+            pid = parsed.pid ?: 0,
+            version = parsed.version.orEmpty(),
+            port = normalizeDaemonPort(parsed.port ?: endpoint.port),
+            startedAtMs = parsed.startedAtMs ?: 0,
+            uptimeSecs = parsed.uptimeSecs ?: 0,
+            workers = parsed.workers ?: 0,
+            authToken = endpoint.authToken,
+        )
     }
 
     private fun request(uri: URI, method: String, body: String?, token: String?): String {
@@ -261,6 +314,10 @@ class HttpRefactDaemonClient(
             gson.fromJson(path.readText(), DaemonInfoWire::class.java)
         }.getOrNull()
     }
+}
+
+private fun normalizeDaemonPort(port: Int): Int {
+    return if (port > 0) port else DEFAULT_REFACT_DAEMON_PORT
 }
 
 private data class DaemonStatusWire(
