@@ -253,6 +253,40 @@ impl HistoryBuffer {
         removed_ids.len()
     }
 
+    pub fn replace_first_kind(
+        &mut self,
+        kind: cells::HistoryCellKind,
+        cell: Box<dyn cells::HistoryCell>,
+    ) -> Option<bool> {
+        let id = self
+            .history
+            .iter()
+            .chain(self.pending.iter())
+            .find_map(|entry| (entry.cell.kind() == kind).then_some(entry.id))?;
+        let revision = cell.revision();
+        let changed = self
+            .history
+            .iter()
+            .chain(self.pending.iter())
+            .filter(|entry| entry.id == id)
+            .any(|entry| entry.cell.revision() != revision);
+        if !changed {
+            return Some(false);
+        }
+        for entry in &mut self.history {
+            if entry.id == id {
+                entry.cell = cell.clone();
+            }
+        }
+        for entry in &mut self.pending {
+            if entry.id == id {
+                entry.cell = cell.clone();
+            }
+        }
+        self.evict_cache_entries(&[id]);
+        Some(true)
+    }
+
     pub fn replace_non_final_cells(
         &mut self,
         kind: cells::HistoryCellKind,
@@ -640,6 +674,39 @@ mod tests {
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
         assert_eq!(lines, vec!["", "  • three", "  "]);
+    }
+
+    #[test]
+    fn replace_first_kind_updates_pending_cell_without_adding_history() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Session {
+            title: "New chat".to_string(),
+            subtitle: Some("model: default".to_string()),
+        });
+
+        let changed = history.replace_first_kind(
+            cells::HistoryCellKind::Session,
+            cells::cell_from_transcript_item(
+                &TranscriptItem::Session {
+                    title: "New chat".to_string(),
+                    subtitle: Some("model: gpt-demo".to_string()),
+                },
+                false,
+            ),
+        );
+
+        assert_eq!(changed, Some(true));
+        assert_eq!(history.pending_cell_count(), 1);
+        assert_eq!(history.source_cell_count(), 1);
+        let lines = history
+            .pending_insertions(80)
+            .into_iter()
+            .flat_map(|insertion| insertion.lines)
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("model: gpt-demo"));
+        assert!(!lines.contains("model: default"));
     }
 
     #[test]

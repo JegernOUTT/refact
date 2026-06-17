@@ -51,9 +51,7 @@ use crate::read_only_views::{
     memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
 };
 use crate::render::highlight;
-use crate::sessions::{
-    last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
-};
+use crate::sessions::{last_branch_message_id, session_items_from_trajectories, TrajectoryMeta};
 use crate::streaming::{
     run_commit_tick, AdaptiveChunkingPolicy, CommitTickScope, PlanStreamController,
     StreamController,
@@ -754,12 +752,7 @@ impl App {
     }
 
     pub fn session_header_subtitle(&self) -> String {
-        session_subtitle(
-            self.current_project().map(|project| project.slug.as_str()),
-            self.model(),
-            self.mode(),
-            self.chat_id(),
-        )
+        session_header_subtitle(self.model(), self.current_project_root().as_deref())
     }
 
     pub fn model(&self) -> Option<&str> {
@@ -2325,7 +2318,7 @@ impl App {
         );
     }
 
-    fn open_chat_shell(&mut self, chat_id: String, title: Option<String>, notice: String) {
+    fn open_chat_shell(&mut self, chat_id: String, title: Option<String>, _notice: String) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
         self.chat_id = chat_id;
@@ -2338,11 +2331,14 @@ impl App {
         self.mode = None;
         self.clear_pending_target_params();
         self.clear_reasoning_level();
-        self.replace_with_session(notice, Some(self.session_header_subtitle()));
+        self.replace_with_session(
+            self.session_header_title(),
+            Some(self.session_header_subtitle()),
+        );
         self.set_session_state(SessionState::Idle);
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.rendered_state_keys.truncate(1);
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
@@ -2354,7 +2350,7 @@ impl App {
         &mut self,
         chat_id: String,
         title: String,
-        subtitle: Option<String>,
+        _subtitle: Option<String>,
     ) -> AppAction {
         self.cancel_backtrack();
         self.transcript_overlay = None;
@@ -2368,11 +2364,14 @@ impl App {
         self.mode = None;
         self.clear_reasoning_level();
         self.clear_pending_target_params();
-        self.replace_with_session(format!("Resuming {title}"), subtitle);
+        self.replace_with_session(
+            self.session_header_title(),
+            Some(self.session_header_subtitle()),
+        );
         self.set_session_state(SessionState::Idle);
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.rendered_state_keys.truncate(1);
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
@@ -3538,13 +3537,15 @@ impl App {
     fn replace_with_session(&mut self, title: String, subtitle: Option<String>) {
         self.cancel_backtrack();
         self.transcript_state.reset();
-        self.transcript_state.push_notice(title.clone());
         self.transcript.clear();
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
-        self.push_history_item(TranscriptItem::Session { title, subtitle });
+        self.push_state_history_item(
+            session_header_key(&title, subtitle.as_deref().unwrap_or_default()),
+            TranscriptItem::Session { title, subtitle },
+        );
     }
 
     fn session_header_title(&self) -> String {
@@ -4149,15 +4150,44 @@ impl App {
         if !include_header {
             return;
         }
-        let next = self.session_header_item();
+        let title = self.session_header_title();
+        let subtitle = self.session_header_subtitle();
+        let key = session_header_key(&title, &subtitle);
+        self.sync_session_header_render_key(&key);
+        let next = TranscriptItem::Session {
+            title,
+            subtitle: Some(subtitle),
+        };
         if let Some(existing) = self
             .transcript
             .iter_mut()
             .find(|item| matches!(item, TranscriptItem::Session { .. }))
         {
             *existing = next;
-        } else if !self.native_scrollback {
+        } else if self.native_scrollback {
+            let changed = self.history.replace_first_kind(
+                HistoryCellKind::Session,
+                crate::history::cells::cell_from_transcript_item(&next, false),
+            );
+            match changed {
+                Some(true) => self.resize_reflow.schedule_immediate(),
+                None => {
+                    self.history.enqueue(next);
+                }
+                Some(false) => {}
+            }
+        } else {
             self.transcript.insert(0, next);
+        }
+    }
+
+    fn sync_session_header_render_key(&mut self, key: &str) {
+        if let Some(existing) = self
+            .rendered_state_keys
+            .iter_mut()
+            .find(|existing| existing.starts_with("session:header:0:"))
+        {
+            *existing = key.to_string();
         }
     }
 
@@ -8020,6 +8050,21 @@ fn state_key_has_stable_identity(key: &str) -> bool {
     )
 }
 
+const SESSION_HEADER_TIPS: &str = "Tips: type /help for shortcuts; Ctrl-C twice exits";
+
+fn session_header_subtitle(model: Option<&str>, project_root: Option<&Path>) -> String {
+    let model = model
+        .filter(|value| !value.trim().is_empty())
+        .map(sanitize_tool_inline)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    let directory = project_root
+        .map(|path| sanitize_tool_inline(path.display().to_string()))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("model: {model} · /model to change\ndirectory: {directory}\n{SESSION_HEADER_TIPS}")
+}
+
 fn session_header_key(title: &str, subtitle: &str) -> String {
     format!(
         "session:header:0:{:016x}",
@@ -8466,6 +8511,22 @@ mod tests {
             .count()
     }
 
+    fn session_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Session { .. }))
+            .count()
+    }
+
+    fn session_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Session { .. }))
+            .map(rendered_item_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn rendered_item_plain_text(item: &TranscriptItem) -> String {
         crate::history::cells::cell_from_transcript_item(item, false)
             .render(80)
@@ -8823,6 +8884,42 @@ mod tests {
     }
 
     #[test]
+    fn new_chat_shows_codex_style_session_header() {
+        let mut app = App::new(project());
+
+        app.new_chat();
+
+        let text = session_text(&app);
+        assert_eq!(session_cell_count(&app), 1);
+        assert!(text.contains(">_ refact"));
+        assert!(text.contains("model: default · /model to change"));
+        assert!(text.contains("directory: /tmp/demo"));
+        assert!(text.contains("Tips: type /help for shortcuts"));
+    }
+
+    #[test]
+    fn new_chat_session_header_updates_model_without_duplication() {
+        let mut app = App::new(project());
+        app.new_chat();
+
+        app.apply_caps(&json!({
+            "defaults": {
+                "chat_default_model": "openai/gpt-demo",
+                "chat_default_mode": "agent"
+            },
+            "chat_models": {
+                "openai/gpt-demo": {"name": "GPT Demo"}
+            }
+        }));
+        app.handle_chat_event(snapshot_event(&app, Vec::new()));
+
+        let text = session_text(&app);
+        assert_eq!(session_cell_count(&app), 1);
+        assert!(text.contains("model: openai/gpt-demo · /model to change"));
+        assert!(!text.contains("model: default"));
+    }
+
+    #[test]
     fn ask_questions_message_and_waiting_snapshot_keep_one_questions_cell() {
         let mut app = App::new(project());
         let questions = json!([
@@ -8969,6 +9066,42 @@ mod tests {
         );
         assert!(app.pending_history_insertions(80).is_empty());
         assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+    }
+
+    #[test]
+    fn native_new_chat_session_header_updates_model_without_duplication() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        app.new_chat();
+
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+
+        app.apply_caps(&json!({
+            "defaults": {"chat_default_model": "openai/gpt-demo"},
+            "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
+        }));
+        app.handle_chat_event(snapshot_event(&app, Vec::new()));
+
+        assert_eq!(app.history_pending_count(), 0);
+        let reflow = app.resize_reflow_insertions(80);
+        let rendered = reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("model: openai/gpt-demo · /model to change"));
+        assert!(!rendered.contains("model: default"));
     }
 
     #[test]
@@ -10779,8 +10912,9 @@ new-chat = "ctrl-x"
         assert_eq!(app.session_title(), Some("Saved chat"));
         assert!(matches!(
             app.visible_transcript().first(),
-            Some(TranscriptItem::Session { title, .. }) if title == "Resuming Saved chat"
+            Some(TranscriptItem::Session { title, .. }) if title == "Saved chat"
         ));
+        assert!(session_text(&app).contains("directory: /tmp/demo"));
     }
 
     #[test]

@@ -162,7 +162,11 @@ fn transcript_cells_golden_snapshot() {
     assert_snapshot(
         actual,
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
-  ─ Parity sweep · fixture · gpt-demo · agent · <chat> ───────────────────────────────────────────
+  >_ refact (v<version>)
+
+  model: gpt-demo · /model to change
+  directory: /tmp/fixture
+  Tips: type /help for shortcuts; Ctrl-C twice exits
 
   • Proposed Plan
 
@@ -216,10 +220,6 @@ fn transcript_cells_golden_snapshot() {
   Δ src/lib.rs +1 -1
 
   • Daemon event captured separately.
-
-
-
-
 
 
 
