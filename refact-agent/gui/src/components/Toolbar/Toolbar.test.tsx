@@ -1,22 +1,27 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "../../utils/test-utils";
+import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { Toolbar, type Tab } from "./Toolbar";
 import { createChatWithId } from "../../features/Chat/Thread";
 import { openTask } from "../../features/Tasks";
+import {
+  makeSurfaceKey,
+  openTab,
+  setActiveTab,
+} from "../../features/Workspace";
 import type { TaskMeta } from "../../services/refact/tasks";
 
 const baseConfig = {
   host: "web" as const,
   lspPort: 8001,
   lspUrl: "http://127.0.0.1:8001/v1/ping/Refact",
-  themeProps: {},
+  themeProps: { appearance: "dark" as const },
 };
 
 const chatModesResponse = {
@@ -38,9 +43,22 @@ const chatModesResponse = {
   errors: [],
 };
 
+const createdTask: TaskMeta = {
+  id: "task-new",
+  name: "New Task",
+  status: "planning",
+  created_at: "2026-06-07T00:00:00.000Z",
+  updated_at: "2026-06-07T00:00:00.000Z",
+  cards_total: 0,
+  cards_done: 0,
+  cards_failed: 0,
+  agents_active: 0,
+};
+
 function useToolbarHandlers(tasks: TaskMeta[] = []) {
   server.use(
     http.get("*/v1/tasks", () => HttpResponse.json(tasks)),
+    http.post("*/v1/tasks", () => HttpResponse.json(createdTask)),
     http.get("*/v1/chat-modes", () => HttpResponse.json(chatModesResponse)),
     http.post("*/v1/chats/:id/commands", () =>
       HttpResponse.json({ status: "queued" }),
@@ -48,31 +66,31 @@ function useToolbarHandlers(tasks: TaskMeta[] = []) {
   );
 }
 
+function pagesForActiveTab(activeTab: Tab) {
+  if (activeTab.type === "dashboard") return [{ name: "history" as const }];
+  if (activeTab.type === "task") {
+    return [
+      { name: "history" as const },
+      { name: "task workspace" as const, taskId: activeTab.taskId },
+    ];
+  }
+  return [{ name: "history" as const }, { name: "chat" as const }];
+}
+
 function renderToolbar(activeTab: Tab) {
   return render(<Toolbar activeTab={activeTab} />, {
-    preloadedState: { config: baseConfig },
+    preloadedState: {
+      config: baseConfig,
+      pages: pagesForActiveTab(activeTab),
+    },
   });
 }
 
-function dispatchAndRerender(
+function rerenderToolbar(
   view: ReturnType<typeof renderToolbar>,
   activeTab: Tab,
-  callback: () => void,
 ) {
-  act(callback);
   view.rerender(<Toolbar activeTab={activeTab} />);
-}
-
-function getTabWrap(title: string): HTMLElement {
-  const wrap = screen.getByTitle(title).closest("div");
-  if (!wrap) throw new Error(`missing tab wrapper for ${title}`);
-  return wrap;
-}
-
-function expectTabToContainStatus(title: string, label: string) {
-  const tab = screen.getByTitle(title);
-  const status = within(tab).getByLabelText(label);
-  expect(tab).toContainElement(status);
 }
 
 afterEach(() => {
@@ -111,227 +129,88 @@ describe("Dropdown navigation", () => {
   });
 });
 
-describe("Toolbar tab parity", () => {
-  it("closes the active task tab and falls back to the dashboard", async () => {
+describe("Toolbar single workspace tab row", () => {
+  it("renders the unified workspace tab bar on chat pages without task KitTabs", () => {
     useToolbarHandlers();
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-a",
-      taskName: "Task Alpha",
-    });
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const chatA = makeSurfaceKey("chat", "chat-a");
 
-    dispatchAndRerender(
-      view,
-      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
-      () => {
-        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-      },
-    );
-
-    await userEvent.click(
-      within(getTabWrap("Task Alpha")).getByTitle("Close task tab"),
-    );
-
-    expect(view.store.getState().tasksUI.openTasks).toEqual([]);
-    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
-  });
-
-  it("closes an inactive task tab without switching to it", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-a",
-      taskName: "Task Alpha",
-    });
-
-    dispatchAndRerender(
-      view,
-      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
-      () => {
-        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-        view.store.dispatch(openTask({ id: "task-b", name: "Task Beta" }));
-      },
-    );
-
-    const pagesLengthBefore = view.store.getState().pages.length;
-    const pagesTopBefore = view.store.getState().pages.at(-1)?.name;
-
-    await userEvent.click(
-      within(getTabWrap("Task Beta")).getByTitle("Close task tab"),
-    );
-
-    expect(
-      view.store.getState().tasksUI.openTasks.map((task) => task.id),
-    ).toEqual(["task-a"]);
-    expect(view.store.getState().pages.length).toBe(pagesLengthBefore);
-    expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
-  });
-
-  it("commits and cancels task title renames from double-click rename mode", async () => {
-    const updatedTask: TaskMeta = {
-      id: "task-rename",
-      name: "Renamed Task",
-      status: "planning",
-      created_at: "2026-06-07T00:00:00.000Z",
-      updated_at: "2026-06-07T00:00:00.000Z",
-      cards_total: 0,
-      cards_done: 0,
-      cards_failed: 0,
-      agents_active: 0,
-    };
-    let patchBody: unknown;
-    server.use(
-      http.get("*/v1/tasks", () => HttpResponse.json([])),
-      http.patch("*/v1/tasks/task-rename/meta", async ({ request }) => {
-        patchBody = await request.json();
-        return HttpResponse.json(updatedTask);
-      }),
-    );
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-rename",
-      taskName: "Original Task",
-    });
-
-    dispatchAndRerender(
-      view,
-      {
-        type: "task",
-        taskId: "task-rename",
-        taskName: "Original Task",
-      },
-      () => {
-        view.store.dispatch(
-          openTask({ id: "task-rename", name: "Original Task" }),
-        );
-      },
-    );
-
-    await userEvent.dblClick(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    );
-    const renameInput = screen.getByDisplayValue("Original Task");
-    await userEvent.clear(renameInput);
-    await userEvent.type(renameInput, "Renamed Task{Enter}");
-
-    await waitFor(() => expect(patchBody).toEqual({ name: "Renamed Task" }));
-
-    await userEvent.dblClick(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    );
-    const cancelInput = screen.getByDisplayValue("Original Task");
-    await userEvent.clear(cancelInput);
-    await userEvent.type(cancelInput, "Cancelled Task{Escape}");
-
-    expect(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    ).toBeInTheDocument();
-  });
-
-  it("maps task states to the current status dot labels", async () => {
-    const task: TaskMeta = {
-      id: "task-status",
-      name: "Task Status",
-      status: "planning",
-      created_at: "2026-06-07T00:00:00.000Z",
-      updated_at: "2026-06-07T00:00:00.000Z",
-      cards_total: 0,
-      cards_done: 0,
-      cards_failed: 0,
-      agents_active: 0,
-      planner_session_state: "waiting_ide",
-    };
-    useToolbarHandlers([task]);
-    const view = renderToolbar({ type: "dashboard" });
-
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
-      view.store.dispatch(openTask({ id: "task-status", name: "Task Status" }));
-    });
-
-    await waitFor(() => {
-      expectTabToContainStatus("Task Status", "Needs your attention");
-    });
-  });
-
-  it("does not render chat tabs in the global toolbar", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
-
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
+    act(() => {
       view.store.dispatch(
-        createChatWithId({ id: "normal-chat", title: "Normal Chat" }),
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
       );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+      view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
     });
+    rerenderToolbar(view, activeTab);
 
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.queryByRole("tab", { name: /Normal Chat/ }),
+      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Task Alpha/ }),
     ).not.toBeInTheDocument();
   });
 
-  it("does not render an empty task tab strip", () => {
+  it("does not render an empty or task-only tab strip outside chat", () => {
     useToolbarHandlers();
-    renderToolbar({ type: "dashboard" });
+    const view = renderToolbar({ type: "dashboard" });
+
+    act(() => {
+      view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    });
+    rerenderToolbar(view, { type: "dashboard" });
 
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
-  it("wheel-scrolls an overflowing tab container horizontally", () => {
+  it("keeps Home, New Chat, New Task, theme, and menu actions functional", async () => {
     useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const initialThreadId = view.store.getState().chat.current_thread_id;
 
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
-      view.store.dispatch(openTask({ id: "task-scroll", name: "Task Scroll" }));
-    });
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Chat" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Task" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Toggle Dark Mode" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Menu" })).toBeInTheDocument();
 
-    const tabList = screen.getByRole("tablist");
-    const container = tabList.parentElement;
-    if (!container) throw new Error("missing tabs container");
-    Object.defineProperty(container, "scrollWidth", {
-      configurable: true,
-      value: 300,
-    });
-    Object.defineProperty(container, "clientWidth", {
-      configurable: true,
-      value: 100,
-    });
+    await view.user.click(screen.getByRole("button", { name: "Home" }));
+    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
 
-    expect(container.scrollLeft).toBe(0);
-    container.dispatchEvent(
-      new WheelEvent("wheel", { deltaY: 24, bubbles: true, cancelable: true }),
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+    expect(view.store.getState().chat.current_thread_id).not.toBe(
+      initialThreadId,
     );
+    expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
 
-    expect(container.scrollLeft).toBe(24);
-  });
-
-  it("scrolls the active task tab into view when the active tab changes", () => {
-    useToolbarHandlers();
-    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
-
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-a",
-      taskName: "Task Alpha",
-    });
-
-    dispatchAndRerender(
-      view,
-      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
-      () => {
-        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-        view.store.dispatch(openTask({ id: "task-b", name: "Task Beta" }));
-      },
+    await view.user.click(
+      screen.getByRole("button", { name: "Toggle Dark Mode" }),
     );
+    expect(view.store.getState().config.themeProps.appearance).toBe("light");
 
-    view.rerender(
-      <Toolbar
-        activeTab={{ type: "task", taskId: "task-b", taskName: "Task Beta" }}
-      />,
-    );
-
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: "smooth",
-      block: "nearest",
-      inline: "nearest",
+    await view.user.click(screen.getByRole("button", { name: "New Task" }));
+    await waitFor(() => {
+      expect(view.store.getState().tasksUI.openTasks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "task-new", name: "New Task" }),
+        ]),
+      );
+      expect(view.store.getState().pages.at(-1)).toEqual({
+        name: "task workspace",
+        taskId: "task-new",
+      });
     });
   });
 });

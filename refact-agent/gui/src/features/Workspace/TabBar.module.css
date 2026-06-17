@@ -12,6 +12,16 @@
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
+.toolbarTabBar {
+  flex: 1 1 auto;
+  min-height: 100%;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border-bottom: 0;
+  backdrop-filter: none;
+}
+
 :global(.radix-themes[data-host="jetbrains"]).tabBar {
   backdrop-filter: none;
 }
@@ -29,6 +39,11 @@
   display: none;
 }
 
+.toolbarTabBar .scrollArea {
+  align-items: center;
+  height: 100%;
+}
+
 .tabList {
   position: relative;
   display: flex;
@@ -37,6 +52,10 @@
   gap: var(--rf-space-1);
   min-width: min-content;
   min-height: calc(var(--rf-control-h-lg) - var(--rf-space-1));
+}
+
+.toolbarTabBar .tabList {
+  min-height: var(--rf-control-h);
 }
 
 .tabWrap {
@@ -51,6 +70,11 @@
   transform: translateX(var(--rf-motion-distance-none))
     scale(var(--rf-motion-scale-active));
   transform-origin: center bottom;
+}
+
+.toolbarTabBar .tabWrap {
+  flex-basis: calc(var(--rf-nav-w-min) - var(--rf-space-6));
+  max-width: var(--rf-nav-w);
 }
 
 .tabWrap::after {
@@ -223,6 +247,10 @@
   .tabBar {
     background: var(--rf-surface-2);
     backdrop-filter: none;
+  }
+
+  .toolbarTabBar {
+    background: transparent;
   }
 }
 

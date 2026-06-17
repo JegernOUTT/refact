@@ -151,7 +151,11 @@ function displayInfoForSurface(
   };
 }
 
-export function TabBar() {
+export type TabBarProps = {
+  placement?: "workspace" | "toolbar";
+};
+
+export function TabBar({ placement = "workspace" }: TabBarProps) {
   const dispatch = useAppDispatch();
   const tabs = useAppSelector(selectTabs);
   const activeTabId = useAppSelector(selectActiveTabId);
@@ -162,6 +166,7 @@ export function TabBar() {
   const [dragTargetTabId, setDragTargetTabId] = useState<SurfaceKey | null>(
     null,
   );
+  const toolbarPlacement = placement === "toolbar";
 
   const tabsById = useMemo(
     () => new Map(tabDisplayData.map((tab) => [tab.id, tab])),
@@ -309,7 +314,13 @@ export function TabBar() {
   }, []);
 
   return (
-    <nav className={styles.tabBar} aria-label="Workspace tabs">
+    <nav
+      className={classNames(
+        styles.tabBar,
+        toolbarPlacement && styles.toolbarTabBar,
+      )}
+      aria-label="Workspace tabs"
+    >
       <div
         className={classNames(styles.scrollArea, "scrollX")}
         onWheel={handleWheel}

@@ -6,7 +6,6 @@ import { IconButton, Tooltip } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCurrentThreadId } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import { TabBar } from "./TabBar";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
 import { makeSurfaceKey } from "./surfaceKey";
@@ -56,7 +55,6 @@ export function WorkspaceView() {
 
   return (
     <div className={styles.workspaceView}>
-      <TabBar />
       <div
         className={classNames(
           styles.body,

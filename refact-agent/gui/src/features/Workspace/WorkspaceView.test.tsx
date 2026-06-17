@@ -84,7 +84,7 @@ describe("WorkspaceView", () => {
     renderWorkspaceView(createWorkspaceStore());
 
     expectSurface(chat("chat-a"));
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
