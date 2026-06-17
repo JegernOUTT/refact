@@ -571,6 +571,63 @@ class RefactDaemonClientTest {
     }
 
     @Test
+    fun daemonStatusFallsBackToEndpointPortWhenReportedPortIsZero() {
+        val root = Files.createTempDirectory("refact-daemon-zero-port")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            writeDaemonJson(root, server.port, "zero-token")
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":88,\"version\":\"8.1.0\",\"port\":0,\"workers\":3}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":88,\"version\":\"8.1.0\",\"port\":0,\"workers\":3}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"project-zero\"}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val status = client.status()
+            val project = client.openProject(root.toString(), LSPConfig())
+
+            assertEquals(88, status.pid)
+            assertEquals(server.port, status.port)
+            assertEquals("zero-token", status.authToken)
+            assertEquals("project-zero", project.projectId)
+            assertEquals(server.port, project.daemon.port)
+            assertEquals("http://127.0.0.1:${server.port}/p/project-zero/", project.baseUrl.toString())
+            val statusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", statusRequest.path)
+            assertEquals("Bearer zero-token", statusRequest.headers["Authorization"])
+            val openStatusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", openStatusRequest.path)
+            assertEquals("Bearer zero-token", openStatusRequest.headers["Authorization"])
+            val openRequest = server.takeRequest()
+            assertEquals("/daemon/v1/projects/open", openRequest.path)
+            assertEquals("Bearer zero-token", openRequest.headers["Authorization"])
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun daemonStatusPrefersCompatibleDiskDaemonOverOldPreferredDaemon() {
         val root = Files.createTempDirectory("refact-daemon-compatible-disk")
         val originalHome = System.getProperty("user.home")

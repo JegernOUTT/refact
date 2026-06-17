@@ -270,10 +270,11 @@ class HttpRefactDaemonClient(
             endpoint.authToken,
         )
         val parsed = gson.fromJson(body, DaemonStatusWire::class.java)
+        val statusPort = parsed.port?.takeIf { it > 0 } ?: endpoint.port
         return DaemonStatus(
             pid = parsed.pid ?: 0,
             version = parsed.version.orEmpty(),
-            port = normalizeDaemonPort(parsed.port ?: endpoint.port),
+            port = statusPort,
             startedAtMs = parsed.startedAtMs ?: 0,
             uptimeSecs = parsed.uptimeSecs ?: 0,
             workers = parsed.workers ?: 0,
