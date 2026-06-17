@@ -29,10 +29,9 @@ import {
   useEventsBusForIDE,
   useSidebarSubscription,
   useAllChatsSubscription,
-  useGetConfiguredProvidersQuery,
+  useProviderBootstrapState,
   useResizeObserverOnRef,
 } from "../hooks";
-import { useGetPing } from "../hooks/useGetPing";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
@@ -74,7 +73,6 @@ import {
 
 import styles from "./App.module.css";
 import { usePatchesAndDiffsEventsForIDE } from "../hooks/usePatchesAndDiffEventsForIDE";
-import { hasAnyUsableActiveProvider } from "./Login/providerAccess";
 import {
   isProjectStorageNamespaceTrusted,
   loadPersistedActiveTab,
@@ -127,13 +125,12 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   );
   const backendStatus = useAppSelector(selectBackendStatus);
   const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
-  const providersQuery = useGetConfiguredProvidersQuery();
+  const providerBootstrap = useProviderBootstrapState();
   useEventBusForWeb();
   useEventBusForApp();
   usePatchesAndDiffsEventsForIDE();
   useSidebarSubscription();
   useAllChatsSubscription();
-  useGetPing();
   useBrowserOnlineStatus();
 
   const config = useConfig();
@@ -273,13 +270,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const isLoggedIn = isPageInHistory("history") || isPageInHistory("chat");
 
-  const hasAnyActiveProvider = useMemo(() => {
-    return hasAnyUsableActiveProvider({
-      providers: providersQuery.data?.providers ?? [],
-    });
-  }, [providersQuery.data?.providers]);
-  const canAccessApp = hasAnyActiveProvider;
-  const canResolveProviderAccess = providersQuery.isSuccess;
+  const canAccessApp = providerBootstrap.canAccessApp;
+  const canShowProviderSetup = providerBootstrap.canShowProviderSetup;
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
   const hasEndpoint = hasUsableEngineEndpoint(config);
@@ -304,20 +296,19 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       return;
     }
 
-    if (providersQuery.isSuccess || providersQuery.isError) {
+    if (providerBootstrap.status !== "provider_loading") {
       setStartupResolved(true);
     }
-  }, [backendStatus, providersQuery.isError, providersQuery.isSuccess]);
+  }, [backendStatus, providerBootstrap.status]);
 
   const showStartupSplash =
     !startupDeadlineReached &&
     hasEndpoint &&
     !startupResolved &&
     backendLastOkAt === null &&
-    (backendStatus !== "online" ||
-      providersQuery.isUninitialized ||
-      providersQuery.isLoading ||
-      providersQuery.isFetching);
+    providerBootstrap.status !== "ready" &&
+    providerBootstrap.status !== "setup_required" &&
+    providerBootstrap.status !== "provider_error";
 
   useEffect(() => {
     if (canAccessApp && !isLoggedIn) {
@@ -326,14 +317,14 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
     if (
       !canAccessApp &&
-      canResolveProviderAccess &&
+      canShowProviderSetup &&
       desiredPage.name !== "login page"
     ) {
       dispatch(popBackTo({ name: "login page" }));
     }
   }, [
     canAccessApp,
-    canResolveProviderAccess,
+    canShowProviderSetup,
     desiredPage.name,
     isLoggedIn,
     dispatch,

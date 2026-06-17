@@ -663,10 +663,15 @@ startListening({
   effect: (action, listenerApi) => {
     const previousStatus =
       listenerApi.getOriginalState().connection.backendStatus;
-    if (action.payload.status !== "online" || previousStatus === "online") {
+    if (action.payload.status === "online") {
+      if (previousStatus === "online") return;
+      listenerApi.dispatch(clearError());
+      listenerApi.dispatch(capsApi.util.resetApiState());
+      listenerApi.dispatch(modelsApi.util.resetApiState());
+      listenerApi.dispatch(providersApi.util.resetApiState());
       return;
     }
-    listenerApi.dispatch(clearError());
+    if (previousStatus !== "online") return;
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
     listenerApi.dispatch(providersApi.util.resetApiState());

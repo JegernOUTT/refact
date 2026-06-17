@@ -48,6 +48,10 @@
   min-width: 0;
 }
 
+.bootstrapState {
+  min-width: 0;
+}
+
 .providerPreview {
   min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);

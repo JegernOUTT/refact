@@ -2,6 +2,7 @@ import { QueryStatus } from "@reduxjs/toolkit/query";
 import { useAppSelector } from "./useAppSelector";
 import { selectConfig } from "../features/Config/configSlice";
 import { getIsAuthError } from "../features/Errors/errorsSlice";
+import { selectBackendStatus } from "../features/Connection";
 import { capsApi } from "../services/refact/caps";
 import { useGetPing } from "./useGetPing";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
@@ -12,6 +13,7 @@ const STARTUP_CAPS_POLLING_INTERVAL_MS = 5000;
 export const useGetCapsQuery = (_args?: undefined) => {
   const isAuthError = useAppSelector(getIsAuthError);
   const config = useAppSelector(selectConfig);
+  const backendStatus = useAppSelector(selectBackendStatus);
   const cachedCaps = useAppSelector(
     (state) => capsApi.endpoints.getCaps.select(undefined)(state).data,
   );
@@ -20,7 +22,7 @@ export const useGetCapsQuery = (_args?: undefined) => {
   );
   useGetPing();
   const canFetchCaps = hasUsableEngineEndpoint(config);
-  const skip = !!isAuthError || !canFetchCaps;
+  const skip = !!isAuthError || !canFetchCaps || backendStatus !== "online";
   const isCapsUninitialized = cachedCapsStatus === QueryStatus.uninitialized;
   const hasLoadedEmptyModelList =
     !!cachedCaps && Object.keys(cachedCaps.chat_models).length === 0;
