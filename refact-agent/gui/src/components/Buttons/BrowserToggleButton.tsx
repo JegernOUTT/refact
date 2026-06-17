@@ -1,7 +1,6 @@
 import { forwardRef, useCallback, useRef, useState } from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
 import { Globe } from "lucide-react";
-import { IconButton } from "../ui";
+import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBrowserUiOpen,
@@ -120,8 +119,8 @@ export const BrowserToggleButton = forwardRef<
       : "Open browser";
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <Tooltip>
+      <Tooltip.Trigger asChild>
         <IconButton
           aria-label={label}
           disabled={busy || disabled}
@@ -131,13 +130,9 @@ export const BrowserToggleButton = forwardRef<
           size="sm"
           variant={isActive ? "primary" : "ghost"}
         />
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
-        <Text as="p" size="2">
-          {label}
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="top">{label}</Tooltip.Content>
+    </Tooltip>
   );
 });
 

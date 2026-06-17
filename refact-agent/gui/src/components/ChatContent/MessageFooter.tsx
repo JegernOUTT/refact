@@ -167,7 +167,7 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
             <HoverCard.Portal>
               <HoverCard.Content
                 align="center"
-                className={styles.usageContent}
+                className={`${styles.usageContent} rf-popover-motion`}
                 collisionPadding={12}
                 side="top"
                 sideOffset={8}

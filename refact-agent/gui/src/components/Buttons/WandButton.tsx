@@ -1,7 +1,6 @@
 import { useCallback } from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
 import { WandSparkles } from "lucide-react";
-import { IconButton } from "../ui";
+import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectManualPreviewItemsById,
@@ -67,8 +66,8 @@ export const WandButton = ({
     : "Preview related memories & context";
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <Tooltip>
+      <Tooltip.Trigger asChild>
         <IconButton
           aria-label={label}
           data-testid="wand-button"
@@ -78,13 +77,9 @@ export const WandButton = ({
           size="sm"
           variant={hasItems ? "primary" : "ghost"}
         />
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
-        <Text as="p" size="2">
-          {label}
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="top">{label}</Tooltip.Content>
+    </Tooltip>
   );
 };
 

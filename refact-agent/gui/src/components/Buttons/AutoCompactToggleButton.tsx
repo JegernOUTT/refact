@@ -1,7 +1,8 @@
 import { useCallback } from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import { Archive } from "lucide-react";
 import { IconButton } from "../ui";
+import { HoverCard } from "../LongTailPrimitives";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectAutoCompactEnabledById,
@@ -46,8 +47,8 @@ export const AutoCompactToggleButton = ({
     : "Auto-compression OFF — click to enable";
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <HoverCard>
+      <HoverCard.Trigger asChild>
         <IconButton
           aria-label={actionLabel}
           aria-pressed={isEnabled}
@@ -59,7 +60,7 @@ export const AutoCompactToggleButton = ({
           variant={isEnabled ? "primary" : "ghost"}
         />
       </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
+      <HoverCard.Content side="top">
         <Text as="p" size="2">
           {label}
         </Text>
@@ -70,7 +71,7 @@ export const AutoCompactToggleButton = ({
           manually.
         </Text>
       </HoverCard.Content>
-    </HoverCard.Root>
+    </HoverCard>
   );
 };
 

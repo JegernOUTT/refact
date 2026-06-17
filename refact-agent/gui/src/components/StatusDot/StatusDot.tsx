@@ -1,5 +1,5 @@
 import React from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
+import { Tooltip } from "../ui";
 import styles from "./StatusDot.module.css";
 
 export type StatusDotState =
@@ -41,18 +41,16 @@ export const StatusDot: React.FC<StatusDotProps> = ({
   const tooltip = tooltipText ?? STATE_TOOLTIPS[state];
 
   return (
-    <HoverCard.Root openDelay={200} closeDelay={100}>
-      <HoverCard.Trigger>
+    <Tooltip delayDuration={200} skipDelayDuration={100}>
+      <Tooltip.Trigger asChild>
         <div
           className={`${styles.dot} ${sizeClass} ${stateClass}`}
           aria-label={tooltip}
         />
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top" align="center">
-        <Text as="p" size="1">
-          {tooltip}
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="top" align="center">
+        {tooltip}
+      </Tooltip.Content>
+    </Tooltip>
   );
 };
