@@ -66,15 +66,15 @@ vi.mock("../features/Chat/Chat", async () => {
   };
 });
 
-vi.mock("../features/ChatPanes/ChatSplitLayout", async () => {
+vi.mock("../features/Workspace/WorkspaceView", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
 
   return {
-    ChatSplitLayout: () =>
+    WorkspaceView: () =>
       React.createElement(
         "div",
-        { "data-testid": "split-chat-layout" },
-        "Split chat layout",
+        { "data-testid": "workspace-view" },
+        "Workspace view",
       ),
   };
 });
@@ -218,11 +218,11 @@ describe("App buddy chat page rendering", () => {
       "Buddy investigation transcript squeak",
     );
     await waitFor(() => {
-      expect(screen.queryByTestId("split-chat-layout")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
     });
   });
 
-  it("keeps normal current chats on the split layout", async () => {
+  it("keeps normal current chats on the workspace view", async () => {
     renderChatPage(
       chatHistoryItem({
         id: "normal-chat-1",
@@ -231,7 +231,7 @@ describe("App buddy chat page rendering", () => {
       }),
     );
 
-    expect(await screen.findByTestId("split-chat-layout")).toBeInTheDocument();
+    expect(await screen.findByTestId("workspace-view")).toBeInTheDocument();
     expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
   });
 });

@@ -18,8 +18,8 @@ import {
   switchToThread,
 } from "./Chat";
 import { Chat } from "./Chat/Chat";
-import { ChatSplitLayout } from "./ChatPanes/ChatSplitLayout";
 import { selectFocusedActiveTabId } from "./ChatPanes/panesSlice";
+import { WorkspaceView } from "./Workspace/WorkspaceView";
 
 import {
   useAppSelector,
@@ -506,7 +506,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
                     chatId={currentThreadId}
                   />
                 ) : (
-                  <ChatSplitLayout />
+                  <WorkspaceView />
                 )}
               </InternalLinkProvider>
             )}

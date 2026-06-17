@@ -1,0 +1,83 @@
+.workspaceView {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.unsplitBody {
+  position: relative;
+}
+
+.splitBody {
+  padding: var(--rf-space-2);
+}
+
+.unsplitSurfaceWrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.unsplitSplitAffordance {
+  position: absolute;
+  top: var(--rf-space-2);
+  right: var(--rf-space-2);
+  z-index: var(--rf-z-dropdown);
+  opacity: 0;
+  transform: translateY(calc(-1 * var(--rf-space-1)));
+  transition:
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.unsplitSurfaceWrap:hover .unsplitSplitAffordance,
+.unsplitSurfaceWrap:focus-within .unsplitSplitAffordance {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.unsplitSplitButton {
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.unsplitSplitButton:hover:not(:disabled) {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .unsplitSplitButton {
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .unsplitSplitButton {
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .unsplitSplitAffordance {
+    transition: none;
+    transform: none;
+  }
+}
