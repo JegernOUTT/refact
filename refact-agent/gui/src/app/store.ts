@@ -77,6 +77,7 @@ import {
   panesSlice,
   reconcilePanesWithOpenThreads,
 } from "../features/ChatPanes/panesSlice";
+import { workspaceSlice } from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -150,6 +151,7 @@ const rootReducer = combineSlices(
   notificationsSlice,
   schedulerSlice,
   panesSlice,
+  workspaceSlice,
 );
 
 const rootPersistConfig = {
