@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Dialog,
   Flex,
   Text,
   Button,
@@ -28,7 +27,7 @@ import {
 import { useAppDispatch } from "../../hooks";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
-import { Slider, Surface, Switch } from "../ui";
+import { Dialog, Slider, Surface, Switch } from "../ui";
 
 type Props = {
   chatId: string;
@@ -138,54 +137,52 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
   const truncatedTokens = charsToTokens(block.char_count);
 
   return (
-    <Dialog.Root open={!!block} onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content
-        maxWidth="800px"
-        style={{ maxHeight: "80vh", overflow: "hidden" }}
-        {...dialogNonInteractiveCloseHandlers(onClose)}
-      >
-        <Flex justify="between" align="center" mb="3">
-          <Dialog.Title style={{ margin: 0 }}>
-            {block.path ?? block.title}
-          </Dialog.Title>
-          <IconButton variant="ghost" onClick={onClose}>
-            <Cross2Icon />
-          </IconButton>
-        </Flex>
+    <Dialog open={!!block} onOpenChange={(open) => !open && onClose()}>
+      <Dialog.Content maxWidth="800px" maxHeight="80vh">
+        <div {...dialogNonInteractiveCloseHandlers(onClose)}>
+          <Flex justify="between" align="center" mb="3">
+            <Dialog.Title style={{ margin: 0 }}>
+              {block.path ?? block.title}
+            </Dialog.Title>
+            <IconButton variant="ghost" onClick={onClose}>
+              <Cross2Icon />
+            </IconButton>
+          </Flex>
 
-        <Flex gap="2" mb="3" wrap="wrap">
-          <Badge color="blue">
-            {isTruncated
-              ? `${originalTokens.toLocaleString()} → ${truncatedTokens.toLocaleString()} tokens`
-              : `~${truncatedTokens.toLocaleString()} tokens`}
-          </Badge>
-          {isTruncated && <Badge color="orange">Truncated</Badge>}
-          <Badge color="gray">{block.section}</Badge>
-        </Flex>
+          <Flex gap="2" mb="3" wrap="wrap">
+            <Badge color="blue">
+              {isTruncated
+                ? `${originalTokens.toLocaleString()} → ${truncatedTokens.toLocaleString()} tokens`
+                : `~${truncatedTokens.toLocaleString()} tokens`}
+            </Badge>
+            {isTruncated && <Badge color="orange">Truncated</Badge>}
+            <Badge color="gray">{block.section}</Badge>
+          </Flex>
 
-        <ScrollArea style={{ maxHeight: "calc(80vh - 150px)" }}>
-          <Code
-            size="1"
-            style={{
-              display: "block",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              padding: "var(--space-3)",
-              backgroundColor: "var(--gray-2)",
-              borderRadius: "var(--radius-2)",
-            }}
-          >
-            {block.content || "(empty)"}
-          </Code>
-        </ScrollArea>
+          <ScrollArea style={{ maxHeight: "calc(80vh - 150px)" }}>
+            <Code
+              size="1"
+              style={{
+                display: "block",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                padding: "var(--space-3)",
+                backgroundColor: "var(--gray-2)",
+                borderRadius: "var(--radius-2)",
+              }}
+            >
+              {block.content || "(empty)"}
+            </Code>
+          </ScrollArea>
 
-        <Flex justify="end" mt="3">
-          <Button type="button" variant="soft" onClick={onClose}>
-            Close
-          </Button>
-        </Flex>
+          <Flex justify="end" mt="3">
+            <Button type="button" variant="soft" onClick={onClose}>
+              Close
+            </Button>
+          </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 
@@ -495,151 +492,152 @@ export const ProjectInformationDialog: React.FC<Props> = ({
 
   if (isLoading) {
     return (
-      <Dialog.Root open={open} onOpenChange={onOpenChange}>
-        <Dialog.Content
-          maxWidth="600px"
-          {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
-        >
-          <Dialog.Title>Project Information</Dialog.Title>
-          <Flex align="center" justify="center" py="6">
-            <Text color="gray">Loading...</Text>
-          </Flex>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <Dialog.Content maxWidth="600px">
+          <div
+            {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
+          >
+            <Dialog.Title>Project Information</Dialog.Title>
+            <Flex align="center" justify="center" py="6">
+              <Text color="gray">Loading...</Text>
+            </Flex>
+          </div>
         </Dialog.Content>
-      </Dialog.Root>
+      </Dialog>
     );
   }
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content
-        maxWidth="600px"
-        style={{ overflow: "hidden" }}
-        {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
-      >
-        <Dialog.Title>Project Information</Dialog.Title>
-        <Dialog.Description size="2" color="gray" mb="4">
-          Configure what project information is included in chat context. Token
-          counts are approximate (~4 chars/token).
-        </Dialog.Description>
-
-        {saveError && (
-          <Flex direction="column" mb="3">
-            <Surface variant="glass" radius="card">
-              <Flex align="center" gap="2" p="3">
-                <ExclamationTriangleIcon />
-                <Text color="red" size="2">
-                  {saveError}
-                </Text>
-              </Flex>
-            </Surface>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content maxWidth="600px">
+        <div {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}>
+          <Dialog.Title>Project Information</Dialog.Title>
+          <Flex direction="column" mb="4">
+            <Dialog.Description>
+              Configure what project information is included in chat context.
+              Token counts are approximate (~4 chars/token).
+            </Dialog.Description>
           </Flex>
-        )}
 
-        {saveSuccess && (
-          <Flex direction="column" mb="3">
-            <Surface variant="glass" radius="card">
-              <Flex align="center" gap="2" p="3">
-                <CheckCircledIcon />
-                <Text color="green" size="2">
-                  Configuration saved!
-                </Text>
-              </Flex>
-            </Surface>
+          {saveError && (
+            <Flex direction="column" mb="3">
+              <Surface variant="glass" radius="card">
+                <Flex align="center" gap="2" p="3">
+                  <ExclamationTriangleIcon />
+                  <Text color="red" size="2">
+                    {saveError}
+                  </Text>
+                </Flex>
+              </Surface>
+            </Flex>
+          )}
+
+          {saveSuccess && (
+            <Flex direction="column" mb="3">
+              <Surface variant="glass" radius="card">
+                <Flex align="center" gap="2" p="3">
+                  <CheckCircledIcon />
+                  <Text color="green" size="2">
+                    Configuration saved!
+                  </Text>
+                </Flex>
+              </Surface>
+            </Flex>
+          )}
+
+          <Flex align="center" justify="between" mb="3">
+            <Flex align="center" gap="2">
+              <Switch
+                checked={localConfig.enabled}
+                onCheckedChange={(enabled) => {
+                  setLocalConfig((prev) => ({ ...prev, enabled }));
+                  if (chatId) {
+                    dispatch(setIncludeProjectInfo({ chatId, value: enabled }));
+                  }
+                }}
+                className="rf-pressable"
+              />
+              <Text weight="medium">Include project information</Text>
+            </Flex>
+            <Badge color="blue" size="2">
+              Total: ~{totalTokens.toLocaleString()} tokens
+              {isPreviewing && " (updating...)"}
+            </Badge>
           </Flex>
-        )}
 
-        <Flex align="center" justify="between" mb="3">
-          <Flex align="center" gap="2">
-            <Switch
-              checked={localConfig.enabled}
-              onCheckedChange={(enabled) => {
-                setLocalConfig((prev) => ({ ...prev, enabled }));
-                if (chatId) {
-                  dispatch(setIncludeProjectInfo({ chatId, value: enabled }));
-                }
-              }}
-              className="rf-pressable"
-            />
-            <Text weight="medium">Include project information</Text>
-          </Flex>
-          <Badge color="blue" size="2">
-            Total: ~{totalTokens.toLocaleString()} tokens
-            {isPreviewing && " (updating...)"}
-          </Badge>
-        </Flex>
+          <Separator size="4" mb="3" />
 
-        <Separator size="4" mb="3" />
+          <ScrollArea style={{ maxHeight: 400 }}>
+            <Flex direction="column" gap="1">
+              {Object.keys(SECTION_META).map((sectionKey) => {
+                const key =
+                  sectionKey as keyof ProjectInformationConfig["sections"];
+                return (
+                  <React.Fragment key={sectionKey}>
+                    <SectionRow
+                      sectionKey={sectionKey}
+                      config={localConfig.sections[key]}
+                      blocks={blocks}
+                      onToggle={(enabled) => updateSection(key, { enabled })}
+                      onFieldChange={(field, value) =>
+                        updateSection(key, { [field]: value })
+                      }
+                      onFileToggle={(path, enabled) =>
+                        updateFileOverride(key, path, enabled)
+                      }
+                      onPreviewBlock={setPreviewBlock}
+                    />
+                    <Separator size="4" />
+                  </React.Fragment>
+                );
+              })}
+            </Flex>
+          </ScrollArea>
 
-        <ScrollArea style={{ maxHeight: 400 }}>
-          <Flex direction="column" gap="1">
-            {Object.keys(SECTION_META).map((sectionKey) => {
-              const key =
-                sectionKey as keyof ProjectInformationConfig["sections"];
-              return (
-                <React.Fragment key={sectionKey}>
-                  <SectionRow
-                    sectionKey={sectionKey}
-                    config={localConfig.sections[key]}
-                    blocks={blocks}
-                    onToggle={(enabled) => updateSection(key, { enabled })}
-                    onFieldChange={(field, value) =>
-                      updateSection(key, { [field]: value })
-                    }
-                    onFileToggle={(path, enabled) =>
-                      updateFileOverride(key, path, enabled)
-                    }
-                    onPreviewBlock={setPreviewBlock}
-                  />
-                  <Separator size="4" />
-                </React.Fragment>
-              );
-            })}
-          </Flex>
-        </ScrollArea>
+          {previewData?.warnings && previewData.warnings.length > 0 && (
+            <Flex direction="column" mt="3">
+              <Surface variant="glass" radius="card">
+                <Flex align="center" gap="2" p="3">
+                  <ExclamationTriangleIcon />
+                  <Text color="orange" size="2">
+                    {previewData.warnings.length} warning(s):{" "}
+                    {previewData.warnings[0]}
+                    {previewData.warnings.length > 1 &&
+                      ` (+${previewData.warnings.length - 1} more)`}
+                  </Text>
+                </Flex>
+              </Surface>
+            </Flex>
+          )}
 
-        {previewData?.warnings && previewData.warnings.length > 0 && (
-          <Flex direction="column" mt="3">
-            <Surface variant="glass" radius="card">
-              <Flex align="center" gap="2" p="3">
-                <ExclamationTriangleIcon />
-                <Text color="orange" size="2">
-                  {previewData.warnings.length} warning(s):{" "}
-                  {previewData.warnings[0]}
-                  {previewData.warnings.length > 1 &&
-                    ` (+${previewData.warnings.length - 1} more)`}
-                </Text>
-              </Flex>
-            </Surface>
-          </Flex>
-        )}
-
-        <Flex gap="3" mt="4" justify="end">
-          <Button
-            type="button"
-            variant="soft"
-            color="gray"
-            onClick={handleReset}
-          >
-            Reset to Defaults
-          </Button>
-          <Dialog.Close>
-            <Button type="button" variant="soft" color="gray">
-              Cancel
+          <Flex gap="3" mt="4" justify="end">
+            <Button
+              type="button"
+              variant="soft"
+              color="gray"
+              onClick={handleReset}
+            >
+              Reset to Defaults
             </Button>
-          </Dialog.Close>
-          <Button
-            type="button"
-            onClick={() => void handleSave()}
-            disabled={isSaving}
-          >
-            {isSaving ? "Saving..." : "Save"}
-          </Button>
-        </Flex>
+            <Dialog.Close asChild>
+              <Button type="button" variant="soft" color="gray">
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button
+              type="button"
+              onClick={() => void handleSave()}
+              disabled={isSaving}
+            >
+              {isSaving ? "Saving..." : "Save"}
+            </Button>
+          </Flex>
 
-        <ContentPreviewDialog
-          block={previewBlock}
-          onClose={() => setPreviewBlock(null)}
-        />
+          <ContentPreviewDialog
+            block={previewBlock}
+            onClose={() => setPreviewBlock(null)}
+          />
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

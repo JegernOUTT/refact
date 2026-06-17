@@ -222,8 +222,9 @@
 }
 
 .jobHeader {
+  flex-wrap: wrap;
   align-items: flex-start;
-  gap: var(--rf-space-3);
+  gap: var(--rf-space-2) var(--rf-space-3);
 }
 
 .iconTile {
@@ -238,7 +239,7 @@
 }
 
 .jobTitleBlock {
-  flex: 1 1 0;
+  flex: 1 1 12ch;
   gap: var(--rf-space-1);
 }
 
