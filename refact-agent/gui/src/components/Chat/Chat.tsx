@@ -24,6 +24,10 @@ import {
   selectBrowserUiOpen,
 } from "../../features/Browser/browserSlice";
 import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
+import {
+  registerVisibleChatMount,
+  unregisterVisibleChatMount,
+} from "../../features/Connection";
 
 export type ChatProps = {
   host: Config["host"];
@@ -59,6 +63,13 @@ export const Chat: React.FC<ChatProps> = ({
   const { submit, abort, retryFromIndex } = useChatActions(chatId);
 
   const { shouldCheckpointsPopupBeShown } = useCheckpoints();
+
+  useEffect(() => {
+    dispatch(registerVisibleChatMount({ chatId }));
+    return () => {
+      dispatch(unregisterVisibleChatMount({ chatId }));
+    };
+  }, [dispatch, chatId]);
 
   const preventSend = useAppSelector((state) =>
     selectPreventSendById(state, chatId),
