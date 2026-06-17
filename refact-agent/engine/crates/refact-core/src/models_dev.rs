@@ -41,6 +41,8 @@ struct ReasoningControlRule {
     #[serde(default)]
     model_prefixes: Vec<String>,
     #[serde(default)]
+    model_ids: Vec<String>,
+    #[serde(default)]
     reasoning_effort_options: Option<Vec<String>>,
     #[serde(default)]
     supports_thinking_budget: bool,
@@ -510,6 +512,24 @@ fn reasoning_rule_matches(
 
     if !provider_matches {
         return false;
+    }
+
+    // Exact id matching (date- and reasoning-suffix-insensitive). Used to pin a
+    // bare base version such as `claude-opus-4` (= 4.0) without greedily
+    // capturing newer minor versions like `claude-opus-4-8` the way a prefix
+    // would.
+    if !rule.model_ids.is_empty() {
+        let model_stem = reasoning_model_stem(&model.id);
+        let exact_match = rule
+            .model_ids
+            .iter()
+            .any(|id| reasoning_model_stem(id) == model_stem);
+        if exact_match {
+            return true;
+        }
+        if rule.model_prefixes.is_empty() && rule.family_prefixes.is_empty() {
+            return false;
+        }
     }
 
     let model_matches = rule.model_prefixes.is_empty()
@@ -1046,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn model_caps_use_predefined_cloud_tokenizers_for_openai_and_anthropic() {
+    fn model_caps_use_predefined_cloud_tokenizers_for_anthropic_only() {
         let openai_provider = ModelsDevProvider {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
@@ -1062,7 +1082,7 @@ mod tests {
         let anthropic_caps =
             models_dev_model_to_model_caps("anthropic", &test_provider(), &test_model(None));
 
-        assert_eq!(openai_caps.tokenizer, "openai");
+        assert_eq!(openai_caps.tokenizer, "fake");
         assert_eq!(anthropic_caps.tokenizer, "anthropic");
     }
 }
