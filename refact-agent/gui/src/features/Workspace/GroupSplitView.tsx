@@ -1,8 +1,9 @@
 import classNames from "classnames";
 import { Columns3, Rows3, X } from "lucide-react";
 import {
-  CSSProperties,
-  MouseEvent as ReactMouseEvent,
+  type CSSProperties,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useRef,
   useState,
@@ -17,13 +18,40 @@ import {
   focusPane,
   resizeGroupSplit,
   selectGroupForTab,
+  splitPaneWithSurface,
   splitTab,
 } from "./workspaceSlice";
-import type { SurfaceKey } from "./surfaceKey";
+import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { hasTabDragType, readTabDragData } from "../ChatPanes/tabDrag";
 import { SurfacePane } from "./SurfacePane";
 import styles from "./GroupSplitView.module.css";
 
 const MIN_RESIZE_FRACTION = 0.12;
+
+type PaneDropEdge = "left" | "right" | "top" | "bottom";
+
+const paneDropEdges: PaneDropEdge[] = ["left", "right", "top", "bottom"];
+
+const paneDropDirections: Record<PaneDropEdge, "row" | "col"> = {
+  left: "row",
+  right: "row",
+  top: "col",
+  bottom: "col",
+};
+
+const paneDropPlacements: Record<PaneDropEdge, "before" | "after"> = {
+  left: "before",
+  right: "after",
+  top: "before",
+  bottom: "after",
+};
+
+const paneDropEdgeClasses: Record<PaneDropEdge, string> = {
+  left: styles.edgeDropLeft,
+  right: styles.edgeDropRight,
+  top: styles.edgeDropTop,
+  bottom: styles.edgeDropBottom,
+};
 
 type PaneSlotStyle = CSSProperties & {
   "--pane-flex": number;
@@ -84,6 +112,23 @@ function resizeAtDivider(
   return normalizedSizes(next, next.length);
 }
 
+function hasSurfaceTabDrag(dataTransfer: DataTransfer): boolean {
+  return (
+    hasTabDragType(dataTransfer, "chat") ||
+    hasTabDragType(dataTransfer, "task") ||
+    hasTabDragType(dataTransfer, "buddy") ||
+    hasTabDragType(dataTransfer, "surface")
+  );
+}
+
+function surfaceKeyFromDrag(event: DragEvent): SurfaceKey | null {
+  const dragged = readTabDragData(event.dataTransfer);
+  if (!dragged) return null;
+  if (dragged.surfaceKey) return dragged.surfaceKey;
+  if (dragged.type === "surface") return dragged.id;
+  return makeSurfaceKey(dragged.type, dragged.id);
+}
+
 function PaneDivider({ dir, dragging, onMouseDown }: DividerProps) {
   const vertical = dir === "row";
 
@@ -106,13 +151,7 @@ function PaneDivider({ dir, dragging, onMouseDown }: DividerProps) {
   );
 }
 
-function PaneHeader({
-  leaf,
-  tabId,
-}: {
-  leaf: LeafPane;
-  tabId: SurfaceKey;
-}) {
+function PaneHeader({ leaf, tabId }: { leaf: LeafPane; tabId: SurfaceKey }) {
   const dispatch = useAppDispatch();
   const canSplit = Boolean(leaf.activeTabId ?? leaf.tabIds[0]);
 
@@ -181,12 +220,69 @@ function LeafView({
   focused: boolean;
 }) {
   const dispatch = useAppDispatch();
+  const [surfaceDragActive, setSurfaceDragActive] = useState(false);
   const surfaceKey =
     leaf.activeTabId ?? (leaf.tabIds.length > 0 ? leaf.tabIds[0] : null);
 
   const handleFocusPane = useCallback(() => {
     dispatch(focusPane({ tabId, leafId: leaf.id }));
   }, [dispatch, leaf.id, tabId]);
+
+  const handlePaneDragEnter = useCallback((event: DragEvent) => {
+    if (!hasSurfaceTabDrag(event.dataTransfer)) return;
+    setSurfaceDragActive(true);
+  }, []);
+
+  const handlePaneDragOver = useCallback((event: DragEvent) => {
+    if (!hasSurfaceTabDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setSurfaceDragActive(true);
+  }, []);
+
+  const handlePaneDragLeave = useCallback((event: DragEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (
+      nextTarget instanceof Node &&
+      event.currentTarget.contains(nextTarget)
+    ) {
+      return;
+    }
+    setSurfaceDragActive(false);
+  }, []);
+
+  const handlePaneDrop = useCallback((event: DragEvent) => {
+    if (hasSurfaceTabDrag(event.dataTransfer)) {
+      event.preventDefault();
+    }
+    setSurfaceDragActive(false);
+  }, []);
+
+  const handleEdgeDragOver = useCallback((event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleEdgeDrop = useCallback(
+    (edge: PaneDropEdge, event: DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setSurfaceDragActive(false);
+      const draggedSurfaceKey = surfaceKeyFromDrag(event);
+      if (!draggedSurfaceKey) return;
+      dispatch(
+        splitPaneWithSurface({
+          tabId,
+          leafId: leaf.id,
+          surfaceKey: draggedSurfaceKey,
+          dir: paneDropDirections[edge],
+          placement: paneDropPlacements[edge],
+        }),
+      );
+    },
+    [dispatch, leaf.id, tabId],
+  );
 
   return (
     <section
@@ -198,8 +294,29 @@ function LeafView({
       onPointerDownCapture={handleFocusPane}
       onClick={handleFocusPane}
       onFocusCapture={handleFocusPane}
+      onDragEnter={handlePaneDragEnter}
+      onDragOver={handlePaneDragOver}
+      onDragLeave={handlePaneDragLeave}
+      onDragEnd={handlePaneDrop}
+      onDrop={handlePaneDrop}
     >
       <PaneHeader leaf={leaf} tabId={tabId} />
+      {surfaceDragActive ? (
+        <div className={styles.edgeDropZones} aria-hidden="true">
+          {paneDropEdges.map((edge) => (
+            <div
+              key={edge}
+              className={classNames(
+                styles.edgeDropZone,
+                paneDropEdgeClasses[edge],
+              )}
+              data-testid={`workspace-pane-edge-drop-${leaf.id}-${edge}`}
+              onDragOver={handleEdgeDragOver}
+              onDrop={(event) => handleEdgeDrop(edge, event)}
+            />
+          ))}
+        </div>
+      ) : null}
       <div className={styles.paneBody}>
         <SurfacePane surfaceKey={surfaceKey} />
       </div>

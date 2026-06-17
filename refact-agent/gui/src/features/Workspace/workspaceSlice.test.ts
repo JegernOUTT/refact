@@ -23,6 +23,7 @@ import {
   selectVisibleThreadIds,
   setActiveTab,
   setPaneActive,
+  splitPaneWithSurface,
   splitTab,
   workspaceSlice,
   type PaneGroup,
@@ -176,17 +177,169 @@ describe("workspaceSlice", () => {
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["a", "b"]);
   });
 
-  test("setPaneActive and focusPane update a split group without changing top tabs", () => {
+  test("addSurfaceToPane collapses an emptied source pane", () => {
     const chatA = chat("a");
     const chatB = chat("b");
-    const leafId = "root:sibling:chat:a";
+    const chatC = chat("c");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, openTab(chatC));
+    state = reducer(state, setActiveTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    const sourceLeafId = "root:sibling:chat:a:sibling:chat:b";
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: sourceLeafId,
+        surfaceKey: chatC,
+      }),
+    );
+
+    state = reducer(
+      state,
+      addSurfaceToPane({ tabId: chatA, leafId: "root", surfaceKey: chatC }),
+    );
+
+    const group = groupFor(state, chatA);
+    expect(findLeaf(group.root, sourceLeafId)).toBeNull();
+    expect(collectLeafIds(group.root)).toEqual(["root", "root:sibling:chat:a"]);
+    expect(findLeaf(group.root, "root")?.tabIds).toEqual([chatA, chatC]);
+    expect(findLeaf(group.root, "root:sibling:chat:a")).toEqual(
+      leaf("root:sibling:chat:a", [chatB], chatB),
+    );
+  });
+
+  test("splitPaneWithSurface adds a dragged tab as a new sibling and cleans its source", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
     let state = reducer(undefined, openTab(chatA));
     state = reducer(state, openTab(chatB));
     state = reducer(state, setActiveTab(chatA));
     state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
     state = reducer(
       state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+
+    state = reducer(
+      state,
+      splitPaneWithSurface({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatA,
+        dir: "row",
+        placement: "before",
+      }),
+    );
+
+    const group = groupFor(state, chatA);
+    expect(findLeaf(group.root, "root")).toBeNull();
+    expect(findLeaf(group.root, "root:sibling:chat:a")).toEqual(
+      leaf("root:sibling:chat:a", [chatB], chatB),
+    );
+    expect(findLeaf(group.root, "root:sibling:chat:a:sibling:chat:a")).toEqual(
+      leaf("root:sibling:chat:a:sibling:chat:a", [chatA], chatA),
+    );
+    expect(group.focusedLeafId).toBe("root:sibling:chat:a:sibling:chat:a");
+    expect(state.tabs).toEqual([chatA]);
+  });
+
+  test("closing a last pane with multiple surfaces ungroups into normal tabs", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    const chatC = chat("c");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, openTab(chatC));
+    state = reducer(state, setActiveTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+    state = reducer(
+      state,
+      addSurfaceToPane({ tabId: chatA, leafId: "root", surfaceKey: chatC }),
+    );
+
+    state = reducer(
+      state,
+      closePane({ tabId: chatA, leafId: "root:sibling:chat:a" }),
+    );
+
+    expect(state.groups[chatA]).toBeUndefined();
+    expect(state.tabs).toEqual([chatA, chatC]);
+    expect(state.activeTabId).toBe(chatC);
+  });
+
+  test("closePane removes dangling empty non-root leaves", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, setActiveTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+
+    state = reducer(
+      state,
+      closePane({ tabId: chatA, leafId: "root:sibling:chat:a" }),
+    );
+
+    expect(state.groups[chatA]).toBeUndefined();
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
+  });
+
+  test("setPaneActive and focusPane update a split group without changing top tabs", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    const chatC = chat("c");
+    const leafId = "root:sibling:chat:a";
+    const spareLeafId = "root:sibling:chat:a:sibling:chat:b";
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, openTab(chatC));
+    state = reducer(state, setActiveTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
       addSurfaceToPane({ tabId: chatA, leafId, surfaceKey: chatB }),
+    );
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: spareLeafId,
+        surfaceKey: chatC,
+      }),
     );
     state = reducer(state, focusPane({ tabId: chatA, leafId: "root" }));
     let group = groupFor(state, chatA);
@@ -204,6 +357,10 @@ describe("workspaceSlice", () => {
 
     group = groupFor(state, chatA);
     expect(findLeaf(group.root, "root")?.tabIds).toEqual([chatB, chatA]);
+    expect(findLeaf(group.root, leafId)).toBeNull();
+    expect(findLeaf(group.root, spareLeafId)).toEqual(
+      leaf(spareLeafId, [chatC], chatC),
+    );
 
     state = reducer(
       state,

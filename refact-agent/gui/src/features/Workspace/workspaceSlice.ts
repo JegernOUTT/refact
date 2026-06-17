@@ -5,7 +5,6 @@ import {
   collectTabIds,
   findLeaf,
   normalizeSizes,
-  splitLeaf,
   type LeafPane,
   type PaneNode,
   type SplitPlacement,
@@ -257,41 +256,82 @@ const resizeSplitNode = (
   });
 };
 
+const makeSiblingLeafId = (leafId: string, surfaceKey: SurfaceKey): string =>
+  `${leafId}:sibling:${surfaceKey}`;
+
+const makeSplitId = (leafId: string, dir: SplitNode["dir"]): string =>
+  `${leafId}:split:${dir}`;
+
+const paneNodeIdExists = (node: PaneNode, id: string): boolean => {
+  if (node.id === id) return true;
+  if (node.kind === "leaf") return false;
+  return node.children.some((child) => paneNodeIdExists(child, id));
+};
+
+const uniquePaneNodeId = (root: PaneNode, baseId: string): string => {
+  if (!paneNodeIdExists(root, baseId)) return baseId;
+
+  let index = 2;
+  let nextId = `${baseId}:${index}`;
+  while (paneNodeIdExists(root, nextId)) {
+    index += 1;
+    nextId = `${baseId}:${index}`;
+  }
+
+  return nextId;
+};
+
+const replaceLeafWithNode = (
+  node: PaneNode,
+  leafId: string,
+  replacement: PaneNode,
+): PaneNode => {
+  if (node.kind === "leaf") {
+    return node.id === leafId ? replacement : normalizeLeaf(node);
+  }
+
+  return normalizePaneTree({
+    ...node,
+    children: node.children.map((child) =>
+      replaceLeafWithNode(child, leafId, replacement),
+    ),
+  });
+};
+
 const splitLeafWithEmptySibling = (
   root: PaneNode,
   leafId: string,
   dir: SplitNode["dir"],
   surfaceKey: SurfaceKey,
   placement?: SplitPlacement,
-): PaneNode => {
+): { root: PaneNode; siblingLeafId: string } | null => {
   const targetLeaf = findLeaf(root, leafId);
   if (!targetLeaf || !targetLeaf.tabIds.includes(surfaceKey)) {
-    return normalizePaneRoot(root);
+    return null;
   }
 
-  const siblingLeafId = `${leafId}:sibling:${surfaceKey}`;
-  if (findLeaf(root, siblingLeafId)) {
-    return normalizePaneRoot(root);
-  }
-
-  const splitRoot = splitLeaf(root, leafId, dir, surfaceKey, placement);
+  const siblingLeafId = uniquePaneNodeId(
+    root,
+    makeSiblingLeafId(leafId, surfaceKey),
+  );
+  const splitId = uniquePaneNodeId(root, makeSplitId(leafId, dir));
   const keptLeaf = normalizeLeaf(targetLeaf);
+  const siblingLeaf = createLeaf(siblingLeafId);
+  const splitNode: SplitNode = {
+    kind: "split",
+    id: splitId,
+    dir,
+    children:
+      placement === "before"
+        ? [siblingLeaf, keptLeaf]
+        : [keptLeaf, siblingLeaf],
+    sizes: [0.5, 0.5],
+  };
 
-  return mapLeaves(splitRoot, (leaf) => {
-    if (leaf.id === leafId) {
-      return keptLeaf;
-    }
-
-    if (leaf.id === siblingLeafId) {
-      return {
-        ...leaf,
-        tabIds: [],
-        activeTabId: null,
-      };
-    }
-
-    return leaf;
-  });
+  return {
+    root: normalizePaneRoot(replaceLeafWithNode(root, leafId, splitNode)),
+    siblingLeafId,
+  };
 };
 
 const reorderItems = <T>(items: T[], source: T, target: T): T[] => {
@@ -331,24 +371,32 @@ const insertTabAt = (
   return next;
 };
 
-const replaceTabKey = (
+const replaceTabWithSurfaceKeys = (
   state: WorkspaceState,
-  oldKey: SurfaceKey,
-  newKey: SurfaceKey,
+  tabId: SurfaceKey,
+  surfaceKeys: SurfaceKey[],
+  preferredSurfaceKey: SurfaceKey | null,
 ): void => {
-  if (oldKey === newKey) return;
+  const tabIndex = tabIndexOrEnd(state.tabs, tabId);
+  const uniqueSurfaceKeys = unique(surfaceKeys);
+  const nextTabs = state.tabs.filter(
+    (key) => key !== tabId && !uniqueSurfaceKeys.includes(key),
+  );
+  const slotsAvailable = Math.max(0, MAX_WORKSPACE_TABS - nextTabs.length);
+  const insertedKeys = uniqueSurfaceKeys.slice(0, slotsAvailable);
 
-  const oldIndex = state.tabs.indexOf(oldKey);
-  if (oldIndex === -1) {
-    state.tabs = insertTabAt(state.tabs, newKey, state.tabs.length);
-  } else if (state.tabs.includes(newKey)) {
-    state.tabs = state.tabs.filter((key) => key !== oldKey);
-  } else {
-    state.tabs[oldIndex] = newKey;
-  }
+  nextTabs.splice(Math.min(tabIndex, nextTabs.length), 0, ...insertedKeys);
+  state.tabs = nextTabs;
 
-  if (state.activeTabId === oldKey) {
-    state.activeTabId = newKey;
+  if (
+    state.activeTabId === tabId ||
+    !state.activeTabId ||
+    !state.tabs.includes(state.activeTabId)
+  ) {
+    state.activeTabId =
+      preferredSurfaceKey && state.tabs.includes(preferredSurfaceKey)
+        ? preferredSurfaceKey
+        : insertedKeys[0] ?? state.tabs[0];
   }
 };
 
@@ -408,12 +456,15 @@ const writeGroup = (
   }
 
   if (leafCount <= 1) {
+    const remainingSurfaceKeys = allSurfaceKeys(normalizedGroup.root);
     const remainingSurface = firstSurfaceKey(normalizedGroup.root);
     state.groups = withoutGroup(state.groups, tabId);
-
-    if (remainingSurface) {
-      replaceTabKey(state, tabId, remainingSurface);
-    }
+    replaceTabWithSurfaceKeys(
+      state,
+      tabId,
+      remainingSurfaceKeys,
+      remainingSurface,
+    );
 
     return;
   }
@@ -456,6 +507,46 @@ const removeSurfaceFromGroups = (
       {
         root: removeSurfaceFromTree(group.root, surfaceKey),
         focusedLeafId: group.focusedLeafId,
+      },
+      true,
+    );
+  }
+};
+
+const detachSurfaceForGroup = (
+  state: WorkspaceState,
+  tabId: SurfaceKey,
+  surfaceKey: SurfaceKey,
+): void => {
+  if (surfaceKey !== tabId) {
+    const sourceGroup = state.groups[surfaceKey];
+    if (sourceGroup) {
+      removeTopLevelTabKeepingGroup(state, surfaceKey);
+      writeGroup(
+        state,
+        surfaceKey,
+        {
+          root: removeSurfaceFromTree(sourceGroup.root, surfaceKey),
+          focusedLeafId: sourceGroup.focusedLeafId,
+        },
+        true,
+        true,
+      );
+    } else {
+      removeTopLevelTab(state, surfaceKey);
+    }
+  }
+
+  for (const groupTabId of Object.keys(state.groups)) {
+    if (groupTabId === tabId) continue;
+    const otherGroup = state.groups[groupTabId];
+    if (!otherGroup) continue;
+    writeGroup(
+      state,
+      groupTabId,
+      {
+        root: removeSurfaceFromTree(otherGroup.root, surfaceKey),
+        focusedLeafId: otherGroup.focusedLeafId,
       },
       true,
     );
@@ -625,13 +716,16 @@ export const workspaceSlice = createSlice({
         focusedLeaf?.activeTabId ?? focusedLeaf?.tabIds[0] ?? null;
       if (!focusedLeaf || !surfaceKey) return;
 
-      const nextRoot = splitLeafWithEmptySibling(
+      const splitResult = splitLeafWithEmptySibling(
         currentGroup.root,
         currentGroup.focusedLeafId,
         dir,
         surfaceKey,
         placement,
       );
+      if (!splitResult) return;
+
+      const nextRoot = splitResult.root;
       const nextLeafIds = collectLeafIds(nextRoot);
       if (nextLeafIds.length === leafCount) return;
 
@@ -640,7 +734,7 @@ export const workspaceSlice = createSlice({
           root: nextRoot,
           focusedLeafId: currentGroup.focusedLeafId,
         },
-        `${currentGroup.focusedLeafId}:sibling:${surfaceKey}`,
+        splitResult.siblingLeafId,
       );
     },
     closePane: (
@@ -657,7 +751,7 @@ export const workspaceSlice = createSlice({
           root: closeLeaf(group.root, action.payload.leafId),
           focusedLeafId: group.focusedLeafId,
         },
-        false,
+        true,
       );
 
       const nextGroup = state.groups[action.payload.tabId];
@@ -713,36 +807,80 @@ export const workspaceSlice = createSlice({
       const group = state.groups[tabId];
       if (!group || !findLeaf(group.root, leafId)) return;
 
-      if (surfaceKey !== tabId) {
-        removeTopLevelTabKeepingGroup(state, surfaceKey);
-        state.groups = withoutGroup(state.groups, surfaceKey);
-      }
-
-      for (const groupTabId of Object.keys(state.groups)) {
-        if (groupTabId === tabId) continue;
-        const otherGroup = state.groups[groupTabId];
-        if (!otherGroup) continue;
-        writeGroup(
-          state,
-          groupTabId,
-          {
-            root: removeSurfaceFromTree(otherGroup.root, surfaceKey),
-            focusedLeafId: otherGroup.focusedLeafId,
-          },
-          true,
-        );
-      }
+      detachSurfaceForGroup(state, tabId, surfaceKey);
 
       const nextGroup = state.groups[tabId];
       if (!nextGroup) return;
 
-      state.groups[tabId] = ensureGroupFocus(
+      writeGroup(
+        state,
+        tabId,
         {
           root: addSurfaceToLeaf(nextGroup.root, leafId, surfaceKey),
           focusedLeafId: nextGroup.focusedLeafId,
         },
-        leafId,
+        true,
       );
+
+      const writtenGroup = state.groups[tabId];
+      if (writtenGroup) {
+        state.groups[tabId] = ensureGroupFocus(writtenGroup, leafId);
+        state.activeTabId = tabId;
+      } else if (state.activeTabId && !state.tabs.includes(state.activeTabId)) {
+        state.activeTabId = state.tabs[0] ?? null;
+      }
+    },
+    splitPaneWithSurface: (
+      state,
+      action: PayloadAction<{
+        tabId: SurfaceKey;
+        leafId: string;
+        surfaceKey: SurfaceKey;
+        dir: SplitNode["dir"];
+        placement?: SplitPlacement;
+      }>,
+    ) => {
+      const { tabId, leafId, surfaceKey, dir, placement } = action.payload;
+      const group = state.groups[tabId];
+      if (!group || !findLeaf(group.root, leafId)) return;
+
+      const leafCount = collectLeafIds(group.root).length;
+      if (leafCount >= MAX_GROUP_LEAVES) return;
+
+      detachSurfaceForGroup(state, tabId, surfaceKey);
+
+      const nextGroup = state.groups[tabId];
+      if (!nextGroup || !findLeaf(nextGroup.root, leafId)) return;
+      const splitResult = splitLeafWithEmptySibling(
+        addSurfaceToLeaf(nextGroup.root, leafId, surfaceKey),
+        leafId,
+        dir,
+        surfaceKey,
+        placement,
+      );
+      if (!splitResult) return;
+
+      writeGroup(
+        state,
+        tabId,
+        {
+          root: addSurfaceToLeaf(
+            splitResult.root,
+            splitResult.siblingLeafId,
+            surfaceKey,
+          ),
+          focusedLeafId: nextGroup.focusedLeafId,
+        },
+        true,
+      );
+
+      const writtenGroup = state.groups[tabId];
+      if (writtenGroup) {
+        state.groups[tabId] = ensureGroupFocus(
+          writtenGroup,
+          splitResult.siblingLeafId,
+        );
+      }
       state.activeTabId = tabId;
     },
     resizeGroupSplit: (
@@ -803,6 +941,7 @@ export const {
   setPaneActive,
   focusPane,
   addSurfaceToPane,
+  splitPaneWithSurface,
   resizeGroupSplit,
   reconcileWorkspace,
   hydrateWorkspace,

@@ -40,9 +40,9 @@ export function WorkspaceView() {
   );
 
   useEffect(() => {
-    if (!currentSurfaceKey || currentSurfaceKnown) return;
+    if (currentSurfaceKey === null || activeTabId !== null || currentSurfaceKnown) return;
     dispatch(openTab(currentSurfaceKey));
-  }, [currentSurfaceKey, currentSurfaceKnown, dispatch]);
+  }, [activeTabId, currentSurfaceKey, currentSurfaceKnown, dispatch]);
 
   const handleSplitActiveSurface = useCallback(() => {
     if (!activeTabId) return;
