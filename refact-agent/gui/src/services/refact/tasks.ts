@@ -365,7 +365,13 @@ export const tasksApi = createApi({
     }),
 
     createPlannerChatFromTransition: builder.mutation<
-      { new_chat_id: string; messages_count: number },
+      {
+        new_chat_id: string;
+        messages_count: number;
+        root_chat_id?: string | null;
+        initial_plan_document?: string | null;
+        initial_plan_error?: string | null;
+      },
       {
         taskId: string;
         sourceChatId: string;
@@ -394,7 +400,13 @@ export const tasksApi = createApi({
         });
         if (result.error) return { error: result.error };
         return {
-          data: result.data as { new_chat_id: string; messages_count: number },
+          data: result.data as {
+            new_chat_id: string;
+            messages_count: number;
+            root_chat_id?: string | null;
+            initial_plan_document?: string | null;
+            initial_plan_error?: string | null;
+          },
         };
       },
       invalidatesTags: (_result, _error, { taskId }) => [

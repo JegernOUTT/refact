@@ -674,6 +674,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       model,
       parentId,
       linkType,
+      rootChatId,
       worktree,
     } = action.payload;
     const existingRt = state.threads[id];
@@ -705,6 +706,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
       }
       if (linkType !== undefined) {
         existingRt.thread.link_type = linkType;
+      }
+      if (rootChatId !== undefined) {
+        existingRt.thread.root_chat_id = rootChatId;
       }
       state.current_thread_id = id;
       return;
@@ -749,6 +753,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
     if (linkType !== undefined) {
       newRuntime.thread.link_type = linkType;
+    }
+    if (rootChatId !== undefined) {
+      newRuntime.thread.root_chat_id = rootChatId;
     }
 
     state.threads[id] = newRuntime;

@@ -149,6 +149,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
             },
             parentId: chatId,
             linkType: "mode_transition",
+            rootChatId: result.root_chat_id ?? undefined,
             worktree: sourceWorktree,
           }),
         );
@@ -194,6 +195,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
             mode: targetMode,
             parentId: chatId,
             linkType: "mode_transition",
+            rootChatId: result.root_chat_id ?? undefined,
             worktree: sourceWorktree,
           }),
         );

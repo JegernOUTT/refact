@@ -9,7 +9,8 @@ use uuid::Uuid;
 use crate::agentic::mode_transition::{AgenticPathContext, ParsedDecisions, assemble_new_chat};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::trajectories::{
-    resolve_task_planner_controller_chat_id, verified_planner_linked_root_chat_id,
+    chat_id_is_planner_for_task, resolve_task_planner_controller_chat_id,
+    verified_planner_linked_root_chat_id,
 };
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
@@ -127,12 +128,7 @@ async fn ensure_task_for_planner_handoff(
             &task_meta,
         )
         .await
-        .or_else(|| {
-            task_meta
-                .planner_chat_id
-                .clone()
-                .filter(|id| !id.is_empty())
-        }) {
+        {
             return Ok(Some(refact_chat_api::TaskMeta {
                 task_id: task_meta.task_id,
                 role: "planner".to_string(),
@@ -140,6 +136,22 @@ async fn ensure_task_for_planner_handoff(
                 card_id: None,
                 planner_chat_id: Some(planner_chat_id),
             }));
+        }
+        if let Some(planner_chat_id) = task_meta
+            .planner_chat_id
+            .clone()
+            .filter(|id| !id.is_empty())
+        {
+            if chat_id_is_planner_for_task(gcx.clone(), &planner_chat_id, &task_meta.task_id).await
+            {
+                return Ok(Some(refact_chat_api::TaskMeta {
+                    task_id: task_meta.task_id,
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some(planner_chat_id),
+                }));
+            }
         }
         let chat_id = storage::next_planner_chat_id(gcx, &task_meta.task_id).await?;
         return Ok(Some(refact_chat_api::TaskMeta {
@@ -457,7 +469,7 @@ impl Tool for ToolHandoffToMode {
             worktree: thread.worktree.clone(),
             parent_id: Some(chat_id.clone()),
             link_type: Some("handoff".to_string()),
-            root_chat_id,
+            root_chat_id: root_chat_id.clone(),
             reasoning_effort: thread.reasoning_effort.clone(),
             thinking_budget: thread.thinking_budget,
             temperature: thread.temperature,
@@ -508,6 +520,9 @@ impl Tool for ToolHandoffToMode {
             "reason": reason,
             "messages_count": new_messages.len(),
             "task_meta": task_meta,
+            "root_chat_id": root_chat_id,
+            "parent_id": chat_id,
+            "link_type": "handoff",
             "initial_plan_document": initial_plan_doc_slug,
             "initial_plan_error": initial_plan_doc_error,
         });

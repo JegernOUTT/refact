@@ -185,6 +185,7 @@ export const createChatWithId = createAction<{
   model?: string;
   parentId?: string;
   linkType?: string;
+  rootChatId?: string;
   worktree?: WorktreeMeta | null;
 }>("chatThread/createWithId");
 

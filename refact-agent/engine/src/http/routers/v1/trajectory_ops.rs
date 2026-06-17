@@ -29,9 +29,9 @@ async fn create_initial_plan_document_for_transition(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     plan_text: Option<&str>,
-) {
+) -> (Option<String>, Option<String>) {
     let Some(plan_text) = plan_text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return;
+        return (None, None);
     };
     let result = async {
         let documents_dir =
@@ -52,15 +52,19 @@ async fn create_initial_plan_document_for_transition(
             "planner",
         )
         .await?;
-        Ok::<(), String>(())
+        Ok::<String, String>(slug)
     }
     .await;
-    if let Err(error) = result {
-        tracing::warn!(
-            "failed to create initial-plan document for task {}: {}",
-            task_id,
-            error
-        );
+    match result {
+        Ok(slug) => (Some(slug), None),
+        Err(error) => {
+            tracing::warn!(
+                "failed to create initial-plan document for task {}: {}",
+                task_id,
+                error
+            );
+            (None, Some(error))
+        }
     }
 }
 
@@ -112,6 +116,12 @@ pub struct ModeTransitionApplyRequest {
 pub struct ModeTransitionApplyResponse {
     pub new_chat_id: String,
     pub messages_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_plan_document: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_plan_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -458,6 +468,13 @@ pub async fn handle_mode_transition_apply(
     let gcx = app.gcx.clone();
     let req: ModeTransitionApplyRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    if req.target_mode.trim().eq_ignore_ascii_case("task_planner") {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Use /v1/tasks/:task_id/planner-chats/from-transition for task_planner transitions"
+                .to_string(),
+        ));
+    }
 
     let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(
@@ -510,6 +527,11 @@ pub async fn handle_mode_transition_apply(
     let new_chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    let root_chat_id = thread
+        .root_chat_id
+        .clone()
+        .or_else(|| Some(chat_id.clone()));
+
     let mut snapshot = TrajectorySnapshot {
         chat_id: new_chat_id.clone(),
         title: String::new(),
@@ -531,10 +553,7 @@ pub async fn handle_mode_transition_apply(
         worktree: thread.worktree.clone(),
         parent_id: Some(chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
-        root_chat_id: thread
-            .root_chat_id
-            .clone()
-            .or_else(|| Some(chat_id.clone())),
+        root_chat_id: root_chat_id.clone(),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -561,6 +580,9 @@ pub async fn handle_mode_transition_apply(
     let response = ModeTransitionApplyResponse {
         new_chat_id,
         messages_count: new_messages.len(),
+        root_chat_id,
+        initial_plan_document: None,
+        initial_plan_error: None,
     };
 
     let body = serde_json::to_vec(&response)
@@ -659,6 +681,8 @@ pub async fn handle_planner_from_transition(
         planner_chat_id: Some(new_chat_id.clone()),
     };
 
+    let root_chat_id = Some(new_chat_id.clone());
+
     let mut snapshot = TrajectorySnapshot {
         chat_id: new_chat_id.clone(),
         title: String::new(),
@@ -680,10 +704,7 @@ pub async fn handle_planner_from_transition(
         worktree: thread.worktree.clone(),
         parent_id: Some(req.source_chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
-        root_chat_id: thread
-            .root_chat_id
-            .clone()
-            .or_else(|| Some(req.source_chat_id.clone())),
+        root_chat_id: root_chat_id.clone(),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -713,18 +734,24 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    if target_mode == "task_planner" {
-        create_initial_plan_document_for_transition(
-            gcx.clone(),
-            &task_id,
-            decisions.initial_plan.as_deref(),
-        )
-        .await;
-    }
+    let (initial_plan_document, initial_plan_error) =
+        if target_mode.eq_ignore_ascii_case("task_planner") {
+            create_initial_plan_document_for_transition(
+                gcx.clone(),
+                &task_id,
+                decisions.initial_plan.as_deref(),
+            )
+            .await
+        } else {
+            (None, None)
+        };
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
         messages_count: new_messages.len(),
+        root_chat_id,
+        initial_plan_document,
+        initial_plan_error,
     };
 
     let body = serde_json::to_vec(&response)
@@ -833,6 +860,34 @@ mod tests {
         assert!(snapshot.previous_response_id.is_none());
         assert!(snapshot.frozen_request_prefix.is_none());
         assert!(snapshot.claude_code_identity.is_none());
+    }
+
+    #[test]
+    fn mode_transition_response_serializes_optional_planner_metadata() {
+        let response = ModeTransitionApplyResponse {
+            new_chat_id: "planner-chat".to_string(),
+            messages_count: 3,
+            root_chat_id: Some("planner-chat".to_string()),
+            initial_plan_document: Some("initial-plan".to_string()),
+            initial_plan_error: None,
+        };
+
+        let raw = serde_json::to_value(response).unwrap();
+        assert_eq!(raw["new_chat_id"], "planner-chat");
+        assert_eq!(raw["messages_count"], 3);
+        assert_eq!(raw["root_chat_id"], "planner-chat");
+        assert_eq!(raw["initial_plan_document"], "initial-plan");
+        assert!(raw.get("initial_plan_error").is_none());
+    }
+
+    #[test]
+    fn generic_mode_transition_rejects_task_planner_target_before_session_lookup() {
+        let req = ModeTransitionApplyRequest {
+            target_mode: " TASK_PLANNER ".to_string(),
+            target_mode_description: String::new(),
+        };
+
+        assert!(req.target_mode.trim().eq_ignore_ascii_case("task_planner"));
     }
 
     #[tokio::test]

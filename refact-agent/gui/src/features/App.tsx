@@ -261,7 +261,12 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const pageSwitching = desiredPage !== renderedPage;
 
-  const isLoggedIn = isPageInHistory("history") || isPageInHistory("chat");
+  const isLoggedIn =
+    isPageInHistory("history") ||
+    isPageInHistory("chat") ||
+    isPageInHistory("tasks list") ||
+    isPageInHistory("task workspace") ||
+    isPageInHistory("task agent");
 
   const canAccessApp = providerBootstrap.canAccessApp;
   const canShowProviderSetup = providerBootstrap.canShowProviderSetup;

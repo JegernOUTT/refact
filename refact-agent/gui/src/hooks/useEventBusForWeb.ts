@@ -65,11 +65,25 @@ export function useEventBusForWeb() {
       return;
     }
 
+    const nextLspUrl = resolveWebLspUrl(config, lspUrl);
+    const nextLspPort = config.engineServed
+      ? currentWindowPort()
+      : config.lspPort;
+    const nextApiKey = apiKey;
+
+    if (
+      config.lspUrl === nextLspUrl &&
+      config.lspPort === nextLspPort &&
+      config.apiKey === nextApiKey
+    ) {
+      return;
+    }
+
     dispatch(
       updateConfig({
-        lspUrl: resolveWebLspUrl(config, lspUrl),
-        lspPort: config.engineServed ? currentWindowPort() : config.lspPort,
-        apiKey,
+        lspUrl: nextLspUrl,
+        lspPort: nextLspPort,
+        apiKey: nextApiKey,
       }),
     );
   }, [apiKey, lspUrl, dispatch, config]);

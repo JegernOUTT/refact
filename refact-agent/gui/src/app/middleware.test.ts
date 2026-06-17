@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "./store";
 import {
   closeThread,
+  applyChatEvent,
   setChatModel,
   setMaxNewTokens,
 } from "../features/Chat/Thread";
@@ -22,6 +23,8 @@ import {
   setPaneActive as setWorkspacePaneActive,
 } from "../features/Workspace";
 import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
+import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
+
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
   const title = id
@@ -59,6 +62,23 @@ function makeThread(id: string): ChatThreadRuntime {
     memory_enrichment_user_touched: false,
     manual_preview_items: [],
     manual_preview_ran: false,
+  };
+}
+
+function handoffEvent(
+  sourceChatId: string,
+  content: Record<string, unknown>,
+): ChatEventEnvelope {
+  return {
+    chat_id: sourceChatId,
+    seq: "1",
+    type: "message_added",
+    index: 1,
+    message: {
+      role: "tool",
+      content: JSON.stringify({ type: "handoff_to_mode", ...content }),
+      tool_call_id: "call-handoff",
+    },
   };
 }
 
@@ -294,6 +314,88 @@ describe("workspace routing middleware", () => {
     await waitFor(() => {
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
     });
+  });
+});
+
+describe("handoff_to_mode middleware", () => {
+  it("routes normal chat to returned task planner metadata", async () => {
+    const sourceChatId = "chat-source";
+    const newChatId = "planner-chat";
+    const taskId = "task-1";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = setUpStore({
+      config: {
+        host: "web",
+        engineServed: true,
+        lspPort: 8001,
+        themeProps: {},
+      },
+      pages: [{ name: "history" }, { name: "chat" }],
+      chat: {
+        current_thread_id: sourceChatId,
+        open_thread_ids: [sourceChatId],
+        threads: { [sourceChatId]: makeThread(sourceChatId) },
+        system_prompt: {},
+        tool_use: "agent" as const,
+        sse_refresh_requested: null,
+        stream_version: 0,
+      },
+    });
+
+    store.dispatch(
+      applyChatEvent(
+        handoffEvent(sourceChatId, {
+          new_chat_id: newChatId,
+          target_mode: "task_planner",
+          task_meta: {
+            task_id: taskId,
+            role: "planner",
+            planner_chat_id: newChatId,
+          },
+          parent_id: sourceChatId,
+          link_type: "handoff",
+          root_chat_id: newChatId,
+        }),
+      ),
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const state = store.getState();
+    const plannerRuntime = state.chat.threads[newChatId];
+    expect(plannerRuntime?.thread.mode).toBe("task_planner");
+    expect(plannerRuntime?.thread.is_task_chat).toBe(true);
+    expect(plannerRuntime?.thread.task_meta).toEqual({
+      task_id: taskId,
+      role: "planner",
+      planner_chat_id: newChatId,
+    });
+    expect(plannerRuntime?.thread.parent_id).toBe(sourceChatId);
+    expect(plannerRuntime?.thread.link_type).toBe("handoff");
+    expect(plannerRuntime?.thread.root_chat_id).toBe(newChatId);
+    expect(state.chat.current_thread_id).toBe(newChatId);
+    expect(state.chat.sse_refresh_requested).toBe(newChatId);
+    expect(state.tasksUI.openTasks).toEqual([
+      {
+        id: taskId,
+        name: "Task",
+        plannerChats: [
+          {
+            id: newChatId,
+            title: "",
+            createdAt: expect.any(String),
+            updatedAt: expect.any(String),
+            mode: "task_planner",
+          },
+        ],
+        activeChat: { type: "planner", chatId: newChatId },
+      },
+    ]);
+    expect(state.pages.at(-1)).toEqual({ name: "task workspace", taskId });
   });
 });
 

@@ -113,6 +113,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
       // Create the planner chat — task-owned, with context if available
       let newChatId: string;
+      let rootChatId: string | undefined;
       if (hasMessages && sourceChatId) {
         const result = await createFromTransition({
           taskId: resolved.id,
@@ -120,6 +121,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
           targetModeDescription: targetModeDescription ?? "",
         }).unwrap();
         newChatId = result.new_chat_id;
+        rootChatId = result.root_chat_id ?? undefined;
       } else {
         const result = await createPlannerChat({
           taskId: resolved.id,
@@ -139,6 +141,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
             role: "planner",
             planner_chat_id: newChatId,
           },
+          rootChatId,
           worktree: sourceWorktree,
         }),
       );

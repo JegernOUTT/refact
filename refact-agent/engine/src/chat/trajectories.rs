@@ -1867,7 +1867,7 @@ fn task_meta_is_planner_for_task(task_meta: Option<&TaskMeta>, task_id: &str) ->
     task_meta.is_some_and(|meta| meta.role == "planner" && meta.task_id == task_id)
 }
 
-async fn chat_id_is_planner_for_task(
+pub(crate) async fn chat_id_is_planner_for_task(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
     task_id: &str,

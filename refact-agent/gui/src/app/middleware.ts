@@ -53,6 +53,8 @@ import {
   removeChatFromCache,
   closeThread,
   reorderOpenThreads,
+  requestSseRefresh,
+  type TaskMeta,
 } from "../features/Chat/Thread";
 import { saveLastThreadParams } from "../utils/threadStorage";
 import {
@@ -306,7 +308,6 @@ startListening({
   },
 });
 
-
 startListening({
   matcher: isAnyOf(
     openWorkspaceTab,
@@ -415,7 +416,6 @@ startListening({
     );
   },
 });
-
 
 startListening({
   actionCreator: setError,
@@ -721,7 +721,6 @@ startListening({
 startListening({
   actionCreator: updateConfig,
   effect: (_action, listenerApi) => {
-    listenerApi.dispatch(pingApi.util.resetApiState());
     const namespaceChanged = syncProjectStorageNamespace(
       listenerApi.getState(),
     );
@@ -732,6 +731,7 @@ startListening({
     const previousConfig = listenerApi.getOriginalState().config;
     const nextConfig = listenerApi.getState().config;
     if (endpointConfigChanged(previousConfig, nextConfig)) {
+      listenerApi.dispatch(pingApi.util.resetApiState());
       listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
@@ -910,6 +910,12 @@ interface HandoffToModeContent {
   target_mode?: string;
   reason?: string;
   messages_count?: number;
+  task_meta?: TaskMeta | null;
+  root_chat_id?: string | null;
+  parent_id?: string | null;
+  link_type?: string | null;
+  initial_plan_document?: string | null;
+  initial_plan_error?: string | null;
 }
 
 type ToolMessageContent =
@@ -1063,22 +1069,24 @@ startListening({
     // Preserve task/browser metadata from the source thread so the new chat
     // inherits the correct context (planner, task agent, browser session, etc.)
     const sourceRuntime = state.chat.threads[event.chat_id];
-    const isTaskChat = sourceRuntime?.thread.is_task_chat ?? false;
-    const taskMeta = sourceRuntime?.thread.task_meta;
+    const taskMeta = content.task_meta ?? sourceRuntime?.thread.task_meta;
+    const isTaskChat = Boolean(taskMeta?.task_id);
     const worktree = sourceRuntime?.thread.worktree;
+    const targetMode = content.target_mode ?? sourceRuntime?.thread.mode;
+    const parentId = content.parent_id ?? event.chat_id;
+    const linkType = content.link_type ?? "handoff";
+    const rootChatId = content.root_chat_id ?? undefined;
 
     listenerApi.dispatch(
       createChatWithId({
         id: new_chat_id,
         isTaskChat,
         taskMeta,
-        parentId: event.chat_id,
-        linkType: "handoff",
+        parentId,
+        linkType,
+        rootChatId,
         worktree,
-        mode:
-          isTaskChat && taskMeta?.role === "planner"
-            ? "TASK_PLANNER"
-            : content.target_mode,
+        mode: targetMode,
       }),
     );
     // Ensure the tab is open and switched to (handles both new and cached threads)
@@ -1088,8 +1096,9 @@ startListening({
     listenerApi.dispatch(
       setIsWaitingForResponse({ id: new_chat_id, value: true }),
     );
+    listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
 
-    if (isTaskChat && taskMeta?.role === "planner" && taskMeta.task_id) {
+    if (taskMeta?.role === "planner" && taskMeta.task_id) {
       const taskId = taskMeta.task_id;
       const now = new Date().toISOString();
       // Ensure the task shell exists in tasksUI before registering the planner.
@@ -1108,6 +1117,7 @@ startListening({
             title: "",
             createdAt: now,
             updatedAt: now,
+            mode: targetMode,
           },
         }),
       );
@@ -1147,6 +1157,9 @@ startListening({
         inFlightHandoffs.delete(key);
       }
     } else {
+      listenerApi.dispatch(
+        setIsWaitingForResponse({ id: new_chat_id, value: false }),
+      );
       if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
         const arr = Array.from(processedHandoffIds);
         arr
