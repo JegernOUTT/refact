@@ -822,6 +822,9 @@ export const selectGroupForTab = (
   tabId: SurfaceKey,
 ) => state.workspace.groups[tabId] ?? null;
 
+export const selectWorkspaceGroups = (state: WorkspaceRootState) =>
+  state.workspace.groups;
+
 export const selectActiveGroup = (state: WorkspaceRootState) =>
   state.workspace.activeTabId
     ? selectGroupForTab(state, state.workspace.activeTabId)

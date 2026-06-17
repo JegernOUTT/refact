@@ -1,0 +1,212 @@
+.tabBar {
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h-lg);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-glass);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+:global(.radix-themes[data-host="jetbrains"]).tabBar {
+  backdrop-filter: none;
+}
+
+.scrollArea {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.scrollArea::-webkit-scrollbar {
+  display: none;
+}
+
+.tabList {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  min-width: min-content;
+  min-height: calc(var(--rf-control-h-lg) - var(--rf-space-1));
+}
+
+.tabWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 190px;
+  min-width: 0;
+  max-width: 260px;
+  min-height: var(--rf-control-h);
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
+
+.tabWrapDragging {
+  opacity: 0.54;
+}
+
+.tabWrapDropTarget {
+  transform: translateX(var(--rf-space-1)) scale(1);
+}
+
+.tabButton {
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  gap: var(--rf-space-1);
+  padding: 0 calc(var(--rf-control-h-sm) + var(--rf-space-1)) 0
+    var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-card);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  cursor: pointer;
+}
+
+.tabButton:hover,
+.tabWrapDropTarget .tabButton {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+.tabButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
+}
+
+.tabWrapActive .tabButton {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border);
+  box-shadow: inset 0 calc(-1 * var(--rf-hairline)) 0 var(--rf-color-accent);
+}
+
+.tabWrapGroup .tabButton {
+  border-color: var(--rf-color-accent);
+}
+
+.tabWrapActive.tabWrapGroup .tabButton {
+  background: var(--rf-color-accent-soft);
+}
+
+.tabStatus {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.groupBadge,
+.notificationBadge {
+  flex: 0 0 auto;
+}
+
+.groupBadge {
+  animation: rf-group-badge-pulse var(--rf-dur-slow) var(--rf-ease-standard)
+    both;
+}
+
+.tabTitle {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
+}
+
+.tabClose {
+  position: absolute;
+  inset-inline-end: var(--rf-space-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  padding: 0;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+  opacity: 0.76;
+}
+
+.tabClose:hover,
+.tabClose:focus-visible {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  opacity: 1;
+}
+
+.tabClose:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tabWrap {
+    transition:
+      opacity var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .tabButton,
+  .tabClose {
+    transition:
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabWrap,
+  .tabButton,
+  .tabClose,
+  .groupBadge {
+    animation: none;
+    transition: none;
+  }
+
+  .tabWrapDropTarget {
+    transform: translateX(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .tabBar {
+    background: var(--rf-surface-2);
+    backdrop-filter: none;
+  }
+}
+
+@keyframes rf-group-badge-pulse {
+  from {
+    transform: scale(0.96);
+  }
+
+  50% {
+    transform: scale(1.06);
+  }
+
+  to {
+    transform: scale(1);
+  }
+}

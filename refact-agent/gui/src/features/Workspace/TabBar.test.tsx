@@ -1,0 +1,207 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { type AppStore, setUpStore } from "../../app/store";
+import { fireEvent, render, screen, within } from "../../utils/test-utils";
+import {
+  createChatWithId,
+  updateChatRuntimeFromSessionState,
+} from "../Chat/Thread";
+import { processCompleted, type ProcessCompletedEvent } from "../Notifications";
+import {
+  addSurfaceToPane,
+  closeTab,
+  openTab,
+  reorderTabs,
+  setActiveTab,
+  splitTab,
+} from "./workspaceSlice";
+import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
+import { TabBar } from "./TabBar";
+
+const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
+
+function renderTabBar(store: AppStore) {
+  return render(<TabBar />, { store });
+}
+
+function createDataTransferStub(): DataTransfer {
+  const data = new Map<string, string>();
+  const dataTransfer = {
+    dropEffect: "none" as DataTransfer["dropEffect"],
+    effectAllowed: "uninitialized" as DataTransfer["effectAllowed"],
+    files: [] as unknown as FileList,
+    items: [] as unknown as DataTransferItemList,
+    get types() {
+      return Array.from(data.keys());
+    },
+    clearData: vi.fn((type?: string) => {
+      if (type) {
+        data.delete(type);
+      } else {
+        data.clear();
+      }
+    }),
+    getData: vi.fn((type: string) => data.get(type) ?? ""),
+    setData: vi.fn((type: string, value: string) => {
+      data.set(type, value);
+    }),
+    setDragImage: vi.fn(),
+  } satisfies Partial<DataTransfer>;
+
+  return dataTransfer as DataTransfer;
+}
+
+function createProcessCompletedEvent(
+  chatId: string,
+  seq: string,
+): ProcessCompletedEvent {
+  return {
+    chat_id: chatId,
+    seq,
+    type: "process_completed",
+    process_id: `exec_${seq}`,
+    status: "failed",
+    exit_code: 1,
+    short_description: "Run workspace tab bar test",
+    mode: "background",
+  };
+}
+
+function createStoreWithChatTabs(): AppStore {
+  const store = setUpStore();
+  store.dispatch(
+    createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+  );
+  store.dispatch(
+    createChatWithId({ id: "chat-b", title: "Chat Beta", mode: "agent" }),
+  );
+  store.dispatch(
+    createChatWithId({ id: "chat-c", title: "Chat Gamma", mode: "agent" }),
+  );
+  store.dispatch(
+    updateChatRuntimeFromSessionState({
+      id: "chat-b",
+      session_state: "generating",
+    }),
+  );
+  store.dispatch(openTab(chat("chat-a")));
+  store.dispatch(openTab(chat("chat-b")));
+  store.dispatch(openTab(chat("chat-c")));
+  store.dispatch(setActiveTab(chat("chat-a")));
+  return store;
+}
+
+function createStoreWithGroupedTabs(): AppStore {
+  const store = createStoreWithChatTabs();
+  const groupTabId = chat("chat-a");
+  store.dispatch(splitTab({ tabId: groupTabId, dir: "row" }));
+  const group = store.getState().workspace.groups[groupTabId];
+  if (!group) throw new Error("missing split group");
+  store.dispatch(
+    addSurfaceToPane({
+      tabId: groupTabId,
+      leafId: group.focusedLeafId,
+      surfaceKey: chat("chat-b"),
+    }),
+  );
+  return store;
+}
+
+function getTabWrap(name: RegExp): HTMLElement {
+  const wrap = screen.getByRole("tab", { name }).closest("div");
+  if (!wrap) throw new Error(`missing tab wrapper for ${name.source}`);
+  return wrap;
+}
+
+describe("TabBar", () => {
+  it("renders all open tabs in one tablist with status and unread badges", () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(
+      processCompleted(createProcessCompletedEvent("chat-a", "1")),
+    );
+    renderTabBar(store);
+
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      within(screen.getByRole("tab", { name: /Chat Beta/ })).getByLabelText(
+        "In progress...",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("tab", { name: /Chat Alpha/ })).getByLabelText(
+        "1 unread process notifications",
+      ),
+    ).toHaveTextContent("1");
+  });
+
+  it("shows a split tab as a compact group with pane count and active pane title", () => {
+    const store = createStoreWithGroupedTabs();
+    renderTabBar(store);
+
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    const groupTab = screen.getByRole("tab", { name: /Chat Beta/ });
+
+    expect(groupTab).toHaveAttribute("aria-selected", "true");
+    expect(within(groupTab).getByLabelText("2 panes")).toHaveTextContent("2");
+    expect(
+      screen.queryByRole("tab", { name: /Chat Alpha/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat Gamma/ })).toBeInTheDocument();
+  });
+
+  it("dispatches setActiveTab when a tab is clicked", async () => {
+    const store = createStoreWithChatTabs();
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    const view = renderTabBar(store);
+
+    await view.user.click(screen.getByRole("tab", { name: /Chat Beta/ }));
+
+    expect(dispatchSpy).toHaveBeenCalledWith(setActiveTab(chat("chat-b")));
+    expect(store.getState().workspace.activeTabId).toBe(chat("chat-b"));
+  });
+
+  it("dispatches closeTab from the close button", async () => {
+    const store = createStoreWithChatTabs();
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+    );
+
+    expect(dispatchSpy).toHaveBeenCalledWith(closeTab(chat("chat-b")));
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-a"),
+      chat("chat-c"),
+    ]);
+  });
+
+  it("dispatches reorderTabs when a tab is dropped on another tab", () => {
+    const store = createStoreWithChatTabs();
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    renderTabBar(store);
+
+    const dataTransfer = createDataTransferStub();
+    fireEvent.dragStart(screen.getByRole("tab", { name: /Chat Gamma/ }), {
+      dataTransfer,
+    });
+    const target = getTabWrap(/Chat Alpha/);
+    fireEvent.dragOver(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      reorderTabs({ sourceKey: chat("chat-c"), targetKey: chat("chat-a") }),
+    );
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-c"),
+      chat("chat-a"),
+      chat("chat-b"),
+    ]);
+  });
+});
