@@ -1,8 +1,11 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { listenerMiddleware } from "./middleware";
 import { setUpStore } from "./store";
 import {
+  closeThread,
   newChatAction,
+  removeChatFromCache,
   setChatModel,
   setMaxNewTokens,
   switchToThread,
@@ -12,6 +15,7 @@ import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
 import {
   findLeaf,
   focusPane,
+  removeTabEverywhere,
   setPaneActiveTab,
   type PaneNode,
 } from "../features/ChatPanes";
@@ -213,6 +217,98 @@ describe("chat pane routing middleware", () => {
 
     await waitFor(() => {
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("removes a closed background tab from its pane through middleware", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      panes: {
+        root: {
+          kind: "leaf",
+          id: "root",
+          tabIds: ["chat-a", "chat-b", "chat-c"],
+          activeTabId: "chat-a",
+        },
+        focusedLeafId: "root",
+      },
+    });
+
+    store.dispatch(closeThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      const root = findLeaf(store.getState().panes.root, "root");
+      expect(root?.tabIds).toEqual(["chat-a", "chat-c"]);
+      expect(root?.activeTabId).toBe("chat-a");
+    });
+  });
+
+  it("removes a closed active split tab from its pane through middleware", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-b", ["chat-a", "chat-b"]),
+      panes: { root: twoPaneRoot(), focusedLeafId: "right" },
+    });
+
+    store.dispatch(closeThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      expect(store.getState().panes.root).toEqual({
+        kind: "leaf",
+        id: "left",
+        tabIds: ["chat-a"],
+        activeTabId: "chat-a",
+      });
+      expect(store.getState().panes.focusedLeafId).toBe("left");
+    });
+  });
+
+  it("dispatches pane cleanup from the closeThread middleware listener", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      panes: {
+        root: {
+          kind: "leaf",
+          id: "root",
+          tabIds: ["chat-a", "chat-b", "chat-c"],
+          activeTabId: "chat-a",
+        },
+        focusedLeafId: "root",
+      },
+    });
+    const dispatch = vi.spyOn(store, "dispatch");
+    const effect = listenerMiddleware.middleware(store)(() => undefined);
+
+    effect(closeThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith(removeTabEverywhere("chat-b"));
+    });
+  });
+
+  it("removes a cached chat from its pane through middleware", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      panes: {
+        root: {
+          kind: "leaf",
+          id: "root",
+          tabIds: ["chat-a", "chat-b", "chat-c"],
+          activeTabId: "chat-a",
+        },
+        focusedLeafId: "root",
+      },
+    });
+
+    store.dispatch(removeChatFromCache({ id: "chat-b" }));
+
+    await waitFor(() => {
+      const root = findLeaf(store.getState().panes.root, "root");
+      expect(root?.tabIds).toEqual(["chat-a", "chat-c"]);
+      expect(root?.activeTabId).toBe("chat-a");
     });
   });
 

@@ -17,7 +17,6 @@ import { findLeaf } from "./panesTree";
 import {
   hydratePaneLayout,
   moveTabToPane,
-  removeTabEverywhere,
   reorderTabInPane,
   setPaneActiveTab,
 } from "./panesSlice";
@@ -242,7 +241,7 @@ describe("PaneTabStrip", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("dispatches closeThread and removeTabEverywhere on close", async () => {
+  it("dispatches closeThread on close", async () => {
     usePaneTabStripHandlers();
     const view = renderPaneTabStrip();
     seedPaneTabs(view);
@@ -254,7 +253,6 @@ describe("PaneTabStrip", () => {
     );
 
     expect(dispatchSpy).toHaveBeenCalledWith(closeThread({ id: "chat-b" }));
-    expect(dispatchSpy).toHaveBeenCalledWith(removeTabEverywhere("chat-b"));
   });
 
   it("renders tabs in leaf tab order instead of global open thread order", () => {

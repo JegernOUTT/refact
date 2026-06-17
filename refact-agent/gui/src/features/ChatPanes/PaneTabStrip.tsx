@@ -28,7 +28,6 @@ import { useGetChatModesQuery } from "../../services/refact/chatModes";
 import { findLeaf, findLeafByTab } from "./panesTree";
 import {
   moveTabToPane,
-  removeTabEverywhere,
   reorderTabInPane,
   selectFocusedActiveTabId,
   selectFocusedLeafId,
@@ -116,7 +115,6 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
       event.stopPropagation();
       event.preventDefault();
       dispatch(closeThread({ id: tabId }));
-      dispatch(removeTabEverywhere(tabId));
     },
     [dispatch],
   );
