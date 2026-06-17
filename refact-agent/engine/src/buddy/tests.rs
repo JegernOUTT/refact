@@ -1665,6 +1665,64 @@ async fn test_unified_listing_mixed_kinds() {
 }
 
 #[tokio::test]
+async fn test_list_recent_buddy_conversations_bounded_by_recency() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    for (name, id, updated, title) in [
+        ("a.json", "a", "2026-01-02T00:00:00Z", "Older"),
+        ("b.json", "b", "2026-01-05T00:00:00Z", "Newer"),
+        ("c.json", "c", "2026-01-04T00:00:00Z", "Middle"),
+    ] {
+        let path = root.join(format!(".refact/buddy/chats/conversations/{name}"));
+        let json = serde_json::json!({
+            "chat_id": id, "title": title, "kind": "chat",
+            "created_at": "2026-01-01T00:00:00Z", "last_message_at": updated,
+            "messages": [{ "role": "user" }]
+        });
+        super::storage::atomic_write_json(&path, &json)
+            .await
+            .unwrap();
+    }
+
+    let recent = super::conversation_ledger::list_recent_buddy_conversations(root, 2).await;
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].title, "Newer");
+    assert_eq!(recent[1].title, "Middle");
+}
+
+#[tokio::test]
+async fn test_list_recent_buddy_conversations_includes_workflows() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let conv_path = root.join(".refact/buddy/chats/conversations/c1.json");
+    let conv_json = serde_json::json!({
+        "chat_id": "c1", "title": "Conversation One", "kind": "chat",
+        "created_at": "2026-01-01T00:00:00Z", "last_message_at": "2026-01-03T00:00:00Z",
+        "messages": [{ "role": "user" }]
+    });
+    super::storage::atomic_write_json(&conv_path, &conv_json)
+        .await
+        .unwrap();
+
+    let wf_path = root.join(".refact/buddy/chats/workflows/commit_message.json");
+    let wf_json = serde_json::json!({
+        "entries": [{ "timestamp": "2026-01-05T00:00:00Z", "output_summary": "done", "success": true }]
+    });
+    super::storage::atomic_write_json(&wf_path, &wf_json)
+        .await
+        .unwrap();
+
+    let recent = super::conversation_ledger::list_recent_buddy_conversations(root, 5).await;
+    assert!(recent.iter().any(|e| e.kind == "chat"));
+    assert!(recent.iter().any(|e| e.kind == "workflow"));
+    assert_eq!(recent[0].kind, "workflow");
+}
+
+#[tokio::test]
 async fn test_setup_kind_stored() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

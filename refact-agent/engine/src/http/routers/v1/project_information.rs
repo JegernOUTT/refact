@@ -12,7 +12,7 @@ use crate::chat::system_context::{
     SystemInfo, find_instruction_files, find_project_configs, gather_git_info, detect_environments,
     generate_compact_project_tree, generate_git_info_prompt, generate_environment_instructions,
 };
-use crate::memories::load_memories_by_tags;
+use crate::memories::load_memories_by_tags_from_index;
 
 pub use crate::yaml_configs::project_information::{
     ProjectInformationConfig, load_project_information_config, override_key,
@@ -23,7 +23,10 @@ async fn get_project_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     crate::files_correction::get_project_dirs(gcx).await
 }
 
-async fn override_allowed_roots(gcx: Arc<GlobalContext>, project_roots: &[PathBuf]) -> Vec<PathBuf> {
+async fn override_allowed_roots(
+    gcx: Arc<GlobalContext>,
+    project_roots: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = project_roots.to_vec();
     roots.push(crate::memories::get_global_knowledge_dir(gcx.clone()).await);
     roots.push(gcx.config_dir.clone());
@@ -358,15 +361,15 @@ pub async fn handle_v1_project_information_preview(
     if config.sections.memories.enabled {
         let memory_tags = &["preference", "lesson", "insight", "pattern"];
         let max_items = config.sections.memories.max_items.unwrap_or(30);
-        let memories = load_memories_by_tags(gcx.clone(), memory_tags, max_items)
-            .await
-            .unwrap_or_default();
+        let memories = load_memories_by_tags_from_index(gcx.clone(), memory_tags, max_items).await;
         let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
         let overrides = &config.sections.memories.overrides;
 
         for (idx, memo) in memories.iter().enumerate() {
             let abs_path_str = memo.file_path.as_ref().map(|p| p.display().to_string());
-            let key = abs_path_str.as_ref().map(|p| override_key(p, &project_dirs));
+            let key = abs_path_str
+                .as_ref()
+                .map(|p| override_key(p, &project_dirs));
             let file_override = key.as_ref().and_then(|k| overrides.get(k));
             let file_enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
             let max_chars_per_item = file_override

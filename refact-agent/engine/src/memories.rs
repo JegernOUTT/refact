@@ -758,6 +758,32 @@ pub async fn load_memories_by_tags(
     Ok(records)
 }
 
+pub async fn load_memories_by_tags_from_index(
+    gcx: Arc<GlobalContext>,
+    allowed_tags: &[&str],
+    max_items: usize,
+) -> Vec<MemoRecord> {
+    let idx_arc = gcx.knowledge_index.clone();
+    let matched = {
+        let idx = idx_arc.lock().await;
+        idx.memos_by_tag_or_kind_substring(allowed_tags, max_items)
+    };
+    matched
+        .into_iter()
+        .map(|(card, content)| MemoRecord {
+            memid: card.id,
+            tags: card.tags,
+            content: content.trim().to_string(),
+            file_path: Some(card.file_path),
+            line_range: None,
+            title: Some(card.title),
+            created: card.created,
+            kind: card.kind,
+            score: None,
+        })
+        .collect()
+}
+
 const PREFERENCE_MIN_CONFIDENCE: f32 = 0.85;
 #[cfg(test)]
 const PREFERENCE_STATEMENT_MAX_CHARS: usize = 240;

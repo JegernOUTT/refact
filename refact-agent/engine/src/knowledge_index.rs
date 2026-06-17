@@ -22,6 +22,7 @@ pub struct KnowledgeCard {
     pub kind: Option<String>,
     pub created: Option<String>,
     pub created_at: Option<String>,
+    pub updated: Option<String>,
     pub file_path: PathBuf,
 }
 
@@ -33,6 +34,7 @@ pub struct KnowledgeIndex {
     by_related_filename: HashMap<String, Vec<KnowledgeCard>>,
     by_related_entity: HashMap<String, Vec<KnowledgeCard>>,
     by_content: HashMap<String, Vec<KnowledgeCard>>,
+    by_path: HashMap<PathBuf, KnowledgeCard>,
     content_by_path: HashMap<PathBuf, String>,
 }
 
@@ -117,6 +119,21 @@ fn kind_priority(kind: Option<&str>) -> i32 {
 fn recency_key(created_at: Option<&str>, created: Option<&str>) -> String {
     // Lexicographic sort works for RFC3339 and YYYY-MM-DD.
     created_at.or(created).unwrap_or("").to_string()
+}
+
+fn card_recency(card: &KnowledgeCard) -> &str {
+    card.updated
+        .as_deref()
+        .or(card.created_at.as_deref())
+        .or(card.created.as_deref())
+        .unwrap_or("")
+}
+
+fn card_is_task_scoped(card: &KnowledgeCard) -> bool {
+    card.tags.iter().any(|tag| {
+        let key = normalize_key(tag);
+        key == "scope:task" || key.starts_with("scope:task:")
+    })
 }
 
 fn rank_cards(mut cards: Vec<KnowledgeCard>, max_items: usize) -> Vec<KnowledgeCard> {
@@ -304,6 +321,7 @@ fn task_card_from_mapping(
         kind,
         created: None,
         created_at: yaml_string(mapping, "created_at"),
+        updated: yaml_string(mapping, "updated_at"),
         file_path: path.to_path_buf(),
     }
 }
@@ -376,6 +394,7 @@ impl KnowledgeIndex {
         retain_cards_not_at_path(&mut self.by_related_filename, file_path);
         retain_cards_not_at_path(&mut self.by_related_entity, file_path);
         retain_cards_not_at_path(&mut self.by_content, file_path);
+        self.by_path.remove(file_path);
         self.content_by_path.remove(file_path);
     }
 
@@ -386,6 +405,7 @@ impl KnowledgeIndex {
             && self.by_related_filename.is_empty()
             && self.by_related_entity.is_empty()
             && self.by_content.is_empty()
+            && self.by_path.is_empty()
     }
 
     pub fn all_cards(&self) -> Vec<KnowledgeCard> {
@@ -413,6 +433,7 @@ impl KnowledgeIndex {
     }
 
     pub fn add_card_with_content(&mut self, card: KnowledgeCard, content: Option<&str>) {
+        self.by_path.insert(card.file_path.clone(), card.clone());
         for filename in &card.filenames {
             self.by_filename
                 .entry(filename.clone())
@@ -524,6 +545,7 @@ impl KnowledgeIndex {
                 kind: fm.kind.clone(),
                 created: fm.created.clone(),
                 created_at: fm.created_at.clone(),
+                updated: fm.updated.clone(),
                 file_path,
             },
             content,
@@ -616,6 +638,76 @@ impl KnowledgeIndex {
             }
         }
         rank_cards(out, max_items)
+    }
+
+    pub fn lessons_for_pulse(&self, max_items: usize) -> Vec<KnowledgeCard> {
+        let mut seen = HashSet::<PathBuf>::new();
+        let mut matched: Vec<&KnowledgeCard> = Vec::new();
+        for tag in ["lesson", "convention"] {
+            if let Some(cards) = self.by_tag.get(tag) {
+                for card in cards {
+                    if card_is_task_scoped(card) {
+                        continue;
+                    }
+                    if seen.insert(card.file_path.clone()) {
+                        matched.push(card);
+                    }
+                }
+            }
+        }
+        matched.sort_by(|a, b| {
+            card_recency(b)
+                .cmp(card_recency(a))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        matched.into_iter().take(max_items).cloned().collect()
+    }
+
+    pub fn memos_by_tag_or_kind_substring(
+        &self,
+        allowed_tags: &[&str],
+        max_items: usize,
+    ) -> Vec<(KnowledgeCard, String)> {
+        let allowed_lower: Vec<String> =
+            allowed_tags.iter().map(|tag| tag.to_lowercase()).collect();
+        let mut matched: Vec<&KnowledgeCard> = Vec::new();
+        for card in self.by_path.values() {
+            if card_is_task_scoped(card) {
+                continue;
+            }
+            let tag_match = card.tags.iter().any(|tag| {
+                let tag_lower = tag.to_lowercase();
+                allowed_lower
+                    .iter()
+                    .any(|allowed| tag_lower.contains(allowed.as_str()))
+            });
+            let kind_match = card.kind.as_deref().map_or(false, |kind| {
+                let kind_lower = kind.to_lowercase();
+                allowed_lower
+                    .iter()
+                    .any(|allowed| kind_lower.contains(allowed.as_str()))
+            });
+            if tag_match || kind_match {
+                matched.push(card);
+            }
+        }
+        matched.sort_by(|a, b| {
+            card_recency(b)
+                .cmp(card_recency(a))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        matched
+            .into_iter()
+            .take(max_items)
+            .map(|card| {
+                let content = self
+                    .content_by_path
+                    .get(&card.file_path)
+                    .cloned()
+                    .unwrap_or_default();
+                (card.clone(), content)
+            })
+            .collect()
     }
 
     pub fn search(
@@ -1256,5 +1348,148 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].card.title, "Active");
+    }
+
+    fn lesson_frontmatter(
+        title: &str,
+        tags: &[&str],
+        kind: Option<&str>,
+        created: &str,
+        status: Option<&str>,
+    ) -> KnowledgeFrontmatter {
+        KnowledgeFrontmatter {
+            title: Some(title.to_string()),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            kind: kind.map(|k| k.to_string()),
+            created: Some(created.to_string()),
+            status: status.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn memos_by_tag_or_kind_substring_matches_tags_kind_recency_and_bounds() {
+        let mut index = KnowledgeIndex::empty();
+        index.add_from_frontmatter(
+            PathBuf::from("/k/a.md"),
+            &lesson_frontmatter("Lesson A", &["lesson"], None, "2026-01-02", None),
+            Some("body a"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/k/b.md"),
+            &lesson_frontmatter("Convention B", &["convention"], None, "2026-01-05", None),
+            Some("body b"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/k/c.md"),
+            &lesson_frontmatter("Random C", &["misc"], None, "2026-01-09", None),
+            Some("body c"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/k/d.md"),
+            &lesson_frontmatter(
+                "Kind Lessonish",
+                &["misc"],
+                Some("lesson-note"),
+                "2026-01-06",
+                None,
+            ),
+            Some("body d"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/k/e.md"),
+            &lesson_frontmatter(
+                "Archived Lesson",
+                &["lesson"],
+                None,
+                "2026-01-12",
+                Some("archived"),
+            ),
+            Some("body e"),
+        );
+
+        let got = index.memos_by_tag_or_kind_substring(&["lesson", "convention"], 10);
+        let titles: Vec<String> = got.iter().map(|(c, _)| c.title.clone()).collect();
+        assert!(titles.contains(&"Lesson A".to_string()));
+        assert!(titles.contains(&"Convention B".to_string()));
+        assert!(titles.contains(&"Kind Lessonish".to_string()));
+        assert!(!titles.contains(&"Random C".to_string()));
+        assert!(!titles.contains(&"Archived Lesson".to_string()));
+
+        let (_, content_a) = got.iter().find(|(c, _)| c.title == "Lesson A").unwrap();
+        assert_eq!(content_a, "body a");
+
+        let top = index.memos_by_tag_or_kind_substring(&["lesson", "convention"], 1);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0.title, "Kind Lessonish");
+    }
+
+    #[test]
+    fn memos_by_tag_or_kind_substring_excludes_task_scoped_cards() {
+        let mut index = KnowledgeIndex::empty();
+        index.add_from_frontmatter(
+            PathBuf::from("/k/knowledge.md"),
+            &lesson_frontmatter("Knowledge Lesson", &["lesson"], None, "2026-01-02", None),
+            Some("k body"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/t/task.md"),
+            &lesson_frontmatter(
+                "Task Lesson",
+                &["lesson", "scope:task", "scope:task:T-1"],
+                None,
+                "2026-01-09",
+                None,
+            ),
+            Some("t body"),
+        );
+
+        let got = index.memos_by_tag_or_kind_substring(&["lesson"], 10);
+        let titles: Vec<String> = got.iter().map(|(c, _)| c.title.clone()).collect();
+        assert!(titles.contains(&"Knowledge Lesson".to_string()));
+        assert!(!titles.contains(&"Task Lesson".to_string()));
+    }
+
+    #[test]
+    fn lessons_for_pulse_recency_task_exclusion_and_bounds() {
+        let mut index = KnowledgeIndex::empty();
+        index.add_from_frontmatter(
+            PathBuf::from("/k/older.md"),
+            &lesson_frontmatter("Older Lesson", &["lesson"], None, "2026-01-02", None),
+            Some("older"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/k/newer.md"),
+            &lesson_frontmatter(
+                "Newer Convention",
+                &["convention"],
+                None,
+                "2026-01-08",
+                None,
+            ),
+            Some("newer"),
+        );
+        index.add_from_frontmatter(
+            PathBuf::from("/t/task.md"),
+            &lesson_frontmatter(
+                "Task Lesson",
+                &["lesson", "scope:task:T-1"],
+                None,
+                "2026-01-12",
+                None,
+            ),
+            Some("task"),
+        );
+
+        let lessons = index.lessons_for_pulse(5);
+        let titles: Vec<String> = lessons.iter().map(|c| c.title.clone()).collect();
+        assert_eq!(
+            titles,
+            vec!["Newer Convention".to_string(), "Older Lesson".to_string()]
+        );
+
+        let top = index.lessons_for_pulse(1);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].title, "Newer Convention");
     }
 }

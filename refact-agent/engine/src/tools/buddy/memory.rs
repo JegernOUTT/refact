@@ -329,6 +329,7 @@ async fn scan_cards_in_dirs(dirs: Vec<PathBuf>) -> Vec<KnowledgeCard> {
                 kind: frontmatter.kind.clone(),
                 created: frontmatter.created.clone(),
                 created_at: frontmatter.created_at.clone(),
+                updated: frontmatter.updated.clone(),
                 file_path: path.to_path_buf(),
             });
         }
