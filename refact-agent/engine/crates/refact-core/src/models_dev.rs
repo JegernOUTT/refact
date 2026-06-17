@@ -556,6 +556,38 @@ fn model_id_or_last_segment_starts_with(model_id: &str, model_name: &str, prefix
         || name_last_segment.starts_with(&prefix)
 }
 
+/// Reduce a model id to a comparable version stem for exact rule matching by
+/// dropping a provider prefix, trailing reasoning-variant suffixes
+/// (`-thinking`, `-think`, `-reasoner`, `-fast`, `-latest`) and a trailing
+/// 8-digit release date. So `claude-opus-4-20250514`, `claude-opus-4-thinking`
+/// and `claude-opus-4` all collapse to `claude-opus-4`, while
+/// `claude-opus-4-8` stays distinct.
+fn reasoning_model_stem(model_id: &str) -> String {
+    let mut stem = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
+
+    loop {
+        let trimmed = ["-thinking", "-think", "-reasoner", "-fast", "-latest"]
+            .iter()
+            .find_map(|suffix| stem.strip_suffix(suffix));
+        match trimmed {
+            Some(rest) => stem = rest.to_string(),
+            None => break,
+        }
+    }
+
+    if let Some((head, tail)) = stem.rsplit_once('-') {
+        if tail.len() == 8 && tail.bytes().all(|byte| byte.is_ascii_digit()) {
+            stem = head.to_string();
+        }
+    }
+
+    stem
+}
+
 fn is_openai_reasoning_model_id(model_id: &str) -> bool {
     let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
     model_id.starts_with("gpt-")
@@ -1084,5 +1116,168 @@ mod tests {
 
         assert_eq!(openai_caps.tokenizer, "fake");
         assert_eq!(anthropic_caps.tokenizer, "anthropic");
+    }
+
+    fn anthropic_provider() -> ModelsDevProvider {
+        ModelsDevProvider {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn anthropic_reasoning_model(id: &str) -> ModelsDevModel {
+        ModelsDevModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            reasoning: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn effort(options: &[&str]) -> Option<Vec<String>> {
+        Some(options.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn anthropic_controls_for(id: &str) -> ReasoningControls {
+        reasoning_controls_for_model(
+            "anthropic",
+            &anthropic_provider(),
+            &anthropic_reasoning_model(id),
+        )
+    }
+
+    #[test]
+    fn future_anthropic_models_inherit_latest_reasoning_controls() {
+        for id in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-4-8-20260601",
+            "claude-opus-4-8-thinking",
+            "claude-opus-5",
+            "claude-sonnet-4-7",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-haiku-4-7",
+        ] {
+            let controls = anthropic_controls_for(id);
+            assert_eq!(
+                controls.reasoning_effort_options,
+                effort(&["low", "medium", "high", "xhigh", "max"]),
+                "{id} should inherit the latest reasoning effort options"
+            );
+            assert!(
+                controls.supports_adaptive_thinking_budget,
+                "{id} should support adaptive thinking budget"
+            );
+            assert!(
+                !controls.supports_thinking_budget,
+                "{id} should not fall back to fixed thinking budget"
+            );
+        }
+    }
+
+    #[test]
+    fn known_older_anthropic_models_keep_their_reasoning_controls() {
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let controls = anthropic_controls_for(id);
+            assert_eq!(
+                controls.reasoning_effort_options,
+                effort(&["low", "medium", "high", "max"]),
+                "{id} keeps the 4.6 effort tier (no xhigh)"
+            );
+            assert!(controls.supports_adaptive_thinking_budget, "{id}");
+            assert!(!controls.supports_thinking_budget, "{id}");
+        }
+
+        let opus_45 = anthropic_controls_for("claude-opus-4-5-20251101");
+        assert_eq!(
+            opus_45.reasoning_effort_options,
+            effort(&["low", "medium", "high", "max"])
+        );
+        assert!(!opus_45.supports_adaptive_thinking_budget);
+        assert!(opus_45.supports_thinking_budget);
+
+        for id in [
+            "claude-opus-4",
+            "claude-opus-4-20250514",
+            "claude-opus-4-thinking",
+            "claude-opus-4-0",
+            "claude-opus-4-1",
+            "claude-opus-4-1-20250805",
+            "claude-opus-41",
+            "claude-sonnet-4",
+            "claude-sonnet-4-20250514",
+            "claude-sonnet-4-5",
+            "claude-3-7-sonnet",
+        ] {
+            let controls = anthropic_controls_for(id);
+            assert_eq!(
+                controls.reasoning_effort_options, None,
+                "{id} must not advertise effort options"
+            );
+            assert!(
+                !controls.supports_adaptive_thinking_budget,
+                "{id} must not advertise adaptive thinking budget"
+            );
+            assert!(
+                controls.supports_thinking_budget,
+                "{id} keeps the fixed thinking budget"
+            );
+        }
+    }
+
+    #[test]
+    fn non_reasoning_anthropic_models_get_no_controls() {
+        let model = ModelsDevModel {
+            id: "claude-opus-4-8".to_string(),
+            name: "claude-opus-4-8".to_string(),
+            reasoning: Some(false),
+            ..Default::default()
+        };
+        let controls = reasoning_controls_for_model("anthropic", &anthropic_provider(), &model);
+        assert_eq!(controls.reasoning_effort_options, None);
+        assert!(!controls.supports_adaptive_thinking_budget);
+        assert!(!controls.supports_thinking_budget);
+    }
+
+    #[test]
+    fn non_anthropic_reasoning_models_are_unaffected_by_claude_catch_all() {
+        let openai_provider = ModelsDevProvider {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            ..Default::default()
+        };
+        let gpt5 = ModelsDevModel {
+            id: "gpt-5".to_string(),
+            name: "gpt-5".to_string(),
+            reasoning: Some(true),
+            ..Default::default()
+        };
+        let controls = reasoning_controls_for_model("openai", &openai_provider, &gpt5);
+        assert_eq!(
+            controls.reasoning_effort_options,
+            effort(&["minimal", "low", "medium", "high"])
+        );
+        assert!(!controls.supports_adaptive_thinking_budget);
+        assert!(!controls.supports_thinking_budget);
+    }
+
+    #[test]
+    fn reasoning_model_stem_collapses_dates_and_suffixes() {
+        assert_eq!(
+            reasoning_model_stem("claude-opus-4-20250514"),
+            "claude-opus-4"
+        );
+        assert_eq!(
+            reasoning_model_stem("claude-opus-4-thinking"),
+            "claude-opus-4"
+        );
+        assert_eq!(
+            reasoning_model_stem("anthropic/claude-opus-4-20250514-thinking"),
+            "claude-opus-4"
+        );
+        assert_eq!(reasoning_model_stem("claude-opus-4-8"), "claude-opus-4-8");
+        assert_eq!(reasoning_model_stem("claude-opus-4-1"), "claude-opus-4-1");
     }
 }
