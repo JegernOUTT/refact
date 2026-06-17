@@ -86,8 +86,8 @@ jobs:
       - name: Install dependencies and VSCE
         shell: bash
         run: |
-          npm ci
-          npm install ./chat_package_fixed/*.tgz --no-save
+          npm ci --ignore-scripts
+          npm install ./chat_package_fixed/*.tgz --no-save --ignore-scripts
           npm install -g @vscode/vsce
           rm -rf ./chat_package ./chat_package_fixed
 
