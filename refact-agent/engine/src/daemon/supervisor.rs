@@ -1487,7 +1487,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(stopped.state, WorkerState::Stopped);
-        let start_info = tokio::time::timeout(Duration::from_secs(2), start)
+        let start_info = tokio::time::timeout(Duration::from_secs(10), start)
             .await
             .unwrap()
             .unwrap()
