@@ -187,6 +187,7 @@ function persistOpenChatTabs(state: RootState): void {
         tool_use: runtime?.thread.tool_use,
         session_state: runtime?.session_state ?? historyItem?.session_state,
         is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
+        is_task_chat: Boolean(runtime?.thread.is_task_chat),
       };
     }),
   });
@@ -218,8 +219,6 @@ function isPaneRoutableChat(
   if (!chatId) return false;
   const runtime = state.chat.threads[chatId];
   if (!runtime) return false;
-  if (runtime.thread.is_task_chat) return false;
-  if (runtime.thread.buddy_meta?.is_buddy_chat) return false;
   return state.chat.open_thread_ids.includes(chatId);
 }
 

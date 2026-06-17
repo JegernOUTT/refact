@@ -203,6 +203,9 @@ function createPersistedThreadRuntime(
       workflow_id: null,
     };
   }
+  if (tab.is_task_chat) {
+    runtime.thread.is_task_chat = true;
+  }
 
   return runtime;
 }
@@ -238,7 +241,6 @@ const createInitialState = (): Chat => {
   const threads: Chat["threads"] = {};
 
   for (const tab of persistedTabs.tabs) {
-    if (tab.is_buddy_chat) continue;
     threads[tab.id] = createPersistedThreadRuntime(tab, "agent");
   }
 
@@ -541,7 +543,6 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const threads: Chat["threads"] = {};
 
     for (const tab of persistedTabs.tabs) {
-      if (tab.is_buddy_chat) continue;
       threads[tab.id] =
         state.threads[tab.id] ?? createPersistedThreadRuntime(tab, "agent");
     }
@@ -667,6 +668,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       id,
       title,
       isTaskChat,
+      openTab,
       mode,
       taskMeta,
       model,
@@ -679,9 +681,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (existingRt) {
       if (isTaskChat) {
         existingRt.thread.is_task_chat = true;
-        state.open_thread_ids = state.open_thread_ids.filter(
-          (tid) => tid !== id,
-        );
+      }
+      if (openTab !== false && !state.open_thread_ids.includes(id)) {
+        state.open_thread_ids.push(id);
       }
       if (title && !existingRt.thread.title) {
         existingRt.thread.title = title;
@@ -750,7 +752,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
 
     state.threads[id] = newRuntime;
-    if (!isTaskChat) {
+    if (openTab !== false) {
       state.open_thread_ids.push(id);
     }
     state.current_thread_id = id;
@@ -862,6 +864,12 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const { chat_id, title } = action.payload;
     const existingRt = getRuntime(state, chat_id);
     if (existingRt) {
+      if (title && !existingRt.thread.title) {
+        existingRt.thread.title = title;
+      }
+      if (!state.open_thread_ids.includes(chat_id)) {
+        state.open_thread_ids.push(chat_id);
+      }
       state.current_thread_id = chat_id;
       return;
     }
@@ -874,6 +882,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     };
     if (title) newRuntime.thread.title = title;
     state.threads[chat_id] = newRuntime;
+    state.open_thread_ids.push(chat_id);
     state.current_thread_id = chat_id;
   });
 
@@ -881,6 +890,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const { chat_id } = action.payload;
     const existingRt = getRuntime(state, chat_id);
     if (existingRt) {
+      if (!state.open_thread_ids.includes(chat_id)) {
+        state.open_thread_ids.push(chat_id);
+      }
       state.current_thread_id = chat_id;
       return;
     }
@@ -892,6 +904,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       workflow_id: null,
     };
     state.threads[chat_id] = newRuntime;
+    state.open_thread_ids.push(chat_id);
     state.current_thread_id = chat_id;
   });
 
@@ -979,15 +992,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(restoreChat, (state, action) => {
-    const isBuddyChat = Boolean(action.payload.buddy_meta?.is_buddy_chat);
     const existingRt = getRuntime(state, action.payload.id);
     if (existingRt) {
       applyRestoredThread(existingRt, action.payload, state.tool_use);
-      if (isBuddyChat || existingRt.thread.is_task_chat) {
-        state.open_thread_ids = state.open_thread_ids.filter(
-          (id) => id !== action.payload.id,
-        );
-      } else if (!state.open_thread_ids.includes(action.payload.id)) {
+      if (!state.open_thread_ids.includes(action.payload.id)) {
         state.open_thread_ids.push(action.payload.id);
       }
       state.current_thread_id = action.payload.id;
@@ -1030,7 +1038,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     applyRestoredThread(newRuntime, action.payload, state.tool_use);
 
     state.threads[action.payload.id] = newRuntime;
-    if (!isBuddyChat && !state.open_thread_ids.includes(action.payload.id)) {
+    if (!state.open_thread_ids.includes(action.payload.id)) {
       state.open_thread_ids.push(action.payload.id);
     }
     state.current_thread_id = action.payload.id;
@@ -1046,9 +1054,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
 
     if (existingRt) {
-      const shouldOpenTab =
-        openTab !== false && !existingRt.thread.is_task_chat;
-      if (shouldOpenTab && !state.open_thread_ids.includes(id)) {
+      if (openTab !== false && !state.open_thread_ids.includes(id)) {
         state.open_thread_ids.push(id);
       }
       state.current_thread_id = id;
@@ -1692,9 +1698,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if ("task_meta" in params && params.task_meta != null) {
           rt.thread.task_meta = params.task_meta as ChatThread["task_meta"];
           rt.thread.is_task_chat = true;
-          state.open_thread_ids = state.open_thread_ids.filter(
-            (id) => id !== chat_id,
-          );
+          if (!state.open_thread_ids.includes(chat_id)) {
+            state.open_thread_ids.push(chat_id);
+          }
         }
         rt.last_applied_seq = event.seq;
         break;

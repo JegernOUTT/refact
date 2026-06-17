@@ -49,6 +49,8 @@ import styles from "./TabBar.module.css";
 type DisplayInfo = {
   title: string;
   session_state?: string;
+  is_buddy_chat?: boolean;
+  is_task_chat?: boolean;
   unreadNotificationCount: number;
 };
 
@@ -143,6 +145,8 @@ function displayInfoForSurface(
   return {
     title: runtime?.thread.title ?? fallbackSurfaceTitle(surfaceKey),
     session_state: runtime?.session_state,
+    is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
+    is_task_chat: Boolean(runtime?.thread.is_task_chat),
     unreadNotificationCount: 0,
   };
 }
@@ -191,6 +195,8 @@ export function TabBar() {
           title: display.title,
           status: getStatusFromSessionState(display.session_state),
           unreadNotificationCount,
+          is_buddy_chat: display.is_buddy_chat,
+          is_task_chat: display.is_task_chat,
           isGroup,
           paneCount: group ? collectLeafIds(group.root).length : 1,
         };
@@ -368,6 +374,26 @@ export function TabBar() {
                     >
                       <Icon icon={Layers} size="sm" />
                       {tab.paneCount}
+                    </Badge>
+                  )}
+                  {tab.is_buddy_chat && (
+                    <Badge
+                      tone="accent"
+                      size="xs"
+                      variant="outline"
+                      className={styles.kindBadge}
+                    >
+                      Buddy
+                    </Badge>
+                  )}
+                  {tab.is_task_chat && (
+                    <Badge
+                      tone="muted"
+                      size="xs"
+                      variant="outline"
+                      className={styles.kindBadge}
+                    >
+                      Task
                     </Badge>
                   )}
                   <span className={styles.tabTitle}>{tab.title}</span>

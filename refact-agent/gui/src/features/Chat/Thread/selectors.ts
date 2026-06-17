@@ -129,6 +129,7 @@ export type TabDisplayData = {
   session_state?: string;
   mode?: string;
   is_buddy_chat?: boolean;
+  is_task_chat?: boolean;
   unreadNotificationCount: number;
 };
 
@@ -149,7 +150,6 @@ export const selectTabsDisplayData = createSelector(
   ): TabDisplayData[] =>
     openIds.flatMap((id) => {
       const runtime = threads[id];
-      if (runtime?.thread.buddy_meta?.is_buddy_chat) return [];
       const historyItem = historyChats[id] as
         | (typeof historyChats)[string]
         | undefined;
@@ -162,7 +162,8 @@ export const selectTabsDisplayData = createSelector(
           title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
           session_state: liveSessionState ?? historyItem?.session_state,
           mode: runtime?.thread.mode ?? historyItem?.mode,
-          is_buddy_chat: false,
+          is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
+          is_task_chat: Boolean(runtime?.thread.is_task_chat),
           unreadNotificationCount:
             pendingNotifications?.filter(
               (notification) => notification.receivedAt > lastSeen,

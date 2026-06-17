@@ -179,6 +179,7 @@ export const createChatWithId = createAction<{
   id: string;
   title?: string;
   isTaskChat?: boolean;
+  openTab?: boolean;
   mode?: string;
   taskMeta?: TaskMeta;
   model?: string;

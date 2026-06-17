@@ -11,13 +11,10 @@ import {
   selectAllThreads,
   selectBackgroundAgentsByThread,
   selectChatId,
-  selectCurrentThreadId,
-  selectIsBuddyChat,
   selectIsStreaming,
   selectThread,
   switchToThread,
 } from "./Chat";
-import { Chat } from "./Chat/Chat";
 import { selectFocusedActiveTabId } from "./ChatPanes/panesSlice";
 import { WorkspaceView } from "./Workspace/WorkspaceView";
 
@@ -115,10 +112,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const { chatPageChange, setIsChatStreaming, setIsChatReady } =
     useEventsBusForIDE();
   const chatId = useAppSelector(selectChatId);
-  const currentThreadId = useAppSelector(selectCurrentThreadId);
-  const currentThreadIsBuddyChat = useAppSelector((state) =>
-    currentThreadId ? selectIsBuddyChat(state, currentThreadId) : false,
-  );
   const currentThread = useAppSelector(selectThread);
   const backgroundAgents = useAppSelector((state) =>
     selectBackgroundAgentsByThread(state, chatId),
@@ -498,16 +491,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
             {!pageSwitching && renderedPage.name === "chat" && (
               <InternalLinkProvider onInternalLink={handleInternalLink}>
-                {currentThreadIsBuddyChat ? (
-                  <Chat
-                    host={config.host}
-                    tabbed={config.tabbed}
-                    backFromChat={goBack}
-                    chatId={currentThreadId}
-                  />
-                ) : (
-                  <WorkspaceView />
-                )}
+                <WorkspaceView />
               </InternalLinkProvider>
             )}
             {!pageSwitching && isSettingsPage(renderedPage) && (

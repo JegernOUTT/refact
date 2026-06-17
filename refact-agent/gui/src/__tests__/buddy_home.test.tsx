@@ -4264,7 +4264,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
 
     const rt = store.getState().chat.threads["existing-buddy-chat"];
     expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
-    expect(store.getState().chat.open_thread_ids).not.toContain(
+    expect(store.getState().chat.open_thread_ids).toContain(
       "existing-buddy-chat",
     );
   });
@@ -4325,7 +4325,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
     });
     expect(rt?.thread.messages).toHaveLength(1);
     expect(store.getState().pages.at(-1)?.name).toBe("chat");
-    expect(store.getState().chat.open_thread_ids).not.toContain(
+    expect(store.getState().chat.open_thread_ids).toContain(
       "workflow-buddy-chat",
     );
   });

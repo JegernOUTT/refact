@@ -56,13 +56,30 @@ describe("Chat Thread Reducer - Core Functionality", () => {
   });
 
   describe("Task Chat Handling", () => {
-    test("should_not_add_task_chat_to_open_tabs", () => {
+    test("should_add_task_chat_to_open_tabs", () => {
       const taskChatId = "task-chat-123";
       const state = chatReducer(
         initialState,
         createChatWithId({
           id: taskChatId,
           isTaskChat: true,
+          title: "Task Chat",
+        }),
+      );
+
+      expect(state.open_thread_ids).toContain(taskChatId);
+      expect(state.threads[taskChatId]).toBeDefined();
+      expect(state.threads[taskChatId]?.thread.is_task_chat).toBe(true);
+    });
+
+    test("should_allow_task_workspace_to_create_internal_chat_without_open_tab", () => {
+      const taskChatId = "task-chat-internal";
+      const state = chatReducer(
+        initialState,
+        createChatWithId({
+          id: taskChatId,
+          isTaskChat: true,
+          openTab: false,
           title: "Task Chat",
         }),
       );
@@ -84,7 +101,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       );
 
       expect(state.threads[taskChatId]?.thread.is_task_chat).toBe(true);
-      expect(state.open_thread_ids).not.toContain(taskChatId);
+      expect(state.open_thread_ids).toContain(taskChatId);
     });
   });
 

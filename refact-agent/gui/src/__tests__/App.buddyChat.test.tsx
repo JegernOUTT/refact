@@ -6,7 +6,7 @@ import { InnerApp } from "../features/App";
 import { restoreChat } from "../features/Chat/Thread";
 import type { ChatHistoryItem } from "../features/History/historySlice";
 import { setBackendStatus } from "../features/Connection";
-import { render, screen, waitFor } from "../utils/test-utils";
+import { render, screen } from "../utils/test-utils";
 import {
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
@@ -68,14 +68,39 @@ vi.mock("../features/Chat/Chat", async () => {
 
 vi.mock("../features/Workspace/WorkspaceView", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
+  const thread = await vi.importActual<
+    typeof import("../features/Chat/Thread")
+  >("../features/Chat/Thread");
+  const selectorHook = await vi.importActual<
+    typeof import("../hooks/useAppSelector")
+  >("../hooks/useAppSelector");
 
   return {
-    WorkspaceView: () =>
-      React.createElement(
-        "div",
-        { "data-testid": "workspace-view" },
-        "Workspace view",
-      ),
+    WorkspaceView: () => {
+      const currentThreadId = selectorHook.useAppSelector(
+        thread.selectCurrentThreadId,
+      );
+      const messages = selectorHook.useAppSelector((state) =>
+        thread.selectMessagesById(state, currentThreadId),
+      );
+
+      return React.createElement(
+        "section",
+        { "data-testid": "workspace-view", "data-chat-id": currentThreadId },
+        messages.map((message, index) =>
+          React.createElement(
+            "p",
+            {
+              key:
+                "message_id" in message && message.message_id
+                  ? message.message_id
+                  : index,
+            },
+            typeof message.content === "string" ? message.content : "",
+          ),
+        ),
+      );
+    },
   };
 });
 
@@ -202,7 +227,7 @@ afterEach(() => {
 });
 
 describe("App buddy chat page rendering", () => {
-  it("renders the current buddy chat with the single Chat container", async () => {
+  it("renders the current buddy chat inside the workspace view", async () => {
     renderChatPage(
       chatHistoryItem({
         id: "buddy-chat-1",
@@ -211,15 +236,13 @@ describe("App buddy chat page rendering", () => {
       }),
     );
 
-    const singleChat = await screen.findByTestId("single-chat");
+    const workspaceView = await screen.findByTestId("workspace-view");
 
-    expect(singleChat).toHaveAttribute("data-chat-id", "buddy-chat-1");
-    expect(singleChat).toHaveTextContent(
+    expect(workspaceView).toHaveAttribute("data-chat-id", "buddy-chat-1");
+    expect(workspaceView).toHaveTextContent(
       "Buddy investigation transcript squeak",
     );
-    await waitFor(() => {
-      expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
-    });
+    expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
   });
 
   it("keeps normal current chats on the workspace view", async () => {
@@ -231,7 +254,9 @@ describe("App buddy chat page rendering", () => {
       }),
     );
 
-    expect(await screen.findByTestId("workspace-view")).toBeInTheDocument();
+    const workspaceView = await screen.findByTestId("workspace-view");
+
+    expect(workspaceView).toHaveAttribute("data-chat-id", "normal-chat-1");
     expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
   });
 });

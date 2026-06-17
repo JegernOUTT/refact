@@ -28,6 +28,7 @@ export type PersistedChatTab = {
   tool_use?: "quick" | "explore" | "agent";
   session_state?: string;
   is_buddy_chat?: boolean;
+  is_task_chat?: boolean;
 };
 
 export type PersistedChatTabsState = {
@@ -285,6 +286,7 @@ function normalizeChatTab(
     tool_use: normalizeToolUse(value.tool_use),
     session_state: stringOrUndefined(value.session_state),
     is_buddy_chat: booleanOrUndefined(value.is_buddy_chat),
+    is_task_chat: booleanOrUndefined(value.is_task_chat),
   };
 }
 
@@ -299,7 +301,7 @@ export function loadPersistedChatTabs(): PersistedChatTabsState {
 
   for (const rawTab of rawTabs) {
     const tab = normalizeChatTab(rawTab);
-    if (tab && !tab.is_buddy_chat) tabsById.set(tab.id, tab);
+    if (tab) tabsById.set(tab.id, tab);
   }
 
   const openThreadIds = rawOpenThreadIds.filter((id) => tabsById.has(id));
@@ -322,7 +324,7 @@ export function savePersistedChatTabs(input: PersistedChatTabsState): void {
   const tabsById = new Map<string, PersistedChatTab>();
 
   for (const tab of input.tabs) {
-    if (!tab.is_buddy_chat) tabsById.set(tab.id, tab);
+    tabsById.set(tab.id, tab);
   }
 
   const openThreadIds = dedupeStrings(

@@ -110,6 +110,7 @@
 }
 
 .groupBadge,
+.kindBadge,
 .notificationBadge {
   flex: 0 0 auto;
 }
