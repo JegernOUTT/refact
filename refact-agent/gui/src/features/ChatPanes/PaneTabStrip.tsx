@@ -22,18 +22,14 @@ import {
 } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { updateChatTitleById } from "../History/historySlice";
-import {
-  closeThread,
-  reorderOpenThreads,
-  saveTitle,
-  selectTabsDisplayData,
-} from "../Chat/Thread";
+import { closeThread, saveTitle, selectTabsDisplayData } from "../Chat/Thread";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import { useGetChatModesQuery } from "../../services/refact/chatModes";
 import { findLeaf, findLeafByTab } from "./panesTree";
 import {
   moveTabToPane,
   removeTabEverywhere,
+  reorderTabInPane,
   selectFocusedActiveTabId,
   selectFocusedLeafId,
   selectPaneRoot,
@@ -91,8 +87,11 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
 
   const paneTabs = useMemo(() => {
     if (!leaf) return [];
-    const leafTabIds = new Set(leaf.tabIds);
-    return tabs.filter((tab) => leafTabIds.has(tab.id));
+    const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
+    return leaf.tabIds.flatMap((tabId) => {
+      const tab = tabsById.get(tabId);
+      return tab ? [tab] : [];
+    });
   }, [leaf, tabs]);
 
   useEffect(() => {
@@ -211,8 +210,15 @@ export function PaneTabStrip({ leafId }: PaneTabStripProps) {
             tabId: dragged.id,
           }),
         );
+        return;
       }
-      dispatch(reorderOpenThreads({ sourceId: dragged.id, targetId: id }));
+      dispatch(
+        reorderTabInPane({
+          leafId,
+          sourceTabId: dragged.id,
+          targetTabId: id,
+        }),
+      );
     },
     [dispatch, leafId, root],
   );

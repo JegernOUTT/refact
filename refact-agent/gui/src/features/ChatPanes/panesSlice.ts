@@ -7,6 +7,7 @@ import {
   findLeafByTab,
   moveTab,
   normalizeSizes,
+  reorderTabInLeaf,
   splitLeaf,
   type LeafPane,
   type PaneNode,
@@ -381,6 +382,26 @@ export const panesSlice = createSlice({
       );
       ensureFocusedLeaf(state, toLeafId);
     },
+    reorderTabInPane: (
+      state,
+      action: PayloadAction<{
+        leafId: string;
+        sourceTabId: string;
+        targetTabId: string;
+      }>,
+    ) => {
+      const { leafId, sourceTabId, targetTabId } = action.payload;
+      const nextRoot = reorderTabInLeaf(
+        state.root,
+        leafId,
+        sourceTabId,
+        targetTabId,
+      );
+      if (nextRoot === state.root) return;
+
+      state.root = normalizePaneRoot(nextRoot);
+      ensureFocusedLeaf(state);
+    },
     addTabToFocusedPane: (state, action: PayloadAction<string>) => {
       ensureFocusedLeaf(state);
       state.root = addTabToLeaf(
@@ -425,6 +446,7 @@ export const {
   focusPane,
   closePane,
   moveTabToPane,
+  reorderTabInPane,
   addTabToFocusedPane,
   removeTabEverywhere,
   resizeSplit,

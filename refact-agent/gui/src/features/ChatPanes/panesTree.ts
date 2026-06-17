@@ -295,3 +295,51 @@ export function moveTab(
 
   return visit(tree);
 }
+
+export function reorderTabInLeaf(
+  tree: PaneNode,
+  leafId: string,
+  sourceTabId: string,
+  targetTabId: string,
+): PaneNode {
+  if (tree.kind === "leaf") {
+    if (tree.id !== leafId) {
+      return tree;
+    }
+
+    const sourceIndex = tree.tabIds.indexOf(sourceTabId);
+    const targetIndex = tree.tabIds.indexOf(targetTabId);
+
+    if (
+      sourceIndex === -1 ||
+      targetIndex === -1 ||
+      sourceIndex === targetIndex
+    ) {
+      return tree;
+    }
+
+    const tabIds = [...tree.tabIds];
+    const [source] = tabIds.splice(sourceIndex, 1);
+    tabIds.splice(targetIndex, 0, source);
+
+    return {
+      ...tree,
+      tabIds,
+      activeTabId: tree.activeTabId,
+    };
+  }
+
+  const children = tree.children.map((child) =>
+    reorderTabInLeaf(child, leafId, sourceTabId, targetTabId),
+  );
+
+  if (children.every((child, index) => child === tree.children[index])) {
+    return tree;
+  }
+
+  return {
+    ...tree,
+    children,
+    sizes: [...tree.sizes],
+  };
+}

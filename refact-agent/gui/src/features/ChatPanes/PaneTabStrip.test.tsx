@@ -8,7 +8,6 @@ import { server } from "../../utils/mockServer";
 import {
   closeThread,
   createChatWithId,
-  reorderOpenThreads,
   saveTitle,
   updateChatRuntimeFromSessionState,
 } from "../Chat/Thread";
@@ -17,7 +16,9 @@ import type { ProcessCompletedEvent } from "../Notifications";
 import { findLeaf } from "./panesTree";
 import {
   hydratePaneLayout,
+  moveTabToPane,
   removeTabEverywhere,
+  reorderTabInPane,
   setPaneActiveTab,
 } from "./panesSlice";
 import { PaneTabStrip } from "./PaneTabStrip";
@@ -95,6 +96,52 @@ function seedPaneTabs(view: ReturnType<typeof renderPaneTabStrip>) {
   });
 }
 
+function seedSplitPaneTabs(view: ReturnType<typeof renderPaneTabStrip>) {
+  act(() => {
+    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
+    if (initialThreadId) {
+      view.store.dispatch(closeThread({ id: initialThreadId, force: true }));
+    }
+    view.store.dispatch(
+      createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+    );
+    view.store.dispatch(
+      createChatWithId({ id: "chat-b", title: "Chat Beta", mode: "agent" }),
+    );
+    view.store.dispatch(
+      createChatWithId({ id: "chat-c", title: "Chat Gamma", mode: "agent" }),
+    );
+    view.store.dispatch(
+      createChatWithId({ id: "chat-d", title: "Chat Delta", mode: "agent" }),
+    );
+    view.store.dispatch(
+      hydratePaneLayout({
+        root: {
+          kind: "split",
+          id: "root-split",
+          dir: "row",
+          children: [
+            {
+              kind: "leaf",
+              id: "root",
+              tabIds: ["chat-b", "chat-a"],
+              activeTabId: "chat-b",
+            },
+            {
+              kind: "leaf",
+              id: "right",
+              tabIds: ["chat-d", "chat-c"],
+              activeTabId: "chat-d",
+            },
+          ],
+          sizes: [0.5, 0.5],
+        },
+        focusedLeafId: "root",
+      }),
+    );
+  });
+}
+
 function getTabWrap(title: string): HTMLElement {
   const wrap = screen.getByTitle(title).closest("div");
   if (!wrap) throw new Error(`missing tab wrapper for ${title}`);
@@ -112,6 +159,10 @@ function createDataTransferStub() {
       getData: (type: string) => data.get(type) ?? "",
     },
   };
+}
+
+function renderedTabTitles(): (string | null)[] {
+  return screen.getAllByRole("tab").map((tab) => tab.getAttribute("title"));
 }
 
 function createProcessCompletedEvent(
@@ -206,15 +257,30 @@ describe("PaneTabStrip", () => {
     expect(dispatchSpy).toHaveBeenCalledWith(removeTabEverywhere("chat-b"));
   });
 
-  it("reorders open chat tabs after drag and drop", () => {
+  it("renders tabs in leaf tab order instead of global open thread order", () => {
     usePaneTabStripHandlers();
     const view = renderPaneTabStrip();
-    seedPaneTabs(view);
+    seedSplitPaneTabs(view);
+
+    expect(view.store.getState().chat.open_thread_ids).toEqual([
+      "chat-a",
+      "chat-b",
+      "chat-c",
+      "chat-d",
+    ]);
+    expect(rootPaneTabIds(view)).toEqual(["chat-b", "chat-a"]);
+    expect(renderedTabTitles()).toEqual(["Chat Beta", "Chat Alpha"]);
+  });
+
+  it("reorders chat tabs within the pane without changing global or other pane order", () => {
+    usePaneTabStripHandlers();
+    const view = renderPaneTabStrip();
+    seedSplitPaneTabs(view);
     const dispatchSpy = vi.spyOn(view.store, "dispatch");
     view.rerender(<PaneTabStrip leafId="root" />);
 
-    const dragged = screen.getByTitle("Chat Beta");
-    const target = getTabWrap("Chat Alpha");
+    const dragged = screen.getByTitle("Chat Alpha");
+    const target = getTabWrap("Chat Beta");
     const { dataTransfer } = createDataTransferStub();
 
     const dragStart = new Event("dragstart", { bubbles: true });
@@ -225,12 +291,48 @@ describe("PaneTabStrip", () => {
     target.dispatchEvent(drop);
 
     expect(dispatchSpy).toHaveBeenCalledWith(
-      reorderOpenThreads({ sourceId: "chat-b", targetId: "chat-a" }),
+      reorderTabInPane({
+        leafId: "root",
+        sourceTabId: "chat-a",
+        targetTabId: "chat-b",
+      }),
     );
     expect(view.store.getState().chat.open_thread_ids).toEqual([
-      "chat-b",
       "chat-a",
+      "chat-b",
+      "chat-c",
+      "chat-d",
     ]);
+    expect(rootPaneTabIds(view)).toEqual(["chat-a", "chat-b"]);
+    expect(findLeaf(view.store.getState().panes.root, "right")?.tabIds).toEqual(
+      ["chat-d", "chat-c"],
+    );
+  });
+
+  it("moves a chat tab from another pane when dropped on this strip", () => {
+    usePaneTabStripHandlers();
+    const view = renderPaneTabStrip();
+    seedSplitPaneTabs(view);
+    const dispatchSpy = vi.spyOn(view.store, "dispatch");
+    view.rerender(<PaneTabStrip leafId="root" />);
+
+    const { dataTransfer } = createDataTransferStub();
+    dataTransfer.setData("text/plain", "chat:chat-c");
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+    screen.getByLabelText("Pane chat tabs").dispatchEvent(drop);
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      moveTabToPane({
+        fromLeafId: "right",
+        toLeafId: "root",
+        tabId: "chat-c",
+      }),
+    );
+    expect(rootPaneTabIds(view)).toEqual(["chat-b", "chat-a", "chat-c"]);
+    expect(findLeaf(view.store.getState().panes.root, "right")?.tabIds).toEqual(
+      ["chat-d"],
+    );
   });
 
   it("dispatches saveTitle when renaming from double-click rename mode", async () => {

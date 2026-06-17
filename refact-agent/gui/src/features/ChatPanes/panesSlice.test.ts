@@ -18,6 +18,7 @@ import {
   moveTabToPane,
   panesSlice,
   reconcilePanesWithOpenThreads,
+  reorderTabInPane,
   removeTabEverywhere,
   resizeSplit,
   selectFocusedActiveTabId,
@@ -195,6 +196,40 @@ describe("panesSlice", () => {
     }
     expect(state.root.sizes[0]).toBeCloseTo(2 / 3);
     expect(state.root.sizes[1]).toBeCloseTo(1 / 3);
+  });
+
+  test("reorderTabInPane updates only the target leaf tab order", () => {
+    const root: PaneNode = {
+      kind: "split",
+      id: "split-a",
+      dir: "row",
+      children: [
+        leaf("left", ["chat-a", "chat-b"], "chat-b"),
+        leaf("right", ["chat-c", "chat-d", "chat-e"], "chat-d"),
+      ],
+      sizes: [1, 1],
+    };
+
+    const hydrated = paneReducer(
+      undefined,
+      hydratePaneLayout({ root, focusedLeafId: "left" }),
+    );
+    const state = paneReducer(
+      hydrated,
+      reorderTabInPane({
+        leafId: "right",
+        sourceTabId: "chat-e",
+        targetTabId: "chat-c",
+      }),
+    );
+
+    expect(findLeaf(state.root, "right")).toEqual(
+      leaf("right", ["chat-e", "chat-c", "chat-d"], "chat-d"),
+    );
+    expect(findLeaf(state.root, "left")).toEqual(
+      leaf("left", ["chat-a", "chat-b"], "chat-b"),
+    );
+    expect(state.focusedLeafId).toBe("left");
   });
 
   test("hydratePaneLayout normalizes layout and falls back to an existing focused leaf", () => {

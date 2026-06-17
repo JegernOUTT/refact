@@ -4,13 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, within } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
-import {
-  closeThread,
-  createChatWithId,
-  reorderOpenThreads,
-} from "../Chat/Thread";
+import { closeThread, createChatWithId } from "../Chat/Thread";
 import { ChatPane } from "./ChatPane";
-import { hydratePaneLayout, moveTabToPane, splitPane } from "./panesSlice";
+import {
+  hydratePaneLayout,
+  moveTabToPane,
+  reorderTabInPane,
+  splitPane,
+} from "./panesSlice";
 
 vi.mock("../Chat/Chat", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
@@ -236,7 +237,7 @@ describe("ChatPane drag split", () => {
     );
   });
 
-  it("keeps within-strip tab reorder as a reorder action", () => {
+  it("keeps within-strip tab reorder as a pane reorder action", () => {
     usePaneTabStripHandlers();
     const view = renderChatPanes();
     seedSinglePaneChats(view);
@@ -252,7 +253,11 @@ describe("ChatPane drag split", () => {
     fireEvent.drop(targetTab, { dataTransfer });
 
     expect(dispatchSpy).toHaveBeenCalledWith(
-      reorderOpenThreads({ sourceId: "chat-b", targetId: "chat-a" }),
+      reorderTabInPane({
+        leafId: "root",
+        sourceTabId: "chat-b",
+        targetTabId: "chat-a",
+      }),
     );
     expect(dispatchSpy).not.toHaveBeenCalledWith(
       moveTabToPane({

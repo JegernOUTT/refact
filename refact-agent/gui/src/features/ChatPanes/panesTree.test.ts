@@ -7,6 +7,7 @@ import {
   findLeafByTab,
   moveTab,
   normalizeSizes,
+  reorderTabInLeaf,
   splitLeaf,
   type LeafPane,
   type PaneNode,
@@ -176,6 +177,38 @@ describe("panesTree", () => {
 
     expect(collectLeafIds(tree)).toEqual(["a", "b", "c"]);
     expect(collectTabIds(tree)).toEqual(["a1", "a2", "c1"]);
+  });
+
+  test("reorderTabInLeaf moves tabs within a leaf without changing active tab", () => {
+    const tree = split(
+      "root",
+      "row",
+      [leaf("left", ["a", "b"], "b"), leaf("right", ["c", "d", "e"], "d")],
+      [0.4, 0.6],
+    );
+
+    const next = reorderTabInLeaf(tree, "right", "e", "c");
+
+    expect(next).not.toBe(tree);
+    expect(findLeaf(next, "right")).toEqual(
+      leaf("right", ["e", "c", "d"], "d"),
+    );
+    expect(findLeaf(next, "left")).toBe(tree.children[0]);
+    expect(findLeaf(next, "left")).toEqual(leaf("left", ["a", "b"], "b"));
+    expect(tree.children[1]).toEqual(leaf("right", ["c", "d", "e"], "d"));
+  });
+
+  test("reorderTabInLeaf is a no-op when source or target is missing", () => {
+    const tree = split(
+      "root",
+      "row",
+      [leaf("left", ["a", "b"]), leaf("right", ["c", "d"])],
+      [1, 1],
+    );
+
+    expect(reorderTabInLeaf(tree, "right", "missing", "c")).toBe(tree);
+    expect(reorderTabInLeaf(tree, "right", "c", "missing")).toBe(tree);
+    expect(reorderTabInLeaf(tree, "missing", "c", "d")).toBe(tree);
   });
 
   test("normalizeSizes clones leaves and normalizes invalid split sizes recursively", () => {
