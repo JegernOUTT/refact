@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { Toolbar, type Tab } from "./Toolbar";
-import { createChatWithId } from "../../features/Chat/Thread";
+import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
 import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
@@ -212,6 +212,46 @@ describe("Toolbar single workspace tab row", () => {
         taskId: "task-new",
       });
     });
+  });
+
+  it("uses the active workspace chat for New Chat cleanup", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-visible" };
+    const view = renderToolbar(activeTab);
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-visible", title: "Visible Chat" }),
+      );
+      view.store.dispatch(
+        createChatWithId({
+          id: "task-hidden",
+          title: "Task Hidden",
+          openTab: false,
+        }),
+      );
+      view.store.dispatch(switchToThread({ id: "task-hidden", openTab: false }));
+    });
+    rerenderToolbar(view, activeTab);
+
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+
+    await waitFor(() => {
+      expect(view.store.getState().chat.current_thread_id).not.toBe(
+        "task-hidden",
+      );
+    });
+    expect(view.store.getState().chat.threads["chat-visible"]).toBeUndefined();
+    expect(view.store.getState().chat.threads["task-hidden"]).toBeDefined();
+    expect(view.store.getState().chat.open_thread_ids).not.toContain(
+      "task-hidden",
+    );
+    expect(view.store.getState().chat.open_thread_ids).toContain(
+      view.store.getState().chat.current_thread_id,
+    );
+    expect(view.store.getState().chat.current_thread_id).not.toBe(
+      "chat-visible",
+    );
   });
 });
 

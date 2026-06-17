@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { waitFor } from "@testing-library/react";
 
 import { type AppStore, setUpStore } from "../../app/store";
 import { fireEvent, render, screen, within } from "../../utils/test-utils";
-import { createChatWithId } from "../Chat/Thread";
+import { createChatWithId, switchToThread } from "../Chat/Thread";
 import {
   addSurfaceToPane,
   openTab,
@@ -89,6 +90,30 @@ describe("WorkspaceView", () => {
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Down" })).toBeNull();
+  });
+
+  it("reconciles current thread to the active workspace chat on entry", async () => {
+    const store = createWorkspaceStore();
+    store.dispatch(
+      createChatWithId({
+        id: "task-hidden",
+        title: "Task Hidden",
+        openTab: false,
+      }),
+    );
+    store.dispatch(switchToThread({ id: "task-hidden", openTab: false }));
+
+    renderWorkspaceView(store);
+
+    expectSurface(chat("chat-a"));
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+    expect(store.getState().workspace.activeTabId).toBe(chat("chat-a"));
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-a"),
+      chat("chat-b"),
+    ]);
   });
 
   it("renders split panes with distinct surfaces and pane close controls", () => {

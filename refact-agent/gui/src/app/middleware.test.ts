@@ -4,8 +4,13 @@ import { setUpStore } from "./store";
 import {
   closeThread,
   applyChatEvent,
+  createChatWithId,
+  newBuddyChatAction,
+  newChatAction,
+  openBuddyChat,
   setChatModel,
   setMaxNewTokens,
+  switchToThread,
 } from "../features/Chat/Thread";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
@@ -18,6 +23,7 @@ import {
 } from "../utils/chatUiPersistence";
 import {
   closePane as closeWorkspacePane,
+  closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   selectFocusedWorkspaceChatId,
   setPaneActive as setWorkspacePaneActive,
@@ -313,6 +319,122 @@ describe("workspace routing middleware", () => {
 
     await waitFor(() => {
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("creates and selects exactly one workspace tab for visible chat opens", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+    });
+
+    store.dispatch(newChatAction({ title: "Visible Chat" }));
+
+    await waitFor(() => {
+      const chatId = store.getState().chat.current_thread_id;
+      expect(chatId).toBeTruthy();
+      expect(store.getState().workspace.tabs).toEqual([chatSurface(chatId)]);
+      expect(store.getState().workspace.activeTabId).toBe(chatSurface(chatId));
+    });
+
+    const chatId = store.getState().chat.current_thread_id;
+    store.dispatch(switchToThread({ id: chatId }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatSurface(chatId)]);
+      expect(store.getState().workspace.activeTabId).toBe(chatSurface(chatId));
+    });
+  });
+
+  it("selects an existing workspace tab when switching visible chats", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+      },
+    });
+
+    store.dispatch(switchToThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([
+        chatSurface("chat-a"),
+        chatSurface("chat-b"),
+      ]);
+      expect(store.getState().workspace.activeTabId).toBe(
+        chatSurface("chat-b"),
+      );
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("keeps task-internal openTab false switches out of workspace tabs", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+      },
+    });
+
+    store.dispatch(
+      createChatWithId({
+        id: "task-hidden",
+        title: "Task Hidden",
+        openTab: false,
+      }),
+    );
+    store.dispatch(switchToThread({ id: "task-hidden", openTab: false }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getState().chat.current_thread_id).toBe("task-hidden");
+    expect(store.getState().workspace.tabs).toEqual([chatSurface("chat-a")]);
+    expect(store.getState().workspace.activeTabId).toBe(chatSurface("chat-a"));
+  });
+
+  it("closing a workspace chat tab closes the matching thread", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+        activeTabId: chatSurface("chat-b"),
+        groups: {},
+      },
+    });
+
+    store.dispatch(closeWorkspaceTab(chatSurface("chat-b")));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatSurface("chat-a")]);
+      expect(store.getState().chat.open_thread_ids).toEqual(["chat-a"]);
+      expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+  });
+
+  it("opens buddy chats as exactly one workspace tab", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+    });
+
+    store.dispatch(newBuddyChatAction({ chat_id: "buddy-chat" }));
+    store.dispatch(
+      openBuddyChat({ chat_id: "buddy-chat", title: "Buddy Chat" }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("buddy-chat");
+      expect(store.getState().workspace.tabs).toEqual([
+        chatSurface("buddy-chat"),
+      ]);
+      expect(store.getState().workspace.activeTabId).toBe(
+        chatSurface("buddy-chat"),
+      );
     });
   });
 });

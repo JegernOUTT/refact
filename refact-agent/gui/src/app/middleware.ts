@@ -119,6 +119,7 @@ import {
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   hydrateWorkspace,
+  isChatSurface,
   makeSurfaceKey,
   openTab as openWorkspaceTab,
   reconcileWorkspace,
@@ -257,11 +258,6 @@ function openChatInWorkspace(
   if (!isWorkspaceRoutableChat(state, targetChatId)) return;
   const surfaceKey = makeSurfaceKey("chat", targetChatId);
 
-  if (state.workspace.tabs.includes(surfaceKey)) {
-    listenerApi.dispatch(setWorkspaceActiveTab(surfaceKey));
-    return;
-  }
-
   for (const [tabId, group] of Object.entries(state.workspace.groups)) {
     if (!group || !collectTabIds(group.root).includes(surfaceKey)) continue;
     listenerApi.dispatch(setWorkspaceActiveTab(tabId));
@@ -271,6 +267,11 @@ function openChatInWorkspace(
         setWorkspacePaneActive({ tabId, leafId: leaf.id, surfaceKey }),
       );
     }
+    return;
+  }
+
+  if (state.workspace.tabs.includes(surfaceKey)) {
+    listenerApi.dispatch(setWorkspaceActiveTab(surfaceKey));
     return;
   }
 
@@ -353,7 +354,13 @@ startListening({
 });
 
 startListening({
-  matcher: isAnyOf(newChatAction, restoreChat, newIntegrationChat),
+  matcher: isAnyOf(
+    newChatAction,
+    restoreChat,
+    newIntegrationChat,
+    openBuddyChat,
+    newBuddyChatAction,
+  ),
   effect: (_action, listenerApi) => {
     openChatInWorkspace(listenerApi);
   },
@@ -375,6 +382,27 @@ startListening({
   },
 });
 
+function closeWorkspaceChatTab(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+    getOriginalState: () => RootState;
+  },
+  surfaceKey: string,
+): void {
+  const originalWorkspace = listenerApi.getOriginalState().workspace;
+  if (!originalWorkspace.tabs.includes(surfaceKey)) return;
+  const group = originalWorkspace.groups[surfaceKey];
+  const surfaceKeys = group ? collectTabIds(group.root) : [surfaceKey];
+
+  for (const key of new Set(surfaceKeys)) {
+    if (!isChatSurface(key)) continue;
+    listenerApi.dispatch(
+      closeThread({ id: key.slice("chat:".length), force: true }),
+    );
+  }
+}
+
 startListening({
   matcher: isAnyOf(
     setWorkspaceActiveTab,
@@ -389,6 +417,13 @@ startListening({
   ),
   effect: (_action, listenerApi) => {
     switchToFocusedWorkspaceChat(listenerApi);
+  },
+});
+
+startListening({
+  actionCreator: closeWorkspaceTab,
+  effect: (action, listenerApi) => {
+    closeWorkspaceChatTab(listenerApi, action.payload);
   },
 });
 

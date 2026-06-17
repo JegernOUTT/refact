@@ -10,6 +10,7 @@ import {
   selectAllThreads,
   selectChatId,
   setThreadConfirmationStatus,
+  switchToThread,
 } from "../../features/Chat/Thread";
 import { popBackTo, push } from "../../features/Pages/pagesSlice";
 import { openTask } from "../../features/Tasks";
@@ -153,6 +154,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
   const { openSettings } = useEventsBusForIDE();
+  const toolbarChatId =
+    activeTab.type === "chat" ? activeTab.id : currentChatId;
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {
@@ -185,26 +188,30 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   );
 
   const onCreateNewChat = useCallback(() => {
-    const currentThread = allThreads[currentChatId] as
+    const currentThread = allThreads[toolbarChatId] as
       | { thread: { messages: unknown[] } }
       | undefined;
 
-    dispatch(clearThreadPauseReasons({ id: currentChatId }));
+    if (currentThread && toolbarChatId !== currentChatId) {
+      dispatch(switchToThread({ id: toolbarChatId, openTab: false }));
+    }
+
+    dispatch(clearThreadPauseReasons({ id: toolbarChatId }));
     dispatch(
       setThreadConfirmationStatus({
-        id: currentChatId,
+        id: toolbarChatId,
         wasInteracted: false,
         confirmationStatus: true,
       }),
     );
 
     if (currentThread && currentThread.thread.messages.length === 0) {
-      dispatch(closeThread({ id: currentChatId }));
+      dispatch(closeThread({ id: toolbarChatId }));
     }
 
     dispatch(newChatAction());
     handleNavigation("chat");
-  }, [allThreads, currentChatId, dispatch, handleNavigation]);
+  }, [allThreads, currentChatId, toolbarChatId, dispatch, handleNavigation]);
 
   const onCreateNewTask = useCallback(() => {
     void createTask({ name: "New Task" })

@@ -387,7 +387,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (desiredPage.name === "chat") {
       return {
         type: "chat",
-        id: chatId,
+        id: focusedWorkspaceChatId ?? chatId,
       };
     }
     if (desiredPage.name === "history") {
@@ -407,7 +407,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         type: "dashboard",
       };
     }
-  }, [desiredPage, chatId]);
+  }, [desiredPage, chatId, focusedWorkspaceChatId]);
 
   useEffect(() => {
     if (!restoredActiveTabRef.current) return;

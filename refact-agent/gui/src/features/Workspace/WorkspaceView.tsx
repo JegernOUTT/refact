@@ -4,7 +4,11 @@ import { useCallback, useEffect } from "react";
 
 import { IconButton, Tooltip } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectCurrentThreadId } from "../Chat/Thread";
+import {
+  selectCurrentThreadId,
+  selectOpenThreadIds,
+  switchToThread,
+} from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
@@ -12,6 +16,7 @@ import { makeSurfaceKey } from "./surfaceKey";
 import {
   openTab,
   selectActiveTabId,
+  selectFocusedWorkspaceChatId,
   selectIsTabSplit,
   selectTabs,
   selectWorkspaceGroups,
@@ -23,6 +28,7 @@ export function WorkspaceView() {
   const dispatch = useAppDispatch();
   const activeTabId = useAppSelector(selectActiveTabId);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
+  const openThreadIds = useAppSelector(selectOpenThreadIds);
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
   const currentSurfaceKey = currentThreadId
@@ -34,6 +40,13 @@ export function WorkspaceView() {
         group ? collectTabIds(group.root).includes(currentSurfaceKey) : false,
       )
     : false;
+  const currentThreadIsOpen = currentThreadId
+    ? openThreadIds.includes(currentThreadId)
+    : false;
+  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const focusedChatIsOpen = focusedChatId
+    ? openThreadIds.includes(focusedChatId)
+    : false;
   const isSplit = useAppSelector((state) =>
     activeTabId ? selectIsTabSplit(state, activeTabId) : false,
   );
@@ -42,11 +55,24 @@ export function WorkspaceView() {
     if (
       currentSurfaceKey === null ||
       activeTabId !== null ||
-      currentSurfaceKnown
+      currentSurfaceKnown ||
+      !currentThreadIsOpen
     )
       return;
     dispatch(openTab(currentSurfaceKey));
-  }, [activeTabId, currentSurfaceKey, currentSurfaceKnown, dispatch]);
+  }, [
+    activeTabId,
+    currentSurfaceKey,
+    currentSurfaceKnown,
+    currentThreadIsOpen,
+    dispatch,
+  ]);
+
+  useEffect(() => {
+    if (!focusedChatId || !focusedChatIsOpen) return;
+    if (currentThreadId === focusedChatId) return;
+    dispatch(switchToThread({ id: focusedChatId, openTab: false }));
+  }, [focusedChatId, focusedChatIsOpen, currentThreadId, dispatch]);
 
   const handleSplitActiveSurface = useCallback(() => {
     if (!activeTabId) return;
