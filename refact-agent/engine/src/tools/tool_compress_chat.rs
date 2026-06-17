@@ -15,7 +15,7 @@ use crate::tools::tools_description::{
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
 use refact_chat_history::trajectory_ops::{
     build_compression_report_message_with_fingerprint, insert_compression_report_at_boundary,
-    is_memory_path, should_preserve_tool, TOOLS_TO_PRESERVE,
+    is_memory_path, should_preserve_tool,
 };
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
