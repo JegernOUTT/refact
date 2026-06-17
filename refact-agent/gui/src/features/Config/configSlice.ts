@@ -63,7 +63,10 @@ export const changeFeature = createAction<{
   value: boolean;
 }>("config/feature/change");
 
-function hasConfigProperty(config: Partial<Config>, key: keyof Config): boolean {
+function hasConfigProperty(
+  config: Partial<Config>,
+  key: keyof Config,
+): boolean {
   return Object.prototype.hasOwnProperty.call(config, key);
 }
 

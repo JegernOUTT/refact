@@ -167,12 +167,12 @@ describe("App workspace restore", () => {
 
     await waitFor(() => {
       expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-b");
-      expect(
-        store.getState().workspace.groups[chatA]?.focusedLeafId,
-      ).toBe("right");
-      expect(
-        store.getState().workspace.groups[chatA]?.root,
-      ).toEqual(twoPaneRoot());
+      expect(store.getState().workspace.groups[chatA]?.focusedLeafId).toBe(
+        "right",
+      );
+      expect(store.getState().workspace.groups[chatA]?.root).toEqual(
+        twoPaneRoot(),
+      );
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
       expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
     });

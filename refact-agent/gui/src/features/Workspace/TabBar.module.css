@@ -55,7 +55,8 @@
 
 .tabWrap::after {
   position: absolute;
-  inset-inline: var(--rf-space-2) calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  inset-inline: var(--rf-space-2)
+    calc(var(--rf-control-h-sm) + var(--rf-space-2));
   bottom: calc(-1 * var(--rf-space-1));
   height: var(--rf-hairline);
   background: var(--rf-color-accent);

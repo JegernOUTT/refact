@@ -1411,7 +1411,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         id: activeChat.chatId,
         title: formatAgentChatTitle(card.id, card.title),
         isTaskChat: true,
-          openTab: false,
+        openTab: false,
         mode: "TASK_AGENT",
         taskMeta: {
           task_id: taskId,
@@ -1493,7 +1493,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               id: newChatId,
               title: "",
               isTaskChat: true,
-          openTab: false,
+              openTab: false,
               mode: resolvedMode,
               taskMeta: {
                 task_id: taskId,
@@ -1847,7 +1847,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               mergeTarget.card.title,
             ),
             isTaskChat: true,
-          openTab: false,
+            openTab: false,
             mode: "TASK_AGENT",
             taskMeta: {
               task_id: taskId,

@@ -40,7 +40,12 @@ export function WorkspaceView() {
   );
 
   useEffect(() => {
-    if (currentSurfaceKey === null || activeTabId !== null || currentSurfaceKnown) return;
+    if (
+      currentSurfaceKey === null ||
+      activeTabId !== null ||
+      currentSurfaceKnown
+    )
+      return;
     dispatch(openTab(currentSurfaceKey));
   }, [activeTabId, currentSurfaceKey, currentSurfaceKnown, dispatch]);
 

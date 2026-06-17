@@ -522,7 +522,7 @@ function createFallbackWorkspace(): WorkspaceState {
   const persistedTabs = loadPersistedChatTabs();
   const fallbackThreadId = persistedTabs.currentThreadId
     ? persistedTabs.currentThreadId
-    : (persistedTabs.openThreadIds.at(-1) ?? null);
+    : persistedTabs.openThreadIds.at(-1) ?? null;
   const fallbackTabId = fallbackThreadId ? `chat:${fallbackThreadId}` : null;
 
   return {
@@ -618,7 +618,10 @@ function normalizePersistedWorkspaceNode(
     if (!Array.isArray(value.children) || value.children.length < 2) {
       return null;
     }
-    if (!Array.isArray(value.sizes) || value.sizes.length !== value.children.length) {
+    if (
+      !Array.isArray(value.sizes) ||
+      value.sizes.length !== value.children.length
+    ) {
       return null;
     }
 

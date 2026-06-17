@@ -77,10 +77,7 @@ import {
   panesSlice,
   reconcilePanesWithOpenThreads,
 } from "../features/ChatPanes/panesSlice";
-import {
-  reconcileWorkspaceState,
-  workspaceSlice,
-} from "../features/Workspace";
+import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
