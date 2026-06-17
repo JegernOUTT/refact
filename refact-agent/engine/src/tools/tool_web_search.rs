@@ -31,7 +31,7 @@ impl Tool for ToolWebSearch {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Search the web and return results with titles, URLs, and snippets. Uses free general and scoped sources such as DuckDuckGo, SearxNG, Wikipedia, GitHub, Stack Overflow, npm, OpenAlex, Crossref, Hacker News, and Brave Search when BRAVE_SEARCH_API_KEY is configured.".to_string(),
+            description: "Search the web and return results with titles, URLs, and snippets. Uses KeenAble via its no-key remote MCP endpoint by default or REST with KEENABLE_API_KEY, Tavily via keyless API by default or bearer auth with TAVILY_API_KEY, plus free scoped sources such as DuckDuckGo, SearxNG, Wikipedia, GitHub, Stack Overflow, npm, OpenAlex, Crossref, Hacker News, and Brave Search when BRAVE_SEARCH_API_KEY is configured.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("query", "string", "Search query."),
