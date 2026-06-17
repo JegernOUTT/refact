@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { pickDesiredChatSubscriptions } from "../hooks/useAllChatsSubscription";
+import {
+  addSurfaceToPane,
+  openTab,
+  selectVisibleThreadIds,
+  setActiveTab,
+  splitTab,
+  workspaceSlice,
+} from "../features/Workspace";
+import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 
 const chatIds = (count: number) =>
   Array.from({ length: count }, (_, index) => `chat-${index + 1}`);
@@ -80,5 +89,38 @@ describe("pickDesiredChatSubscriptions", () => {
     });
 
     expect(result).toEqual(["chat-3", "chat-2", "chat-1"]);
+  });
+
+  it("subscribes visible chat surfaces from the active workspace group first", () => {
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    const chatB = makeSurfaceKey("chat", "chat-b");
+    const chatC = makeSurfaceKey("chat", "chat-c");
+    let workspace = workspaceSlice.reducer(undefined, openTab(chatA));
+    workspace = workspaceSlice.reducer(workspace, openTab(chatB));
+    workspace = workspaceSlice.reducer(workspace, openTab(chatC));
+    workspace = workspaceSlice.reducer(workspace, setActiveTab(chatA));
+    workspace = workspaceSlice.reducer(
+      workspace,
+      splitTab({ tabId: chatA, dir: "row" }),
+    );
+    workspace = workspaceSlice.reducer(
+      workspace,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:chat-a",
+        surfaceKey: chatB,
+      }),
+    );
+
+    const visibleThreadIds = selectVisibleThreadIds({ workspace });
+    const result = pickDesiredChatSubscriptions({
+      openThreadIds: ["chat-a", "chat-b", "chat-c"],
+      visibleThreadIds,
+      activeChatId: "chat-c",
+      subscribedThreadIds: [],
+      maxSubscriptions: 3,
+    });
+
+    expect(result).toEqual(["chat-a", "chat-b", "chat-c"]);
   });
 });

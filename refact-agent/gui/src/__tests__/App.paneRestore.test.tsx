@@ -4,12 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "../app/store";
 import { InnerApp } from "../features/App";
 import { setBackendStatus } from "../features/Connection";
-import { findLeaf, type PaneNode } from "../features/ChatPanes";
+import type { PaneNode } from "../features/ChatPanes";
+import { selectFocusedWorkspaceChatId } from "../features/Workspace";
+import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 import {
   getProjectStorageNamespace,
   savePersistedActiveTab,
   savePersistedChatTabs,
-  savePersistedPaneLayout,
+  savePersistedWorkspace,
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
@@ -98,6 +100,9 @@ const renderApp = () => {
 };
 
 function twoPaneRoot(): PaneNode {
+  const chatA = makeSurfaceKey("chat", "chat-a");
+  const chatB = makeSurfaceKey("chat", "chat-b");
+
   return {
     kind: "split",
     id: "root:split:row",
@@ -107,14 +112,14 @@ function twoPaneRoot(): PaneNode {
       {
         kind: "leaf",
         id: "left",
-        tabIds: ["chat-a"],
-        activeTabId: "chat-a",
+        tabIds: [chatA],
+        activeTabId: chatA,
       },
       {
         kind: "leaf",
         id: "right",
-        tabIds: ["chat-b"],
-        activeTabId: "chat-b",
+        tabIds: [chatB],
+        activeTabId: chatB,
       },
     ],
   };
@@ -127,9 +132,10 @@ afterEach(() => {
   setProjectStorageNamespace(undefined);
 });
 
-describe("App pane restore", () => {
-  it("restores persisted pane structure and reconciles current thread to the focused pane", async () => {
+describe("App workspace restore", () => {
+  it("restores persisted workspace structure and reconciles current thread to the focused pane", async () => {
     server.use(...appHandlers, sidebarSubscribe);
+    const chatA = makeSurfaceKey("chat", "chat-a");
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/tmp/refact-test"],
       projectName: "refact-test",
@@ -143,7 +149,13 @@ describe("App pane restore", () => {
         { id: "chat-b", title: "Chat B", mode: "agent" },
       ],
     });
-    savePersistedPaneLayout({ root: twoPaneRoot(), focusedLeafId: "right" });
+    savePersistedWorkspace({
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {
+        [chatA]: { root: twoPaneRoot(), focusedLeafId: "right" },
+      },
+    });
     savePersistedActiveTab({ type: "chat", id: "chat-a" });
     setProjectStorageNamespace(undefined);
     sessionStorage.setItem(
@@ -154,19 +166,21 @@ describe("App pane restore", () => {
     const { store } = renderApp();
 
     await waitFor(() => {
-      expect(store.getState().panes.focusedLeafId).toBe("right");
-      expect(findLeaf(store.getState().panes.root, "right")?.activeTabId).toBe(
-        "chat-b",
-      );
+      expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-b");
+      expect(
+        store.getState().workspace.groups[chatA]?.focusedLeafId,
+      ).toBe("right");
+      expect(
+        store.getState().workspace.groups[chatA]?.root,
+      ).toEqual(twoPaneRoot());
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
       expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
     });
 
-    const root = store.getState().panes.root;
-    expect(root).toEqual(twoPaneRoot());
+    expect(store.getState().workspace.tabs).toEqual([chatA]);
   });
 
-  it("prunes dangling pane tabs and degrades missing layouts to a single leaf fallback", async () => {
+  it("prunes dangling workspace chats and degrades missing layouts to a single tab fallback", async () => {
     server.use(
       ...appHandlers,
       http.get("*/v1/sidebar/subscribe", () => {
@@ -236,6 +250,9 @@ describe("App pane restore", () => {
         });
       }),
     );
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    const missingLeft = makeSurfaceKey("chat", "missing-left");
+    const missingRight = makeSurfaceKey("chat", "missing-right");
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/tmp/refact-test"],
       projectName: "refact-test",
@@ -246,28 +263,34 @@ describe("App pane restore", () => {
       currentThreadId: "chat-a",
       tabs: [{ id: "chat-a", title: "Chat A", mode: "agent" }],
     });
-    savePersistedPaneLayout({
-      root: {
-        kind: "split",
-        id: "root:split:row",
-        dir: "row",
-        sizes: [0.5, 0.5],
-        children: [
-          {
-            kind: "leaf",
-            id: "left",
-            tabIds: ["missing-left"],
-            activeTabId: "missing-left",
+    savePersistedWorkspace({
+      tabs: [chatA, missingLeft],
+      activeTabId: missingLeft,
+      groups: {
+        [chatA]: {
+          root: {
+            kind: "split",
+            id: "root:split:row",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              {
+                kind: "leaf",
+                id: "left",
+                tabIds: [missingLeft],
+                activeTabId: missingLeft,
+              },
+              {
+                kind: "leaf",
+                id: "right",
+                tabIds: [missingRight],
+                activeTabId: missingRight,
+              },
+            ],
           },
-          {
-            kind: "leaf",
-            id: "right",
-            tabIds: ["missing-right"],
-            activeTabId: "missing-right",
-          },
-        ],
+          focusedLeafId: "right",
+        },
       },
-      focusedLeafId: "right",
     });
     savePersistedActiveTab({ type: "chat", id: "chat-a" });
     setProjectStorageNamespace(undefined);
@@ -280,13 +303,11 @@ describe("App pane restore", () => {
 
     await waitFor(() => {
       expect(store.getState().chat.open_thread_ids).toEqual(["chat-a"]);
-      expect(store.getState().panes.root).toEqual({
-        kind: "leaf",
-        id: "root",
-        tabIds: ["chat-a"],
-        activeTabId: "chat-a",
+      expect(store.getState().workspace).toEqual({
+        tabs: [chatA],
+        activeTabId: chatA,
+        groups: {},
       });
-      expect(store.getState().panes.focusedLeafId).toBe("root");
       expect(store.getState().chat.current_thread_id).toBe("chat-a");
     });
   });

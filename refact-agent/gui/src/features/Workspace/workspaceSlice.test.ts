@@ -16,6 +16,7 @@ import {
   reorderTabs,
   selectActiveGroup,
   selectActiveTabId,
+  selectFocusedWorkspaceChatId,
   selectGroupForTab,
   selectIsTabSplit,
   selectTabs,
@@ -408,6 +409,26 @@ describe("workspaceSlice", () => {
 
     expect(selectVisibleSurfaceKeys(rootState(state))).toEqual([chatB]);
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["b"]);
+  });
+
+  test("workspace selectors expose the active group's visible and focused chats", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, setActiveTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chatA,
+        leafId: "root:sibling:chat:a",
+        surfaceKey: chatB,
+      }),
+    );
+
+    expect(selectVisibleThreadIds(rootState(state))).toEqual(["a", "b"]);
+    expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("b");
   });
 
   test("openTab enforces the top-level tab cap", () => {

@@ -23,9 +23,17 @@ import {
   getProjectStorageNamespace,
   savePersistedChatTabs,
   savePersistedPaneLayout,
+  savePersistedWorkspace,
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
+import {
+  closePane as closeWorkspacePane,
+  focusPane as focusWorkspacePane,
+  selectFocusedWorkspaceChatId,
+  setPaneActive as setWorkspacePaneActive,
+} from "../features/Workspace";
+import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 function makeThread(id: string): ChatThreadRuntime {
   const mode = id.startsWith("chat-") ? "agent" : undefined;
   const title = id
@@ -100,6 +108,8 @@ function twoPaneRoot(): PaneNode {
     ],
   };
 }
+
+const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -312,7 +322,7 @@ describe("chat pane routing middleware", () => {
     });
   });
 
-  it("hydrates persisted pane layout after the project namespace is trusted", async () => {
+  it("ignores legacy persisted pane layout after the project namespace is trusted", async () => {
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/workspace/project-a"],
       projectName: "project-a",
@@ -349,11 +359,187 @@ describe("chat pane routing middleware", () => {
         "chat-a",
         "chat-b",
       ]);
-      expect(findLeaf(store.getState().panes.root, "right")?.activeTabId).toBe(
+      expect(findLeaf(store.getState().panes.root, "right")).toBeNull();
+      expect(findLeaf(store.getState().panes.root, "root")?.activeTabId).toBe(
         "chat-b",
       );
     });
-    expect(store.getState().panes.focusedLeafId).toBe("right");
+  });
+});
+
+describe("workspace routing middleware", () => {
+  it("hydrates workspace only after the project namespace is trusted", async () => {
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/project-a"],
+      projectName: "project-a",
+    });
+    const namespace = getProjectStorageNamespace();
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    savePersistedWorkspace({
+      tabs: [chatSurface("chat-a")],
+      activeTabId: chatSurface("chat-a"),
+      groups: {
+        [chatSurface("chat-a")]: {
+          root: {
+            kind: "split",
+            id: "root:split:row",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              {
+                kind: "leaf",
+                id: "left",
+                tabIds: [chatSurface("chat-a")],
+                activeTabId: chatSurface("chat-a"),
+              },
+              {
+                kind: "leaf",
+                id: "right",
+                tabIds: [chatSurface("chat-b")],
+                activeTabId: chatSurface("chat-b"),
+              },
+            ],
+          },
+          focusedLeafId: "right",
+        },
+      },
+    });
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      namespace ?? "",
+    );
+
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+    });
+
+    expect(store.getState().workspace.tabs).toEqual([]);
+
+    store.dispatch(
+      setCurrentProjectInfo({
+        name: "project-a",
+        workspaceRoots: ["/workspace/project-a"],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatSurface("chat-a")]);
+      expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-b");
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+  });
+
+  it("reconciles dangling workspace surfaces and syncs current_thread_id", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {
+          [chatSurface("chat-a")]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatSurface("chat-b")],
+                  activeTabId: chatSurface("chat-b"),
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+        },
+      },
+    });
+
+    store.dispatch(closeThread({ id: "chat-b" }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.groups).toEqual({});
+      expect(store.getState().workspace.tabs).toEqual([chatSurface("chat-a")]);
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+  });
+
+  it("syncs current_thread_id to the focused active workspace pane", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
+      workspace: {
+        tabs: [chatSurface("chat-a")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {
+          [chatSurface("chat-a")]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatSurface("chat-b")],
+                  activeTabId: chatSurface("chat-b"),
+                },
+              ],
+            },
+            focusedLeafId: "left",
+          },
+        },
+      },
+    });
+
+    store.dispatch(
+      setWorkspacePaneActive({
+        tabId: chatSurface("chat-a"),
+        leafId: "right",
+        surfaceKey: chatSurface("chat-b"),
+      }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
+
+    store.dispatch(
+      focusWorkspacePane({ tabId: chatSurface("chat-a"), leafId: "left" }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+
+    store.dispatch(
+      closeWorkspacePane({ tabId: chatSurface("chat-a"), leafId: "left" }),
+    );
+
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
+    });
   });
 });
 

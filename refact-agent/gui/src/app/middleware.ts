@@ -58,9 +58,10 @@ import { saveLastThreadParams } from "../utils/threadStorage";
 import {
   getProjectStorageNamespace,
   isProjectStorageNamespaceTrusted,
-  loadPersistedPaneLayout,
+  loadPersistedWorkspace,
   savePersistedChatTabs,
   savePersistedPaneLayout,
+  savePersistedWorkspace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
 import { integrationsApi } from "../services/refact/integrations";
@@ -124,6 +125,24 @@ import {
   setPaneActiveTab,
   splitPane,
 } from "../features/ChatPanes/panesSlice";
+import { collectTabIds, findLeafByTab } from "../features/ChatPanes/panesTree";
+import {
+  addSurfaceToPane as addSurfaceToWorkspacePane,
+  closePane as closeWorkspacePane,
+  closeTab as closeWorkspaceTab,
+  focusPane as focusWorkspacePane,
+  hydrateWorkspace,
+  makeSurfaceKey,
+  openTab as openWorkspaceTab,
+  reconcileWorkspace,
+  reorderTabs as reorderWorkspaceTabs,
+  resizeGroupSplit,
+  selectFocusedWorkspaceChatId,
+  setActiveTab as setWorkspaceActiveTab,
+  setPaneActive as setWorkspacePaneActive,
+  splitPaneWithSurface,
+  splitTab as splitWorkspaceTab,
+} from "../features/Workspace";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -201,14 +220,28 @@ function persistPaneLayout(state: RootState): void {
   });
 }
 
+function persistWorkspaceLayout(state: RootState): void {
+  syncProjectStorageNamespace(state);
+  savePersistedWorkspace(state.workspace);
+}
+
 function hydratePersistedChatUi(listenerApi: {
   dispatch: AppDispatch;
   getState: () => RootState;
 }): void {
+  const trustedWorkspace = isProjectStorageNamespaceTrusted()
+    ? loadPersistedWorkspace()
+    : null;
+
   listenerApi.dispatch(hydratePersistedChatTabs());
-  if (isProjectStorageNamespaceTrusted()) {
-    listenerApi.dispatch(hydratePaneLayout(loadPersistedPaneLayout()));
-    switchToFocusedPaneTab(listenerApi);
+  if (trustedWorkspace) {
+    listenerApi.dispatch(hydrateWorkspace(trustedWorkspace));
+    listenerApi.dispatch(
+      reconcileWorkspace({
+        openThreadIds: listenerApi.getState().chat.open_thread_ids,
+      }),
+    );
+    switchToFocusedWorkspaceChat(listenerApi);
   }
 }
 
@@ -249,6 +282,49 @@ function switchToFocusedPaneTab(listenerApi: {
   if (!isPaneRoutableChat(state, chatId)) return;
   if (state.chat.current_thread_id === chatId) return;
   listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
+}
+
+function switchToFocusedWorkspaceChat(listenerApi: {
+  dispatch: AppDispatch;
+  getState: () => RootState;
+}): void {
+  const state = listenerApi.getState();
+  const chatId = selectFocusedWorkspaceChatId(state);
+  if (!isPaneRoutableChat(state, chatId)) return;
+  if (state.chat.current_thread_id === chatId) return;
+  listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
+}
+
+function openChatInWorkspace(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+  chatId?: string,
+): void {
+  const state = listenerApi.getState();
+  const targetChatId = chatId ?? state.chat.current_thread_id;
+  if (!isPaneRoutableChat(state, targetChatId)) return;
+  const surfaceKey = makeSurfaceKey("chat", targetChatId);
+
+  if (state.workspace.tabs.includes(surfaceKey)) {
+    listenerApi.dispatch(setWorkspaceActiveTab(surfaceKey));
+    return;
+  }
+
+  for (const [tabId, group] of Object.entries(state.workspace.groups)) {
+    if (!group || !collectTabIds(group.root).includes(surfaceKey)) continue;
+    listenerApi.dispatch(setWorkspaceActiveTab(tabId));
+    const leaf = findLeafByTab(group.root, surfaceKey);
+    if (leaf) {
+      listenerApi.dispatch(
+        setWorkspacePaneActive({ tabId, leafId: leaf.id, surfaceKey }),
+      );
+    }
+    return;
+  }
+
+  listenerApi.dispatch(openWorkspaceTab(surfaceKey));
 }
 
 startListening({
@@ -320,6 +396,115 @@ startListening({
     }
 
     persistPaneLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    openWorkspaceTab,
+    closeWorkspaceTab,
+    setWorkspaceActiveTab,
+    reorderWorkspaceTabs,
+    splitWorkspaceTab,
+    closeWorkspacePane,
+    setWorkspacePaneActive,
+    focusWorkspacePane,
+    addSurfaceToWorkspacePane,
+    splitPaneWithSurface,
+    resizeGroupSplit,
+    hydrateWorkspace,
+    reconcileWorkspace,
+    newChatAction,
+    restoreChat,
+    newIntegrationChat,
+    removeChatFromCache,
+    closeThread,
+    switchToThread,
+    reorderOpenThreads,
+    saveTitle,
+    createChatWithId,
+    updateChatRuntimeFromSessionState,
+    openBuddyChat,
+    newBuddyChatAction,
+    applyChatEvent,
+  ),
+  effect: (action, listenerApi) => {
+    if (
+      applyChatEvent.match(action) &&
+      action.payload.type !== "snapshot" &&
+      action.payload.type !== "thread_updated" &&
+      action.payload.type !== "runtime_updated" &&
+      action.payload.type !== "stream_finished"
+    ) {
+      return;
+    }
+
+    persistWorkspaceLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(newChatAction, restoreChat, newIntegrationChat),
+  effect: (_action, listenerApi) => {
+    openChatInWorkspace(listenerApi);
+  },
+});
+
+startListening({
+  actionCreator: createChatWithId,
+  effect: (action, listenerApi) => {
+    if (action.payload.openTab === false) return;
+    openChatInWorkspace(listenerApi, action.payload.id);
+  },
+});
+
+startListening({
+  actionCreator: switchToThread,
+  effect: (action, listenerApi) => {
+    if (action.payload.openTab === false) return;
+    openChatInWorkspace(listenerApi, action.payload.id);
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    setWorkspaceActiveTab,
+    closeWorkspaceTab,
+    closeWorkspacePane,
+    setWorkspacePaneActive,
+    focusWorkspacePane,
+    addSurfaceToWorkspacePane,
+    splitPaneWithSurface,
+    hydrateWorkspace,
+    reconcileWorkspace,
+  ),
+  effect: (_action, listenerApi) => {
+    switchToFocusedWorkspaceChat(listenerApi);
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    removeChatFromCache,
+    closeThread,
+    reorderOpenThreads,
+    hydratePersistedChatTabs,
+    applyChatEvent,
+  ),
+  effect: (action, listenerApi) => {
+    if (
+      applyChatEvent.match(action) &&
+      action.payload.type !== "snapshot" &&
+      action.payload.type !== "thread_updated"
+    ) {
+      return;
+    }
+
+    listenerApi.dispatch(
+      reconcileWorkspace({
+        openThreadIds: listenerApi.getState().chat.open_thread_ids,
+      }),
+    );
   },
 });
 

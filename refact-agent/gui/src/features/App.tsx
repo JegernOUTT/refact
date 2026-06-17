@@ -15,7 +15,6 @@ import {
   selectThread,
   switchToThread,
 } from "./Chat";
-import { selectFocusedActiveTabId } from "./ChatPanes/panesSlice";
 import { WorkspaceView } from "./Workspace/WorkspaceView";
 
 import {
@@ -75,6 +74,7 @@ import {
   loadPersistedActiveTab,
   savePersistedActiveTab,
 } from "../utils/chatUiPersistence";
+import { selectFocusedWorkspaceChatId } from "./Workspace";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
@@ -100,7 +100,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const allThreads = useAppSelector(selectAllThreads);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
-  const focusedPaneActiveTabId = useAppSelector(selectFocusedActiveTabId);
+  const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
 
   const isPageInHistory = useCallback(
     (pageName: string) => {
@@ -438,8 +438,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
     if (persistedActiveTab.type === "chat") {
       const restoredChatId =
-        focusedPaneActiveTabId && allThreads[focusedPaneActiveTabId]
-          ? focusedPaneActiveTabId
+        focusedWorkspaceChatId && allThreads[focusedWorkspaceChatId]
+          ? focusedWorkspaceChatId
           : persistedActiveTab.id;
       if (!allThreads[restoredChatId]) return;
       restoredActiveTabRef.current = true;
@@ -460,7 +460,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     allThreads,
     canAccessApp,
     dispatch,
-    focusedPaneActiveTabId,
+    focusedWorkspaceChatId,
     isLoggedIn,
     openTasks,
   ]);

@@ -147,6 +147,13 @@ const firstSurfaceKey = (node: PaneNode): SurfaceKey | null => {
   return surfaceKeys.length > 0 ? surfaceKeys[0] : null;
 };
 
+const focusedSurfaceKey = (group: PaneGroup): SurfaceKey | null => {
+  const focusedLeaf = findLeaf(group.root, group.focusedLeafId);
+  if (focusedLeaf?.activeTabId) return focusedLeaf.activeTabId;
+  if (focusedLeaf?.tabIds[0]) return focusedLeaf.tabIds[0];
+  return firstSurfaceKey(group.root);
+};
+
 const findFirstEmptyLeafId = (node: PaneNode): string | null => {
   if (node.kind === "leaf") {
     return node.tabIds.length === 0 ? node.id : null;
@@ -612,6 +619,60 @@ const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
   return normalized;
 };
 
+const paneNodeEquals = (left: PaneNode, right: PaneNode): boolean => {
+  if (left.kind !== right.kind || left.id !== right.id) return false;
+
+  if (left.kind === "leaf" && right.kind === "leaf") {
+    return (
+      left.activeTabId === right.activeTabId &&
+      left.tabIds.length === right.tabIds.length &&
+      left.tabIds.every((tabId, index) => tabId === right.tabIds[index])
+    );
+  }
+
+  if (left.kind === "split" && right.kind === "split") {
+    return (
+      left.dir === right.dir &&
+      left.sizes.length === right.sizes.length &&
+      left.sizes.every((size, index) => size === right.sizes[index]) &&
+      left.children.length === right.children.length &&
+      left.children.every((child, index) =>
+        paneNodeEquals(child, right.children[index]),
+      )
+    );
+  }
+
+  return false;
+};
+
+const groupsEqual = (
+  left: WorkspaceGroups,
+  right: WorkspaceGroups,
+): boolean => {
+  const leftKeys = Object.keys(left).filter((key) => left[key]);
+  const rightKeys = Object.keys(right).filter((key) => right[key]);
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  return leftKeys.every((key) => {
+    const leftGroup = left[key];
+    const rightGroup = right[key];
+    if (!leftGroup || !rightGroup) return false;
+    return (
+      leftGroup.focusedLeafId === rightGroup.focusedLeafId &&
+      paneNodeEquals(leftGroup.root, rightGroup.root)
+    );
+  });
+};
+
+const workspaceStatesEqual = (
+  left: WorkspaceState,
+  right: WorkspaceState,
+): boolean =>
+  left.activeTabId === right.activeTabId &&
+  left.tabs.length === right.tabs.length &&
+  left.tabs.every((tabId, index) => tabId === right.tabs[index]) &&
+  groupsEqual(left.groups, right.groups);
+
 export const reconcileWorkspaceState = (
   state: WorkspaceState,
   openThreadIds: string[],
@@ -644,7 +705,7 @@ export const reconcileWorkspaceState = (
     nextState.activeTabId = nextState.tabs[0] ?? null;
   }
 
-  return nextState;
+  return workspaceStatesEqual(state, nextState) ? state : nextState;
 };
 
 export const workspaceSlice = createSlice({
@@ -990,5 +1051,24 @@ export const selectVisibleThreadIds = (state: WorkspaceRootState): string[] =>
   selectVisibleSurfaceKeys(state)
     .filter(isChatSurface)
     .map((key) => key.slice("chat:".length));
+
+export const selectFocusedWorkspaceSurfaceKey = (
+  state: WorkspaceRootState,
+): SurfaceKey | null => {
+  const activeTabId = state.workspace.activeTabId;
+  if (!activeTabId) return null;
+
+  const group = state.workspace.groups[activeTabId];
+  return group ? focusedSurfaceKey(group) : activeTabId;
+};
+
+export const selectFocusedWorkspaceChatId = (
+  state: WorkspaceRootState,
+): string | null => {
+  const surfaceKey = selectFocusedWorkspaceSurfaceKey(state);
+  return surfaceKey && isChatSurface(surfaceKey)
+    ? surfaceKey.slice("chat:".length)
+    : null;
+};
 
 export default workspaceSlice.reducer;

@@ -28,7 +28,7 @@ import {
 import { calculateBackoff } from "../utils/backoff";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { processCompleted } from "../features/Notifications";
-import { selectVisibleThreadIds } from "../features/ChatPanes/panesSlice";
+import { selectVisibleThreadIds } from "../features/Workspace";
 
 const DEFAULT_MAX_CHAT_SSE_SUBSCRIPTIONS = 50;
 

@@ -77,7 +77,10 @@ import {
   panesSlice,
   reconcilePanesWithOpenThreads,
 } from "../features/ChatPanes/panesSlice";
-import { workspaceSlice } from "../features/Workspace";
+import {
+  reconcileWorkspaceState,
+  workspaceSlice,
+} from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -180,9 +183,26 @@ const paneInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
   };
 };
 
+const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
+  const nextWorkspace = reconcileWorkspaceState(
+    state.workspace,
+    state.chat.open_thread_ids,
+  );
+
+  if (nextWorkspace === state.workspace) {
+    return state;
+  }
+
+  return {
+    ...state,
+    workspace: nextWorkspace,
+  };
+};
+
 const persistedReducer = persistReducer<ReturnType<typeof rootReducer>>(
   rootPersistConfig,
-  (state, action) => paneInvariantReducer(rootReducer(state, action)),
+  (state, action) =>
+    workspaceInvariantReducer(paneInvariantReducer(rootReducer(state, action))),
 );
 
 export type RootState = ReturnType<typeof persistedReducer>;

@@ -5,12 +5,14 @@ import {
   loadPersistedActiveTab,
   loadPersistedChatTabs,
   loadPersistedPaneLayout,
+  loadPersistedWorkspace,
   loadPersistedTasksUIState,
   loadTaskWorkspaceTab,
   saveAskQuestionsDraft,
   savePersistedActiveTab,
   savePersistedChatTabs,
   savePersistedPaneLayout,
+  savePersistedWorkspace,
   savePersistedTasksUIState,
   saveTaskWorkspaceTab,
 } from "../chatUiPersistence";
@@ -21,11 +23,18 @@ import {
   setProjectStorageNamespaceFromProjectInfo,
 } from "../chatUiPersistence";
 import type { PaneNode } from "../../features/ChatPanes/panesTree";
+import { makeSurfaceKey } from "../../features/Workspace/surfaceKey";
+import type { WorkspaceState } from "../../features/Workspace/workspaceSlice";
 
 const PANE_LAYOUT_STORAGE_KEY = "refact:chat-ui:panes:v1";
+const WORKSPACE_STORAGE_KEY = "refact:chat-ui:workspace:v1";
 
 function paneStorageKey(): string {
   return `refact:project:${getProjectStorageNamespace()}:${PANE_LAYOUT_STORAGE_KEY}`;
+}
+
+function workspaceStorageKey(): string {
+  return `refact:project:${getProjectStorageNamespace()}:${WORKSPACE_STORAGE_KEY}`;
 }
 
 function fallbackPaneLayout() {
@@ -60,6 +69,42 @@ function splitPaneRoot(): PaneNode {
         activeTabId: "chat-b",
       },
     ],
+  };
+}
+
+const chatSurface = (id: string) => makeSurfaceKey("chat", id);
+
+function splitWorkspace(): WorkspaceState {
+  const chatA = chatSurface("chat-a");
+  const chatB = chatSurface("chat-b");
+  return {
+    tabs: [chatA],
+    activeTabId: chatA,
+    groups: {
+      [chatA]: {
+        root: {
+          kind: "split",
+          id: "root:split:row",
+          dir: "row",
+          sizes: [0.7, 0.3],
+          children: [
+            {
+              kind: "leaf",
+              id: "left",
+              tabIds: [chatA],
+              activeTabId: chatA,
+            },
+            {
+              kind: "leaf",
+              id: "right",
+              tabIds: [chatB],
+              activeTabId: chatB,
+            },
+          ],
+        },
+        focusedLeafId: "right",
+      },
+    },
   };
 }
 
@@ -471,6 +516,113 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedPaneLayout()).toEqual({
       root: splitPaneRoot(),
       focusedLeafId: "right",
+    });
+  });
+
+  it("round-trips workspace v2 under the project namespace", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    const workspace = splitWorkspace();
+
+    savePersistedWorkspace(workspace);
+
+    expect(loadPersistedWorkspace()).toEqual(workspace);
+  });
+
+  it("ignores legacy pane-only persistence when loading workspace v2", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    savePersistedPaneLayout({ root: splitPaneRoot(), focusedLeafId: "right" });
+
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-b")],
+      activeTabId: chatSurface("chat-b"),
+      groups: {},
+    });
+  });
+
+  it("falls back to one active workspace tab for corrupt or oversized workspace v2", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 2,
+        tabs: Array.from({ length: 31 }, (_, index) =>
+          chatSurface(`chat-${index}`),
+        ),
+        activeTabId: chatSurface("chat-a"),
+        groups: {},
+      }),
+    );
+
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-b")],
+      activeTabId: chatSurface("chat-b"),
+      groups: {},
+    });
+
+    localStorage.setItem(workspaceStorageKey(), "not json");
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-b")],
+      activeTabId: chatSurface("chat-b"),
+      groups: {},
+    });
+  });
+
+  it("prunes dangling workspace chat surfaces", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a" }],
+    });
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 2,
+        tabs: [chatSurface("chat-a"), chatSurface("missing")],
+        activeTabId: chatSurface("missing"),
+        groups: {
+          [chatSurface("chat-a")]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.7, 0.3],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatSurface("missing")],
+                  activeTabId: chatSurface("missing"),
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+        },
+      }),
+    );
+
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-a")],
+      activeTabId: chatSurface("chat-a"),
+      groups: {},
     });
   });
 
