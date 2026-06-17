@@ -1,28 +1,16 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listenerMiddleware } from "./middleware";
 import { setUpStore } from "./store";
 import {
   closeThread,
-  newChatAction,
-  removeChatFromCache,
   setChatModel,
   setMaxNewTokens,
-  switchToThread,
 } from "../features/Chat/Thread";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
 import {
-  findLeaf,
-  focusPane,
-  removeTabEverywhere,
-  setPaneActiveTab,
-  type PaneNode,
-} from "../features/ChatPanes";
-import {
   getProjectStorageNamespace,
   savePersistedChatTabs,
-  savePersistedPaneLayout,
   savePersistedWorkspace,
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
@@ -86,29 +74,6 @@ function makeChatState(currentThreadId: string, ids: string[]) {
   };
 }
 
-function twoPaneRoot(): PaneNode {
-  return {
-    kind: "split",
-    id: "root:split:row",
-    dir: "row",
-    sizes: [0.5, 0.5],
-    children: [
-      {
-        kind: "leaf",
-        id: "left",
-        tabIds: ["chat-a"],
-        activeTabId: "chat-a",
-      },
-      {
-        kind: "leaf",
-        id: "right",
-        tabIds: ["chat-b"],
-        activeTabId: "chat-b",
-      },
-    ],
-  };
-}
-
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 
 afterEach(() => {
@@ -153,217 +118,6 @@ describe("task delete middleware", () => {
     const state = store.getState();
     expect(state.chat.open_thread_ids).toContain(THREAD_ID);
     expect(state.chat.threads[THREAD_ID]).toBeDefined();
-  });
-});
-
-describe("chat pane routing middleware", () => {
-  it("places new chats in the focused pane", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
-      panes: { root: twoPaneRoot(), focusedLeafId: "right" },
-    });
-
-    store.dispatch(newChatAction({ title: "Chat C" }));
-
-    const newChatId = store.getState().chat.current_thread_id;
-    await waitFor(() => {
-      const right = findLeaf(store.getState().panes.root, "right");
-      expect(right?.activeTabId).toBe(newChatId);
-      expect(right?.tabIds).toContain(newChatId);
-    });
-    expect(store.getState().chat.open_thread_ids).toContain(newChatId);
-  });
-
-  it("places switched threads in the focused pane and keeps one pane owner", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
-      panes: { root: twoPaneRoot(), focusedLeafId: "left" },
-    });
-
-    store.dispatch(switchToThread({ id: "chat-b" }));
-
-    await waitFor(() => {
-      const left = findLeaf(store.getState().panes.root, "left");
-      const right = findLeaf(store.getState().panes.root, "right");
-      expect(left?.activeTabId).toBe("chat-b");
-      expect(left?.tabIds).toContain("chat-b");
-      expect(right?.tabIds).not.toContain("chat-b");
-    });
-    expect(store.getState().chat.current_thread_id).toBe("chat-b");
-  });
-
-  it("switches current_thread_id when pane tab selection changes", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
-      panes: {
-        root: {
-          kind: "leaf",
-          id: "root",
-          tabIds: ["chat-a", "chat-b"],
-          activeTabId: "chat-a",
-        },
-        focusedLeafId: "root",
-      },
-    });
-
-    store.dispatch(setPaneActiveTab({ leafId: "root", tabId: "chat-b" }));
-
-    await waitFor(() => {
-      expect(store.getState().chat.current_thread_id).toBe("chat-b");
-    });
-  });
-
-  it("switches current_thread_id when pane focus changes", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b"]),
-      panes: { root: twoPaneRoot(), focusedLeafId: "left" },
-    });
-
-    store.dispatch(focusPane("right"));
-
-    await waitFor(() => {
-      expect(store.getState().chat.current_thread_id).toBe("chat-b");
-    });
-  });
-
-  it("removes a closed background tab from its pane through middleware", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
-      panes: {
-        root: {
-          kind: "leaf",
-          id: "root",
-          tabIds: ["chat-a", "chat-b", "chat-c"],
-          activeTabId: "chat-a",
-        },
-        focusedLeafId: "root",
-      },
-    });
-
-    store.dispatch(closeThread({ id: "chat-b" }));
-
-    await waitFor(() => {
-      const root = findLeaf(store.getState().panes.root, "root");
-      expect(root?.tabIds).toEqual(["chat-a", "chat-c"]);
-      expect(root?.activeTabId).toBe("chat-a");
-    });
-  });
-
-  it("removes a closed active split tab from its pane through middleware", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-b", ["chat-a", "chat-b"]),
-      panes: { root: twoPaneRoot(), focusedLeafId: "right" },
-    });
-
-    store.dispatch(closeThread({ id: "chat-b" }));
-
-    await waitFor(() => {
-      expect(store.getState().panes.root).toEqual({
-        kind: "leaf",
-        id: "left",
-        tabIds: ["chat-a"],
-        activeTabId: "chat-a",
-      });
-      expect(store.getState().panes.focusedLeafId).toBe("left");
-    });
-  });
-
-  it("dispatches pane cleanup from the closeThread middleware listener", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
-      panes: {
-        root: {
-          kind: "leaf",
-          id: "root",
-          tabIds: ["chat-a", "chat-b", "chat-c"],
-          activeTabId: "chat-a",
-        },
-        focusedLeafId: "root",
-      },
-    });
-    const dispatch = vi.spyOn(store, "dispatch");
-    const effect = listenerMiddleware.middleware(store)(() => undefined);
-
-    effect(closeThread({ id: "chat-b" }));
-
-    await waitFor(() => {
-      expect(dispatch).toHaveBeenCalledWith(removeTabEverywhere("chat-b"));
-    });
-  });
-
-  it("removes a cached chat from its pane through middleware", async () => {
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
-      panes: {
-        root: {
-          kind: "leaf",
-          id: "root",
-          tabIds: ["chat-a", "chat-b", "chat-c"],
-          activeTabId: "chat-a",
-        },
-        focusedLeafId: "root",
-      },
-    });
-
-    store.dispatch(removeChatFromCache({ id: "chat-b" }));
-
-    await waitFor(() => {
-      const root = findLeaf(store.getState().panes.root, "root");
-      expect(root?.tabIds).toEqual(["chat-a", "chat-c"]);
-      expect(root?.activeTabId).toBe("chat-a");
-    });
-  });
-
-  it("ignores legacy persisted pane layout after the project namespace is trusted", async () => {
-    setProjectStorageNamespaceFromProjectInfo({
-      workspaceRoots: ["/workspace/project-a"],
-      projectName: "project-a",
-    });
-    const namespace = getProjectStorageNamespace();
-    savePersistedChatTabs({
-      openThreadIds: ["chat-a", "chat-b"],
-      currentThreadId: "chat-b",
-      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
-    });
-    savePersistedPaneLayout({ root: twoPaneRoot(), focusedLeafId: "right" });
-    setProjectStorageNamespace(undefined);
-    sessionStorage.setItem(
-      "refact:chat-ui:project-storage-namespace:v1",
-      namespace ?? "",
-    );
-
-    const store = setUpStore({
-      config: { host: "web", lspPort: 8001, themeProps: {} },
-    });
-
-    expect(store.getState().chat.open_thread_ids).toEqual([]);
-    expect(findLeaf(store.getState().panes.root, "right")).toBeNull();
-
-    store.dispatch(
-      setCurrentProjectInfo({
-        name: "project-a",
-        workspaceRoots: ["/workspace/project-a"],
-      }),
-    );
-
-    await waitFor(() => {
-      expect(store.getState().chat.open_thread_ids).toEqual([
-        "chat-a",
-        "chat-b",
-      ]);
-      expect(findLeaf(store.getState().panes.root, "right")).toBeNull();
-      expect(findLeaf(store.getState().panes.root, "root")?.activeTabId).toBe(
-        "chat-b",
-      );
-    });
   });
 });
 

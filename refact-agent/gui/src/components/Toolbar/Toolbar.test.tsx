@@ -268,9 +268,20 @@ describe("Toolbar tab parity", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("wheel-scrolls an overflowing tab container horizontally", () => {
+  it("does not render an empty task tab strip", () => {
     useToolbarHandlers();
     renderToolbar({ type: "dashboard" });
+
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  });
+
+  it("wheel-scrolls an overflowing tab container horizontally", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    dispatchAndRerender(view, { type: "dashboard" }, () => {
+      view.store.dispatch(openTask({ id: "task-scroll", name: "Task Scroll" }));
+    });
 
     const tabList = screen.getByRole("tablist");
     const container = tabList.parentElement;

@@ -41,6 +41,10 @@ const routes = [
     path: "/tests/e2e/route-showcase.html?route=chat",
   },
   {
+    name: "chat split group",
+    path: "/tests/e2e/route-showcase.html?route=chat-split",
+  },
+  {
     name: "buddy",
     path: "/tests/e2e/route-showcase.html?route=buddy",
   },
@@ -127,6 +131,15 @@ test.describe("no page-level horizontal scroll", () => {
         if (route.path.includes("route=buddy")) {
           await page.getByTestId("buddy-home-content").waitFor();
           await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
+        }
+        if (route.path.includes("route=chat-split")) {
+          await page.locator("[data-workspace-group-tab-id]").waitFor();
+          await expect(
+            page.locator("[data-surface-key='chat:showcase-chat']"),
+          ).toBeVisible();
+          await expect(
+            page.locator("[data-surface-key='chat:showcase-chat-b']"),
+          ).toBeVisible();
         }
 
         const overflow = await page.evaluate<OverflowReport, boolean>(
@@ -225,10 +238,6 @@ test.describe("no page-level horizontal scroll", () => {
               {
                 selector: "[data-testid='buddy-recent-errors-panel']",
                 description: "Buddy recent errors panel",
-              },
-              {
-                selector: "[data-testid='buddy-workshop']",
-                description: "Buddy workshop dock",
               },
             ];
             return targets.map(({ selector, description }) => {

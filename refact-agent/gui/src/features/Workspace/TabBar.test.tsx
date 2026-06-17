@@ -6,7 +6,8 @@ import {
   createChatWithId,
   updateChatRuntimeFromSessionState,
 } from "../Chat/Thread";
-import { processCompleted, type ProcessCompletedEvent } from "../Notifications";
+import { notificationAdded } from "../Notifications";
+import type { ProcessCompletedNotification } from "../Notifications/notificationsSlice";
 import {
   addSurfaceToPane,
   closeTab,
@@ -51,19 +52,20 @@ function createDataTransferStub(): DataTransfer {
   return dataTransfer as DataTransfer;
 }
 
-function createProcessCompletedEvent(
+function createProcessCompletedNotification(
   chatId: string,
   seq: string,
-): ProcessCompletedEvent {
+): ProcessCompletedNotification {
   return {
-    chat_id: chatId,
+    id: `${chatId}:exec_${seq}:${seq}`,
+    threadId: chatId,
     seq,
-    type: "process_completed",
-    process_id: `exec_${seq}`,
+    processId: `exec_${seq}`,
     status: "failed",
-    exit_code: 1,
-    short_description: "Run workspace tab bar test",
+    exitCode: 1,
+    shortDescription: "Run workspace tab bar test",
     mode: "background",
+    receivedAt: Date.now() + Number(seq),
   };
 }
 
@@ -116,9 +118,10 @@ function getTabWrap(name: RegExp): HTMLElement {
 describe("TabBar", () => {
   it("renders all open tabs in one tablist with status and unread badges", () => {
     const store = createStoreWithChatTabs();
-    store.dispatch(
-      processCompleted(createProcessCompletedEvent("chat-a", "1")),
-    );
+    store.dispatch({
+      type: notificationAdded.type,
+      payload: createProcessCompletedNotification("chat-a", "1"),
+    });
     renderTabBar(store);
 
     expect(screen.getAllByRole("tablist")).toHaveLength(1);

@@ -74,10 +74,9 @@ import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import {
-  panesSlice,
-  reconcilePanesWithOpenThreads,
-} from "../features/ChatPanes/panesSlice";
-import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
+  reconcileWorkspaceState,
+  workspaceSlice,
+} from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -150,7 +149,6 @@ const rootReducer = combineSlices(
   browserSlice,
   notificationsSlice,
   schedulerSlice,
-  panesSlice,
   workspaceSlice,
 );
 
@@ -162,23 +160,6 @@ const rootPersistConfig = {
 };
 
 const APPLY_CHAT_EVENT_ACTION = "chatThread/applyChatEvent";
-
-const paneInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
-  const nextPanes = reconcilePanesWithOpenThreads(
-    state.panes,
-    state.chat.open_thread_ids,
-    state.chat.current_thread_id,
-  );
-
-  if (nextPanes === state.panes) {
-    return state;
-  }
-
-  return {
-    ...state,
-    panes: nextPanes,
-  };
-};
 
 const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
   const nextWorkspace = reconcileWorkspaceState(
@@ -198,8 +179,7 @@ const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
 
 const persistedReducer = persistReducer<ReturnType<typeof rootReducer>>(
   rootPersistConfig,
-  (state, action) =>
-    workspaceInvariantReducer(paneInvariantReducer(rootReducer(state, action))),
+  (state, action) => workspaceInvariantReducer(rootReducer(state, action)),
 );
 
 export type RootState = ReturnType<typeof persistedReducer>;

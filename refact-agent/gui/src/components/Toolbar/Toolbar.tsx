@@ -461,110 +461,116 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         />
       </div>
 
-      <div className={styles.toolbarDivider} />
+      {openTasks.length > 0 && (
+        <>
+          <div className={styles.toolbarDivider} />
 
-      <KitTabs
-        className={classNames(styles.tabsContainer, "scrollX")}
-        onWheel={(event) => {
-          const container = event.currentTarget;
-          if (container.scrollWidth <= container.clientWidth) return;
-          event.preventDefault();
-          container.scrollLeft += event.deltaY || event.deltaX;
-        }}
-        value={isTaskTab(activeTab) ? activeTab.taskId : "dashboard"}
-        onValueChange={handleTabValueChange}
-      >
-        <KitTabs.List className={styles.tabList}>
-          {openTasks.map((task) => {
-            const isActive =
-              isTaskTab(activeTab) && activeTab.taskId === task.id;
-            const taskName = task.name.trim() || "Task";
-            const isRenaming =
-              renameState?.kind === "task" && renameState.id === task.id;
+          <KitTabs
+            className={classNames(styles.tabsContainer, "scrollX")}
+            onWheel={(event) => {
+              const container = event.currentTarget;
+              if (container.scrollWidth <= container.clientWidth) return;
+              event.preventDefault();
+              container.scrollLeft += event.deltaY || event.deltaX;
+            }}
+            value={isTaskTab(activeTab) ? activeTab.taskId : "dashboard"}
+            onValueChange={handleTabValueChange}
+          >
+            <KitTabs.List className={styles.tabList}>
+              {openTasks.map((task) => {
+                const isActive =
+                  isTaskTab(activeTab) && activeTab.taskId === task.id;
+                const taskName = task.name.trim() || "Task";
+                const isRenaming =
+                  renameState?.kind === "task" && renameState.id === task.id;
 
-            if (isRenaming) {
-              return (
-                <div key={`task-${task.id}`} className={styles.tabWrap}>
-                  <FieldText
-                    autoComplete="off"
-                    onKeyUp={(e) => handleKeyUpOnTaskRename(e, task.id)}
-                    onBlur={() => setRenameState(null)}
-                    autoFocus
-                    value={renameState.value}
-                    onChange={handleRenameChange}
-                    className={styles.RenameInput}
-                  />
-                </div>
-              );
-            }
-
-            const taskMeta = tasksList.find((t) => t.id === task.id);
-            const taskStatus = taskMeta
-              ? getTaskStatusDotState(taskMeta)
-              : "idle";
-
-            return (
-              <div
-                key={`task-${task.id}`}
-                className={classNames(
-                  styles.tabWrap,
-                  draggingTabId === task.id && styles.tabWrapDragging,
-                )}
-                onDragOver={handleDragOver}
-                onDrop={(event) => handleDrop(event, task.id)}
-                ref={isActive ? activeTabRef : undefined}
-              >
-                <KitTabs.Trigger value={task.id} asChild>
-                  <button
-                    type="button"
-                    aria-selected={isActive}
-                    draggable
-                    className={classNames(
-                      styles.tabButton,
-                      "rf-enter",
-                      "rf-pressable",
-                      isActive && styles.tabButtonActive,
-                    )}
-                    onAuxClick={(event) =>
-                      handleMiddleClickClose(event, {
-                        type: "task",
-                        taskId: task.id,
-                        taskName,
-                      })
-                    }
-                    onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
-                    onDragStart={(event) => handleDragStart(event, task.id)}
-                    onDragEnd={handleDragEnd}
-                    title={taskName}
-                  >
-                    <span className={styles.tabStatus}>
-                      <StatusDot
-                        aria-label={taskStatusLabel(taskStatus)}
-                        status={taskStatus}
-                        size="small"
+                if (isRenaming) {
+                  return (
+                    <div key={`task-${task.id}`} className={styles.tabWrap}>
+                      <FieldText
+                        autoComplete="off"
+                        onKeyUp={(e) => handleKeyUpOnTaskRename(e, task.id)}
+                        onBlur={() => setRenameState(null)}
+                        autoFocus
+                        value={renameState.value}
+                        onChange={handleRenameChange}
+                        className={styles.RenameInput}
                       />
-                    </span>
-                    <span className={styles.tabTitle}>{taskName}</span>
-                  </button>
-                </KitTabs.Trigger>
-                <button
-                  type="button"
-                  className={styles.tabClose}
-                  title="Close task tab"
-                  aria-label="Close tab"
-                  draggable={false}
-                  onMouseDown={stopClosePointerEvent}
-                  onPointerDown={stopClosePointerEvent}
-                  onDragStart={stopCloseDragEvent}
-                  onClick={(e) => handleCloseTaskTab(e, task.id)}
-                >
-                  <Icon icon={X} size="sm" tone="muted" />
-                </button>
-              </div>
-            );
-          })}
-        </KitTabs.List>
-      </KitTabs>
+                    </div>
+                  );
+                }
+
+                const taskMeta = tasksList.find((t) => t.id === task.id);
+                const taskStatus = taskMeta
+                  ? getTaskStatusDotState(taskMeta)
+                  : "idle";
+
+                return (
+                  <div
+                    key={`task-${task.id}`}
+                    className={classNames(
+                      styles.tabWrap,
+                      draggingTabId === task.id && styles.tabWrapDragging,
+                    )}
+                    onDragOver={handleDragOver}
+                    onDrop={(event) => handleDrop(event, task.id)}
+                    ref={isActive ? activeTabRef : undefined}
+                  >
+                    <KitTabs.Trigger value={task.id} asChild>
+                      <button
+                        type="button"
+                        aria-selected={isActive}
+                        draggable
+                        className={classNames(
+                          styles.tabButton,
+                          "rf-enter",
+                          "rf-pressable",
+                          isActive && styles.tabButtonActive,
+                        )}
+                        onAuxClick={(event) =>
+                          handleMiddleClickClose(event, {
+                            type: "task",
+                            taskId: task.id,
+                            taskName,
+                          })
+                        }
+                        onDoubleClick={() =>
+                          handleTaskRenaming(task.id, taskName)
+                        }
+                        onDragStart={(event) => handleDragStart(event, task.id)}
+                        onDragEnd={handleDragEnd}
+                        title={taskName}
+                      >
+                        <span className={styles.tabStatus}>
+                          <StatusDot
+                            aria-label={taskStatusLabel(taskStatus)}
+                            status={taskStatus}
+                            size="small"
+                          />
+                        </span>
+                        <span className={styles.tabTitle}>{taskName}</span>
+                      </button>
+                    </KitTabs.Trigger>
+                    <button
+                      type="button"
+                      className={styles.tabClose}
+                      title="Close task tab"
+                      aria-label="Close tab"
+                      draggable={false}
+                      onMouseDown={stopClosePointerEvent}
+                      onPointerDown={stopClosePointerEvent}
+                      onDragStart={stopCloseDragEvent}
+                      onClick={(e) => handleCloseTaskTab(e, task.id)}
+                    >
+                      <Icon icon={X} size="sm" tone="muted" />
+                    </button>
+                  </div>
+                );
+              })}
+            </KitTabs.List>
+          </KitTabs>
+        </>
+      )}
 
       <div
         className={classNames(styles.toolbarDivider, styles.connectionDivider)}

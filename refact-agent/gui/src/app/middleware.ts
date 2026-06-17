@@ -60,7 +60,6 @@ import {
   isProjectStorageNamespaceTrusted,
   loadPersistedWorkspace,
   savePersistedChatTabs,
-  savePersistedPaneLayout,
   savePersistedWorkspace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
@@ -111,20 +110,6 @@ import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
 } from "../services/refact/apiUrl";
-import {
-  addTabToFocusedPane,
-  closePane,
-  focusPane,
-  hydratePaneLayout,
-  moveTabToPane,
-  reorderTabInPane,
-  removeTabEverywhere,
-  resizeSplit,
-  selectFocusedActiveTabId,
-  selectFocusedLeafId,
-  setPaneActiveTab,
-  splitPane,
-} from "../features/ChatPanes/panesSlice";
 import { collectTabIds, findLeafByTab } from "../features/ChatPanes/panesTree";
 import {
   addSurfaceToPane as addSurfaceToWorkspacePane,
@@ -212,14 +197,6 @@ function persistOpenChatTabs(state: RootState): void {
   });
 }
 
-function persistPaneLayout(state: RootState): void {
-  syncProjectStorageNamespace(state);
-  savePersistedPaneLayout({
-    root: state.panes.root,
-    focusedLeafId: state.panes.focusedLeafId,
-  });
-}
-
 function persistWorkspaceLayout(state: RootState): void {
   syncProjectStorageNamespace(state);
   savePersistedWorkspace(state.workspace);
@@ -245,7 +222,7 @@ function hydratePersistedChatUi(listenerApi: {
   }
 }
 
-function isPaneRoutableChat(
+function isWorkspaceRoutableChat(
   state: RootState,
   chatId: string | null | undefined,
 ): chatId is string {
@@ -255,42 +232,13 @@ function isPaneRoutableChat(
   return state.chat.open_thread_ids.includes(chatId);
 }
 
-function placeChatInFocusedPane(
-  listenerApi: {
-    dispatch: AppDispatch;
-    getState: () => RootState;
-  },
-  chatId?: string,
-): void {
-  const state = listenerApi.getState();
-  const targetChatId = chatId ?? state.chat.current_thread_id;
-  if (!isPaneRoutableChat(state, targetChatId)) return;
-
-  listenerApi.dispatch(addTabToFocusedPane(targetChatId));
-  const focusedLeafId = selectFocusedLeafId(listenerApi.getState());
-  listenerApi.dispatch(
-    setPaneActiveTab({ leafId: focusedLeafId, tabId: targetChatId }),
-  );
-}
-
-function switchToFocusedPaneTab(listenerApi: {
-  dispatch: AppDispatch;
-  getState: () => RootState;
-}): void {
-  const state = listenerApi.getState();
-  const chatId = selectFocusedActiveTabId(state);
-  if (!isPaneRoutableChat(state, chatId)) return;
-  if (state.chat.current_thread_id === chatId) return;
-  listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
-}
-
 function switchToFocusedWorkspaceChat(listenerApi: {
   dispatch: AppDispatch;
   getState: () => RootState;
 }): void {
   const state = listenerApi.getState();
   const chatId = selectFocusedWorkspaceChatId(state);
-  if (!isPaneRoutableChat(state, chatId)) return;
+  if (!isWorkspaceRoutableChat(state, chatId)) return;
   if (state.chat.current_thread_id === chatId) return;
   listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
 }
@@ -304,7 +252,7 @@ function openChatInWorkspace(
 ): void {
   const state = listenerApi.getState();
   const targetChatId = chatId ?? state.chat.current_thread_id;
-  if (!isPaneRoutableChat(state, targetChatId)) return;
+  if (!isWorkspaceRoutableChat(state, targetChatId)) return;
   const surfaceKey = makeSurfaceKey("chat", targetChatId);
 
   if (state.workspace.tabs.includes(surfaceKey)) {
@@ -358,46 +306,6 @@ startListening({
   },
 });
 
-startListening({
-  matcher: isAnyOf(
-    splitPane,
-    setPaneActiveTab,
-    focusPane,
-    closePane,
-    moveTabToPane,
-    reorderTabInPane,
-    addTabToFocusedPane,
-    removeTabEverywhere,
-    resizeSplit,
-    hydratePaneLayout,
-    newChatAction,
-    restoreChat,
-    newIntegrationChat,
-    removeChatFromCache,
-    closeThread,
-    switchToThread,
-    reorderOpenThreads,
-    saveTitle,
-    createChatWithId,
-    updateChatRuntimeFromSessionState,
-    openBuddyChat,
-    newBuddyChatAction,
-    applyChatEvent,
-  ),
-  effect: (action, listenerApi) => {
-    if (
-      applyChatEvent.match(action) &&
-      action.payload.type !== "snapshot" &&
-      action.payload.type !== "thread_updated" &&
-      action.payload.type !== "runtime_updated" &&
-      action.payload.type !== "stream_finished"
-    ) {
-      return;
-    }
-
-    persistPaneLayout(listenerApi.getState());
-  },
-});
 
 startListening({
   matcher: isAnyOf(
@@ -508,60 +416,6 @@ startListening({
   },
 });
 
-startListening({
-  matcher: isAnyOf(closeThread, removeChatFromCache),
-  effect: (action, listenerApi) => {
-    if (!closeThread.match(action) && !removeChatFromCache.match(action))
-      return;
-    listenerApi.dispatch(removeTabEverywhere(action.payload.id));
-    switchToFocusedPaneTab(listenerApi);
-  },
-});
-
-startListening({
-  matcher: isAnyOf(newChatAction, restoreChat, newIntegrationChat),
-  effect: (_action, listenerApi) => {
-    placeChatInFocusedPane(listenerApi);
-  },
-});
-
-startListening({
-  actionCreator: createChatWithId,
-  effect: (action, listenerApi) => {
-    placeChatInFocusedPane(listenerApi, action.payload.id);
-  },
-});
-
-startListening({
-  actionCreator: switchToThread,
-  effect: (action, listenerApi) => {
-    placeChatInFocusedPane(listenerApi, action.payload.id);
-  },
-});
-
-startListening({
-  actionCreator: setPaneActiveTab,
-  effect: (action, listenerApi) => {
-    const state = listenerApi.getState();
-    if (selectFocusedLeafId(state) !== action.payload.leafId) {
-      listenerApi.dispatch(focusPane(action.payload.leafId));
-    }
-
-    const nextState = listenerApi.getState();
-    if (nextState.chat.current_thread_id === action.payload.tabId) return;
-    if (!isPaneRoutableChat(nextState, action.payload.tabId)) return;
-    listenerApi.dispatch(
-      switchToThread({ id: action.payload.tabId, openTab: false }),
-    );
-  },
-});
-
-startListening({
-  actionCreator: focusPane,
-  effect: (_action, listenerApi) => {
-    switchToFocusedPaneTab(listenerApi);
-  },
-});
 
 startListening({
   actionCreator: setError,

@@ -17,7 +17,6 @@ type JsonRecord = Record<string, unknown>;
 
 const CHAT_TABS_STORAGE_KEY = "refact:chat-ui:tabs:v1";
 const ACTIVE_TAB_STORAGE_KEY = "refact:chat-ui:active-tab:v1";
-const PANE_LAYOUT_STORAGE_KEY = "refact:chat-ui:panes:v1";
 const WORKSPACE_STORAGE_KEY = "refact:chat-ui:workspace:v1";
 const TASKS_UI_STORAGE_KEY = "refact:chat-ui:tasks-ui:v1";
 const ASK_QUESTIONS_STORAGE_KEY = "refact:chat-ui:ask-questions:v1";
@@ -29,7 +28,6 @@ let projectStorageNamespace: string | null = null;
 let projectStorageNamespaceTrusted = false;
 
 const MAX_OPEN_CHAT_TABS = 50;
-const MAX_PANE_TREE_NODES = MAX_OPEN_CHAT_TABS * 2 + 1;
 const MAX_WORKSPACE_TREE_NODES = MAX_WORKSPACE_TABS * (MAX_GROUP_LEAVES * 2);
 const MAX_OPEN_TASKS = 25;
 const MAX_PLANNER_CHATS_PER_TASK = 50;
@@ -56,11 +54,6 @@ export type PersistedActiveTab =
   | { type: "dashboard" }
   | { type: "chat"; id: string }
   | { type: "task"; taskId: string };
-
-export type PersistedPaneLayout = {
-  root: PaneNode;
-  focusedLeafId: string;
-};
 
 export type PersistedTaskActiveChat =
   | { type: "planner"; chatId: string }
@@ -362,160 +355,9 @@ export function savePersistedChatTabs(input: PersistedChatTabsState): void {
   });
 }
 
-function createFallbackPaneLayout(): PersistedPaneLayout {
-  return {
-    root: {
-      kind: "leaf",
-      id: "root",
-      tabIds: [],
-      activeTabId: null,
-    },
-    focusedLeafId: "root",
-  };
-}
-
 function collectPaneLeafIds(node: PaneNode): string[] {
   if (node.kind === "leaf") return [node.id];
   return node.children.flatMap((child) => collectPaneLeafIds(child));
-}
-
-type PaneLayoutValidationContext = {
-  allowedTabIds: ReadonlySet<string>;
-  seenNodeIds: Set<string>;
-  seenTabIds: Set<string>;
-  nodeCount: number;
-  tabCount: number;
-};
-
-function normalizePersistedPaneNode(
-  value: unknown,
-  context: PaneLayoutValidationContext,
-): PaneNode | null {
-  if (!isRecord(value)) return null;
-
-  const id = stringOrUndefined(value.id)?.trim();
-  if (!id || context.seenNodeIds.has(id)) return null;
-
-  context.nodeCount += 1;
-  if (context.nodeCount > MAX_PANE_TREE_NODES) return null;
-  context.seenNodeIds.add(id);
-
-  if (value.kind === "leaf") {
-    if (!Array.isArray(value.tabIds)) return null;
-    const rawTabIds: unknown[] = value.tabIds;
-    if (
-      !rawTabIds.every((tabId): tabId is string => typeof tabId === "string")
-    ) {
-      return null;
-    }
-    if (
-      value.activeTabId !== null &&
-      value.activeTabId !== undefined &&
-      typeof value.activeTabId !== "string"
-    ) {
-      return null;
-    }
-
-    const tabIds: string[] = [];
-    for (const rawTabId of rawTabIds) {
-      const tabId = rawTabId.trim();
-      if (!tabId) continue;
-      context.tabCount += 1;
-      if (context.tabCount > MAX_OPEN_CHAT_TABS) return null;
-      if (!context.allowedTabIds.has(tabId)) continue;
-      if (context.seenTabIds.has(tabId) || tabIds.includes(tabId)) continue;
-      context.seenTabIds.add(tabId);
-      tabIds.push(tabId);
-    }
-
-    const rawActiveTabId = stringOrUndefined(value.activeTabId)?.trim() ?? null;
-    const activeTabId =
-      rawActiveTabId && tabIds.includes(rawActiveTabId)
-        ? rawActiveTabId
-        : tabIds[0] ?? null;
-
-    return {
-      kind: "leaf",
-      id,
-      tabIds,
-      activeTabId,
-    };
-  }
-
-  if (value.kind === "split") {
-    const dir = value.dir === "row" || value.dir === "col" ? value.dir : null;
-    if (!dir) return null;
-    if (!Array.isArray(value.children) || value.children.length < 2)
-      return null;
-    if (!Array.isArray(value.sizes)) return null;
-    if (value.sizes.length !== value.children.length) return null;
-    if (value.sizes.some((size) => typeof size !== "number")) return null;
-
-    const sizes = value.sizes.filter(
-      (size): size is number => Number.isFinite(size) && size > 0,
-    );
-    if (sizes.length !== value.sizes.length) return null;
-
-    const children: PaneNode[] = [];
-    for (const child of value.children) {
-      const node = normalizePersistedPaneNode(child, context);
-      if (!node) return null;
-      children.push(node);
-    }
-
-    const sizeSum = sizes.reduce((total, size) => total + size, 0);
-    if (sizeSum <= 0) return null;
-
-    return {
-      kind: "split",
-      id,
-      dir,
-      children,
-      sizes: sizes.map((size) => size / sizeSum),
-    };
-  }
-
-  return null;
-}
-
-export function loadPersistedPaneLayout(): PersistedPaneLayout {
-  const trustedKey = trustedProjectScopedStorageKey(PANE_LAYOUT_STORAGE_KEY);
-  const record = trustedKey ? readRecord(trustedKey) : null;
-  if (!record) return createFallbackPaneLayout();
-
-  const persistedTabs = loadPersistedChatTabs();
-  const context: PaneLayoutValidationContext = {
-    allowedTabIds: new Set(persistedTabs.openThreadIds),
-    seenNodeIds: new Set<string>(),
-    seenTabIds: new Set<string>(),
-    nodeCount: 0,
-    tabCount: 0,
-  };
-  const root = normalizePersistedPaneNode(record.root, context);
-  if (!root) return createFallbackPaneLayout();
-
-  const leafIds = collectPaneLeafIds(root);
-  if (leafIds.length === 0) return createFallbackPaneLayout();
-
-  const rawFocusedLeafId = stringOrUndefined(record.focusedLeafId)?.trim();
-  const focusedLeafId =
-    rawFocusedLeafId && leafIds.includes(rawFocusedLeafId)
-      ? rawFocusedLeafId
-      : leafIds[0];
-
-  return { root, focusedLeafId };
-}
-
-export function savePersistedPaneLayout(layout: PersistedPaneLayout): void {
-  const storageKey = trustedProjectScopedStorageKey(PANE_LAYOUT_STORAGE_KEY);
-  if (!storageKey) return;
-
-  writeRecord(storageKey, {
-    version: 1,
-    root: layout.root,
-    focusedLeafId: layout.focusedLeafId,
-    updatedAt: Date.now(),
-  });
 }
 
 function createFallbackWorkspace(): WorkspaceState {
