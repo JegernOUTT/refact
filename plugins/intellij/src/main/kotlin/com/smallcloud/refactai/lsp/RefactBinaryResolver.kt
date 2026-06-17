@@ -5,7 +5,9 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -17,6 +19,10 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
 internal const val REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download"
+
+private const val INSTALL_LOCK_NAME = ".install.lock"
+private const val INSTALL_LOCK_RETRY_MS = 100L
+private const val INSTALL_LOCK_TIMEOUT_MS = 120_000L
 
 internal data class RefactReleaseAsset(
     val target: String,
@@ -38,6 +44,8 @@ internal data class RefactBinaryResolverOptions(
     val downloader: (URI, Path) -> Unit = ::downloadFile,
     val extractor: (Path, Path, Boolean) -> Unit = ::extractArchive,
     val chmod: (Path) -> Unit = ::makeExecutable,
+    val installLockRetryMs: Long = INSTALL_LOCK_RETRY_MS,
+    val installLockTimeoutMs: Long = INSTALL_LOCK_TIMEOUT_MS,
 )
 
 internal object RefactBinaryResolver {
@@ -199,7 +207,7 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
     val target = refactReleaseTarget(options.osName, options.arch)
     val binaryName = refactBinaryName(options.osName)
     val sharedBinPath = sharedRefactBinaryPath(options.homeDir, options.osName)
-    return withSharedInstallLock(sharedBinPath) {
+    return withSharedInstallLock(sharedBinPath, options.installLockRetryMs, options.installLockTimeoutMs) {
         if (isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
             return@withSharedInstallLock sharedBinPath.toString()
         }
@@ -242,15 +250,46 @@ private fun downloadPinnedRefactBinaryToSharedPath(
     }
 }
 
-private fun <T> withSharedInstallLock(sharedBinPath: Path, block: () -> T): T {
+private fun <T> withSharedInstallLock(sharedBinPath: Path, retryMs: Long, timeoutMs: Long, block: () -> T): T {
     val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
     Files.createDirectories(sharedDir)
-    val lockPath = sharedDir.resolve(".refact-install.lock")
-    FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
-        channel.lock().use {
-            return block()
+    val lockPath = sharedDir.resolve(INSTALL_LOCK_NAME)
+    val channel = acquireInstallLock(lockPath, maxOf(10L, retryMs), maxOf(10L, timeoutMs))
+    try {
+        writeInstallLockDebug(channel)
+        return block()
+    } finally {
+        try {
+            channel.close()
+        } finally {
+            Files.deleteIfExists(lockPath)
         }
     }
+}
+
+private fun acquireInstallLock(lockPath: Path, retryMs: Long, timeoutMs: Long): FileChannel {
+    val startedAt = System.currentTimeMillis()
+    while (true) {
+        try {
+            return FileChannel.open(lockPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        } catch (error: FileAlreadyExistsException) {
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            if (elapsedMs >= timeoutMs) {
+                throw IOException("timed out waiting for Refact install lock at $lockPath", error)
+            }
+            try {
+                Thread.sleep(minOf(retryMs, maxOf(10L, timeoutMs - elapsedMs)))
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("interrupted waiting for Refact install lock at $lockPath", interrupted)
+            }
+        }
+    }
+}
+
+private fun writeInstallLockDebug(channel: FileChannel) {
+    val content = "${ProcessHandle.current().pid()}\n${System.currentTimeMillis()}\n".toByteArray(Charsets.UTF_8)
+    channel.write(ByteBuffer.wrap(content))
 }
 
 private fun promoteSharedBinary(extractedBin: Path, sharedBinPath: Path, options: RefactBinaryResolverOptions) {

@@ -15,6 +15,10 @@ import java.nio.file.Path
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.Comparator
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.GZIPOutputStream
 
 class RefactDaemonClientTest {
@@ -189,6 +193,64 @@ class RefactDaemonClientTest {
                 downloads,
             )
         } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun binaryResolverWaitsOnSharedInstallLockAndRechecksCompatibleBinary() {
+        val root = Files.createTempDirectory("refact-binary-resolver-lock")
+        val homeDir = root.resolve("home")
+        val homeRefact = sharedRefactBinaryPath(homeDir, "Linux")
+        val sharedBinDir = homeRefact.parent
+        val sharedLock = sharedBinDir.resolve(".install.lock")
+        val privateLock = sharedBinDir.resolve(".refact-install.lock")
+        val initialVersionRead = java.util.concurrent.CountDownLatch(1)
+        val downloads = AtomicInteger(0)
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            Files.createDirectories(sharedBinDir)
+            Files.writeString(homeRefact, "old-binary")
+            Files.writeString(sharedLock, "other-installer")
+
+            val resolved = executor.submit(Callable {
+                RefactBinaryResolver.resolve(
+                    RefactBinaryResolverOptions(
+                        minVersion = "8.1.0",
+                        pinnedVersion = "8.1.0",
+                        cacheDir = root.resolve("cache"),
+                        pathEnv = "",
+                        homeDir = homeDir,
+                        osName = "Linux",
+                        arch = "amd64",
+                        versionReader = { path ->
+                            if (path == homeRefact) {
+                                initialVersionRead.countDown()
+                            }
+                            if (Files.readString(path) == "new-binary") "refact 8.1.0" else "refact 7.9.0"
+                        },
+                        downloader = { _, _ -> downloads.incrementAndGet() },
+                        installLockRetryMs = 10,
+                        installLockTimeoutMs = 2_000,
+                        chmod = {},
+                    )
+                )
+            })
+
+            assertTrue(initialVersionRead.await(1, TimeUnit.SECONDS))
+            Thread.sleep(50)
+            assertTrue(Files.exists(sharedLock))
+            Files.writeString(homeRefact, "new-binary")
+            Files.delete(sharedLock)
+
+            assertEquals(homeRefact.toString(), resolved.get(1, TimeUnit.SECONDS))
+            assertEquals(0, downloads.get())
+            assertFalse(Files.exists(sharedLock))
+            assertFalse(Files.exists(privateLock))
+            assertEquals("new-binary", Files.readString(homeRefact))
+        } finally {
+            executor.shutdownNow()
             root.deleteRecursively()
         }
     }
