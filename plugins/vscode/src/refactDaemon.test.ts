@@ -123,27 +123,49 @@ async function runStandaloneResolutionTests() {
             runVersion: async () => undefined,
         }), path.resolve(explicit));
 
+        const binaryName = "refact";
         const pathDir = path.join(root, "path-bin");
         const homeDir = path.join(root, "home");
         const cacheDir = path.join(root, "cache");
-        const pathRefact = path.join(pathDir, process.platform === "win32" ? "refact.exe" : "refact");
-        const homeRefact = path.join(homeDir, ".refact", "bin", process.platform === "win32" ? "refact.exe" : "refact");
+        const pathRefact = path.join(pathDir, binaryName);
+        const homeRefact = path.join(homeDir, ".refact", "bin", binaryName);
         fs.mkdirSync(path.dirname(pathRefact), { recursive: true });
         fs.mkdirSync(path.dirname(homeRefact), { recursive: true });
-        fs.writeFileSync(pathRefact, "");
-        fs.writeFileSync(homeRefact, "");
+        fs.writeFileSync(pathRefact, "refact 8.1.0");
+        fs.writeFileSync(homeRefact, "refact 8.1.0");
 
-        const oldPathIsSkipped = await resolveRefactBinary({
+        const versionChecks: string[] = [];
+        const sharedPreferred = await resolveRefactBinary({
             minVersion: "8.1.0",
             pinnedVersion: "8.1.0",
             cacheDir,
             pathEnv: pathDir,
             homeDir,
-            runVersion: async binPath => binPath === pathRefact ? "refact 8.0.0" : "refact 8.1.0",
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => {
+                versionChecks.push(binPath);
+                return "refact 8.1.0";
+            },
         });
-        assert.strictEqual(oldPathIsSkipped, homeRefact);
+        assert.strictEqual(sharedPreferred, homeRefact);
+        assert.deepStrictEqual(versionChecks, [homeRefact]);
+
+        fs.writeFileSync(homeRefact, "refact 7.9.0");
+        const incompatibleSharedSkipped = await resolveRefactBinary({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir,
+            pathEnv: pathDir,
+            homeDir,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => fs.readFileSync(binPath, "utf8"),
+        });
+        assert.strictEqual(incompatibleSharedSkipped, pathRefact);
 
         const downloads: string[] = [];
+        fs.writeFileSync(pathRefact, "refact 7.9.0");
         const extracted = await resolveRefactBinary({
             minVersion: "8.1.0",
             pinnedVersion: "8.1.0",
@@ -152,7 +174,7 @@ async function runStandaloneResolutionTests() {
             homeDir,
             platform: "linux",
             arch: "x64",
-            runVersion: async binPath => binPath.includes(`${path.sep}cache${path.sep}`) ? "refact 8.1.0" : "refact 7.9.0",
+            runVersion: async binPath => fs.readFileSync(binPath, "utf8"),
             downloadFile: async (url, destPath) => {
                 downloads.push(url);
                 fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -163,15 +185,59 @@ async function runStandaloneResolutionTests() {
                 }
             },
             extractArchive: async (_archivePath, destDir) => {
-                fs.writeFileSync(path.join(destDir, "refact"), "");
+                fs.writeFileSync(path.join(destDir, "refact"), "refact 8.1.0");
             },
             chmod: async () => undefined,
         });
-        assert.strictEqual(extracted, path.join(cacheDir, "8.1.0", "x86_64-unknown-linux-gnu", "refact"));
+        assert.strictEqual(extracted, homeRefact);
+        assert.notStrictEqual(extracted, path.join(cacheDir, "8.1.0", "x86_64-unknown-linux-gnu", "refact"));
         assert.deepStrictEqual(downloads, [
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
         ]);
+
+        const lockHomeDir = path.join(root, "lock-home");
+        const lockCacheDir = path.join(root, "lock-cache");
+        const lockRefact = path.join(lockHomeDir, ".refact", "bin", binaryName);
+        const lockPath = path.join(path.dirname(lockRefact), ".install.lock");
+        fs.mkdirSync(path.dirname(lockRefact), { recursive: true });
+        fs.writeFileSync(lockRefact, "refact 7.9.0");
+        fs.writeFileSync(lockPath, "held");
+        let markPreLockChecksDone: (() => void) | undefined;
+        const preLockChecksDone = new Promise<void>(resolve => { markPreLockChecksDone = resolve; });
+        let lockDownloads = 0;
+        let lockVersionReads = 0;
+        const lockedResolve = resolveRefactBinary({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir: lockCacheDir,
+            pathEnv: "",
+            homeDir: lockHomeDir,
+            platform: "linux",
+            arch: "x64",
+            installLockRetryMs: 5,
+            installLockTimeoutMs: 2000,
+            runVersion: async binPath => {
+                assert.strictEqual(binPath, lockRefact);
+                lockVersionReads++;
+                if (lockVersionReads === 2) {
+                    markPreLockChecksDone?.();
+                }
+                return fs.readFileSync(binPath, "utf8");
+            },
+            downloadFile: async () => {
+                lockDownloads++;
+                throw new Error("download should be skipped after install lock re-check");
+            },
+            extractArchive: async () => undefined,
+            chmod: async () => undefined,
+        });
+        await preLockChecksDone;
+        fs.writeFileSync(lockRefact, "refact 8.1.0");
+        fs.rmSync(lockPath, { force: true });
+        assert.strictEqual(await lockedResolve, lockRefact);
+        assert.strictEqual(lockDownloads, 0);
+        assert.strictEqual(lockVersionReads >= 3, true);
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }

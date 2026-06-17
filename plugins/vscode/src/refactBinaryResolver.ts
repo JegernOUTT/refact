@@ -10,6 +10,9 @@ import { compareVersions } from "./refactDaemon";
 
 export const REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download";
 const USER_AGENT_HEADER = "User-Agent";
+const INSTALL_LOCK_NAME = ".install.lock";
+const INSTALL_LOCK_RETRY_MS = 100;
+const INSTALL_LOCK_TIMEOUT_MS = 120000;
 
 export type RefactReleaseAsset = {
     target: string;
@@ -31,7 +34,11 @@ export type RefactBinaryResolverOptions = {
     downloadFile?: (url: string, destPath: string) => Promise<void>;
     extractArchive?: (archivePath: string, destDir: string, platform: string) => Promise<void>;
     chmod?: (binPath: string) => Promise<void>;
+    installLockRetryMs?: number;
+    installLockTimeoutMs?: number;
 };
+
+type DownloadRefactOptions = RefactBinaryResolverOptions & Required<Pick<RefactBinaryResolverOptions, "platform" | "arch" | "homeDir" | "runVersion">>;
 
 export function binaryNameForPlatform(platform: string = process.platform): string {
     return platform === "win32" ? "refact.exe" : "refact";
@@ -84,24 +91,29 @@ export async function resolveRefactBinary(options: RefactBinaryResolverOptions):
     const minVersion = options.minVersion;
     const platform = options.platform ?? process.platform;
     const arch = options.arch ?? process.arch;
+    const homeDir = options.homeDir ?? os.homedir();
     const runVersion = options.runVersion ?? readRefactVersion;
-    for (const candidate of systemRefactCandidates(options.pathEnv ?? process.env.PATH ?? "", options.homeDir ?? os.homedir(), platform)) {
+    for (const candidate of systemRefactCandidates(options.pathEnv ?? process.env.PATH ?? "", homeDir, platform)) {
         if (await isCompatibleRefactBinary(candidate, minVersion, runVersion)) {
             return candidate;
         }
     }
 
-    return downloadPinnedRefactBinary({ ...options, platform, arch, runVersion });
+    return downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
 }
 
 function systemRefactCandidates(pathEnv: string, homeDir: string, platform: string): string[] {
     const binaryName = binaryNameForPlatform(platform);
-    const candidates = pathEnv
+    const candidates = [sharedRefactBinaryPath(homeDir, platform)];
+    candidates.push(...pathEnv
         .split(path.delimiter)
         .filter(entry => entry.trim().length > 0)
-        .map(entry => path.join(entry, binaryName));
-    candidates.push(path.join(homeDir, ".refact", "bin", binaryName));
+        .map(entry => path.join(entry, binaryName)));
     return Array.from(new Set(candidates.map(candidate => path.resolve(candidate))));
+}
+
+function sharedRefactBinaryPath(homeDir: string, platform: string): string {
+    return path.resolve(path.join(homeDir, ".refact", "bin", binaryNameForPlatform(platform)));
 }
 
 async function isCompatibleRefactBinary(
@@ -114,44 +126,103 @@ async function isCompatibleRefactBinary(
     return !!version && compareVersions(version, minVersion) >= 0;
 }
 
-async function downloadPinnedRefactBinary(options: Required<Pick<RefactBinaryResolverOptions, "platform" | "arch" | "runVersion">> & RefactBinaryResolverOptions): Promise<string> {
+async function downloadPinnedRefactBinary(options: DownloadRefactOptions): Promise<string> {
     const target = refactReleaseTarget(options.platform, options.arch);
     const binaryName = binaryNameForPlatform(options.platform);
-    const targetDir = path.join(options.cacheDir, options.pinnedVersion, target);
-    const binPath = path.join(targetDir, binaryName);
+    const binPath = sharedRefactBinaryPath(options.homeDir, options.platform);
     if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
         return binPath;
     }
 
-    const downloadFile = options.downloadFile ?? defaultDownloadFile;
-    const extractArchive = options.extractArchive ?? defaultExtractArchive;
-    const chmod = options.chmod ?? defaultChmod;
-    const asset = refactReleaseAsset(options.pinnedVersion, target, options.platform);
-    const tmpDir = path.join(options.cacheDir, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    const archivePath = path.join(tmpDir, asset.archiveName);
-    const shaPath = `${archivePath}.sha256`;
-    const extractDir = path.join(tmpDir, "extract");
-    await fs.promises.mkdir(extractDir, { recursive: true });
+    const lockPath = path.join(path.dirname(binPath), INSTALL_LOCK_NAME);
+    return withInstallLock(lockPath, options.installLockRetryMs ?? INSTALL_LOCK_RETRY_MS, options.installLockTimeoutMs ?? INSTALL_LOCK_TIMEOUT_MS, async () => {
+        if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
+            return binPath;
+        }
+
+        const downloadFile = options.downloadFile ?? defaultDownloadFile;
+        const extractArchive = options.extractArchive ?? defaultExtractArchive;
+        const chmod = options.chmod ?? (candidate => defaultChmod(candidate, options.platform));
+        const asset = refactReleaseAsset(options.pinnedVersion, target, options.platform);
+        const tmpDir = path.join(options.cacheDir, options.pinnedVersion, target, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        const archivePath = path.join(tmpDir, asset.archiveName);
+        const shaPath = `${archivePath}.sha256`;
+        const extractDir = path.join(tmpDir, "extract");
+        await fs.promises.mkdir(extractDir, { recursive: true });
+        try {
+            await downloadFile(asset.archiveUrl, archivePath);
+            await downloadFile(asset.sha256Url, shaPath);
+            await verifySha256(archivePath, shaPath);
+            await extractArchive(archivePath, extractDir, options.platform);
+            const extractedBin = path.join(extractDir, binaryName);
+            if (!fileExists(extractedBin)) {
+                throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
+            }
+            await chmod(extractedBin);
+            await promoteBinaryToSharedInstall(extractedBin, binPath, chmod);
+            await chmod(binPath);
+            if (!await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
+                throw new Error(`downloaded Refact binary is older than ${options.minVersion}`);
+            }
+            return binPath;
+        } finally {
+            await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+    });
+}
+
+async function withInstallLock<T>(
+    lockPath: string,
+    retryMs: number,
+    timeoutMs: number,
+    body: () => Promise<T>,
+): Promise<T> {
+    await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
+    const handle = await acquireInstallLock(lockPath, Math.max(10, retryMs), Math.max(10, timeoutMs));
     try {
-        await downloadFile(asset.archiveUrl, archivePath);
-        await downloadFile(asset.sha256Url, shaPath);
-        await verifySha256(archivePath, shaPath);
-        await extractArchive(archivePath, extractDir, options.platform);
-        const extractedBin = path.join(extractDir, binaryName);
-        if (!fileExists(extractedBin)) {
-            throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
-        }
-        await chmod(extractedBin);
-        await fs.promises.rm(targetDir, { recursive: true, force: true });
-        await fs.promises.mkdir(path.dirname(targetDir), { recursive: true });
-        await fs.promises.rename(extractDir, targetDir);
-        await chmod(binPath);
-        if (!await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-            throw new Error(`downloaded Refact binary is older than ${options.minVersion}`);
-        }
-        return binPath;
+        await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`);
+        return await body();
     } finally {
-        await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+        await handle.close().catch(() => undefined);
+        await fs.promises.rm(lockPath, { force: true }).catch(() => undefined);
+    }
+}
+
+async function acquireInstallLock(lockPath: string, retryMs: number, timeoutMs: number): Promise<fs.promises.FileHandle> {
+    const startedAt = Date.now();
+    while (true) {
+        try {
+            return await fs.promises.open(lockPath, "wx");
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+                throw error;
+            }
+            if (Date.now() - startedAt >= timeoutMs) {
+                throw new Error(`timed out waiting for Refact install lock at ${lockPath}`);
+            }
+            await sleep(Math.min(retryMs, Math.max(10, timeoutMs - (Date.now() - startedAt))));
+        }
+    }
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function promoteBinaryToSharedInstall(
+    extractedBin: string,
+    binPath: string,
+    chmod: (binPath: string) => Promise<void>,
+): Promise<void> {
+    const installDir = path.dirname(binPath);
+    const tempTarget = path.join(installDir, `.${path.basename(binPath)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    await fs.promises.mkdir(installDir, { recursive: true });
+    try {
+        await fs.promises.copyFile(extractedBin, tempTarget);
+        await chmod(tempTarget);
+        await fs.promises.rename(tempTarget, binPath);
+    } finally {
+        await fs.promises.rm(tempTarget, { force: true }).catch(() => undefined);
     }
 }
 
@@ -441,8 +512,8 @@ async function assertNotSymlink(targetPath: string): Promise<void> {
     }
 }
 
-async function defaultChmod(binPath: string): Promise<void> {
-    if (process.platform !== "win32") {
+async function defaultChmod(binPath: string, platform: string = process.platform): Promise<void> {
+    if (platform !== "win32") {
         await fs.promises.chmod(binPath, 0o755);
     }
 }
