@@ -170,26 +170,30 @@ export class RustBinaryBlob {
             throw new Error("Open a workspace folder before starting Refact.");
         }
 
-        this.port = daemonPort;
         const pluginVersion = this.plugin_version();
-        const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
-        const binPath = await refactBinary.resolveRefactBinary({
-            explicitPath: configuredBinary,
-            minVersion: pluginVersion,
-            pinnedVersion: pluginVersion,
-            cacheDir: this.binary_cache_path,
-        });
-        await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
+        let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion });
+        if (!daemon) {
+            const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
+            const binPath = await refactBinary.resolveRefactBinary({
+                explicitPath: configuredBinary,
+                minVersion: pluginVersion,
+                pinnedVersion: pluginVersion,
+                cacheDir: this.binary_cache_path,
+            });
+            daemon = await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
+        }
         if (generation !== this.lifecycleGeneration) {
             return;
         }
 
+        this.port = daemon.port;
         this.openedProjects.clear();
         const settings = this.project_settings();
         let primary: refactDaemon.OpenProjectResponse | undefined;
         for (const root of roots) {
             const response = await refactDaemon.openProject(root, {
-                port: daemonPort,
+                port: daemon.port,
+                authToken: daemon.authToken,
                 clientKind: "vscode",
                 settings,
             });
