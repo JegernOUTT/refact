@@ -10,9 +10,9 @@ import { GitBranch } from "lucide-react";
 import { Icon, Popover } from "../../components/ui";
 import {
   DEFAULT_MODE,
-  selectChatId,
-  selectThreadWorktree,
+  selectThreadWorktreeById,
   setThreadWorktree,
+  useThreadId,
 } from "../Chat/Thread";
 import { selectApiKey, selectConfig, selectHost } from "../Config/configSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -93,8 +93,10 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
-  const currentWorktree = useAppSelector(selectThreadWorktree);
+  const chatId = useThreadId();
+  const currentWorktree = useAppSelector((state) =>
+    selectThreadWorktreeById(state, chatId),
+  );
   const host = useAppSelector(selectHost);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
@@ -376,6 +378,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
           </button>
         </Popover.Trigger>
         <WorktreeMenu
+          chatId={chatId}
           currentWorktree={currentWorktree}
           currentRecord={currentRecord}
           records={records}

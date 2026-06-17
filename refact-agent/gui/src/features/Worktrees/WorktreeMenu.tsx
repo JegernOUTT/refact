@@ -19,7 +19,7 @@ import { sendUserMessage } from "../../services/refact/chatCommands";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
-import { selectChatId, setThreadWorktree } from "../Chat/Thread";
+import { setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
 import { MergeWorktreeModal } from "./MergeWorktreeModal";
@@ -28,6 +28,7 @@ import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
 type WorktreeMenuProps = {
+  chatId: string;
   currentWorktree: WorktreeMeta | null;
   currentRecord?: WorktreeRecordView | null;
   records: WorktreeRecordView[];
@@ -113,6 +114,7 @@ function referenceCount(
 }
 
 export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
+  chatId,
   currentWorktree,
   currentRecord,
   records,
@@ -126,7 +128,6 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   onCopyPath,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [diffOpen, setDiffOpen] = useState(false);

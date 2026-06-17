@@ -658,6 +658,7 @@ describe("Worktree lifecycle GUI", () => {
     const { user } = render(
       <Popover.Root open>
         <WorktreeMenu
+          chatId="chat-1"
           currentWorktree={record.meta}
           currentRecord={record}
           records={[record]}
@@ -721,6 +722,7 @@ describe("Worktree lifecycle GUI", () => {
     const { user } = render(
       <Popover.Root open>
         <WorktreeMenu
+          chatId="chat-1"
           currentWorktree={record.meta}
           currentRecord={record}
           records={[record]}
