@@ -2315,6 +2315,26 @@ mod tests {
         assert_eq!(task.await.unwrap(), 0);
     }
 
+    async fn retry_open_project(info: &crate::daemon::state::DaemonInfo, root: &Path) -> Value {
+        let mut last_error = None;
+        for _ in 0..20 {
+            match client::post_json::<_, Value>(
+                info,
+                "/daemon/v1/projects/open",
+                &json!({"root": root}),
+            )
+            .await
+            {
+                Ok(value) => return value,
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        panic!("daemon project open failed: {:?}", last_error);
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn stop_daemon_missing_file_does_not_spawn() {
@@ -2698,13 +2718,7 @@ mod tests {
         };
         let project_dir = tempfile::tempdir().unwrap();
         let (info, task) = start_test_daemon(&cache_dir).await;
-        let opened: Value = client::post_json(
-            &info,
-            "/daemon/v1/projects/open",
-            &json!({"root": project_dir.path()}),
-        )
-        .await
-        .unwrap();
+        let opened: Value = retry_open_project(&info, project_dir.path()).await;
         let project_id = opened["project_id"].as_str().unwrap().to_string();
 
         let mut out = Vec::new();
@@ -2760,13 +2774,7 @@ mod tests {
         };
         let (info, task) = start_test_daemon(&cache_dir).await;
         let project_dir = tempfile::tempdir().unwrap();
-        let opened: Value = client::post_json(
-            &info,
-            "/daemon/v1/projects/open",
-            &json!({"root": project_dir.path()}),
-        )
-        .await
-        .unwrap();
+        let opened: Value = retry_open_project(&info, project_dir.path()).await;
         let project_id = opened["project_id"].as_str().unwrap().to_string();
         let _: Value = client::delete_json(&info, &format!("/daemon/v1/projects/{project_id}"))
             .await
