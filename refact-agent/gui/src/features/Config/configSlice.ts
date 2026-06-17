@@ -63,14 +63,29 @@ export const changeFeature = createAction<{
   value: boolean;
 }>("config/feature/change");
 
+function hasConfigProperty(config: Partial<Config>, key: keyof Config): boolean {
+  return Object.prototype.hasOwnProperty.call(config, key);
+}
+
 export const reducer = createReducer<Config>(initialState, (builder) => {
   // TODO: toggle darkmode for web host?
   builder.addCase(updateConfig, (state, action) => {
     state.dev = action.payload.dev ?? state.dev;
     state.engineServed = action.payload.engineServed ?? state.engineServed;
-    state.backendReady = action.payload.backendReady ?? state.backendReady;
-    state.connectionStatus =
-      action.payload.connectionStatus ?? state.connectionStatus;
+    if (hasConfigProperty(action.payload, "backendReady")) {
+      if (action.payload.backendReady === undefined) {
+        delete state.backendReady;
+      } else {
+        state.backendReady = action.payload.backendReady;
+      }
+    }
+    if (hasConfigProperty(action.payload, "connectionStatus")) {
+      if (action.payload.connectionStatus === undefined) {
+        delete state.connectionStatus;
+      } else {
+        state.connectionStatus = action.payload.connectionStatus;
+      }
+    }
 
     state.features = action.payload.features
       ? { ...state.features, ...action.payload.features }

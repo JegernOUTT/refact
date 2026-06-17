@@ -15,7 +15,7 @@ describe("configSlice", () => {
     expect(state.features?.ast).toBe(true);
   });
 
-  it("persists plugin backend readiness fields", () => {
+  it("updates plugin backend readiness fields by property presence", () => {
     const startingState = reducer(
       undefined,
       updateConfig({ backendReady: false, connectionStatus: "starting" }),
@@ -31,5 +31,25 @@ describe("configSlice", () => {
 
     expect(readyState.backendReady).toBe(true);
     expect(readyState.connectionStatus).toBe("ready");
+
+    const omittedState = reducer(readyState, updateConfig({ lspPort: 8002 }));
+
+    expect(omittedState.backendReady).toBe(true);
+    expect(omittedState.connectionStatus).toBe("ready");
+  });
+
+  it("clears plugin backend readiness fields when present with undefined", () => {
+    const readyState = reducer(
+      undefined,
+      updateConfig({ backendReady: true, connectionStatus: "ready" }),
+    );
+
+    const clearedState = reducer(
+      readyState,
+      updateConfig({ backendReady: undefined, connectionStatus: undefined }),
+    );
+
+    expect(clearedState.backendReady).toBeUndefined();
+    expect(clearedState.connectionStatus).toBeUndefined();
   });
 });

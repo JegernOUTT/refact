@@ -157,6 +157,16 @@ describe("hasUsableEngineEndpoint", () => {
         connectionStatus: "installing",
       }),
     ).toBe(false);
+    expect(
+      hasUsableEngineEndpoint({
+        host: "vscode",
+        lspPort: 8001,
+        browserUrl: "http://127.0.0.1:8001",
+        lspUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "failed",
+      }),
+    ).toBe(false);
   });
 
   test("keeps ready IDE plugin config usable", () => {

@@ -208,4 +208,37 @@ describe("provider bootstrap gate", () => {
       screen.queryByRole("button", { name: /OpenAI/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("shows connection problem from stale provider data when plugin backend failed", async () => {
+    const store = createStore();
+
+    store.dispatch(
+      updateConfig({
+        lspUrl: "http://127.0.0.1:8001",
+        browserUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "failed",
+      }),
+    );
+    store.dispatch(setBackendStatus({ status: "online" }));
+    void store.dispatch(
+      providersApi.util.upsertQueryData("getConfiguredProviders", undefined, {
+        providers: [inactiveProvider],
+        error_log: [],
+      }),
+    );
+    mockCapsReady(store);
+
+    render(<LoginPage />, { store });
+
+    expect(
+      await screen.findByRole("heading", { name: "Connection Problem" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Set Up Providers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /OpenAI/i }),
+    ).not.toBeInTheDocument();
+  });
 });
