@@ -13,9 +13,10 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.Comparator
-import java.util.zip.GZIPInputStream
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
 internal const val REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download"
@@ -23,6 +24,7 @@ internal const val REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refa
 private const val INSTALL_LOCK_NAME = ".install.lock"
 private const val INSTALL_LOCK_RETRY_MS = 100L
 private const val INSTALL_LOCK_TIMEOUT_MS = 120_000L
+private const val INSTALL_LOCK_STALE_MS = 15 * 60_000L
 
 internal data class RefactReleaseAsset(
     val target: String,
@@ -46,6 +48,8 @@ internal data class RefactBinaryResolverOptions(
     val chmod: (Path) -> Unit = ::makeExecutable,
     val installLockRetryMs: Long = INSTALL_LOCK_RETRY_MS,
     val installLockTimeoutMs: Long = INSTALL_LOCK_TIMEOUT_MS,
+    val installLockStaleMs: Long = INSTALL_LOCK_STALE_MS,
+    val installLockNowMs: () -> Long = System::currentTimeMillis,
 )
 
 internal object RefactBinaryResolver {
@@ -207,7 +211,13 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
     val target = refactReleaseTarget(options.osName, options.arch)
     val binaryName = refactBinaryName(options.osName)
     val sharedBinPath = sharedRefactBinaryPath(options.homeDir, options.osName)
-    return withSharedInstallLock(sharedBinPath, options.installLockRetryMs, options.installLockTimeoutMs) {
+    return withSharedInstallLock(
+        sharedBinPath,
+        options.installLockRetryMs,
+        options.installLockTimeoutMs,
+        options.installLockStaleMs,
+        options.installLockNowMs,
+    ) {
         if (isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
             return@withSharedInstallLock sharedBinPath.toString()
         }
@@ -250,30 +260,46 @@ private fun downloadPinnedRefactBinaryToSharedPath(
     }
 }
 
-private fun <T> withSharedInstallLock(sharedBinPath: Path, retryMs: Long, timeoutMs: Long, block: () -> T): T {
+private fun <T> withSharedInstallLock(
+    sharedBinPath: Path,
+    retryMs: Long,
+    timeoutMs: Long,
+    staleMs: Long,
+    nowMs: () -> Long,
+    block: () -> T,
+): T {
     val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
     Files.createDirectories(sharedDir)
     val lockPath = sharedDir.resolve(INSTALL_LOCK_NAME)
-    val channel = acquireInstallLock(lockPath, maxOf(10L, retryMs), maxOf(10L, timeoutMs))
+    val channel = acquireInstallLock(lockPath, maxOf(10L, retryMs), maxOf(10L, timeoutMs), maxOf(10L, staleMs), nowMs)
+    val lockText = writeInstallLockMetadata(channel, nowMs())
     try {
-        writeInstallLockDebug(channel)
         return block()
     } finally {
         try {
             channel.close()
         } finally {
-            Files.deleteIfExists(lockPath)
+            releaseInstallLock(lockPath, lockText)
         }
     }
 }
 
-private fun acquireInstallLock(lockPath: Path, retryMs: Long, timeoutMs: Long): FileChannel {
-    val startedAt = System.currentTimeMillis()
+private fun acquireInstallLock(
+    lockPath: Path,
+    retryMs: Long,
+    timeoutMs: Long,
+    staleMs: Long,
+    nowMs: () -> Long,
+): FileChannel {
+    val startedAt = nowMs()
     while (true) {
         try {
             return FileChannel.open(lockPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         } catch (error: FileAlreadyExistsException) {
-            val elapsedMs = System.currentTimeMillis() - startedAt
+            if (breakStaleInstallLock(lockPath, staleMs, nowMs())) {
+                continue
+            }
+            val elapsedMs = nowMs() - startedAt
             if (elapsedMs >= timeoutMs) {
                 throw IOException("timed out waiting for Refact install lock at $lockPath", error)
             }
@@ -287,9 +313,79 @@ private fun acquireInstallLock(lockPath: Path, retryMs: Long, timeoutMs: Long): 
     }
 }
 
-private fun writeInstallLockDebug(channel: FileChannel) {
-    val content = "${ProcessHandle.current().pid()}\n${System.currentTimeMillis()}\n".toByteArray(Charsets.UTF_8)
+private data class InstallLockMetadata(
+    val pid: Long?,
+    val timestampMs: Long?,
+)
+
+private fun writeInstallLockMetadata(channel: FileChannel, nowMs: Long): String {
+    val content = "pid=${ProcessHandle.current().pid()}\ntimestamp_ms=$nowMs\n".toByteArray(Charsets.UTF_8)
     channel.write(ByteBuffer.wrap(content))
+    channel.force(true)
+    return content.toString(Charsets.UTF_8)
+}
+
+private fun releaseInstallLock(lockPath: Path, lockText: String) {
+    runCatching {
+        if (Files.exists(lockPath) && Files.readString(lockPath) == lockText) {
+            Files.deleteIfExists(lockPath)
+        }
+    }
+}
+
+private fun breakStaleInstallLock(lockPath: Path, staleMs: Long, nowMs: Long): Boolean {
+    val lockText = runCatching { Files.readString(lockPath) }.getOrNull()
+    val metadata = lockText?.let { parseInstallLockMetadata(it) }
+    val stale = if (metadata == null) {
+        lockFileIsOlderThan(lockPath, nowMs, staleMs)
+    } else {
+        metadata.timestampMs?.let { nowMs - it >= staleMs } == true ||
+            metadata.pid?.let { !processIsAlive(it) } == true ||
+            (metadata.timestampMs == null && lockFileIsOlderThan(lockPath, nowMs, staleMs))
+    }
+    if (!stale) return false
+    if (lockText != null && Files.exists(lockPath) && runCatching { Files.readString(lockPath) }.getOrNull() != lockText) {
+        return false
+    }
+    return runCatching { Files.deleteIfExists(lockPath) }.getOrDefault(false)
+}
+
+private fun parseInstallLockMetadata(text: String): InstallLockMetadata? {
+    val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    if (lines.isEmpty()) return null
+    var pid: Long? = null
+    var timestampMs: Long? = null
+    for (line in lines) {
+        val separator = line.indexOf('=')
+        if (separator <= 0) continue
+        val key = line.substring(0, separator).trim().lowercase()
+        val value = line.substring(separator + 1).trim()
+        when (key) {
+            "pid", "owner_pid" -> pid = value.toLongOrNull()
+            "timestamp", "timestamp_ms", "created_at", "created_at_ms" -> timestampMs = parseLockTimestampMs(value)
+        }
+    }
+    if (pid == null) {
+        pid = lines.firstOrNull()?.toLongOrNull()
+    }
+    if (timestampMs == null) {
+        timestampMs = lines.getOrNull(1)?.let { parseLockTimestampMs(it) }
+    }
+    return if (pid != null || timestampMs != null) InstallLockMetadata(pid, timestampMs) else null
+}
+
+private fun parseLockTimestampMs(value: String): Long? {
+    return value.toLongOrNull() ?: runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+}
+
+private fun processIsAlive(pid: Long): Boolean {
+    if (pid <= 0) return false
+    return runCatching { ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }.getOrDefault(false)
+}
+
+private fun lockFileIsOlderThan(lockPath: Path, nowMs: Long, staleMs: Long): Boolean {
+    val modifiedMs = runCatching { Files.getLastModifiedTime(lockPath).toMillis() }.getOrNull() ?: return false
+    return nowMs - modifiedMs >= staleMs
 }
 
 private fun promoteSharedBinary(extractedBin: Path, sharedBinPath: Path, options: RefactBinaryResolverOptions) {

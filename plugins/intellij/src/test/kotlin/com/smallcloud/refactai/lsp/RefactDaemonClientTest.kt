@@ -212,7 +212,7 @@ class RefactDaemonClientTest {
         try {
             Files.createDirectories(sharedBinDir)
             Files.writeString(homeRefact, "old-binary")
-            Files.writeString(sharedLock, "other-installer")
+            Files.writeString(sharedLock, "pid=${ProcessHandle.current().pid()}\ntimestamp_ms=${System.currentTimeMillis()}\n")
 
             val resolved = executor.submit(Callable {
                 RefactBinaryResolver.resolve(
@@ -251,6 +251,61 @@ class RefactDaemonClientTest {
             assertEquals("new-binary", Files.readString(homeRefact))
         } finally {
             executor.shutdownNow()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun binaryResolverBreaksDeadOldSharedInstallLockAndRemovesIt() {
+        val root = Files.createTempDirectory("refact-binary-resolver-stale-lock")
+        val homeDir = root.resolve("home")
+        val homeRefact = sharedRefactBinaryPath(homeDir, "Linux")
+        val sharedLock = homeRefact.parent.resolve(".install.lock")
+        val downloads = mutableListOf<String>()
+        val lockSnapshots = mutableListOf<String>()
+
+        try {
+            Files.createDirectories(homeRefact.parent)
+            Files.writeString(sharedLock, "pid=9223372036854775807\ntimestamp_ms=1000\n")
+
+            val resolved = RefactBinaryResolver.resolve(
+                RefactBinaryResolverOptions(
+                    minVersion = "8.1.0",
+                    pinnedVersion = "8.1.0",
+                    cacheDir = root.resolve("cache"),
+                    pathEnv = "",
+                    homeDir = homeDir,
+                    osName = "Linux",
+                    arch = "amd64",
+                    versionReader = { path ->
+                        if (Files.isRegularFile(path) && Files.readString(path) == "new-binary") "refact 8.1.0" else "refact 7.9.0"
+                    },
+                    downloader = { uri, dest ->
+                        downloads.add(uri.toString())
+                        lockSnapshots.add(Files.readString(sharedLock))
+                        Files.createDirectories(dest.parent)
+                        if (uri.toString().endsWith(".sha256")) {
+                            val archive = dest.parent.resolve("refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz")
+                            Files.writeString(dest, "${sha256(archive)}  archive\n")
+                        } else {
+                            Files.writeString(dest, "archive")
+                        }
+                    },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "new-binary") },
+                    chmod = {},
+                    installLockRetryMs = 10,
+                    installLockTimeoutMs = 500,
+                    installLockStaleMs = 100,
+                    installLockNowMs = { 10_000 },
+                )
+            )
+
+            assertEquals(homeRefact.toString(), resolved)
+            assertEquals("new-binary", Files.readString(homeRefact))
+            assertEquals(2, downloads.size)
+            assertTrue(lockSnapshots.any { it.contains("pid=") && it.contains("timestamp_ms=10000") })
+            assertFalse(Files.exists(sharedLock))
+        } finally {
             root.deleteRecursively()
         }
     }
