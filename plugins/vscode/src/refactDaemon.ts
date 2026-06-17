@@ -168,9 +168,10 @@ function mergeDaemonEndpoints(primary: DaemonEndpoint[], secondary: DaemonEndpoi
 }
 
 function daemonStatusForEndpoint(status: DaemonStatus, endpoint: DaemonEndpoint): DaemonStatus {
+    const reportedPort = status.port;
     return {
         ...status,
-        port: normalizeDaemonPort(status.port || endpoint.port),
+        port: Number.isFinite(reportedPort) && reportedPort > 0 ? Math.trunc(reportedPort) : endpoint.port,
         authToken: endpoint.authToken ?? status.authToken ?? null,
     };
 }

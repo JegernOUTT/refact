@@ -70,6 +70,8 @@ export async function runRefactDaemonTests() {
     await runDaemonUpgradeTimeoutTest();
     await runCompatibleDaemonSkipsMissingBinaryTest();
     await runDaemonJsonDiscoveryTest();
+    await runDaemonReportedPortFallbackTest(0);
+    await runDaemonReportedPortFallbackTest(-1);
     await runDaemonAuthHeaderTest();
 }
 
@@ -523,6 +525,106 @@ async function runDaemonJsonDiscoveryTest() {
         assert.strictEqual(status?.authToken, "disk-token");
         assert.deepStrictEqual(probes, [[8488, undefined], [9234, "disk-token"]]);
     } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+async function runDaemonReportedPortFallbackTest(reportedPort: number) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-reported-port-"));
+    const sockets = new Set<Socket>();
+    const requests: Array<{ method: string; url: string; authorization?: string }> = [];
+    const authToken = `reported-port-token-${reportedPort}`;
+    let spawned = false;
+    const server = http.createServer((request, response) => {
+        requests.push({
+            method: request.method ?? "",
+            url: request.url ?? "",
+            authorization: request.headers.authorization,
+        });
+        response.setHeader("Connection", "close");
+        response.setHeader("Content-Type", "application/json");
+        if (request.headers.authorization !== `Bearer ${authToken}`) {
+            response.statusCode = 401;
+            response.end(JSON.stringify({ error: "missing auth" }));
+            return;
+        }
+        if (request.url === "/daemon/v1/status") {
+            const version = spawned ? "8.2.0" : "8.1.0";
+            response.end(JSON.stringify(daemonStatus(version, reportedPort)));
+            return;
+        }
+        if (request.url === "/daemon/v1/projects/open") {
+            response.end(JSON.stringify({
+                project_id: `project-reported-port-${reportedPort}`,
+                slug: `project-reported-port-${reportedPort}`,
+                root,
+                pinned: false,
+            }));
+            return;
+        }
+        if (request.url === "/daemon/v1/shutdown") {
+            response.end(JSON.stringify({ ok: true }));
+            return;
+        }
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: "not found" }));
+    });
+    server.on("connection", socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+    });
+    server.keepAliveTimeout = 1;
+    server.headersTimeout = 1000;
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+        const port = (server.address() as AddressInfo).port;
+        const daemonJsonPath = path.join(root, "daemon.json");
+        fs.writeFileSync(daemonJsonPath, JSON.stringify({ port, auth_token: authToken }));
+
+        const status = await findExistingDaemon({ port, pluginVersion: "8.1.0", daemonJsonPath });
+        assert.strictEqual(status?.port, port);
+        assert.strictEqual(status?.authToken, authToken);
+
+        const opened = await openProject(root, { port: status?.port, authToken: status?.authToken, daemonJsonPath });
+        assert.strictEqual(opened.project_id, `project-reported-port-${reportedPort}`);
+        const refactPath = path.join(root, "refact");
+        fs.writeFileSync(refactPath, "");
+        const ensured = await ensureDaemon(refactPath, {
+            port,
+            pluginVersion: "8.1.0",
+            daemonJsonPath,
+            spawnDaemon: () => { spawned = true; },
+        });
+        assert.strictEqual(ensured.port, port);
+        assert.strictEqual(spawned, false);
+
+        const upgraded = await ensureDaemon(refactPath, {
+            port,
+            pluginVersion: "8.2.0",
+            daemonJsonPath,
+            timeoutMs: 1000,
+            shutdownTimeoutMs: 1000,
+            shutdownPollMs: 1,
+            spawnDaemon: () => { spawned = true; },
+            isProcessRunning: () => false,
+        });
+        assert.strictEqual(upgraded.port, port);
+        assert.strictEqual(upgraded.version, "8.2.0");
+        assert.strictEqual(requests.every(request => request.authorization === `Bearer ${authToken}`), true);
+        assert.deepStrictEqual(requests.map(request => [request.method, request.url]), [
+            ["GET", "/daemon/v1/status"],
+            ["POST", "/daemon/v1/projects/open"],
+            ["GET", "/daemon/v1/status"],
+            ["GET", "/daemon/v1/status"],
+            ["POST", "/daemon/v1/shutdown"],
+            ["GET", "/daemon/v1/status"],
+            ["GET", "/daemon/v1/status"],
+        ]);
+    } finally {
+        for (const socket of sockets) {
+            socket.destroy();
+        }
+        await new Promise<void>(resolve => server.close(() => resolve()));
         fs.rmSync(root, { recursive: true, force: true });
     }
 }
