@@ -20,8 +20,7 @@
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
@@ -44,20 +43,40 @@
   position: relative;
   display: flex;
   align-items: center;
-  flex: 0 1 190px;
+  flex: 0 1 calc(var(--rf-nav-w-min) + var(--rf-space-3));
   min-width: 0;
-  max-width: 260px;
+  max-width: calc(var(--rf-nav-w) + var(--rf-space-6) + var(--rf-space-2));
   min-height: var(--rf-control-h);
-  opacity: 1;
-  transform: translateX(0) scale(1);
+  opacity: var(--rf-motion-opacity-visible);
+  transform: translateX(var(--rf-motion-distance-none))
+    scale(var(--rf-motion-scale-active));
+  transform-origin: center bottom;
+}
+
+.tabWrap::after {
+  position: absolute;
+  inset-inline: var(--rf-space-2) calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  bottom: calc(-1 * var(--rf-space-1));
+  height: var(--rf-hairline);
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  content: "";
+  opacity: var(--rf-motion-opacity-hidden);
+  pointer-events: none;
+  transform: translateX(calc(-1 * var(--rf-motion-distance-sm)))
+    scaleX(var(--rf-motion-scale-none));
+  transform-origin: left center;
 }
 
 .tabWrapDragging {
-  opacity: 0.54;
+  opacity: var(--rf-motion-opacity-muted);
+  transform: translateX(var(--rf-motion-distance-none))
+    scale(var(--rf-motion-scale-enter));
 }
 
 .tabWrapDropTarget {
-  transform: translateX(var(--rf-space-1)) scale(1);
+  transform: translateX(var(--rf-motion-distance-sm))
+    scale(var(--rf-motion-scale-active));
 }
 
 .tabButton {
@@ -89,11 +108,16 @@
   outline-offset: calc(-1 * var(--rf-hairline));
 }
 
+.tabWrapActive::after {
+  opacity: var(--rf-motion-opacity-visible);
+  transform: translateX(var(--rf-motion-distance-none))
+    scaleX(var(--rf-motion-scale-active));
+}
+
 .tabWrapActive .tabButton {
   color: var(--rf-color-fg);
   background: var(--rf-surface-2);
   border-color: var(--rf-border);
-  box-shadow: inset 0 calc(-1 * var(--rf-hairline)) 0 var(--rf-color-accent);
 }
 
 .tabWrapGroup .tabButton {
@@ -144,14 +168,14 @@
   border: 0;
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  opacity: 0.76;
+  opacity: var(--rf-motion-opacity-soft);
 }
 
 .tabClose:hover,
 .tabClose:focus-visible {
   color: var(--rf-color-fg);
   background: var(--rf-surface-2);
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .tabClose:focus-visible {
@@ -160,7 +184,8 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .tabWrap {
+  .tabWrap,
+  .tabWrap::after {
     transition:
       opacity var(--rf-dur-fast) var(--rf-ease-standard),
       transform var(--rf-dur-fast) var(--rf-ease-standard);
@@ -171,7 +196,6 @@
     transition:
       background var(--rf-dur-fast) var(--rf-ease-standard),
       border-color var(--rf-dur-fast) var(--rf-ease-standard),
-      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
       color var(--rf-dur-fast) var(--rf-ease-standard),
       opacity var(--rf-dur-fast) var(--rf-ease-standard);
   }
@@ -179,6 +203,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .tabWrap,
+  .tabWrap::after,
   .tabButton,
   .tabClose,
   .groupBadge {
@@ -186,8 +211,10 @@
     transition: none;
   }
 
+  .tabWrapDragging,
   .tabWrapDropTarget {
-    transform: translateX(0) scale(1);
+    transform: translateX(var(--rf-motion-distance-none))
+      scale(var(--rf-motion-scale-active));
   }
 }
 
@@ -199,15 +226,18 @@
 }
 
 @keyframes rf-group-badge-pulse {
-  from {
-    transform: scale(0.96);
+  0% {
+    opacity: var(--rf-motion-opacity-soft);
+    transform: scale(var(--rf-motion-scale-enter));
   }
 
   50% {
-    transform: scale(1.06);
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scale(var(--rf-motion-scale-emphasis));
   }
 
-  to {
-    transform: scale(1);
+  100% {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scale(var(--rf-motion-scale-active));
   }
 }

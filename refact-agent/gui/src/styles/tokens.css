@@ -64,6 +64,36 @@
   --rf-toolcard-motion-duration: var(--rf-collapse-duration);
   --rf-collapse-enter-y: -8px;
   --rf-stagger: 0.03s;
+  --rf-motion-distance-none: 0;
+  --rf-motion-distance-2xs: var(--rf-space-2xs);
+  --rf-motion-distance-xs: var(--rf-space-1);
+  --rf-motion-distance-sm: var(--rf-space-xs);
+  --rf-motion-opacity-hidden: 0;
+  --rf-motion-opacity-muted: 0.54;
+  --rf-motion-opacity-soft: 0.72;
+  --rf-motion-opacity-visible: 1;
+  --rf-motion-scale-none: 0;
+  --rf-motion-scale-enter: 0.96;
+  --rf-motion-scale-press: 0.98;
+  --rf-motion-scale-active: 1;
+  --rf-motion-scale-highlight: 1.02;
+  --rf-motion-scale-emphasis: 1.06;
+  --rf-motion-scale-pop: 1.2;
+  --rf-motion-shimmer-size: 250% 100%;
+  --rf-motion-shimmer-duration: calc(var(--rf-dur-slow) * 8);
+  --rf-motion-spin-duration: calc(var(--rf-dur-slow) * 4);
+  --rf-motion-shimmer-start: -100%;
+  --rf-motion-shimmer-end: 100%;
+  --rf-motion-gradient-start: 0%;
+  --rf-motion-gradient-mid-start: 38%;
+  --rf-motion-gradient-mid: 50%;
+  --rf-motion-gradient-mid-end: 62%;
+  --rf-motion-gradient-end: 100%;
+  --rf-motion-gradient-angle: 90deg;
+  --rf-motion-transform-base: translate(
+    var(--rf-motion-distance-none),
+    var(--rf-motion-distance-none)
+  );
   --rf-ease-standard: cubic-bezier(0.2, 0.7, 0.2, 1);
   --rf-ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
   --rf-ease-exit: cubic-bezier(0.4, 0, 1, 1);

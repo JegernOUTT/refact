@@ -1,3 +1,4 @@
+import classNames from "classnames";
 import { MessageSquare, PanelsTopLeft } from "lucide-react";
 import { useCallback } from "react";
 
@@ -29,7 +30,7 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
 
   if (!surfaceKey) {
     return (
-      <div className={styles.placeholder}>
+      <div className={classNames(styles.placeholder, "rf-enter-rise")}>
         <EmptyState
           icon={MessageSquare}
           title="No surface selected"
@@ -59,7 +60,10 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
     }
 
     return (
-      <div className={styles.placeholder} data-surface-key={surfaceKey}>
+      <div
+        className={classNames(styles.placeholder, "rf-enter-rise")}
+        data-surface-key={surfaceKey}
+      >
         <EmptyState
           icon={PanelsTopLeft}
           title={`${surfaceLabel(surfaceKey)} placeholder`}
@@ -70,7 +74,10 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
     );
   } catch {
     return (
-      <div className={styles.placeholder} data-surface-key={surfaceKey}>
+      <div
+        className={classNames(styles.placeholder, "rf-enter-rise")}
+        data-surface-key={surfaceKey}
+      >
         <EmptyState
           icon={PanelsTopLeft}
           title="Unsupported surface"

@@ -336,7 +336,7 @@ export function TabBar() {
                 key={tab.id}
                 className={classNames(
                   styles.tabWrap,
-                  "rf-enter",
+                  "rf-enter-scale",
                   isActive && styles.tabWrapActive,
                   tab.isGroup && styles.tabWrapGroup,
                   draggingTabId === tab.id && styles.tabWrapDragging,

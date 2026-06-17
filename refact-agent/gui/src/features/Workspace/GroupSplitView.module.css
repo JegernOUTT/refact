@@ -39,6 +39,9 @@
 
 .paneSlot {
   --pane-flex: 1;
+  --rf-motion-enter-x: var(--rf-motion-distance-none);
+  --rf-motion-enter-y: var(--rf-motion-distance-sm);
+  --rf-motion-origin: center;
 
   position: relative;
   display: flex;
@@ -46,6 +49,30 @@
   min-width: 0;
   min-height: 0;
   overflow: visible;
+}
+
+.row > .paneSlot[data-pane-index="0"] {
+  --rf-motion-enter-x: calc(-1 * var(--rf-motion-distance-sm));
+  --rf-motion-enter-y: var(--rf-motion-distance-none);
+  --rf-motion-origin: right center;
+}
+
+.row > .paneSlot[data-pane-index="1"] {
+  --rf-motion-enter-x: var(--rf-motion-distance-sm);
+  --rf-motion-enter-y: var(--rf-motion-distance-none);
+  --rf-motion-origin: left center;
+}
+
+.col > .paneSlot[data-pane-index="0"] {
+  --rf-motion-enter-x: var(--rf-motion-distance-none);
+  --rf-motion-enter-y: calc(-1 * var(--rf-motion-distance-sm));
+  --rf-motion-origin: center bottom;
+}
+
+.col > .paneSlot[data-pane-index="1"] {
+  --rf-motion-enter-x: var(--rf-motion-distance-none);
+  --rf-motion-enter-y: var(--rf-motion-distance-sm);
+  --rf-motion-origin: center top;
 }
 
 .pane {
@@ -62,12 +89,6 @@
   border-radius: var(--rf-radius-card);
   outline: 0 solid transparent;
   outline-offset: calc(-1 * var(--rf-focus-ring-w));
-  transition:
-    border-color var(--rf-dur-fast) var(--rf-ease-standard),
-    outline-color var(--rf-dur-fast) var(--rf-ease-standard),
-    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
-    opacity var(--rf-dur-med) var(--rf-ease-standard),
-    transform var(--rf-dur-med) var(--rf-ease-standard);
 }
 
 .focused {
@@ -138,16 +159,14 @@
   background: var(--rf-color-accent-soft);
   border: var(--rf-hairline) solid var(--rf-color-accent);
   border-radius: var(--rf-radius-card);
-  opacity: 0.72;
-  transition:
-    opacity var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
+  opacity: var(--rf-motion-opacity-soft);
+  transform: scale(var(--rf-motion-scale-active));
 }
 
 .edgeDropZone:hover::before,
 .edgeDropZone:focus-visible::before {
-  opacity: 1;
-  transform: scale(1.02);
+  opacity: var(--rf-motion-opacity-visible);
+  transform: scale(var(--rf-motion-scale-highlight));
 }
 
 .edgeDropLeft,
@@ -206,13 +225,12 @@
   position: absolute;
   inset: 0;
   background: var(--rf-color-accent-soft);
-  opacity: 0;
-  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  opacity: var(--rf-motion-opacity-hidden);
 }
 
 .divider:hover::before,
 .divider[data-dragging]::before {
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .verticalDivider {
@@ -236,9 +254,7 @@
   z-index: 1;
   background: var(--rf-border-strong);
   border-radius: var(--rf-radius-pill);
-  transition:
-    background var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
+  transform: scale(var(--rf-motion-scale-active));
 }
 
 .verticalDivider .dividerHandle {
@@ -254,12 +270,11 @@
 .divider:hover .dividerHandle,
 .divider[data-dragging] .dividerHandle {
   background: var(--rf-color-accent);
-  transform: scale(1.2);
+  transform: scale(var(--rf-motion-scale-pop));
 }
 
 .stackedLayout {
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto hidden;
 }
 
 .stackedLayout .tree {
@@ -277,7 +292,7 @@
 
 .stackedSplit .paneSlot {
   flex: 0 0 auto;
-  min-height: min(60dvh, calc(var(--rf-control-h-lg) * 16));
+  min-height: min(var(--rf-content-max), calc(var(--rf-control-h-lg) * 16));
   overflow: hidden;
 }
 
@@ -285,17 +300,51 @@
   backdrop-filter: none;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .split {
+    transition:
+      gap var(--rf-dur-med) var(--rf-ease-standard),
+      opacity var(--rf-dur-med) var(--rf-ease-standard);
+  }
+
+  .pane,
+  .edgeDropZones,
+  .edgeDropZone::before,
+  .divider::before,
+  .dividerHandle {
+    transition:
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-med) var(--rf-ease-standard),
+      outline-color var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-med) var(--rf-ease-standard);
+  }
+}
+
 @media (prefers-reduced-transparency: reduce) {
   .paneHeader {
+    background: var(--rf-surface-2);
     backdrop-filter: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .split,
+  .paneSlot,
   .pane,
+  .edgeDropZones,
   .edgeDropZone::before,
   .divider::before,
   .dividerHandle {
+    animation: none;
     transition: none;
+  }
+
+  .paneSlot,
+  .edgeDropZone::before,
+  .dividerHandle {
+    transform: none;
   }
 }

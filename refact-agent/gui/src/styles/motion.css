@@ -1,18 +1,30 @@
-:root {
-}
-
 .rf-enter,
 .rf-enter-rise,
+.rf-enter-scale,
+.rf-grow-in,
 .rf-popover-motion {
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .rf-enter-rise {
-  transform: translateY(0);
+  transform: translateY(var(--rf-motion-distance-none));
+}
+
+.rf-enter-scale {
+  transform: scale(var(--rf-motion-scale-active));
+}
+
+.rf-grow-in {
+  transform: translate(
+      var(--rf-motion-distance-none),
+      var(--rf-motion-distance-none)
+    )
+    scale(var(--rf-motion-scale-active));
+  transform-origin: var(--rf-motion-origin, center);
 }
 
 .rf-popover-motion {
-  transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
+  transform: var(--rf-motion-transform-base) scale(var(--rf-motion-scale-active));
   transform-origin: var(--radix-popover-content-transform-origin, center);
 }
 
@@ -33,12 +45,13 @@
 }
 
 .rf-pressable {
-  transform: translateY(0) scale(1);
+  transform: translateY(var(--rf-motion-distance-none))
+    scale(var(--rf-motion-scale-active));
 }
 
 .rf-active-pulse,
 .rf-status-pulse {
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .rf-text-shimmer {
@@ -56,15 +69,15 @@
   position: absolute;
   inset: 0;
   background-image: linear-gradient(
-    90deg,
+    var(--rf-motion-gradient-angle),
     transparent,
     var(--rf-surface-3),
     transparent
   );
   content: "";
-  opacity: 0.72;
+  opacity: var(--rf-motion-opacity-soft);
   pointer-events: none;
-  transform: translateX(-100%);
+  transform: translateX(var(--rf-motion-shimmer-start));
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -74,6 +87,14 @@
 
   .rf-enter-rise {
     animation: rf-fade-rise var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .rf-enter-scale {
+    animation: rf-scale-fade var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .rf-grow-in {
+    animation: rf-grow-in var(--rf-dur-med) var(--rf-ease-entrance) both;
   }
 
   .rf-stagger > * {
@@ -138,11 +159,13 @@
   }
 
   .rf-pressable:hover {
-    transform: translateY(-1px) scale(1);
+    transform: translateY(calc(-1 * var(--rf-motion-distance-2xs)))
+      scale(var(--rf-motion-scale-active));
   }
 
   .rf-pressable:active {
-    transform: translateY(0) scale(0.98);
+    transform: translateY(var(--rf-motion-distance-none))
+      scale(var(--rf-motion-scale-press));
   }
 
   .rf-active-pulse,
@@ -153,23 +176,24 @@
 
   .rf-text-shimmer {
     background-image: linear-gradient(
-      90deg,
-      var(--rf-shimmer-text-base) 0%,
-      var(--rf-shimmer-text-base) 38%,
-      var(--rf-shimmer-text-glow) 50%,
-      var(--rf-shimmer-text-base) 62%,
-      var(--rf-shimmer-text-base) 100%
+      var(--rf-motion-gradient-angle),
+      var(--rf-shimmer-text-base) var(--rf-motion-gradient-start),
+      var(--rf-shimmer-text-base) var(--rf-motion-gradient-mid-start),
+      var(--rf-shimmer-text-glow) var(--rf-motion-gradient-mid),
+      var(--rf-shimmer-text-base) var(--rf-motion-gradient-mid-end),
+      var(--rf-shimmer-text-base) var(--rf-motion-gradient-end)
     );
-    background-size: 250% 100%;
-    background-position: 100% 0;
-    animation: rf-text-shimmer 2.4s linear infinite;
+    background-size: var(--rf-motion-shimmer-size);
+    background-position: var(--rf-motion-gradient-end)
+      var(--rf-motion-gradient-start);
+    animation: rf-text-shimmer var(--rf-motion-shimmer-duration) linear infinite;
     color: transparent;
     background-clip: text;
     -webkit-text-fill-color: transparent;
   }
 
   .rf-spin {
-    animation: rf-spin 1.2s linear infinite;
+    animation: rf-spin var(--rf-motion-spin-duration) linear infinite;
   }
 
   .rf-shimmer::after {
@@ -180,6 +204,8 @@
 @media (prefers-reduced-motion: reduce) {
   .rf-enter,
   .rf-enter-rise,
+  .rf-enter-scale,
+  .rf-grow-in,
   .rf-popover-motion,
   .rf-active-pulse,
   .rf-status-pulse,
@@ -198,67 +224,91 @@
 
   .rf-pressable:hover,
   .rf-pressable:active {
-    transform: translateY(0) scale(1);
+    transform: translateY(var(--rf-motion-distance-none))
+      scale(var(--rf-motion-scale-active));
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
   .rf-shimmer::after {
-    opacity: 0;
+    opacity: var(--rf-motion-opacity-hidden);
   }
 }
 
 @keyframes rf-fade {
   from {
-    opacity: 0;
+    opacity: var(--rf-motion-opacity-hidden);
   }
 
   to {
-    opacity: 1;
+    opacity: var(--rf-motion-opacity-visible);
   }
 }
 
 @keyframes rf-fade-rise {
   from {
-    opacity: 0;
-    transform: translateY(6px);
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateY(var(--rf-motion-distance-sm));
   }
 
   to {
-    opacity: 1;
-    transform: translateY(0);
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(var(--rf-motion-distance-none));
   }
 }
 
 @keyframes rf-scale-fade {
   from {
-    opacity: 0;
-    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(0.96);
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: var(--rf-motion-transform-base) scale(var(--rf-motion-scale-enter));
   }
 
   to {
-    opacity: 1;
-    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
+    opacity: var(--rf-motion-opacity-visible);
+    transform: var(--rf-motion-transform-base)
+      scale(var(--rf-motion-scale-active));
+  }
+}
+
+@keyframes rf-grow-in {
+  from {
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translate(
+        var(--rf-motion-enter-x, var(--rf-motion-distance-none)),
+        var(--rf-motion-enter-y, var(--rf-motion-distance-sm))
+      )
+      scale(var(--rf-motion-scale-enter));
+  }
+
+  to {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translate(
+        var(--rf-motion-distance-none),
+        var(--rf-motion-distance-none)
+      )
+      scale(var(--rf-motion-scale-active));
   }
 }
 
 @keyframes rf-soft-pulse {
   from {
-    opacity: 1;
+    opacity: var(--rf-motion-opacity-visible);
   }
 
   to {
-    opacity: 0.55;
+    opacity: var(--rf-motion-opacity-muted);
   }
 }
 
 @keyframes rf-text-shimmer {
   from {
-    background-position: 100% 0;
+    background-position: var(--rf-motion-gradient-end)
+      var(--rf-motion-gradient-start);
   }
 
   to {
-    background-position: 0% 0;
+    background-position: var(--rf-motion-gradient-start)
+      var(--rf-motion-gradient-start);
   }
 }
 
@@ -269,18 +319,13 @@
 }
 
 @keyframes rf-shimmer {
-  0% {
-    opacity: 0;
-    transform: translateX(-100%);
+  from {
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateX(var(--rf-motion-shimmer-start));
   }
 
-  20%,
-  80% {
-    opacity: 0.72;
-  }
-
-  100% {
-    opacity: 0;
-    transform: translateX(100%);
+  to {
+    opacity: var(--rf-motion-opacity-soft);
+    transform: translateX(var(--rf-motion-shimmer-end));
   }
 }

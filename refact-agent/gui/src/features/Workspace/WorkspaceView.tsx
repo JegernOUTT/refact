@@ -57,6 +57,7 @@ export function WorkspaceView() {
           styles.body,
           !isSplit && styles.unsplitBody,
           isSplit && styles.splitBody,
+          isSplit ? "rf-enter-scale" : "rf-enter",
         )}
       >
         {activeTabId && isSplit ? (

@@ -302,7 +302,10 @@ function LeafView({
     >
       <PaneHeader leaf={leaf} tabId={tabId} />
       {surfaceDragActive ? (
-        <div className={styles.edgeDropZones} aria-hidden="true">
+        <div
+          className={classNames(styles.edgeDropZones, "rf-enter")}
+          aria-hidden="true"
+        >
           {paneDropEdges.map((edge) => (
             <div
               key={edge}
@@ -415,7 +418,8 @@ function SplitView({ node, tabId, focusedLeafId, stacked }: SplitViewProps) {
       {node.children.map((child, index) => (
         <div
           key={child.id}
-          className={styles.paneSlot}
+          className={classNames(styles.paneSlot, "rf-grow-in")}
+          data-pane-index={index}
           style={{ "--pane-flex": sizes[index] } as PaneSlotStyle}
         >
           <PaneNodeView
