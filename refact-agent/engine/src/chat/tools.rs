@@ -383,7 +383,7 @@ fn spawn_subchat_bridge(
 
             match recv_result {
                 Ok(Some(value)) => {
-                    info!("spawn_subchat_bridge: received message: {:?}b", value.len());
+                    info!("spawn_subchat_bridge: received message: {}b", value.to_string().len());
                     let tool_call_id = value.get("tool_call_id").and_then(|v| v.as_str());
                     let subchat_id = value.get("subchat_id").and_then(|v| v.as_str());
 

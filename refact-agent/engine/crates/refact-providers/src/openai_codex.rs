@@ -1409,7 +1409,7 @@ impl OpenAICodexProvider {
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
             supports_cache_control: true,
-            tokenizer: Some(refact_core::model_caps::OPENAI_CLOUD_TOKENIZER.to_string()),
+            tokenizer: None,
             enabled,
             is_custom: false,
             pricing,

@@ -2166,10 +2166,6 @@ async fn run_streaming_generation(
             overflow_ops: overflow_ops.clone(),
         };
 
-        if let Some(count) = cloud_input_usage.as_ref() {
-            collector.on_usage(&count.usage);
-        }
-
         let session_arc_emitter = session_arc.clone();
         let emitter_task = tokio::spawn(async move {
             fn merge_events(
@@ -2454,9 +2450,7 @@ async fn run_streaming_generation(
                     prompt_tokens: usage.prompt_tokens,
                     total_tokens: usage
                         .prompt_tokens
-                        .saturating_add(provider_usage.completion_tokens)
-                        .saturating_add(provider_usage.cache_creation_tokens.unwrap_or(0))
-                        .saturating_add(provider_usage.cache_read_tokens.unwrap_or(0)),
+                        .saturating_add(provider_usage.completion_tokens),
                     ..provider_usage
                 },
                 None => usage,

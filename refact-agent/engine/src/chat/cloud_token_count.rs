@@ -8,15 +8,12 @@ use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
 use crate::llm::adapter::{AdapterSettings, HttpParts, LlmWireAdapter};
 use crate::llm::LlmRequest;
-use refact_core::model_caps::{
-    ANTHROPIC_CLOUD_TOKENIZER, CLAUDE_CLOUD_TOKENIZER_ALIAS, OPENAI_CLOUD_TOKENIZER,
-};
+use refact_core::model_caps::{ANTHROPIC_CLOUD_TOKENIZER, CLAUDE_CLOUD_TOKENIZER_ALIAS};
 
 const CLOUD_TOKEN_COUNT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloudTokenizerKind {
-    OpenAi,
     Anthropic,
 }
 
@@ -28,7 +25,6 @@ pub struct CloudInputTokenCount {
 
 fn cloud_tokenizer_kind(tokenizer: &str) -> Option<CloudTokenizerKind> {
     match tokenizer.trim().to_ascii_lowercase().as_str() {
-        OPENAI_CLOUD_TOKENIZER => Some(CloudTokenizerKind::OpenAi),
         ANTHROPIC_CLOUD_TOKENIZER | CLAUDE_CLOUD_TOKENIZER_ALIAS => {
             Some(CloudTokenizerKind::Anthropic)
         }
@@ -57,46 +53,6 @@ fn path_segments(url: &str) -> Option<Vec<String>> {
     )
 }
 
-fn openai_responses_endpoint(endpoint: &str) -> Option<String> {
-    let segments = path_segments(endpoint)?;
-    if let Some(idx) = segments.iter().position(|segment| segment == "responses") {
-        return set_path_segments(
-            endpoint,
-            &segments[..=idx]
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        );
-    }
-    if segments.len() >= 2
-        && segments[segments.len() - 2] == "chat"
-        && segments[segments.len() - 1] == "completions"
-    {
-        let mut responses_segments = segments[..segments.len() - 2].to_vec();
-        responses_segments.push("responses".to_string());
-        return set_path_segments(
-            endpoint,
-            &responses_segments
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        );
-    }
-    None
-}
-
-fn openai_count_url(endpoint: &str) -> Option<String> {
-    let responses_endpoint = openai_responses_endpoint(endpoint)?;
-    let mut segments = path_segments(&responses_endpoint)?;
-    if segments.last().map(String::as_str) != Some("input_tokens") {
-        segments.push("input_tokens".to_string());
-    }
-    set_path_segments(
-        &responses_endpoint,
-        &segments.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-}
-
 fn anthropic_count_url(endpoint: &str) -> Option<String> {
     let mut segments = path_segments(endpoint)?;
     if segments.last().map(String::as_str) == Some("count_tokens") {
@@ -113,25 +69,6 @@ fn anthropic_count_url(endpoint: &str) -> Option<String> {
         );
     }
     None
-}
-
-fn strip_openai_count_unsupported_fields(body: &mut Value) {
-    if let Some(obj) = body.as_object_mut() {
-        for key in [
-            "stream",
-            "store",
-            "include",
-            "max_output_tokens",
-            "temperature",
-            "top_p",
-            "frequency_penalty",
-            "stop",
-            "parallel_tool_calls",
-            "previous_response_id",
-        ] {
-            obj.remove(key);
-        }
-    }
 }
 
 fn strip_anthropic_count_unsupported_fields(body: &mut Value) {
@@ -154,43 +91,6 @@ fn strip_anthropic_count_unsupported_fields(body: &mut Value) {
 
 fn body_usize(body: &Value, key: &str) -> Option<usize> {
     body.get(key)?.as_u64().map(|value| value as usize)
-}
-
-fn openai_count_http_parts(
-    req: &LlmRequest,
-    settings: &AdapterSettings,
-) -> Result<(HttpParts, usize), String> {
-    if settings.api_key.is_empty() {
-        return Err("OpenAI cloud token count requires an API key".to_string());
-    }
-    let responses_endpoint = openai_responses_endpoint(&settings.endpoint).ok_or_else(|| {
-        "OpenAI cloud token count requires a Responses-compatible endpoint".to_string()
-    })?;
-    let count_url = openai_count_url(&responses_endpoint)
-        .ok_or_else(|| "failed to derive OpenAI input token count endpoint".to_string())?;
-
-    let count_settings = AdapterSettings {
-        api_key: settings.api_key.clone(),
-        auth_token: settings.auth_token.clone(),
-        endpoint: responses_endpoint,
-        extra_headers: settings.extra_headers.clone(),
-        model_name: settings.model_name.clone(),
-        supports_tools: settings.supports_tools,
-        supports_reasoning: settings.supports_reasoning,
-        reasoning_type: settings.reasoning_type.clone(),
-        supports_temperature: settings.supports_temperature,
-        supports_max_completion_tokens: settings.supports_max_completion_tokens,
-        eof_is_done: settings.eof_is_done,
-        supports_web_search: settings.supports_web_search,
-        supports_cache_control: settings.supports_cache_control,
-    };
-    let mut http = crate::llm::adapters::openai_responses::OpenAiResponsesAdapter
-        .build_http(req, &count_settings)?;
-    let output_token_reserve =
-        body_usize(&http.body, "max_output_tokens").unwrap_or(req.params.max_tokens);
-    http.url = count_url;
-    strip_openai_count_unsupported_fields(&mut http.body);
-    Ok((http, output_token_reserve))
 }
 
 fn anthropic_count_http_parts(
@@ -242,7 +142,6 @@ fn cloud_count_http_parts(
     };
 
     let parts = match kind {
-        CloudTokenizerKind::OpenAi => openai_count_http_parts(req, &settings)?,
         CloudTokenizerKind::Anthropic => anthropic_count_http_parts(req, &settings)?,
     };
     Ok(Some(parts))
@@ -380,28 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_count_parts_use_responses_input_tokens_endpoint() {
-        let model = base_model(
-            OPENAI_CLOUD_TOKENIZER,
-            WireFormat::OpenaiChatCompletions,
-            "https://api.openai.com/v1/chat/completions",
-        );
-
-        let (parts, _output_token_reserve) =
-            cloud_count_http_parts(&req(), &model).unwrap().unwrap();
-
-        assert_eq!(
-            parts.url,
-            "https://api.openai.com/v1/responses/input_tokens"
-        );
-        assert_eq!(parts.body["model"], json!("gpt-4.1"));
-        assert!(parts.body.get("input").is_some());
-        assert!(parts.body.get("stream").is_none());
-        assert!(parts.body.get("store").is_none());
-        assert!(parts.body.get("max_output_tokens").is_none());
-    }
-
-    #[test]
     fn anthropic_count_parts_use_messages_count_tokens_endpoint() {
         let model = base_model(
             ANTHROPIC_CLOUD_TOKENIZER,
@@ -420,41 +297,6 @@ mod tests {
         assert!(parts.body.get("messages").is_some());
         assert!(parts.body.get("max_tokens").is_none());
         assert!(parts.body.get("temperature").is_none());
-    }
-
-    #[test]
-    fn cloud_count_accepts_openai_compatible_count_endpoints() {
-        let model = base_model(
-            OPENAI_CLOUD_TOKENIZER,
-            WireFormat::OpenaiChatCompletions,
-            "https://example.com/v1/chat/completions",
-        );
-
-        let (parts, _output_token_reserve) =
-            cloud_count_http_parts(&req(), &model).unwrap().unwrap();
-
-        assert_eq!(parts.url, "https://example.com/v1/responses/input_tokens");
-    }
-
-    #[test]
-    fn cloud_count_uses_tokenizer_api_key_when_present() {
-        let mut model = base_model(
-            OPENAI_CLOUD_TOKENIZER,
-            WireFormat::OpenaiResponses,
-            "https://api.openai.com/v1/responses",
-        );
-        model.tokenizer_api_key = "sk-tokenizer".to_string();
-
-        let (parts, _output_token_reserve) =
-            cloud_count_http_parts(&req(), &model).unwrap().unwrap();
-
-        assert_eq!(
-            parts
-                .headers
-                .get(reqwest::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer sk-tokenizer")
-        );
     }
 
     #[test]
