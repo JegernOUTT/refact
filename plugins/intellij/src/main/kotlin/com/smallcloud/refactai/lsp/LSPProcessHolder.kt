@@ -28,6 +28,7 @@ import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as I
 interface LSPProcessHolderChangedNotifier {
     fun capabilitiesChanged(newCaps: LSPCapabilities) {}
     fun lspIsActive(isActive: Boolean) {}
+    fun backendConnectionStatusChanged(newStatus: LSPBackendConnectionStatus) {}
     fun ragStatusChanged(ragStatus: RagStatus) {}
 
     companion object {
@@ -35,6 +36,13 @@ interface LSPProcessHolderChangedNotifier {
             "Refact.ai LSP Process Notifier", LSPProcessHolderChangedNotifier::class.java
         )
     }
+}
+
+enum class LSPBackendConnectionStatus(val wireName: String) {
+    CONNECTING("connecting"),
+    STARTING("starting"),
+    READY("ready"),
+    FAILED("failed")
 }
 
 open class LSPProcessHolder(val project: Project) : Disposable {
@@ -63,6 +71,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     @Volatile
     private var startupInProgress = false
     @Volatile
+    private var backendConnectionStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING
+    @Volatile
     private var attachedProject: DaemonProject? = null
     protected open val daemonClient: RefactDaemonClient = HttpRefactDaemonClient()
 
@@ -80,6 +90,22 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 project.messageBus.syncPublisher(LSPProcessHolderChangedNotifier.TOPIC).lspIsActive(newValue)
             }
         }
+
+    open fun backendConnectionStatus(): LSPBackendConnectionStatus {
+        return backendConnectionStatus
+    }
+
+    fun backendReady(): Boolean {
+        return backendConnectionStatus() == LSPBackendConnectionStatus.READY
+    }
+
+    private fun setBackendConnectionStatus(newStatus: LSPBackendConnectionStatus) {
+        if (backendConnectionStatus == newStatus) return
+        backendConnectionStatus = newStatus
+        if (!project.isDisposed) {
+            project.messageBus.syncPublisher(LSPProcessHolderChangedNotifier.TOPIC).backendConnectionStatusChanged(newStatus)
+        }
+    }
 
     private fun logIfBlockingOperationOnEdt(operation: String) {
         if (ApplicationManager.getApplication().isDispatchThread) {
@@ -124,6 +150,9 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return
             }
 
+            if (restart || !backendReady()) {
+                setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
+            }
             lifecycleStartRequested.set(true)
             if (restart) {
                 lifecycleRestartRequested.set(true)
@@ -337,22 +366,33 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         if (shouldAbortLifecycleWork()) return
         val newConfig = currentConfig()
 
-        if (newConfig.sameRuntimeSettings(lastConfig) && attachedProject != null && isWorking) return
+        if (newConfig.sameRuntimeSettings(lastConfig) && attachedProject != null && isWorking) {
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            return
+        }
 
         startupInProgress = true
         try {
             capabilities = LSPCapabilities()
             closeAttachedProject()
             terminate()
-            if (!newConfig.isValid) return
+            setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
+            if (!newConfig.isValid) {
+                setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+                return
+            }
             val root = projectRootPath()
             if (root == null) {
                 logger.warn("LSP daemon attach project root is null")
+                setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
             }
             val daemonStatus = compatibleDaemonStatusOrNull()
             if (daemonStatus == null) {
-                val bin = binaryPathForDaemon() ?: return
+                val bin = binaryPathForDaemon() ?: run {
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+                    return
+                }
                 logger.debug("LSP daemon spawn/upgrade $bin ${newConfig.toSafeLogString()}")
                 daemonClient.ensureDaemon(bin)
             } else {
@@ -369,12 +409,14 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return
             }
             initializeAttachedProject()
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
             logger.info("LSP daemon attach finished in ${System.currentTimeMillis() - startedAt}ms (working=$isWorking)")
         } catch (e: Exception) {
             logger.warn("LSP daemon attach failed: ${e.message}", e)
             isWorking = false
             attachedProject = null
             lastConfig = null
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
         } finally {
             startupInProgress = false
         }
@@ -447,9 +489,11 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             attachedProject = daemonClient.openProject(root, config)
             lastConfig = config
             isWorking = true
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
             true
         } catch (e: Exception) {
             logger.warn("LSP wake retry failed: ${e.message}")
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
             false
         }
     }
@@ -545,6 +589,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         if (!isDisposed) {
             logIfBlockingOperationOnEdt("terminate")
         }
+        setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
         isWorking = false
         attachedProject = null
         lastConfig = null

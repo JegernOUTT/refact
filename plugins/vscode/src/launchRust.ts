@@ -10,6 +10,7 @@ import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
 import * as refactBinary from './refactBinaryResolver';
 import * as refactDaemon from './refactDaemon';
+import { backendReadyForStatus, type RefactBackendConnectionStatus } from './backendStatus';
 
 const DEBUG_HTTP_PORT = 8001;
 const DEBUG_LSP_PORT = 8002;
@@ -30,6 +31,7 @@ export class RustBinaryBlob {
     private reconnectTimer: NodeJS.Timeout | undefined = undefined;
     private reconnectAttempts: number = 0;
     private openedProjects: Map<string, refactDaemon.OpenProjectResponse> = new Map();
+    private attachState: RefactBackendConnectionStatus = "connecting";
 
     constructor(asset_path: string, binary_cache_path?: string) {
         this.asset_path = asset_path;
@@ -66,6 +68,28 @@ export class RustBinaryBlob {
             return "";
         }
         return refactDaemon.projectProxyBaseUrl(this.port, this.project_id);
+    }
+
+    public backend_status(): RefactBackendConnectionStatus {
+        return this.attachState;
+    }
+
+    public backend_ready(): boolean {
+        return backendReadyForStatus(this.attachState);
+    }
+
+    public set_backend_status_for_test(status: RefactBackendConnectionStatus) {
+        this.set_attach_state(status);
+    }
+
+    private set_attach_state(status: RefactBackendConnectionStatus) {
+        if (this.attachState === status) {
+            return;
+        }
+        this.attachState = status;
+        global.side_panel?.handleSettingsChange();
+        global.open_chat_tabs?.forEach(tab => tab.handleSettingsChange());
+        global.status_bar?.choose_color();
     }
 
     public browser_url(): string {
@@ -117,6 +141,8 @@ export class RustBinaryBlob {
     }
 
     private async settings_changed_serialized(generation: number) {
+        this.set_attach_state("connecting");
+        global.status_bar?.set_socket_error(false, "");
         try {
             if (this.x_debug()) {
                 await this.attach_debug_serialized(generation);
@@ -126,6 +152,7 @@ export class RustBinaryBlob {
         } catch (error) {
             console.log(["Refact attach failed", error]);
             global.have_caps = false;
+            this.set_attach_state("failed");
             global.status_bar.set_socket_error(true, error instanceof Error ? error.message : String(error));
         } finally {
             global.side_panel?.handleSettingsChange();
@@ -172,6 +199,10 @@ export class RustBinaryBlob {
 
         const pluginVersion = this.plugin_version();
         let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion });
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
+        this.set_attach_state(daemon ? "connecting" : "starting");
         if (!daemon) {
             const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
             const binPath = await refactBinary.resolveRefactBinary({
@@ -267,6 +298,7 @@ export class RustBinaryBlob {
         await fetchH2.disconnectAll();
         global.have_caps = false;
         global.status_bar.choose_color();
+        this.set_attach_state("connecting");
     }
 
     public async read_caps() {
@@ -400,6 +432,7 @@ export class RustBinaryBlob {
                         finish();
                         return;
                     }
+                    this.set_attach_state("ready");
                     this.reconnectAttempts = 0;
                     console.log(`RUST /START`);
                     await this.read_caps();

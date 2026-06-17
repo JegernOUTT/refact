@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import * as estate from "./estate";
 import * as fetchAPI from "./fetchAPI";
 import { FimDebugData, fim } from 'refact-chat-js/dist/events';
+import { backendReadyForStatus, shouldReadCapsForCompletion } from './backendStatus';
 
 
 export class MyInlineCompletionProvider implements vscode.InlineCompletionItemProvider
@@ -103,6 +104,13 @@ export class MyInlineCompletionProvider implements vscode.InlineCompletionItemPr
         called_manually: boolean
     ): Promise<[string, number]>
     {
+        const backendStatus = global.rust_binary_blob?.backend_status?.() ?? "connecting";
+        if (!backendReadyForStatus(backendStatus)) {
+            return ["", -1];
+        }
+        if (!global.have_caps && !shouldReadCapsForCompletion(global.have_caps, backendStatus)) {
+            return ["", -1];
+        }
         if (!global.have_caps) {
             await global.rust_binary_blob?.read_caps();
         }

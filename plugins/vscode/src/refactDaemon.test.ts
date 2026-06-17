@@ -28,6 +28,11 @@ import {
     refactReleaseAsset,
     resolveRefactBinary,
 } from "./refactBinaryResolver";
+import {
+    backendConfigForStatus,
+    effectiveLspPortForStatus,
+    shouldReadCapsForCompletion,
+} from "./backendStatus";
 
 export async function runRefactDaemonTests() {
     assert.strictEqual(
@@ -56,6 +61,8 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-alpha.1"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
 
+    runBackendStatusTests();
+
     await runBundledRefactSpawnTests();
     await runStandaloneResolutionTests();
     await runArchiveTraversalRejectedTest();
@@ -64,6 +71,22 @@ export async function runRefactDaemonTests() {
     await runCompatibleDaemonSkipsMissingBinaryTest();
     await runDaemonJsonDiscoveryTest();
     await runDaemonAuthHeaderTest();
+}
+
+function runBackendStatusTests() {
+    assert.deepStrictEqual(backendConfigForStatus("connecting"), {
+        backendReady: false,
+        connectionStatus: "connecting",
+    });
+    assert.deepStrictEqual(backendConfigForStatus("ready"), {
+        backendReady: true,
+        connectionStatus: "ready",
+    });
+    assert.strictEqual(effectiveLspPortForStatus(8001, "connecting"), 0);
+    assert.strictEqual(effectiveLspPortForStatus(8001, "ready"), 8001);
+    assert.strictEqual(shouldReadCapsForCompletion(false, "connecting"), false);
+    assert.strictEqual(shouldReadCapsForCompletion(false, "ready"), true);
+    assert.strictEqual(shouldReadCapsForCompletion(true, "ready"), false);
 }
 
 async function runBundledRefactSpawnTests() {

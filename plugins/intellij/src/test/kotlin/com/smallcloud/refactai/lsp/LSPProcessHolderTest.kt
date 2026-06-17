@@ -10,6 +10,7 @@ import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.MessageBus
 import com.smallcloud.refactai.io.AsyncConnection
 import com.smallcloud.refactai.io.HttpStatusException
+import com.smallcloud.refactai.panes.sharedchat.Events
 import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -49,6 +50,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         var statusVersion = "8.1.0"
         var ensuredVersion = "8.1.0"
         var statusError: RuntimeException? = null
+        var openProjectError: RuntimeException? = null
 
         override fun status(): DaemonStatus {
             statusCalls.incrementAndGet()
@@ -66,6 +68,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         override fun openProject(root: String, settings: LSPConfig): DaemonProject {
             openProjectCalls.incrementAndGet()
+            openProjectError?.let { throw it }
             openedSettings.add(settings)
             openProjectEntered.countDown()
             if (blockOpenProject) {
@@ -427,5 +430,63 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val holder = TestLspProcessHolder(mockProject(), FakeDaemonClient())
         assertFalse(holder.hasPendingLifecycleWork())
         holder.dispose()
+    }
+
+    @Test
+    fun testBackendConnectionStatusDefaultsConnecting() {
+        val holder = TestLspProcessHolder(mockProject(), FakeDaemonClient())
+        assertEquals(LSPBackendConnectionStatus.CONNECTING, holder.backendConnectionStatus())
+        assertFalse(holder.backendReady())
+        holder.dispose()
+    }
+
+    @Test
+    fun testBackendConnectionStatusReadyAfterAttach() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient())
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-ready") }
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBackendConnectionStatusFailedAfterAttachError() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-failed") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testConfigPayloadContainsBackendReadiness() {
+        val payload = Events.Config.UpdatePayload(
+            Events.Config.Features(true, false),
+            Events.Config.ThemeProps("light"),
+            0,
+            Events.Config.KeyBindings("foo"),
+            backendReady = false,
+            connectionStatus = LSPBackendConnectionStatus.STARTING.wireName
+        )
+
+        val result = Events.stringify(Events.Config.Update(payload))
+
+        assertTrue(result.contains("\"backendReady\":false"))
+        assertTrue(result.contains("\"connectionStatus\":\"starting\""))
     }
 }

@@ -34,6 +34,7 @@ import com.intellij.util.concurrency.AppExecutorUtil
 import com.smallcloud.refactai.FimCache
 import com.smallcloud.refactai.io.InferenceGlobalContext
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
+import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
 import com.smallcloud.refactai.lsp.LSPProcessHolderChangedNotifier
 import com.smallcloud.refactai.modes.ModeProvider
 import com.smallcloud.refactai.modes.diff.waitingDiff
@@ -390,6 +391,10 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 override fun lspIsActive(isActive: Boolean) {
                     this@SharedChatPane.sendUserConfig()
                     this@SharedChatPane.sendCurrentProjectInfo()
+                }
+
+                override fun backendConnectionStatusChanged(newStatus: LSPBackendConnectionStatus) {
+                    this@SharedChatPane.sendUserConfig()
                 }
             })
 

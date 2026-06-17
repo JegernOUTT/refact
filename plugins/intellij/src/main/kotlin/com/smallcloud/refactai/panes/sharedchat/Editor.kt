@@ -12,6 +12,7 @@ import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.util.application
 import com.smallcloud.refactai.lsp.LSPProcessHolder
+import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
 import com.smallcloud.refactai.panes.sharedchat.browser.getActionKeybinding
 import com.smallcloud.refactai.settings.AppSettingsState
 import java.io.File
@@ -107,15 +108,25 @@ class Editor (val project: Project) {
         val mode = if (isDarkMode) "dark" else "light"
         val themeProps = Events.Config.ThemeProps(mode)
         val lspHolder = LSPProcessHolder.getInstance(project)
-        val rawPort = lspHolder?.baseUrlOrNull()?.port ?: 0
-        if (rawPort <= 0) {
+        val connectionStatus = lspHolder?.backendConnectionStatus() ?: LSPBackendConnectionStatus.CONNECTING
+        val backendReady = lspHolder?.backendReady() ?: false
+        val rawPort = if (backendReady) lspHolder?.baseUrlOrNull()?.port ?: 0 else 0
+        if (!backendReady && connectionStatus == LSPBackendConnectionStatus.CONNECTING) {
             lspHolder?.ensureStartedAsync("editor-config-request")
         }
         val lspPort = if (rawPort > 0) rawPort else 0
-        val lspUrl = lspHolder?.browserUrlOrNull()?.toString()
+        val lspUrl = if (backendReady) lspHolder?.browserUrlOrNull()?.toString() else null
         val keyBindings = Events.Config.KeyBindings(getActionKeybinding("ForceCompletionAction"))
 
-        return Events.Config.UpdatePayload(features, themeProps, lspPort, keyBindings, lspUrl)
+        return Events.Config.UpdatePayload(
+            features,
+            themeProps,
+            lspPort,
+            keyBindings,
+            lspUrl,
+            backendReady,
+            connectionStatus.wireName
+        )
     }
 
     fun getActiveFileInfo(cb: (Events.ActiveFile.FileInfo) -> Unit) {
