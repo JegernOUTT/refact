@@ -29,9 +29,9 @@ import {
 
 vi.mock("../features/Chat/Chat", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
-  const thread = await vi.importActual<typeof import("../features/Chat/Thread")>(
-    "../features/Chat/Thread",
-  );
+  const thread = await vi.importActual<
+    typeof import("../features/Chat/Thread")
+  >("../features/Chat/Thread");
   const selectorHook = await vi.importActual<
     typeof import("../hooks/useAppSelector")
   >("../hooks/useAppSelector");
@@ -214,7 +214,9 @@ describe("App buddy chat page rendering", () => {
     const singleChat = await screen.findByTestId("single-chat");
 
     expect(singleChat).toHaveAttribute("data-chat-id", "buddy-chat-1");
-    expect(singleChat).toHaveTextContent("Buddy investigation transcript squeak");
+    expect(singleChat).toHaveTextContent(
+      "Buddy investigation transcript squeak",
+    );
     await waitFor(() => {
       expect(screen.queryByTestId("split-chat-layout")).not.toBeInTheDocument();
     });
