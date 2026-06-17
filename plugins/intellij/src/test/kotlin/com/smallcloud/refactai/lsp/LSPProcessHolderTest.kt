@@ -95,6 +95,9 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     ) : LSPProcessHolder(project) {
         private val latch = CountDownLatch(1)
         val retryAttempts = mutableListOf<Int>()
+        val ensureStartedBlockingEntered = CountDownLatch(1)
+        val releaseEnsureStartedBlocking = CountDownLatch(1)
+        var blockEnsureStartedBlocking = false
 
         override val daemonClient: RefactDaemonClient
             get() = fakeDaemonClient
@@ -130,6 +133,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             latch.countDown()
             future.get(2, TimeUnit.SECONDS)
             return caughtException
+        }
+
+        override fun ensureStartedBlocking(reason: String) {
+            if (blockEnsureStartedBlocking) {
+                ensureStartedBlockingEntered.countDown()
+                releaseEnsureStartedBlocking.await(2, TimeUnit.SECONDS)
+            }
+            super.ensureStartedBlocking(reason)
         }
 
         fun ensureStartedBlockingForTest(reason: String) {
@@ -486,8 +497,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
 
             fake.openProjectError = null
+            holder.blockEnsureStartedBlocking = true
             holder.ensureStartedAsync("failed-config-request")
 
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.ensureStartedBlockingEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            holder.releaseEnsureStartedBlocking.countDown()
             val deadline = System.currentTimeMillis() + 3000
             while (holder.hasPendingLifecycleWork() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(25)
@@ -497,6 +514,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertTrue(holder.backendReady())
             assertEquals(2, fake.openProjectCalls.get())
         } finally {
+            holder.releaseEnsureStartedBlocking.countDown()
             holder.dispose()
         }
     }

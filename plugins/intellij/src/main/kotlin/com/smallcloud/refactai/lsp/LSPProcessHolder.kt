@@ -150,7 +150,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return
             }
 
-            if (restart || !backendReady()) {
+            if (restart) {
                 setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
             }
             lifecycleStartRequested.set(true)
@@ -375,8 +375,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         try {
             capabilities = LSPCapabilities()
             closeAttachedProject()
-            terminate()
-            setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
+            terminate(LSPBackendConnectionStatus.STARTING)
             if (!newConfig.isValid) {
                 setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
@@ -585,11 +584,11 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
-    private fun terminate() {
+    private fun terminate(newStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING) {
         if (!isDisposed) {
             logIfBlockingOperationOnEdt("terminate")
         }
-        setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
+        setBackendConnectionStatus(newStatus)
         isWorking = false
         attachedProject = null
         lastConfig = null
