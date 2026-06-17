@@ -279,6 +279,33 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
+  it("derives task and buddy navigation tabs outside persisted workspace panes", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 2,
+        tabs: [
+          chatSurface("chat-a"),
+          makeSurfaceKey("task", "task-a"),
+          makeSurfaceKey("buddy", "home"),
+        ],
+        activeTabId: makeSurfaceKey("task", "task-a"),
+        groups: {},
+      }),
+    );
+
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-a")],
+      activeTabId: chatSurface("chat-a"),
+      groups: {},
+    });
+  });
+
   it("ignores legacy pane-only persistence when loading workspace v2", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a", "chat-b"],
@@ -348,6 +375,29 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual({
       tabs: [chatSurface("chat-b")],
       activeTabId: chatSurface("chat-b"),
+      groups: {},
+    });
+  });
+
+  it("falls back deterministically when the persisted active tab no longer resolves", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 2,
+        tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+        activeTabId: chatSurface("missing"),
+        groups: {},
+      }),
+    );
+
+    expect(loadPersistedWorkspace()).toEqual({
+      tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+      activeTabId: chatSurface("chat-a"),
       groups: {},
     });
   });

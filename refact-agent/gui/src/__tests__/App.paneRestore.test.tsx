@@ -11,6 +11,7 @@ import {
   getProjectStorageNamespace,
   savePersistedActiveTab,
   savePersistedChatTabs,
+  savePersistedTasksUIState,
   savePersistedWorkspace,
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
@@ -28,9 +29,36 @@ import {
   goodTools,
   goodUser,
   noCommandPreview,
+  noCompletions,
   server,
   sidebarSubscribe,
 } from "../utils/mockServer";
+
+vi.mock("../features/Tasks", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  const actual = await vi.importActual<typeof import("../features/Tasks")>(
+    "../features/Tasks",
+  );
+
+  return {
+    ...actual,
+    TaskWorkspace: ({ taskId }: { taskId: string }) =>
+      React.createElement(
+        "section",
+        { "data-testid": "task-workspace" },
+        taskId,
+      ),
+  };
+});
+
+vi.mock("../features/Buddy/BuddyHome", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+
+  return {
+    BuddyHome: () =>
+      React.createElement("section", { "data-testid": "buddy-home" }, "Buddy"),
+  };
+});
 
 const appHandlers = [
   goodPing,
@@ -44,6 +72,7 @@ const appHandlers = [
   chatSessionAbort,
   emptyTasks,
   noCommandPreview,
+  noCompletions,
   http.get("*/v1/chat-modes", () =>
     HttpResponse.json({ modes: [], errors: [] }),
   ),
@@ -86,6 +115,77 @@ const baseConfig = {
   apiKey: "test",
   themeProps: {},
 };
+
+function createSidebarSnapshotHandler(
+  tasks: { id: string; name: string }[] = [],
+) {
+  return http.get("*/v1/sidebar/subscribe", () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        const events = [
+          {
+            protocol_version: 2,
+            seq: 0,
+            subscription_id: "test-sidebar",
+            event: {
+              type: "section_snapshot",
+              section: "workspace",
+              status: "ready",
+              snapshot: { workspace_roots: ["/tmp/refact-test"] },
+            },
+          },
+          {
+            protocol_version: 2,
+            seq: 1,
+            subscription_id: "test-sidebar",
+            event: {
+              type: "section_snapshot",
+              section: "chats",
+              status: "ready",
+              snapshot: { trajectories: [] },
+            },
+          },
+          {
+            protocol_version: 2,
+            seq: 2,
+            subscription_id: "test-sidebar",
+            event: {
+              type: "section_snapshot",
+              section: "tasks",
+              status: "ready",
+              snapshot: { tasks },
+            },
+          },
+          {
+            protocol_version: 2,
+            seq: 3,
+            subscription_id: "test-sidebar",
+            event: {
+              type: "section_snapshot",
+              section: "buddy",
+              status: "ready",
+              snapshot: { buddy: null },
+            },
+          },
+        ];
+        for (const event of events) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+          );
+        }
+      },
+    });
+
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  });
+}
 
 const renderApp = () => {
   const store = setUpStore({
@@ -181,75 +281,7 @@ describe("App workspace restore", () => {
   });
 
   it("prunes dangling workspace chats and degrades missing layouts to a single tab fallback", async () => {
-    server.use(
-      ...appHandlers,
-      http.get("*/v1/sidebar/subscribe", () => {
-        const encoder = new TextEncoder();
-        const stream = new ReadableStream({
-          start(controller) {
-            const events = [
-              {
-                protocol_version: 2,
-                seq: 0,
-                subscription_id: "test-sidebar",
-                event: {
-                  type: "section_snapshot",
-                  section: "workspace",
-                  status: "ready",
-                  snapshot: { workspace_roots: ["/tmp/refact-test"] },
-                },
-              },
-              {
-                protocol_version: 2,
-                seq: 1,
-                subscription_id: "test-sidebar",
-                event: {
-                  type: "section_snapshot",
-                  section: "chats",
-                  status: "ready",
-                  snapshot: { trajectories: [] },
-                },
-              },
-              {
-                protocol_version: 2,
-                seq: 2,
-                subscription_id: "test-sidebar",
-                event: {
-                  type: "section_snapshot",
-                  section: "tasks",
-                  status: "ready",
-                  snapshot: { tasks: [] },
-                },
-              },
-              {
-                protocol_version: 2,
-                seq: 3,
-                subscription_id: "test-sidebar",
-                event: {
-                  type: "section_snapshot",
-                  section: "buddy",
-                  status: "ready",
-                  snapshot: { buddy: null },
-                },
-              },
-            ];
-            for (const event of events) {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
-              );
-            }
-          },
-        });
-
-        return new HttpResponse(stream, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
-        });
-      }),
-    );
+    server.use(...appHandlers, createSidebarSnapshotHandler());
     const chatA = makeSurfaceKey("chat", "chat-a");
     const missingLeft = makeSurfaceKey("chat", "missing-left");
     const missingRight = makeSurfaceKey("chat", "missing-right");
@@ -309,6 +341,137 @@ describe("App workspace restore", () => {
         groups: {},
       });
       expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+  });
+
+  it("restores task nav tabs from tasks UI without adding pane surfaces", async () => {
+    server.use(
+      ...appHandlers,
+      createSidebarSnapshotHandler([{ id: "task-a", name: "Task Alpha" }]),
+    );
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/tmp/refact-test"],
+      projectName: "refact-test",
+    });
+    const namespace = getProjectStorageNamespace();
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a", title: "Chat A", mode: "agent" }],
+    });
+    savePersistedWorkspace({
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {},
+    });
+    savePersistedTasksUIState({
+      openTasks: [
+        {
+          id: "task-a",
+          name: "Task Alpha",
+          plannerChats: [],
+          activeChat: null,
+        },
+      ],
+    });
+    savePersistedActiveTab({ type: "task", taskId: "task-a" });
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      namespace ?? "",
+    );
+
+    const { store } = renderApp();
+
+    await waitFor(() => {
+      expect(store.getState().workspace).toEqual({
+        tabs: [chatA],
+        activeTabId: chatA,
+        groups: {},
+      });
+      expect(store.getState().tasksUI.openTasks).toEqual([
+        {
+          id: "task-a",
+          name: "Task Alpha",
+          plannerChats: [],
+          activeChat: null,
+        },
+      ]);
+      expect(store.getState().pages.at(-1)).toEqual({
+        name: "task workspace",
+        taskId: "task-a",
+      });
+    });
+  });
+
+  it("falls back when the persisted active chat or task no longer resolves", async () => {
+    server.use(...appHandlers, createSidebarSnapshotHandler());
+    const chatA = makeSurfaceKey("chat", "chat-a");
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/tmp/refact-test"],
+      projectName: "refact-test",
+    });
+    const namespace = getProjectStorageNamespace();
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a", title: "Chat A", mode: "agent" }],
+    });
+    savePersistedWorkspace({
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {},
+    });
+    savePersistedActiveTab({ type: "chat", id: "missing-chat" });
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      namespace ?? "",
+    );
+
+    const { store, unmount } = renderApp();
+
+    await waitFor(() => {
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+      expect(store.getState().workspace.tabs).toEqual([chatA]);
+    });
+
+    unmount();
+    localStorage.clear();
+    sessionStorage.clear();
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/tmp/refact-test"],
+      projectName: "refact-test",
+    });
+    const nextNamespace = getProjectStorageNamespace();
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a"],
+      currentThreadId: "chat-a",
+      tabs: [{ id: "chat-a", title: "Chat A", mode: "agent" }],
+    });
+    savePersistedWorkspace({
+      tabs: [chatA],
+      activeTabId: chatA,
+      groups: {},
+    });
+    savePersistedActiveTab({ type: "task", taskId: "missing-task" });
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(
+      "refact:chat-ui:project-storage-namespace:v1",
+      nextNamespace ?? "",
+    );
+
+    const { store: nextStore } = renderApp();
+
+    await waitFor(() => {
+      expect(nextStore.getState().pages.at(-1)).toEqual({ name: "history" });
+      expect(nextStore.getState().workspace).toEqual({
+        tabs: [chatA],
+        activeTabId: chatA,
+        groups: {},
+      });
     });
   });
 });

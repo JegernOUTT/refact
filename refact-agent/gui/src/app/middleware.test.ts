@@ -417,6 +417,56 @@ describe("workspace routing middleware", () => {
     });
   });
 
+  it("closing a grouped workspace chat tab closes all grouped threads without ghosts", async () => {
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-b", ["chat-a", "chat-b", "chat-c"]),
+      workspace: {
+        tabs: [chatSurface("chat-a"), chatSurface("chat-c")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {
+          [chatSurface("chat-a")]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatSurface("chat-b")],
+                  activeTabId: chatSurface("chat-b"),
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+        },
+      },
+    });
+
+    store.dispatch(closeWorkspaceTab(chatSurface("chat-a")));
+
+    await waitFor(() => {
+      expect(store.getState().workspace).toEqual({
+        tabs: [chatSurface("chat-c")],
+        activeTabId: chatSurface("chat-c"),
+        groups: {},
+      });
+      expect(store.getState().chat.open_thread_ids).toEqual(["chat-c"]);
+      expect(store.getState().chat.threads["chat-a"]).toBeUndefined();
+      expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
+      expect(store.getState().chat.current_thread_id).toBe("chat-c");
+    });
+  });
+
   it("opens buddy chats as exactly one workspace tab", async () => {
     const store = setUpStore({
       config: { host: "web", lspPort: 8001, themeProps: {} },

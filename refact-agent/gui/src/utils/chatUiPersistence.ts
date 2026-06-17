@@ -392,7 +392,7 @@ function isOpenWorkspaceSurface(
   openThreadIds: ReadonlySet<string>,
 ): boolean {
   return (
-    !isChatSurface(surfaceKey) ||
+    isChatSurface(surfaceKey) &&
     openThreadIds.has(surfaceKey.slice("chat:".length))
   );
 }

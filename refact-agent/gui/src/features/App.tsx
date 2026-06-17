@@ -463,17 +463,20 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         focusedWorkspaceChatId && allThreads[focusedWorkspaceChatId]
           ? focusedWorkspaceChatId
           : persistedActiveTab.id;
-      if (!allThreads[restoredChatId]) return;
       restoredActiveTabRef.current = true;
-      dispatch(switchToThread({ id: restoredChatId, openTab: false }));
-      dispatch(popBackTo({ name: "history" }));
-      dispatch(push({ name: "chat" }));
+      if (allThreads[restoredChatId]) {
+        dispatch(switchToThread({ id: restoredChatId, openTab: false }));
+        dispatch(popBackTo({ name: "history" }));
+        dispatch(push({ name: "chat" }));
+      } else {
+        dispatch(popBackTo({ name: "history" }));
+      }
       return;
     }
 
+    restoredActiveTabRef.current = true;
+    dispatch(popBackTo({ name: "history" }));
     if (openTasks.some((task) => task.id === persistedActiveTab.taskId)) {
-      restoredActiveTabRef.current = true;
-      dispatch(popBackTo({ name: "history" }));
       dispatch(
         push({ name: "task workspace", taskId: persistedActiveTab.taskId }),
       );
