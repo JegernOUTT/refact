@@ -387,8 +387,8 @@ describe("handoff_to_mode middleware", () => {
           {
             id: newChatId,
             title: "",
-            createdAt: expect.any(String),
-            updatedAt: expect.any(String),
+            createdAt: expect.any(String) as unknown as string,
+            updatedAt: expect.any(String) as unknown as string,
             mode: "task_planner",
           },
         ],
