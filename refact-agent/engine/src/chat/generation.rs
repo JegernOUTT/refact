@@ -1766,20 +1766,29 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Stop => {
-                    let mut ev = make_runtime_event(
-                        "chat_completed",
-                        &format!("Completed: {}", chat_label),
-                        "chat",
-                        &format!("chat_{}", chat_id),
-                        "completed",
-                        None,
-                    );
-                    ev.chat_id = Some(chat_id.to_string());
-                    app.buddy_event_sink
-                        .apply_chat_completion(ev, 4, "happy".to_string())
+                    let completed = {
+                        let session = session_arc.lock().await;
+                        session.runtime.state == SessionState::Completed
+                    };
+                    if completed {
+                        let mut ev = make_runtime_event(
+                            "chat_completed",
+                            &format!("Completed: {}", chat_label),
+                            "chat",
+                            &format!("chat_{}", chat_id),
+                            "completed",
+                            None,
+                        );
+                        ev.chat_id = Some(chat_id.to_string());
+                        app.buddy_event_sink
+                            .apply_chat_completion(ev, 4, "happy".to_string())
+                            .await;
+                        maybe_enqueue_completion_activity_reaction(
+                            app.clone(),
+                            session_arc.clone(),
+                        )
                         .await;
-                    maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
-                        .await;
+                    }
                     break;
                 }
                 ToolStepOutcome::Continue => {

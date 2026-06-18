@@ -21,6 +21,7 @@ use super::types::*;
 use super::browser_context;
 use super::content::parse_content_with_attachments;
 use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
+use super::goal_verifier::{verify_goal_before_completion, GoalCompletionGateOutcome};
 use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
 use super::trajectories::{maybe_save_trajectory, maybe_save_trajectory_background};
 use crate::ext::slash_expand::expand_slash_command;
@@ -2138,6 +2139,7 @@ async fn handle_tool_decisions(
         // Some tools (ask_questions/task_done/agent_finish) set abort_flag=true as part of
         // normal operation to stop further LLM generation.
         let mut final_state = SessionState::Idle;
+        let mut completion_trigger: Option<String> = None;
         for tool_call in &tool_calls_to_execute {
             let tool_name =
                 crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
@@ -2145,8 +2147,14 @@ async fn handle_tool_decisions(
                 );
             match tool_name.as_str() {
                 "ask_questions" | "wait_agents" => final_state = SessionState::WaitingUserInput,
-                "task_done" => final_state = SessionState::Completed,
-                "agent_finish" => final_state = SessionState::Completed,
+                "task_done" | "finish" => {
+                    final_state = SessionState::Completed;
+                    completion_trigger = Some(tool_name.to_string());
+                }
+                "agent_finish" => {
+                    final_state = SessionState::Completed;
+                    completion_trigger = Some(tool_name.to_string());
+                }
                 _ => {}
             }
         }
@@ -2163,6 +2171,7 @@ async fn handle_tool_decisions(
                 .load(std::sync::atomic::Ordering::Relaxed)
         };
 
+        let mut verify_completion = false;
         {
             let mut session = session_arc.lock().await;
             for result_msg in tool_results {
@@ -2170,11 +2179,38 @@ async fn handle_tool_decisions(
             }
             session.drain_post_tool_side_effects();
             if tool_initiated_stop {
-                session.set_runtime_state(final_state, None);
+                if final_state == SessionState::Completed
+                    && completion_trigger.is_some()
+                    && session.goal_can_pursue()
+                {
+                    session.set_runtime_state(SessionState::ExecutingTools, None);
+                    verify_completion = true;
+                } else {
+                    session.set_runtime_state(final_state, None);
+                }
             } else if was_aborted {
                 session.set_runtime_state(SessionState::Idle, None);
             } else {
                 session.set_runtime_state(SessionState::Generating, None);
+            }
+        }
+
+        if verify_completion {
+            let trigger = completion_trigger.as_deref().unwrap_or("task_done");
+            match verify_goal_before_completion(app.clone(), session_arc.clone(), trigger).await {
+                GoalCompletionGateOutcome::Passthrough => {
+                    let mut session = session_arc.lock().await;
+                    session.set_runtime_state(SessionState::Completed, None);
+                }
+                GoalCompletionGateOutcome::Finalized => {}
+                GoalCompletionGateOutcome::Rearmed => {
+                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    return;
+                }
+                GoalCompletionGateOutcome::Aborted => {
+                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    return;
+                }
             }
         }
 
