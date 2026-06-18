@@ -82,7 +82,7 @@ Background process completion is represented by a hidden `event(process_complete
 
 `POST /v1/chats/{chat_id}/commands` — queued processing.
 
-Variants (Rust enum names; on the wire they are flattened JSON objects with `type` in snake_case): `UserMessage` (`user_message`), `SetParams` (`set_params`, payload under `patch`), `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort` (`abort`), `ApproveTools` / `RejectTools` (combined as `tool_decisions` with `decisions: [{tool_call_id, accepted}]`), `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`. All carry `client_request_id`; optional `priority` is accepted.
+Variants (Rust enum names; on the wire they are flattened JSON objects with `type` in snake_case): `UserMessage` (`user_message`), `SetParams` (`set_params`, payload under `patch`), `SetGoal` (`set_goal`, `content`), `UpdateGoal` (`update_goal`, `note`), `GoalControl` (`goal_control`, `action: pause|resume|stop`), `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort` (`abort`), `ApproveTools` / `RejectTools` (combined as `tool_decisions` with `decisions: [{tool_call_id, accepted}]`), `RestoreMessages`, `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`. All carry `client_request_id`; optional `priority` is accepted. Goal command types are shared in `refact-chat-api`; do not import similarly named Buddy conductor goal types.
 
 ### Delta Operations
 
@@ -103,7 +103,7 @@ UserMessage → queue → prepare (system prompt, knowledge RAG, history limit) 
 Chat compression produces first-class chat messages and runtime status, not trailing instructions.
 
 - `compression_report` is a visible message role for deterministic/reactive compression reports. It stores Markdown content plus `extra.compression_report = { kind: "chat_compression_report", context_files_removed, context_messages_dropped, tool_results_truncated, tokens_before, tokens_after, estimated_tokens_saved, reduction_percent }`, uses `summarization_tier: "tier2_reactive"`, and is preserved by model-switch/new-thread sanitization.
-- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` (or the fingerprinted variant) and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after the entire leading control prefix (`system`/`event`/`plan`) and after the first user when present, and never between an assistant's tool calls and their results. Report equivalence for idempotent removal is decided by the stable `op_fingerprint` when both reports carry one (deterministic compaction hashes changed message ids, `compress_chat_apply` hashes its op lists, `compress_in_place` hashes options + affected ids); fingerprint-less legacy pairs still compare by metrics, and mixed pairs are never equivalent.
+- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` (or the fingerprinted variant) and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after the entire leading control prefix (`system`/`event`/`goal`/`plan`) and after the first user when present, and never between an assistant's tool calls and their results. Report equivalence for idempotent removal is decided by the stable `op_fingerprint` when both reports carry one (deterministic compaction hashes changed message ids, `compress_chat_apply` hashes its op lists, `compress_in_place` hashes options + affected ids); fingerprint-less legacy pairs still compare by metrics, and mixed pairs are never equivalent.
 - Runtime compression status is carried on both `ChatSession` and `RuntimeState` as `is_compressing`, `compression_phase`, and `compression_reason`, and is emitted through `RuntimeUpdated` and snapshots.
 - Active compression phases are `checking` and `running`; terminal phases are `applied`, `skipped`, and `failed`. Active phases must set/keep `is_compressing` consistently, while terminal runtime transitions clear stale active phases and preserve already-terminal phase/reason metadata.
 - Segment summarization writes compressed assistant messages with `extra.compression.kind === "llm_segment_summary"`; these summaries remain visible UI artifacts and are excluded from repeated summarization by source metadata.
@@ -129,7 +129,10 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 
 | Role | Stored shape | Purpose | GUI default |
 |---|---|---|---|
-| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta` |
+| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, goal deltas, goal pursuit, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit` |
+| `goal` | `extra.goal = { mode, version, created_at_ms, supersedes, active, status?, budget, progress?, attempts?, events?, transferred_from?, transferred_to?, truncated?, original_chars? }` plus Markdown `content` | Single install-once base goal; body is capped at 96KB (`MAX_GOAL_BODY_CHARS`) and owns the active goal projection | Hidden from normal transcript; projected into `Snapshot.goal`, runtime goal fields, TUI `/goal`, and GUI TaskProgressWidget |
+| `event(goal_delta)` | `extra.event = { subkind: "goal_delta", source, payload: { seq, truncated?, original_chars?, kept_chars?, at_ms? } }` plus Markdown `content` | Append-only goal updates; note content is capped at 16KB (`MAX_GOAL_DELTA_CHARS`) | Hidden from normal transcript and EventLog; merged into the synthesized goal/get_goal |
+| `event(goal_pursuit)` | `extra.event = { subkind: "goal_pursuit", source, payload: { kind, at_ms?, gaps?, account_progress? } }` plus human-readable `content` | Internal pursuit facts such as verifier verdicts, re-arm gaps, monitor nudges, budget stops, and transfer notices | Hidden from normal transcript and EventLog; contributes to `GoalSnapshot.events` and TaskProgressWidget history |
 | `plan` | `extra.plan = { mode, version, created_at_ms, supersedes, truncated?, original_chars? }` plus Markdown `content` | Single install-once base plan; body is capped at 96KB (`MAX_PLAN_BODY_CHARS`) | Hidden from normal transcript; latest shown in PlanBanner |
 | `event(plan_delta)` | `extra.event = { subkind: "plan_delta", source, payload: { seq, summary?, truncated?, original_chars?, kept_chars? } }` plus Markdown `content` | Append-only plan updates; note content is capped at 16KB (`MAX_PLAN_DELTA_CHARS`) | Hidden from normal transcript and general EventLog; merged into PlanBanner/get_plan |
 
@@ -148,10 +151,12 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 | `cancellation_note` | cancellation paths | PreserveAnchor |
 | `system_notice` | assorted internal emitters | PreserveAnchor |
 | `plan_delta` | `tool.update_plan` | Never |
+| `goal_delta` | `tool.update_goal` / `chat.command.update_goal` | Never |
+| `goal_pursuit` | `chat.goal_verifier` / `chat.goal_monitor` / transition helpers | PreserveAnchor |
 
-Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan` and `event(plan_delta)` are `Never` and must never be compressed, truncated by compression, or dropped; non-event/non-plan roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
+Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan`, `goal`, `event(plan_delta)`, and `event(goal_delta)` are `Never` and must never be compressed, truncated by compression, or dropped; `event(goal_pursuit)` is `PreserveAnchor`; non-event/non-plan/non-goal roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
 
-Wire mapping rules: provider adapters must never send literal `event` or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps the cached base plan bytes stable while still exposing the synthesized current plan to the model. Preserve Anthropic thinking/signature block order across hidden-role lowering.
+Wire mapping rules: provider adapters must never send literal `event`, `goal`, or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `goal` lowers as `<goal mode="..." version="...">...` and must appear before `<plan>` whenever both are present; `event(goal_delta)` lowers as append-only `<goal-update seq="...">...` blocks. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps cached base goal/plan bytes stable while still exposing synthesized current goal and plan text to the model. `event(goal_pursuit)` remains a generic event block. Preserve Anthropic thinking/signature block order across hidden-role lowering.
 
 ### Plan tools
 
@@ -212,6 +217,70 @@ Schema:
 
 Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count" } }`. `content` is synthesized from the base `plan` plus append-only `plan_delta` notes; the base plan bytes are not rewritten.
 
+### Goal tools
+
+Goal state has two synchronized representations: hidden `goal` + `event(goal_delta|goal_pursuit)` messages in chat history, and the `GoalSnapshot` projection exposed on snapshots, runtime updates, trajectories, and GUI state. All shared goal API types live in `crates/refact-chat-api/src/lib.rs`.
+
+#### `set_goal`
+
+Model-facing prompt: "Install the chat's single active goal. Fails if a goal already exists — use `update_goal` to evolve it."
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "content": { "type": "string", "description": "Full goal body. Required." }
+  },
+  "required": ["content"]
+}
+```
+
+Returns `{ "version": 1, "supersedes": null }`, queues one hidden `goal`, and appends `event(system_notice, "tool.set_goal", {version}, "Goal updated to v1")`. It rejects missing/non-string/empty `content` and rejects any second install with `goal already exists; use update_goal`. The stored base goal is capped at 96KB chars and records truncation metadata when capped. Available by default in `agent`, `task_planner`, and `task_agent` modes.
+
+#### `update_goal`
+
+Model-facing prompt: "Append an incremental update to the current goal. Use when the goal evolves; it does not rewrite the original goal."
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "note": { "type": "string", "description": "Goal update note. Required." }
+  },
+  "required": ["note"]
+}
+```
+
+Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capped at 16KB chars (`MAX_GOAL_DELTA_CHARS`); when capped, the result is `{ "seq": number, "truncated": true, "original_chars": number, "kept_chars": number }`. It queues one hidden `event(goal_delta, "tool.update_goal", {seq, truncated?, original_chars?, kept_chars?}, note)`. It requires an existing or queued base goal and rejects empty `note`.
+
+#### `get_goal`
+
+Model-facing prompt: "Read the current goal installed on this chat. Returns merged goal content, status, version, delta count, budget counters, latest verifier verdict, and gaps."
+
+Schema:
+
+```json
+{ "type": "object", "properties": {}, "required": [] }
+```
+
+Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`. `content` is synthesized from the base `goal` plus append-only `goal_delta` notes; the base goal bytes are not rewritten.
+
+### Goal pursuit contract
+
+`GoalSnapshot` fields are `content`, `version`, `active`, `status`, `budget`, `progress`, `attempts`, `events`, `transferred_from`, and `transferred_to`. `active=true` means ownership, not current execution; pursuit is allowed only when `active && status == Active`. `GoalStatus` serializes as `active`, `verifying`, `paused`, `completed`, `stopped`, `budget_exhausted`, `no_progress`, or `transferred`.
+
+`RuntimeState` and `RuntimeUpdated` mirror `goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, and `goal_no_progress_turns`. `Snapshot` carries `goal: Option<GoalSnapshot>`. `ChatCommand::{SetGoal, UpdateGoal, GoalControl}` mutates the hidden messages/projection through the queue and persists trajectories. GUI command dispatchers send `set_goal`, `update_goal`, and `goal_control`.
+
+Verifier-on-done gates finish-like tools (`task_done`, `finish`, `agent_finish`) before the session reaches `Completed`. Active goals move to `verifying`; the verifier runs in a cache-reusing fork of the parent chat with one hidden verification prompt. `GOAL: MET` records an attempt, emits `event(goal_pursuit, kind=verified)`, marks the goal `completed`, and then completes the session. `GOAL: UNMET` or an inconclusive verifier records gaps, emits `event(goal_pursuit, kind=verification_gaps)`, re-arms the goal as `active`, and enqueues priority `Regenerate` without emitting a completed runtime or Buddy event.
+
+The goal monitor nudges stalled active goal owners with hidden `event(goal_pursuit, kind=nudge, account_progress=true)` events and priority regeneration. Budget windows track max turns, minutes, tokens, cooldown, low-output no-progress turns, and no-progress token thresholds. Turn-end accounting occurs after assistant output and can mark terminal `budget_exhausted` or `no_progress` status instead of completing.
+
+Ownership transfer on `handoff_to_mode` and mode-transition routes carries the current goal into the target chat before any plan messages, resets the target progress window, sets `transferred_from`, and marks the source `active=false, status=transferred, transferred_to=<target_chat_id>`. Restart/reload rehydrates the same owner from `TrajectorySnapshot.goal` and hidden goal messages; it must not synthesize a transfer event.
+
 ### Plan transitions
 
 `handoff_to_mode` and mode-transition endpoints create a pinned `initial-plan` task document when transitioning into Task Planner with an `initial_plan`. The document is created with kind `plan`, role `planner`, and `pinned=true`; failures are non-blocking and reported/logged without mutating the source chat's cached provider state.
@@ -222,7 +291,7 @@ Thinking blocks with cryptographic signatures must be preserved verbatim — no 
 
 ### Trajectories
 
-Stored: `.refact/trajectories/{chat_id}.json`. Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc.
+Stored: `.refact/trajectories/{chat_id}.json`. Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, `goal`, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc. `goal` is a serialized `GoalSnapshot` projection and is rebuilt from hidden goal messages on restore/restart when possible.
 
 OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_to_openai()`).
 

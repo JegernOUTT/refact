@@ -100,6 +100,106 @@ def _plan_message(events: list[dict], version: int) -> dict | None:
     return None
 
 
+def _goal_meta(message: dict) -> dict:
+    return message.get("extra", {}).get("goal") or {}
+
+
+def _goal_message(events: list[dict], version: int | None = None) -> dict | None:
+    for message in _messages(events):
+        if message.get("role") == "goal" and (version is None or _goal_meta(message).get("version") == version):
+            return message
+    return None
+
+
+def _runtime_goal_event(events: list[dict]) -> dict | None:
+    for event in reversed(events):
+        if event.get("type") == "runtime_updated" and "goal_status" in event:
+            return event
+    return None
+
+
+async def _snapshot(base_url: str, chat_id: str) -> dict:
+    events = await _collect_until(base_url, chat_id, lambda seen: any(e.get("type") == "snapshot" for e in seen))
+    return next(event for event in events if event.get("type") == "snapshot")
+
+
+async def _drive_commands_and_collect(
+    base_url: str,
+    chat_id: str,
+    commands: list[dict],
+    predicate,
+    timeout: float = 30.0,
+) -> list[dict]:
+    waiter = asyncio.create_task(_collect_until(base_url, chat_id, predicate, timeout=timeout))
+    await asyncio.sleep(0.1)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for command in commands:
+            await _post_command(client, base_url, chat_id, command)
+    return await waiter
+
+
+def _goal_budget(**overrides) -> dict:
+    budget = {
+        "max_turns": 10,
+        "max_minutes": 15,
+        "max_tokens": 200_000,
+        "cooldown_ms": 1_500,
+        "no_progress_token_threshold": 50,
+        "no_progress_turns": 2,
+    }
+    budget.update(overrides)
+    return budget
+
+
+def _goal_progress(**overrides) -> dict:
+    progress = {
+        "turns_used": 0,
+        "tokens_used": 0,
+        "started_at_ms": 1,
+        "no_progress_turns": 0,
+        "last_nudge_at_ms": 0,
+    }
+    progress.update(overrides)
+    return progress
+
+
+def _goal_hidden_message(content: str, **overrides) -> dict:
+    meta = {
+        "mode": "agent",
+        "version": 1,
+        "created_at_ms": 1,
+        "supersedes": None,
+        "active": True,
+        "status": "active",
+        "budget": _goal_budget(),
+        "progress": _goal_progress(),
+        "attempts": [],
+        "events": [],
+    }
+    meta.update(overrides)
+    return {
+        "message_id": f"goal-{uuid.uuid4().hex[:8]}",
+        "role": "goal",
+        "content": content,
+        "extra": {"goal": meta},
+    }
+
+
+def _goal_pursuit_message(content: str, payload: dict) -> dict:
+    return {
+        "message_id": f"goal-pursuit-{uuid.uuid4().hex[:8]}",
+        "role": "event",
+        "content": content,
+        "extra": {
+            "event": {
+                "subkind": "goal_pursuit",
+                "source": "chat.goal_verifier",
+                "payload": payload,
+            }
+        },
+    }
+
+
 def _tool_call(name: str, arguments: dict, call_id: str | None = None) -> dict:
     return {
         "id": call_id or f"call-{uuid.uuid4().hex[:8]}",
@@ -227,3 +327,257 @@ async def test_set_plan_tool_creates_v2():
     assert plan is not None
     assert _plan_meta(plan)["version"] == 2
     assert "Verify hidden role v2" in plan.get("content", "")
+
+
+@pytest.mark.asyncio
+async def test_goal_role_command_happy_path_projection():
+    base_url = _base_url()
+    chat_id = f"test-goal-met-{uuid.uuid4().hex[:8]}"
+
+    events = await _drive_commands_and_collect(
+        base_url,
+        chat_id,
+        [
+            {"type": "set_params", "patch": {"mode": "agent"}},
+            {"type": "set_goal", "content": "Ship the hidden goal docs"},
+            {"type": "update_goal", "note": "Acceptance: E2E covers MET"},
+        ],
+        lambda seen: _goal_message(seen, 1) is not None
+        and _event_message(seen, "goal_delta") is not None
+        and _runtime_goal_event(seen) is not None,
+    )
+
+    goal_message = _goal_message(events, 1)
+    assert goal_message is not None
+    assert goal_message.get("role") == "goal"
+    assert _goal_meta(goal_message)["active"] is True
+    assert _goal_meta(goal_message)["version"] == 1
+
+    goal_delta = _event_message(events, "goal_delta")
+    assert goal_delta is not None
+    assert _event_meta(goal_delta)["source"] == "chat.command.update_goal"
+
+    snapshot = await _snapshot(base_url, chat_id)
+    goal = snapshot.get("goal")
+    assert goal is not None
+    assert goal["status"] == "active"
+    assert goal["active"] is True
+    assert goal["version"] == 1
+    assert "Acceptance: E2E covers MET" in goal["content"]
+
+    runtime = _runtime_goal_event(events)
+    assert runtime is not None
+    assert runtime["goal_active"] is True
+    assert runtime["goal_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_goal_met_pursuit_restore_projection_completed():
+    base_url = _base_url()
+    chat_id = f"test-goal-met-{uuid.uuid4().hex[:8]}"
+    goal = _goal_hidden_message(
+        "Ship the pond",
+        status="completed",
+        attempts=[
+            {
+                "at_ms": 10,
+                "trigger": "task_done",
+                "verdict": "met",
+                "gaps": [],
+                "verifier_reply": "GOAL: MET",
+            }
+        ],
+        progress=_goal_progress(turns_used=1, tokens_used=77),
+    )
+    pursuit = _goal_pursuit_message(
+        "Goal verification passed.",
+        {"kind": "verified", "at_ms": 10, "gaps": []},
+    )
+
+    events = await _drive_commands_and_collect(
+        base_url,
+        chat_id,
+        [{"type": "restore_messages", "messages": [goal, pursuit]}],
+        lambda seen: _goal_message(seen, 1) is not None
+        and _event_message(seen, "goal_pursuit") is not None,
+    )
+
+    pursuit_event = _event_message(events, "goal_pursuit")
+    assert pursuit_event is not None
+    assert _event_meta(pursuit_event)["payload"]["kind"] == "verified"
+
+    snapshot = await _snapshot(base_url, chat_id)
+    projected = snapshot.get("goal")
+    assert projected is not None
+    assert projected["active"] is True
+    assert projected["status"] == "completed"
+    assert projected["attempts"][0]["verdict"] == "met"
+    assert projected["attempts"][0]["verifier_reply"] == "GOAL: MET"
+    assert projected["events"][0]["kind"] == "goal_pursuit"
+    assert projected["progress"]["turns_used"] == 1
+    assert projected["progress"]["tokens_used"] == 77
+
+
+@pytest.mark.asyncio
+async def test_goal_unmet_rearm_restore_projection():
+    base_url = _base_url()
+    chat_id = f"test-goal-unmet-{uuid.uuid4().hex[:8]}"
+    goal = _goal_hidden_message(
+        "Ship the pond",
+        attempts=[
+            {
+                "at_ms": 10,
+                "trigger": "task_done",
+                "verdict": "unmet",
+                "gaps": ["missing tests"],
+                "verifier_reply": "GOAL: UNMET\n- missing tests",
+            }
+        ],
+    )
+    pursuit = _goal_pursuit_message(
+        "Goal verification found gaps:\nmissing tests",
+        {"kind": "verification_gaps", "at_ms": 10, "gaps": ["missing tests"]},
+    )
+
+    events = await _drive_commands_and_collect(
+        base_url,
+        chat_id,
+        [{"type": "restore_messages", "messages": [goal, pursuit]}],
+        lambda seen: _goal_message(seen, 1) is not None
+        and _event_message(seen, "goal_pursuit") is not None,
+    )
+
+    restored_goal = _goal_message(events, 1)
+    assert restored_goal is not None
+    assert _goal_meta(restored_goal)["attempts"][0]["verdict"] == "unmet"
+
+    pursuit_event = _event_message(events, "goal_pursuit")
+    assert pursuit_event is not None
+    assert _event_meta(pursuit_event)["payload"]["kind"] == "verification_gaps"
+
+    snapshot = await _snapshot(base_url, chat_id)
+    projected = snapshot.get("goal")
+    assert projected is not None
+    assert projected["status"] == "active"
+    assert projected["active"] is True
+    assert projected["attempts"][0]["verdict"] == "unmet"
+    assert projected["attempts"][0]["gaps"] == ["missing tests"]
+    assert projected["events"][0]["kind"] == "goal_pursuit"
+
+
+@pytest.mark.asyncio
+async def test_goal_budget_exhaustion_restore_projection_stops_pursuit():
+    base_url = _base_url()
+    chat_id = f"test-goal-budget-{uuid.uuid4().hex[:8]}"
+    goal = _goal_hidden_message(
+        "Stop when budget is exhausted",
+        status="budget_exhausted",
+        budget=_goal_budget(max_turns=1),
+        progress=_goal_progress(turns_used=1, tokens_used=120),
+    )
+    pursuit = _goal_pursuit_message(
+        "Goal budget exhausted.",
+        {"kind": "budget_exhausted", "at_ms": 20},
+    )
+
+    await _drive_commands_and_collect(
+        base_url,
+        chat_id,
+        [{"type": "restore_messages", "messages": [goal, pursuit]}],
+        lambda seen: _goal_message(seen, 1) is not None,
+    )
+
+    snapshot = await _snapshot(base_url, chat_id)
+    projected = snapshot.get("goal")
+    assert projected is not None
+    assert projected["active"] is True
+    assert projected["status"] == "budget_exhausted"
+    assert projected["progress"]["turns_used"] == 1
+    assert projected["progress"]["tokens_used"] == 120
+
+
+@pytest.mark.asyncio
+async def test_goal_ownership_transfer_restore_projection():
+    base_url = _base_url()
+    source_chat_id = f"test-goal-transfer-source-{uuid.uuid4().hex[:8]}"
+    target_chat_id = f"test-goal-transfer-target-{uuid.uuid4().hex[:8]}"
+
+    source_goal = _goal_hidden_message(
+        "Transfer ownership to a new chat",
+        active=False,
+        status="transferred",
+        transferred_to=target_chat_id,
+    )
+    target_goal = _goal_hidden_message(
+        "Transfer ownership to a new chat",
+        transferred_from=source_chat_id,
+        progress=_goal_progress(started_at_ms=30),
+    )
+
+    await _drive_commands_and_collect(
+        base_url,
+        source_chat_id,
+        [{"type": "restore_messages", "messages": [source_goal]}],
+        lambda seen: _goal_message(seen, 1) is not None,
+    )
+    await _drive_commands_and_collect(
+        base_url,
+        target_chat_id,
+        [{"type": "restore_messages", "messages": [target_goal]}],
+        lambda seen: _goal_message(seen, 1) is not None,
+    )
+
+    source_snapshot = await _snapshot(base_url, source_chat_id)
+    source_projected = source_snapshot.get("goal")
+    assert source_projected is not None
+    assert source_projected["active"] is False
+    assert source_projected["status"] == "transferred"
+    assert source_projected["transferred_to"] == target_chat_id
+
+    target_snapshot = await _snapshot(base_url, target_chat_id)
+    target_projected = target_snapshot.get("goal")
+    assert target_projected is not None
+    assert target_projected["active"] is True
+    assert target_projected["status"] == "active"
+    assert target_projected["transferred_from"] == source_chat_id
+    assert target_projected["progress"]["turns_used"] == 0
+    assert target_projected["progress"]["tokens_used"] == 0
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_restore_same_owner_counters_survive():
+    base_url = _base_url()
+    chat_id = f"test-goal-restart-{uuid.uuid4().hex[:8]}"
+    goal = _goal_hidden_message(
+        "Restore the same owner after restart",
+        progress=_goal_progress(turns_used=4, tokens_used=2048, no_progress_turns=1, last_nudge_at_ms=90),
+        attempts=[
+            {
+                "at_ms": 80,
+                "trigger": "finish",
+                "verdict": "met",
+                "gaps": [],
+                "verifier_reply": "GOAL: MET",
+            }
+        ],
+    )
+
+    await _drive_commands_and_collect(
+        base_url,
+        chat_id,
+        [{"type": "restore_messages", "messages": [goal]}],
+        lambda seen: _goal_message(seen, 1) is not None,
+    )
+
+    snapshot = await _snapshot(base_url, chat_id)
+    projected = snapshot.get("goal")
+    assert projected is not None
+    assert projected["active"] is True
+    assert projected["status"] == "active"
+    assert projected.get("transferred_from") is None
+    assert projected.get("transferred_to") is None
+    assert projected["progress"]["turns_used"] == 4
+    assert projected["progress"]["tokens_used"] == 2048
+    assert projected["progress"]["no_progress_turns"] == 1
+    assert projected["progress"]["last_nudge_at_ms"] == 90
+    assert projected["attempts"][0]["verdict"] == "met"
