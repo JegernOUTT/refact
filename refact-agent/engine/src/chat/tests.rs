@@ -201,7 +201,6 @@ mod tests {
             messages: vec![],
             background_agents: vec![background_agent_summary()],
             browser: None,
-            goal: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();

@@ -2189,11 +2189,6 @@ fn emit_compression_status(
         is_compressing,
         compression_phase: Some(phase),
         compression_reason: reason,
-        goal_active: false,
-        goal_status: None,
-        goal_turns_used: 0,
-        goal_tokens_used: 0,
-        goal_no_progress_turns: 0,
     });
 }
 

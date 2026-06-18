@@ -491,7 +491,6 @@ impl ChatSession {
             messages,
             background_agents,
             browser: None,
-            goal: None,
         }
     }
 
@@ -1095,11 +1094,6 @@ impl ChatSession {
             is_compressing: self.is_compressing,
             compression_phase: self.compression_phase,
             compression_reason: self.compression_reason,
-            goal_active: false,
-            goal_status: None,
-            goal_turns_used: 0,
-            goal_tokens_used: 0,
-            goal_no_progress_turns: 0,
         });
         self.emit_trajectory_state_change();
     }
@@ -1632,11 +1626,6 @@ impl ChatSession {
                     is_compressing: self.is_compressing,
                     compression_phase: self.compression_phase,
                     compression_reason: self.compression_reason,
-                    goal_active: false,
-                    goal_status: None,
-                    goal_turns_used: 0,
-                    goal_tokens_used: 0,
-                    goal_no_progress_turns: 0,
                 });
             }
         }
