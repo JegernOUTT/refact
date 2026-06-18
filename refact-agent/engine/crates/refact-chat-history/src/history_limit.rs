@@ -490,22 +490,25 @@ fn validate_chat_history_slice(messages: &[ChatMessage]) -> Result<(), String> {
     if messages.is_empty() {
         return Err("Invalid chat history: no messages present".to_string());
     }
-    let has_prompt_anchor = messages
-        .iter()
-        .any(|msg| matches!(msg.role.as_str(), "system" | "user" | "event" | "plan"));
+    let has_prompt_anchor = messages.iter().any(|msg| {
+        matches!(
+            msg.role.as_str(),
+            "system" | "user" | "event" | "plan" | "goal"
+        )
+    });
     if !has_prompt_anchor {
         return Err(
-            "Invalid chat history: must have at least one message of role 'system', 'user', 'event', or 'plan'"
+            "Invalid chat history: must have at least one message of role 'system', 'user', 'event', 'plan', or 'goal'"
                 .to_string(),
         );
     }
 
     if !matches!(
         messages[0].role.as_str(),
-        "system" | "user" | "event" | "plan"
+        "system" | "user" | "event" | "plan" | "goal"
     ) {
         return Err(format!(
-            "Invalid chat history: first message must be 'system', 'user', 'event', or 'plan', got '{}'",
+            "Invalid chat history: first message must be 'system', 'user', 'event', 'plan', or 'goal', got '{}'",
             messages[0].role
         ));
     }
@@ -767,6 +770,24 @@ mod tests {
         }
     }
 
+    fn make_goal_msg_basic(content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            serde_json::json!({
+                "version": 1,
+                "active": true,
+                "status": "active",
+            }),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn validate_chat_history_allows_event_first_history() {
         let mut sampling = SamplingParameters::default();
@@ -776,6 +797,17 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, "event");
+    }
+
+    #[test]
+    fn validate_chat_history_allows_goal_first_history() {
+        let mut sampling = SamplingParameters::default();
+        let messages = vec![make_goal_msg_basic("finish the task")];
+
+        let result = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "goal");
     }
 
     #[test]

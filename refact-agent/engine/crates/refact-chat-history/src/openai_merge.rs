@@ -25,7 +25,7 @@ impl ToolCallAccumulator {
     pub fn merge(&mut self, new_tc: &serde_json::Value) {
         if matches!(
             new_tc.get("role").and_then(|role| role.as_str()),
-            Some("event" | "plan")
+            Some("event" | "plan" | "goal")
         ) {
             return;
         }
@@ -422,5 +422,18 @@ mod tests {
             result.is_empty(),
             "Empty strings should not create initialized entry"
         );
+    }
+
+    #[test]
+    fn test_accumulator_ignores_hidden_goal_role() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(&json!({
+            "role": "goal",
+            "index": 0,
+            "id": "goal-not-a-tool",
+            "function": {"name": "should_ignore", "arguments": "{}"}
+        }));
+
+        assert!(acc.finalize().is_empty());
     }
 }
