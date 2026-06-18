@@ -96,6 +96,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const persistedActiveTabRef = useRef<ReturnType<
     typeof loadPersistedActiveTab
   > | null>(null);
+  const lastProjectStorageRestoreIdentityRef = useRef<string | null>(null);
   const lastTrustedProjectStorageNamespaceRef = useRef<string | null>(null);
 
   const pages = useAppSelector(selectPages);
@@ -129,9 +130,14 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useBrowserOnlineStatus();
 
   const config = useConfig();
-  const trustedProjectStorageNamespace = isProjectStorageNamespaceTrusted()
-    ? getProjectStorageNamespace()
+  const projectStorageNamespaceTrusted = isProjectStorageNamespaceTrusted();
+  const projectStorageNamespace = getProjectStorageNamespace();
+  const trustedProjectStorageNamespace = projectStorageNamespaceTrusted
+    ? projectStorageNamespace
     : null;
+  const projectStorageRestoreIdentity = projectStorageNamespaceTrusted
+    ? `trusted:${projectStorageNamespace ?? ""}`
+    : "untrusted";
 
   useEffectOnce(() => {
     if (crashSessionStartedRef.current) return;
@@ -420,23 +426,36 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [desiredPage, chatId, focusedWorkspaceChatId]);
 
   useEffect(() => {
-    if (trustedProjectStorageNamespace === null) return;
-
-    const previousNamespace = lastTrustedProjectStorageNamespaceRef.current;
-    if (previousNamespace === null) {
-      lastTrustedProjectStorageNamespaceRef.current =
-        trustedProjectStorageNamespace;
+    const previousIdentity = lastProjectStorageRestoreIdentityRef.current;
+    if (previousIdentity === null) {
+      lastProjectStorageRestoreIdentityRef.current =
+        projectStorageRestoreIdentity;
+      if (trustedProjectStorageNamespace !== null) {
+        lastTrustedProjectStorageNamespaceRef.current =
+          trustedProjectStorageNamespace;
+      }
       return;
     }
 
-    if (trustedProjectStorageNamespace !== previousNamespace) {
-      restoredActiveTabRef.current = false;
-      persistedActiveTabRef.current = null;
+    if (projectStorageRestoreIdentity !== previousIdentity) {
+      const previousTrustedNamespace =
+        lastTrustedProjectStorageNamespaceRef.current;
+      if (
+        trustedProjectStorageNamespace !== null &&
+        previousTrustedNamespace !== null &&
+        trustedProjectStorageNamespace !== previousTrustedNamespace
+      ) {
+        restoredActiveTabRef.current = false;
+        persistedActiveTabRef.current = null;
+      }
     }
 
-    lastTrustedProjectStorageNamespaceRef.current =
-      trustedProjectStorageNamespace;
-  }, [trustedProjectStorageNamespace]);
+    if (trustedProjectStorageNamespace !== null) {
+      lastTrustedProjectStorageNamespaceRef.current =
+        trustedProjectStorageNamespace;
+    }
+    lastProjectStorageRestoreIdentityRef.current = projectStorageRestoreIdentity;
+  }, [projectStorageRestoreIdentity, trustedProjectStorageNamespace]);
 
   useEffect(() => {
     if (!restoredActiveTabRef.current) return;

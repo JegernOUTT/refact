@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 
@@ -18,6 +20,11 @@ import {
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { WorkspaceView } from "./WorkspaceView";
+
+const groupSplitViewCss = readFileSync(
+  "src/features/Workspace/GroupSplitView.module.css",
+  "utf8",
+);
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
@@ -157,6 +164,33 @@ describe("WorkspaceView", () => {
     expect(screen.getAllByRole("button", { name: "Split Down" })).toHaveLength(
       2,
     );
+  });
+
+  it("uses a vertically scrollable stacked layout at narrow breakpoints", async () => {
+    const clientWidthSpy = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(360);
+
+    try {
+      renderWorkspaceView(createSplitWorkspaceStore());
+
+      await waitFor(() => {
+        const container = document.querySelector<HTMLElement>(
+          `[data-workspace-group-tab-id="${chat("chat-a")}"]`,
+        );
+        expect(container).toBeInTheDocument();
+        expect(container).toHaveAttribute("data-breakpoint", "narrow");
+        expect(container).toHaveAttribute("data-stacked", "true");
+      });
+      expectSurface(chat("chat-a"));
+      expectSurface(chat("chat-b"));
+      expect(screen.queryByTestId("workspace-vertical-divider")).toBeNull();
+      expect(groupSplitViewCss).toMatch(
+        /\.stackedLayout\s*\{[^}]*overflow:\s*hidden auto;/u,
+      );
+    } finally {
+      clientWidthSpy.mockRestore();
+    }
   });
 
   it("dropping a chat tab on an unsplit chat surface creates a split", () => {

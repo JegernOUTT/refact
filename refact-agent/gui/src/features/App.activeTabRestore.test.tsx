@@ -60,6 +60,20 @@ vi.mock("./Buddy/BuddyHome", async () => {
 const PROJECT_STORAGE_NAMESPACE_SESSION_KEY =
   "refact:chat-ui:project-storage-namespace:v1";
 
+function activeTabStorageKey(namespace: string) {
+  return `refact:project:${namespace}:refact:chat-ui:active-tab:v1`;
+}
+
+function writePersistedActiveTab(
+  namespace: string,
+  activeTab: Parameters<typeof savePersistedActiveTab>[0],
+) {
+  localStorage.setItem(
+    activeTabStorageKey(namespace),
+    JSON.stringify({ version: 1, activeTab, updatedAt: Date.now() }),
+  );
+}
+
 const baseConfig = {
   host: "vscode" as const,
   lspPort: 8001,
@@ -299,5 +313,94 @@ describe("App active tab restore", () => {
       "task-b",
     );
     expect(getProjectStorageNamespace()).not.toBe(namespaceA);
+  });
+
+  it("resets active-tab restore refs after untrusted transition to a different project", async () => {
+    server.use(
+      ...appHandlers,
+      createSidebarSnapshotHandler(["/tmp/project-a"]),
+    );
+    const namespaceA = saveProjectAState();
+    const namespaceB = saveProjectBState();
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY, namespaceA);
+
+    const { store } = renderApp();
+
+    await waitFor(() => {
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+
+    act(() => {
+      store.dispatch(setCurrentProjectInfo({ name: "", workspaceRoots: [] }));
+    });
+
+    await waitFor(() => {
+      expect(store.getState().chat.open_thread_ids).toEqual([]);
+    });
+
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({
+          name: "project-b",
+          workspaceRoots: ["/tmp/project-b"],
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(store.getState().pages.at(-1)).toEqual({
+        name: "task workspace",
+        taskId: "task-b",
+      });
+    });
+    expect(await screen.findByTestId("task-workspace")).toHaveTextContent(
+      "task-b",
+    );
+    expect(getProjectStorageNamespace()).toBe(namespaceB);
+  });
+
+  it("preserves active-tab restore refs after untrusted transition to the same project", async () => {
+    server.use(
+      ...appHandlers,
+      createSidebarSnapshotHandler(["/tmp/project-a"]),
+    );
+    const namespaceA = saveProjectAState();
+    setProjectStorageNamespace(undefined);
+    sessionStorage.setItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY, namespaceA);
+
+    const { store } = renderApp();
+
+    await waitFor(() => {
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+
+    writePersistedActiveTab(namespaceA, { type: "buddy" });
+
+    act(() => {
+      store.dispatch(setCurrentProjectInfo({ name: "", workspaceRoots: [] }));
+    });
+
+    await waitFor(() => {
+      expect(store.getState().chat.open_thread_ids).toEqual([]);
+    });
+
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({
+          name: "project-a",
+          workspaceRoots: ["/tmp/project-a"],
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(store.getState().chat.current_thread_id).toBe("chat-a");
+    });
+    expect(screen.queryByTestId("buddy-home")).toBeNull();
+    expect(getProjectStorageNamespace()).toBe(namespaceA);
   });
 });
