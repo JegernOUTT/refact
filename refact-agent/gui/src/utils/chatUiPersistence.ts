@@ -3,6 +3,7 @@ import {
   MAX_GROUP_LEAVES,
   MAX_WORKSPACE_TABS,
   reconcileWorkspaceState,
+  sanitizeWorkspaceSurfaceUniqueness,
   type PaneGroup,
   type WorkspaceGroups,
   type WorkspaceState,
@@ -557,7 +558,7 @@ export function loadPersistedWorkspace(): WorkspaceState {
   const groups: WorkspaceGroups = {};
   for (const [rawTabId, rawGroup] of Object.entries(record.groups)) {
     const tabId = normalizeSurfaceKey(rawTabId);
-    if (!tabId) return fallback;
+    if (!tabId) continue;
     if (!tabs.includes(tabId)) continue;
     if (rawGroup === null || rawGroup === undefined) continue;
 
@@ -566,7 +567,7 @@ export function loadPersistedWorkspace(): WorkspaceState {
       openThreadIds,
       totalNodeCount,
     );
-    if (!group) return fallback;
+    if (!group) continue;
     groups[tabId] = group;
   }
 
@@ -584,14 +585,14 @@ export function loadPersistedWorkspace(): WorkspaceState {
   if (record.activeTabId && !rawActiveTabId) return fallback;
 
   return reconcileWorkspaceState(
-    {
+    sanitizeWorkspaceSurfaceUniqueness({
       tabs,
       activeTabId:
         rawActiveTabId && tabs.includes(rawActiveTabId)
           ? rawActiveTabId
           : tabs[0] ?? null,
       groups,
-    },
+    }),
     persistedTabs.openThreadIds,
   );
 }

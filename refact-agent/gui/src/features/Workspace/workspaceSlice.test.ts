@@ -57,6 +57,12 @@ const leaf = (
 
 const rootState = (workspace: WorkspaceState) => ({ workspace });
 
+const renderedSurfaces = (workspace: WorkspaceState): SurfaceKey[] =>
+  workspace.tabs.flatMap((tabId) => {
+    const group = workspace.groups[tabId];
+    return group ? collectTabIds(group.root) : [tabId];
+  });
+
 const groupFor = (state: WorkspaceState, tabId: SurfaceKey): PaneGroup => {
   const group = state.groups[tabId];
   if (!group) {
@@ -208,6 +214,78 @@ describe("workspaceSlice", () => {
       activeTabId: chatA,
       groups: {},
     });
+  });
+
+  test("hydrateWorkspace drops duplicate surface groups back to unsplit tabs", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    const chatC = chat("c");
+    const chatD = chat("d");
+    const chatE = chat("e");
+
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({
+        tabs: [chatA, chatB, chatC, chatD],
+        activeTabId: chatA,
+        groups: {
+          [chatA]: {
+            focusedLeafId: "left",
+            root: {
+              kind: "split",
+              id: "duplicate:split",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                leaf("left", [chatA], chatA),
+                leaf("right", [chatA], chatA),
+              ],
+            },
+          },
+          [chatB]: {
+            focusedLeafId: "left",
+            root: {
+              kind: "split",
+              id: "top-level-collision:split",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                leaf("left", [chatB], chatB),
+                leaf("right", [chatC], chatC),
+              ],
+            },
+          },
+          [chatD]: {
+            focusedLeafId: "right",
+            root: {
+              kind: "split",
+              id: "valid:split",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                leaf("left", [chatD], chatD),
+                leaf("right", [chatE], chatE),
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    expect(hydrated.tabs).toEqual([chatA, chatB, chatC, chatD]);
+    expect(hydrated.groups[chatA]).toBeUndefined();
+    expect(hydrated.groups[chatB]).toBeUndefined();
+    expect(hydrated.groups[chatD]).toBeDefined();
+    expect(renderedSurfaces(hydrated)).toEqual([
+      chatA,
+      chatB,
+      chatC,
+      chatD,
+      chatE,
+    ]);
+    expect(new Set(renderedSurfaces(hydrated)).size).toBe(
+      renderedSurfaces(hydrated).length,
+    );
   });
 
   test("splitTab creates a group with the surface kept and an empty sibling", () => {

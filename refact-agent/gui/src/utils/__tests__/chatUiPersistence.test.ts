@@ -449,6 +449,83 @@ describe("chatUiPersistence", () => {
     });
   });
 
+  it("loads corrupt duplicate workspace groups as safe unsplit tabs", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b", "chat-c", "chat-d"],
+      currentThreadId: "chat-a",
+      tabs: [
+        { id: "chat-a" },
+        { id: "chat-b" },
+        { id: "chat-c" },
+        { id: "chat-d" },
+      ],
+    });
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 2,
+        tabs: [chatSurface("chat-a"), chatSurface("chat-c")],
+        activeTabId: chatSurface("chat-a"),
+        groups: {
+          [chatSurface("chat-a")]: {
+            root: {
+              kind: "split",
+              id: "duplicate:split",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatSurface("chat-a")],
+                  activeTabId: chatSurface("chat-a"),
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+          [chatSurface("chat-c")]: {
+            root: {
+              kind: "split",
+              id: "valid:split",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "valid-left",
+                  tabIds: [chatSurface("chat-c")],
+                  activeTabId: chatSurface("chat-c"),
+                },
+                {
+                  kind: "leaf",
+                  id: "valid-right",
+                  tabIds: [chatSurface("chat-d")],
+                  activeTabId: chatSurface("chat-d"),
+                },
+              ],
+            },
+            focusedLeafId: "valid-right",
+          },
+        },
+      }),
+    );
+
+    const workspace = loadPersistedWorkspace();
+    expect(workspace.tabs).toEqual([
+      chatSurface("chat-a"),
+      chatSurface("chat-c"),
+    ]);
+    expect(workspace.groups[chatSurface("chat-a")]).toBeUndefined();
+    expect(workspace.groups[chatSurface("chat-c")]).toBeDefined();
+  });
+
   it("persists task management tabs and their active child chat", () => {
     savePersistedTasksUIState({
       openTasks: [

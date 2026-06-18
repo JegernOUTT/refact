@@ -606,6 +606,7 @@ const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
   const normalized = normalizeGroup(group);
   const leafCount = collectLeafIds(normalized.root).length;
   const surfaces = collectTabIds(normalized.root);
+  const uniqueSurfaceCount = unique(surfaces).length;
   const surfaceCount = surfaces.length;
 
   if (
@@ -613,6 +614,7 @@ const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
     leafCount > MAX_GROUP_LEAVES ||
     surfaceCount === 0 ||
     surfaceCount > MAX_WORKSPACE_TABS ||
+    uniqueSurfaceCount !== surfaceCount ||
     surfaces.some((key) => !isChatSurface(key))
   ) {
     return null;
@@ -675,6 +677,56 @@ const workspaceStatesEqual = (
   left.tabs.every((tabId, index) => tabId === right.tabs[index]) &&
   groupsEqual(left.groups, right.groups);
 
+export const sanitizeWorkspaceSurfaceUniqueness = (
+  state: WorkspaceState,
+): WorkspaceState => {
+  const tabs = unique(state.tabs)
+    .filter(isChatSurface)
+    .slice(0, MAX_WORKSPACE_TABS);
+  const topLevelSurfaces = new Set(tabs);
+  const claimedGroupSurfaces = new Set<SurfaceKey>();
+  const groups: WorkspaceGroups = {};
+
+  for (const tabId of tabs) {
+    const group = state.groups[tabId];
+    if (!group) continue;
+
+    const normalized = normalizeHydratedGroup(group);
+    if (!normalized) continue;
+
+    const rawGroupSurfaces = collectTabIds(normalized.root).filter(
+      isChatSurface,
+    );
+    const groupSurfaces = unique(rawGroupSurfaces);
+    const missingGroupKey = !groupSurfaces.includes(tabId);
+    const hasTopLevelCollision = groupSurfaces.some(
+      (key) => key !== tabId && topLevelSurfaces.has(key),
+    );
+    const hasGroupCollision = groupSurfaces.some((key) =>
+      claimedGroupSurfaces.has(key),
+    );
+
+    if (missingGroupKey || hasTopLevelCollision || hasGroupCollision) {
+      continue;
+    }
+
+    groups[tabId] = normalized;
+    for (const key of groupSurfaces) {
+      claimedGroupSurfaces.add(key);
+    }
+  }
+
+  const activeTabId =
+    state.activeTabId &&
+    isChatSurface(state.activeTabId) &&
+    tabs.includes(state.activeTabId)
+      ? state.activeTabId
+      : tabs[0] ?? null;
+  const nextState: WorkspaceState = { tabs, activeTabId, groups };
+
+  return workspaceStatesEqual(state, nextState) ? state : nextState;
+};
+
 export const reconcileWorkspaceState = (
   state: WorkspaceState,
   openThreadIds: string[],
@@ -697,8 +749,9 @@ export const reconcileWorkspaceState = (
       root: pruned.node,
       focusedLeafId: group.focusedLeafId,
     };
+    if (!collectTabIds(nextGroup.root).includes(tabId)) continue;
     nextState.groups[tabId] = nextGroup;
-    writeGroup(nextState, tabId, nextGroup, pruned.changed, true);
+    writeGroup(nextState, tabId, nextGroup, pruned.changed);
   }
 
   if (
@@ -708,7 +761,9 @@ export const reconcileWorkspaceState = (
     nextState.activeTabId = nextState.tabs[0] ?? null;
   }
 
-  return workspaceStatesEqual(state, nextState) ? state : nextState;
+  const sanitizedState = sanitizeWorkspaceSurfaceUniqueness(nextState);
+
+  return workspaceStatesEqual(state, sanitizedState) ? state : sanitizedState;
 };
 
 export const workspaceSlice = createSlice({
@@ -1014,7 +1069,7 @@ export const workspaceSlice = createSlice({
 
       const activeTabId = action.payload.activeTabId;
 
-      return {
+      return sanitizeWorkspaceSurfaceUniqueness({
         tabs,
         activeTabId:
           activeTabId &&
@@ -1023,7 +1078,7 @@ export const workspaceSlice = createSlice({
             ? activeTabId
             : tabs[0] ?? null,
         groups,
-      };
+      });
     },
   },
 });

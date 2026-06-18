@@ -145,6 +145,7 @@ import {
   setPaneActive as setWorkspacePaneActive,
   splitPaneWithSurface,
   splitTab as splitWorkspaceTab,
+  type WorkspaceState,
 } from "../features/Workspace";
 
 const AUTH_ERROR_MESSAGE =
@@ -293,6 +294,40 @@ function openChatInWorkspace(
   listenerApi.dispatch(openWorkspaceTab(surfaceKey));
 }
 
+function collectWorkspaceSurfaceKeys(workspace: WorkspaceState): Set<string> {
+  const surfaces = new Set(workspace.tabs);
+
+  for (const group of Object.values(workspace.groups)) {
+    if (!group) continue;
+    for (const key of collectTabIds(group.root)) {
+      surfaces.add(key);
+    }
+  }
+
+  return surfaces;
+}
+
+function closeRemovedWorkspaceChats(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+  originalSurfaceKeys: Iterable<string>,
+): void {
+  const remainingSurfaceKeys = collectWorkspaceSurfaceKeys(
+    listenerApi.getState().workspace,
+  );
+
+  // Diff against post-action workspace state so corrupt duplicates and future
+  // reducer shape changes cannot force-close a surviving chat surface.
+  for (const key of new Set(originalSurfaceKeys)) {
+    if (!isChatSurface(key) || remainingSurfaceKeys.has(key)) continue;
+    listenerApi.dispatch(
+      closeThread({ id: key.slice("chat:".length), force: true }),
+    );
+  }
+}
+
 startListening({
   matcher: isAnyOf(
     newChatAction,
@@ -408,19 +443,17 @@ function closeWorkspaceChatTab(
   const originalWorkspace = listenerApi.getOriginalState().workspace;
   if (!originalWorkspace.tabs.includes(surfaceKey)) return;
   const group = originalWorkspace.groups[surfaceKey];
-  const surfaceKeys = group ? collectTabIds(group.root) : [surfaceKey];
+  const surfaceKeys = group
+    ? [surfaceKey, ...collectTabIds(group.root)]
+    : [surfaceKey];
 
-  for (const key of new Set(surfaceKeys)) {
-    if (!isChatSurface(key)) continue;
-    listenerApi.dispatch(
-      closeThread({ id: key.slice("chat:".length), force: true }),
-    );
-  }
+  closeRemovedWorkspaceChats(listenerApi, surfaceKeys);
 }
 
 function closeWorkspacePaneChats(
   listenerApi: {
     dispatch: AppDispatch;
+    getState: () => RootState;
     getOriginalState: () => RootState;
   },
   payload: { tabId: string; leafId: string },
@@ -432,12 +465,7 @@ function closeWorkspacePaneChats(
   const leaf = findLeaf(group.root, payload.leafId);
   if (!leaf) return;
 
-  for (const key of new Set(leaf.tabIds)) {
-    if (!isChatSurface(key)) continue;
-    listenerApi.dispatch(
-      closeThread({ id: key.slice("chat:".length), force: true }),
-    );
-  }
+  closeRemovedWorkspaceChats(listenerApi, leaf.tabIds);
 }
 
 startListening({

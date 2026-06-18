@@ -1,6 +1,8 @@
 import { waitFor } from "@testing-library/react";
+import type { UnknownAction } from "@reduxjs/toolkit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setUpStore } from "./store";
+import { setUpStore, type RootState } from "./store";
+import { chatReducer } from "../features/Chat/Thread/reducer";
 import {
   closeThread,
   applyChatEvent,
@@ -27,6 +29,8 @@ import {
   focusPane as focusWorkspacePane,
   selectFocusedWorkspaceChatId,
   setPaneActive as setWorkspacePaneActive,
+  workspaceSlice,
+  type WorkspaceState,
 } from "../features/Workspace";
 import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
@@ -101,6 +105,32 @@ function makeChatState(currentThreadId: string, ids: string[]) {
 }
 
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
+
+const setWorkspaceActionType = "test/setWorkspace";
+
+function installUnsanitizedWorkspaceReducer(
+  store: ReturnType<typeof setUpStore>,
+): void {
+  const initialState = store.getState();
+  store.replaceReducer(
+    (state: RootState | undefined, action: UnknownAction) => {
+      const current = state ?? initialState;
+      if (action.type === setWorkspaceActionType) {
+        return { ...current, workspace: action.payload as WorkspaceState };
+      }
+
+      return {
+        ...current,
+        chat: chatReducer(current.chat, action),
+        workspace: workspaceSlice.reducer(current.workspace, action),
+      };
+    },
+  );
+}
+
+function setWorkspace(workspace: WorkspaceState): UnknownAction {
+  return { type: setWorkspaceActionType, payload: workspace };
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -417,6 +447,57 @@ describe("workspace routing middleware", () => {
     });
   });
 
+  it("closing a tab preserves grouped chats that survive elsewhere", async () => {
+    const chatA = chatSurface("chat-a");
+    const chatB = chatSurface("chat-b");
+    const chatC = chatSurface("chat-c");
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+      workspace: {
+        tabs: [chatA, chatB, chatC],
+        activeTabId: chatA,
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatA],
+                  activeTabId: chatA,
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatB],
+                  activeTabId: chatB,
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+        },
+      },
+    });
+
+    store.dispatch(closeWorkspaceTab(chatA));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatB, chatC]);
+      expect(store.getState().chat.open_thread_ids).toEqual([
+        "chat-b",
+        "chat-c",
+      ]);
+      expect(store.getState().chat.threads["chat-a"]).toBeUndefined();
+      expect(store.getState().chat.threads["chat-b"]).toBeDefined();
+    });
+  });
+
   it("closing a grouped workspace chat tab closes all grouped threads without ghosts", async () => {
     const store = setUpStore({
       config: { host: "web", lspPort: 8001, themeProps: {} },
@@ -464,6 +545,112 @@ describe("workspace routing middleware", () => {
       expect(store.getState().chat.threads["chat-a"]).toBeUndefined();
       expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
       expect(store.getState().chat.current_thread_id).toBe("chat-c");
+    });
+  });
+
+  it("closing a duplicate pane preserves the surviving duplicate chat", async () => {
+    const chatA = chatSurface("chat-a");
+    const chatB = chatSurface("chat-b");
+    const chatC = chatSurface("chat-c");
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-a", ["chat-a", "chat-b", "chat-c"]),
+    });
+    installUnsanitizedWorkspaceReducer(store);
+    store.dispatch(
+      setWorkspace({
+        tabs: [chatA, chatC],
+        activeTabId: chatA,
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatB],
+                  activeTabId: chatB,
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatA, chatB],
+                  activeTabId: chatB,
+                },
+              ],
+            },
+            focusedLeafId: "right",
+          },
+        },
+      }),
+    );
+
+    store.dispatch(closeWorkspacePane({ tabId: chatA, leafId: "left" }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatA, chatB, chatC]);
+      expect(store.getState().chat.open_thread_ids).toEqual([
+        "chat-a",
+        "chat-b",
+        "chat-c",
+      ]);
+      expect(store.getState().chat.threads["chat-b"]).toBeDefined();
+    });
+  });
+
+  it("closing a normal pane closes only chats removed from workspace", async () => {
+    const chatA = chatSurface("chat-a");
+    const chatB = chatSurface("chat-b");
+    const chatC = chatSurface("chat-c");
+    const store = setUpStore({
+      config: { host: "web", lspPort: 8001, themeProps: {} },
+      chat: makeChatState("chat-b", ["chat-a", "chat-b", "chat-c"]),
+      workspace: {
+        tabs: [chatA, chatC],
+        activeTabId: chatA,
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "split",
+              id: "root:split:row",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: [chatA],
+                  activeTabId: chatA,
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: [chatB],
+                  activeTabId: chatB,
+                },
+              ],
+            },
+            focusedLeafId: "left",
+          },
+        },
+      },
+    });
+
+    store.dispatch(closeWorkspacePane({ tabId: chatA, leafId: "right" }));
+
+    await waitFor(() => {
+      expect(store.getState().workspace.tabs).toEqual([chatA, chatC]);
+      expect(store.getState().chat.open_thread_ids).toEqual([
+        "chat-a",
+        "chat-c",
+      ]);
+      expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
+      expect(store.getState().chat.threads["chat-a"]).toBeDefined();
+      expect(store.getState().chat.threads["chat-c"]).toBeDefined();
     });
   });
 
