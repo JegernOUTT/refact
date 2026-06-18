@@ -12,8 +12,9 @@ import {
   setThreadConfirmationStatus,
   switchToThread,
 } from "../../features/Chat/Thread";
-import { popBackTo, push } from "../../features/Pages/pagesSlice";
-import { openTask } from "../../features/Tasks";
+import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
+import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
+import { selectTabs } from "../../features/Workspace";
 import { TabBar } from "../../features/Workspace/TabBar";
 import {
   useAppDispatch,
@@ -157,9 +158,16 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const engineUrl = useMemo(() => resolveBrowserEngineUrl(config), [config]);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
+  const workspaceTabs = useAppSelector(selectTabs);
+  const openTasks = useAppSelector(selectOpenTasksFromRoot);
+  const pages = useAppSelector(selectPages);
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat" ? activeTab.id : currentChatId;
+  const showTabBar =
+    workspaceTabs.length > 0 ||
+    openTasks.length > 0 ||
+    pages.some((page) => page.name === "buddy");
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {
@@ -242,7 +250,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         />
       </div>
 
-      {activeTab.type !== "dashboard" && (
+      {showTabBar && (
         <>
           <div className={styles.toolbarDivider} />
           <TabBar placement="toolbar" />
@@ -271,28 +279,22 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         </a>
       </div>
 
-      {activeTab.type !== "dashboard" && (
-        <>
-          <div className={styles.toolbarDivider} />
+      <div className={styles.toolbarDivider} />
 
-          <div
-            className={classNames(styles.toolbarSection, styles.actionSection)}
-          >
-            <ToolbarIconButton
-              label="New Chat"
-              icon={Plus}
-              onClick={onCreateNewChat}
-            />
+      <div className={classNames(styles.toolbarSection, styles.actionSection)}>
+        <ToolbarIconButton
+          label="New Chat"
+          icon={Plus}
+          onClick={onCreateNewChat}
+        />
 
-            <ToolbarIconButton
-              label="New Task"
-              icon={CheckSquare}
-              className={styles.newTaskAction}
-              onClick={onCreateNewTask}
-            />
-          </div>
-        </>
-      )}
+        <ToolbarIconButton
+          label="New Task"
+          icon={CheckSquare}
+          className={styles.newTaskAction}
+          onClick={onCreateNewTask}
+        />
+      </div>
 
       <div className={styles.toolbarDivider} />
 

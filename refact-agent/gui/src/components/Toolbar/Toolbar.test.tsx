@@ -175,14 +175,41 @@ describe("Toolbar single workspace tab row", () => {
     );
   });
 
-  it("does not render an empty or task-only tab strip on dashboard", () => {
+  it("renders the unified workspace tab bar on dashboard when tabs are open", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
+    const chatA = makeSurfaceKey("chat", "chat-a");
 
     act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
       view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
     });
     rerenderToolbar(view, { type: "dashboard" });
+
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(
+      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /Task Alpha/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Chat" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Task" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render an empty tab strip on dashboard", () => {
+    useToolbarHandlers();
+    renderToolbar({ type: "dashboard" });
 
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
