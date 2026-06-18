@@ -21,7 +21,9 @@ use super::types::*;
 use super::browser_context;
 use super::content::parse_content_with_attachments;
 use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
-use super::goal_verifier::{verify_goal_before_completion, GoalCompletionGateOutcome};
+use super::goal_verifier::{
+    should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
+};
 use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
 use super::trajectories::{maybe_save_trajectory, maybe_save_trajectory_background};
 use crate::ext::slash_expand::expand_slash_command;
@@ -2181,7 +2183,7 @@ async fn handle_tool_decisions(
             if tool_initiated_stop {
                 if final_state == SessionState::Completed
                     && completion_trigger.is_some()
-                    && session.goal_can_pursue()
+                    && should_verify_goal_on_done(&session)
                 {
                     session.set_runtime_state(SessionState::ExecutingTools, None);
                     verify_completion = true;
@@ -2207,6 +2209,7 @@ async fn handle_tool_decisions(
                     maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                     return;
                 }
+                GoalCompletionGateOutcome::BudgetExhausted(_) => {}
                 GoalCompletionGateOutcome::Aborted => {
                     maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                     return;

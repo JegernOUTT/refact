@@ -72,7 +72,9 @@ pub enum ToolStepOutcome {
 
 use super::types::*;
 use super::trajectories::maybe_save_trajectory;
-use super::goal_verifier::{verify_goal_before_completion, GoalCompletionGateOutcome};
+use super::goal_verifier::{
+    should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
+};
 
 use super::config::{limits, tokens};
 
@@ -1383,7 +1385,7 @@ pub async fn process_tool_calls_once(
         if tool_initiated_stop {
             if final_state == SessionState::Completed
                 && completion_trigger.is_some()
-                && session.goal_can_pursue()
+                && should_verify_goal_on_done(&session)
             {
                 session.set_runtime_state(SessionState::ExecutingTools, None);
                 verify_completion = true;
@@ -1410,6 +1412,7 @@ pub async fn process_tool_calls_once(
                 maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                 return ToolStepOutcome::Stop;
             }
+            GoalCompletionGateOutcome::BudgetExhausted(_) => {}
             GoalCompletionGateOutcome::Aborted => return ToolStepOutcome::Stop,
         }
     }

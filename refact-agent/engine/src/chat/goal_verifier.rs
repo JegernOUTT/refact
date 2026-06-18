@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
 use tokio::sync::Mutex as AMutex;
@@ -18,6 +18,7 @@ use crate::chat::types::*;
 use crate::constants::CHAT_TOP_N;
 use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
+use refact_tool_api::ToolDesc;
 
 const GOAL_VERIFIER_SOURCE: &str = "chat.goal_verifier";
 const INCONCLUSIVE_GAP: &str = "verification inconclusive; continue";
@@ -55,6 +56,7 @@ pub enum GoalCompletionGateOutcome {
     Passthrough,
     Finalized,
     Rearmed,
+    BudgetExhausted(GoalStatus),
     Aborted,
 }
 
@@ -66,14 +68,29 @@ fn epoch_ms_now() -> u64 {
 }
 
 pub fn should_verify_goal_on_done(session: &ChatSession) -> bool {
-    session.goal_can_pursue()
+    session.goal.as_ref().is_some_and(|goal| {
+        goal.active
+            && matches!(
+                goal.status,
+                GoalStatus::Active | GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+            )
+    })
 }
 
 pub fn begin_goal_verification_if_needed(session: &mut ChatSession) -> GoalVerificationBegin {
     let Some(goal) = session.goal.as_ref() else {
         return GoalVerificationBegin::NoActiveGoal;
     };
-    if !goal.active || goal.status != GoalStatus::Active {
+    if !goal.active {
+        return GoalVerificationBegin::NoActiveGoal;
+    }
+    if matches!(
+        goal.status,
+        GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+    ) {
+        return GoalVerificationBegin::BudgetExhausted;
+    }
+    if goal.status != GoalStatus::Active {
         return GoalVerificationBegin::NoActiveGoal;
     }
     if goal.goal_budget_exhausted() {
@@ -92,8 +109,15 @@ pub async fn verify_goal_before_completion(
         let mut session = session_arc.lock().await;
         begin_goal_verification_if_needed(&mut session)
     };
-    if begin != GoalVerificationBegin::Started {
-        return GoalCompletionGateOutcome::Passthrough;
+    match begin {
+        GoalVerificationBegin::Started => {}
+        GoalVerificationBegin::BudgetExhausted => {
+            let mut session = session_arc.lock().await;
+            let status = apply_goal_budget_exhausted_terminal(&mut session, trigger)
+                .unwrap_or(GoalStatus::BudgetExhausted);
+            return GoalCompletionGateOutcome::BudgetExhausted(status);
+        }
+        GoalVerificationBegin::NoActiveGoal => return GoalCompletionGateOutcome::Passthrough,
     }
     {
         let session = session_arc.lock().await;
@@ -102,7 +126,6 @@ pub async fn verify_goal_before_completion(
             abort_goal_verification(session_arc.clone()).await;
             return GoalCompletionGateOutcome::Aborted;
         }
-        session.abort_flag.store(false, Ordering::SeqCst);
     }
 
     let reply = match run_goal_verifier(app, session_arc.clone()).await {
@@ -110,9 +133,7 @@ pub async fn verify_goal_before_completion(
         Err(error) => {
             let aborted = {
                 let session = session_arc.lock().await;
-                session.user_interrupt_flag.load(Ordering::SeqCst)
-                    || session.abort_flag.load(Ordering::SeqCst)
-                    || error == ABORT_ERROR_MESSAGE
+                session.user_interrupt_flag.load(Ordering::SeqCst) || error == ABORT_ERROR_MESSAGE
             };
             if aborted {
                 abort_goal_verification(session_arc.clone()).await;
@@ -126,12 +147,81 @@ pub async fn verify_goal_before_completion(
         }
     };
 
+    {
+        let session = session_arc.lock().await;
+        if session.user_interrupt_flag.load(Ordering::SeqCst) {
+            drop(session);
+            abort_goal_verification(session_arc.clone()).await;
+            return GoalCompletionGateOutcome::Aborted;
+        }
+    }
+
     let mut session = session_arc.lock().await;
     match apply_goal_verdict(&mut session, trigger, reply) {
         GoalVerificationApplyOutcome::Finalized => GoalCompletionGateOutcome::Finalized,
         GoalVerificationApplyOutcome::Rearmed => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::NoGoal => GoalCompletionGateOutcome::Passthrough,
     }
+}
+
+fn apply_goal_budget_exhausted_terminal(
+    session: &mut ChatSession,
+    trigger: &str,
+) -> Option<GoalStatus> {
+    let at_ms = epoch_ms_now();
+    let goal = session.goal.as_ref()?;
+    let status = if matches!(
+        goal.status,
+        GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+    ) {
+        goal.status
+    } else {
+        goal.goal_budget_exhaustion_status_at(at_ms)
+            .unwrap_or(GoalStatus::BudgetExhausted)
+    };
+    let kind = terminal_goal_kind(status);
+    let already_recorded = session.goal.as_ref().is_some_and(|goal| {
+        goal.events
+            .iter()
+            .any(|event| event.kind == "goal_pursuit" && event.text.contains(kind))
+    });
+    session.goal_set_status(status);
+    if !already_recorded {
+        let message = goal_budget_exhausted_terminal_event(status, trigger, at_ms);
+        session.goal_push_event(GoalEvent {
+            at_ms,
+            kind: "goal_pursuit".to_string(),
+            text: message.content.content_text_only(),
+        });
+        session.add_message(message);
+    }
+    session.set_runtime_state(SessionState::Completed, None);
+    Some(status)
+}
+
+fn terminal_goal_kind(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::NoProgress => "no_progress",
+        _ => "budget_exhausted",
+    }
+}
+
+fn goal_budget_exhausted_terminal_event(
+    status: GoalStatus,
+    trigger: &str,
+    at_ms: u64,
+) -> ChatMessage {
+    let kind = terminal_goal_kind(status);
+    internal_roles::event(
+        EventSubkind::GoalPursuit,
+        GOAL_VERIFIER_SOURCE,
+        json!({
+            "kind": kind,
+            "trigger": trigger,
+            "at_ms": at_ms,
+        }),
+        format!("Goal pursuit stopped before completion: {kind}."),
+    )
 }
 
 async fn abort_goal_verification(session_arc: Arc<AMutex<ChatSession>>) {
@@ -199,80 +289,23 @@ impl StreamCollector for GoalVerifierCollector {
     fn on_finish(&mut self, _choice_idx: usize, _finish_reason: Option<String>) {}
 }
 
-pub async fn run_goal_verifier(
-    app: AppState,
-    session_arc: Arc<AMutex<ChatSession>>,
-) -> Result<GoalVerifierReply, String> {
-    let gcx = app.gcx.clone();
-    let (thread, mut messages, goal_text, chat_id, abort_flag, abort_notify) = {
-        let session = session_arc.lock().await;
-        let goal_text = session
-            .goal
-            .as_ref()
-            .map(|goal| goal.content.clone())
-            .ok_or_else(|| "no active goal to verify".to_string())?;
-        (
-            session.thread.clone(),
-            session.messages.clone(),
-            goal_text,
-            session.chat_id.clone(),
-            session.abort_flag.clone(),
-            session.abort_notify.clone(),
-        )
-    };
+struct GoalVerifierPrepareInputs {
+    thread: ThreadParams,
+    messages: Vec<ChatMessage>,
+    chat_id: String,
+    tools: Vec<ToolDesc>,
+    sampling_parameters: SamplingParameters,
+    options: ChatPrepareOptions,
+}
 
-    if abort_flag.load(Ordering::SeqCst) {
-        return Err(ABORT_ERROR_MESSAGE.to_string());
-    }
+fn goal_text_for_verifier(session: &ChatSession) -> Result<String, String> {
+    crate::chat::goal_role::synthesize_current_goal(session)
+        .or_else(|| session.goal.as_ref().map(|goal| goal.content.clone()))
+        .ok_or_else(|| "no active goal to verify".to_string())
+}
 
-    messages.push(goal_verification_message(&goal_text));
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-        .await
-        .map_err(|e| e.message)?;
-    let model_rec = crate::caps::resolve_chat_model(caps, &thread.model)?;
-    let tools_for_gen = app
-        .tool_registry
-        .get_tools_index_for_mode(&thread.mode, Some(&model_rec.base.id))
-        .await;
-    let tools = tools_for_gen.tools;
-    let model_n_ctx = if model_rec.base.n_ctx > 0 {
-        model_rec.base.n_ctx
-    } else {
-        crate::chat::config::tokens().default_n_ctx
-    };
-    let effective_n_ctx = match thread.context_tokens_cap {
-        Some(cap) if cap > 0 => cap.min(model_n_ctx),
-        _ => model_n_ctx,
-    };
-    let tokenizer_arc = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
-    let t = HasTokenizerAndEot::new(tokenizer_arc);
-    let ccx = AtCommandsContext::new_from_app(
-        app.clone(),
-        effective_n_ctx,
-        CHAT_TOP_N,
-        false,
-        messages.clone(),
-        chat_id.clone(),
-        thread.root_chat_id.clone(),
-        model_rec.base.id.clone(),
-        thread.task_meta.clone(),
-        thread.worktree.clone(),
-    )
-    .await;
-    let meta = ChatMeta {
-        chat_id,
-        chat_mode: thread.mode.clone(),
-        chat_remote: false,
-        current_config_file: String::new(),
-        context_tokens_cap: thread.context_tokens_cap,
-        include_project_info: thread.include_project_info,
-        request_attempt_id: Uuid::new_v4().to_string(),
-        worktree: thread.worktree.clone(),
-    };
-    let mut verifier_thread = thread.clone();
-    verifier_thread.max_tokens = Some(GOAL_VERIFIER_MAX_TOKENS);
-    verifier_thread.temperature = Some(0.0);
-    let mut sampling_parameters = SamplingParameters {
+fn verifier_sampling_parameters(thread: &ThreadParams) -> SamplingParameters {
+    SamplingParameters {
         max_new_tokens: GOAL_VERIFIER_MAX_TOKENS,
         temperature: Some(0.0),
         boost_reasoning: false,
@@ -289,42 +322,158 @@ pub async fn run_goal_verifier(
             }),
         thinking_budget: thread.thinking_budget,
         ..Default::default()
-    };
+    }
+}
+
+fn goal_verifier_prepare_inputs_from_parts(
+    mut thread: ThreadParams,
+    mut messages: Vec<ChatMessage>,
+    goal_text: String,
+    chat_id: String,
+    tools: Vec<ToolDesc>,
+) -> GoalVerifierPrepareInputs {
+    messages.push(goal_verification_message(&goal_text));
+    thread.max_tokens = Some(GOAL_VERIFIER_MAX_TOKENS);
+    thread.temperature = Some(0.0);
+    let sampling_parameters = verifier_sampling_parameters(&thread);
     let options = ChatPrepareOptions {
         prepend_system_prompt: false,
         allow_at_commands: false,
         allow_tool_prerun: false,
-        supports_tools: model_rec.supports_tools,
+        supports_tools: true,
         tool_choice: Some(ToolChoice::None),
         parallel_tool_calls: Some(false),
         cache_control: CacheControl::Ephemeral,
         frozen_request_prefix: thread.frozen_request_prefix.clone(),
     };
+    GoalVerifierPrepareInputs {
+        thread,
+        messages,
+        chat_id,
+        tools,
+        sampling_parameters,
+        options,
+    }
+}
+
+#[cfg(test)]
+fn goal_verifier_prepare_inputs(
+    session: &ChatSession,
+    tools: Vec<ToolDesc>,
+) -> Result<GoalVerifierPrepareInputs, String> {
+    Ok(goal_verifier_prepare_inputs_from_parts(
+        session.thread.clone(),
+        session.messages.clone(),
+        goal_text_for_verifier(session)?,
+        session.chat_id.clone(),
+        tools,
+    ))
+}
+
+async fn verifier_cancel_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
+    let session = session_arc.lock().await;
+    session.user_interrupt_flag.load(Ordering::SeqCst)
+}
+
+pub async fn run_goal_verifier(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> Result<GoalVerifierReply, String> {
+    let gcx = app.gcx.clone();
+    let (thread, messages, goal_text, chat_id, abort_notify) = {
+        let session = session_arc.lock().await;
+        let goal_text = goal_text_for_verifier(&session)?;
+        (
+            session.thread.clone(),
+            session.messages.clone(),
+            goal_text,
+            session.chat_id.clone(),
+            session.abort_notify.clone(),
+        )
+    };
+
+    if verifier_cancel_requested(&session_arc).await {
+        return Err(ABORT_ERROR_MESSAGE.to_string());
+    }
+
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| e.message)?;
+    let model_rec = crate::caps::resolve_chat_model(caps, &thread.model)?;
+    let tools_for_gen = app
+        .tool_registry
+        .get_tools_index_for_mode(&thread.mode, Some(&model_rec.base.id))
+        .await;
+    let prepare_inputs = goal_verifier_prepare_inputs_from_parts(
+        thread,
+        messages,
+        goal_text,
+        chat_id,
+        tools_for_gen.tools,
+    );
+    let model_n_ctx = if model_rec.base.n_ctx > 0 {
+        model_rec.base.n_ctx
+    } else {
+        crate::chat::config::tokens().default_n_ctx
+    };
+    let effective_n_ctx = match prepare_inputs.thread.context_tokens_cap {
+        Some(cap) if cap > 0 => cap.min(model_n_ctx),
+        _ => model_n_ctx,
+    };
+    let tokenizer_arc = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
+    let t = HasTokenizerAndEot::new(tokenizer_arc);
+    let ccx = AtCommandsContext::new_from_app(
+        app.clone(),
+        effective_n_ctx,
+        CHAT_TOP_N,
+        false,
+        prepare_inputs.messages.clone(),
+        prepare_inputs.chat_id.clone(),
+        prepare_inputs.thread.root_chat_id.clone(),
+        model_rec.base.id.clone(),
+        prepare_inputs.thread.task_meta.clone(),
+        prepare_inputs.thread.worktree.clone(),
+    )
+    .await;
+    let meta = ChatMeta {
+        chat_id: prepare_inputs.chat_id,
+        chat_mode: prepare_inputs.thread.mode.clone(),
+        chat_remote: false,
+        current_config_file: String::new(),
+        context_tokens_cap: prepare_inputs.thread.context_tokens_cap,
+        include_project_info: prepare_inputs.thread.include_project_info,
+        request_attempt_id: Uuid::new_v4().to_string(),
+        worktree: prepare_inputs.thread.worktree.clone(),
+    };
+    let mut sampling_parameters = prepare_inputs.sampling_parameters;
+    let mut options = prepare_inputs.options;
+    options.supports_tools = model_rec.supports_tools;
     let prepared = prepare_chat_passthrough(
         gcx,
         Arc::new(AMutex::new(ccx)),
         &t,
-        messages,
-        &verifier_thread,
+        prepare_inputs.messages,
+        &prepare_inputs.thread,
         &model_rec.base.id,
-        &thread.mode,
-        tools,
+        &prepare_inputs.thread.mode,
+        prepare_inputs.tools,
         &meta,
         &mut sampling_parameters,
         &options,
     )
     .await?;
 
-    if abort_flag.load(Ordering::SeqCst) {
+    if verifier_cancel_requested(&session_arc).await {
         return Err(ABORT_ERROR_MESSAGE.to_string());
     }
 
+    let verifier_abort_flag = Arc::new(AtomicBool::new(false));
     let params = StreamRunParams {
         llm_request: prepared.llm_request,
         model_rec: model_rec.base.clone(),
         chat_id: None,
         allow_websocket: true,
-        abort_flag: Some(abort_flag),
+        abort_flag: Some(verifier_abort_flag),
         abort_notify: Some(abort_notify),
         supports_tools: model_rec.supports_tools,
         supports_reasoning: model_rec.has_reasoning_support(),
@@ -421,6 +570,8 @@ pub fn apply_goal_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_chat_api::FrozenRequestPrefix;
+    use refact_tool_api::{ToolSource, ToolSourceType};
     use serde_json::json;
 
     fn session_with_goal() -> ChatSession {
@@ -433,6 +584,23 @@ mod tests {
         );
         session.set_runtime_state(SessionState::ExecutingTools, None);
         session
+    }
+
+    fn tool_desc(name: &str) -> ToolDesc {
+        ToolDesc {
+            name: name.to_string(),
+            display_name: name.to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: format!("{name} tool"),
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: None,
+            annotations: None,
+        }
     }
 
     fn drain_runtime_states(session: &mut ChatSession) -> Vec<SessionState> {
@@ -537,6 +705,155 @@ mod tests {
         assert_eq!(
             begin_goal_verification_if_needed(&mut exhausted),
             GoalVerificationBegin::BudgetExhausted
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_exhausted_finish_records_terminal_status() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = session_with_goal();
+        session.goal.as_mut().unwrap().progress.turns_used = GoalBudget::default().max_turns;
+        assert!(should_verify_goal_on_done(&session));
+        let session_arc = Arc::new(AMutex::new(session));
+
+        let outcome = verify_goal_before_completion(app, session_arc.clone(), "task_done").await;
+
+        assert_eq!(
+            outcome,
+            GoalCompletionGateOutcome::BudgetExhausted(GoalStatus::BudgetExhausted)
+        );
+        let session = session_arc.lock().await;
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.status, GoalStatus::BudgetExhausted);
+        assert!(goal.attempts.is_empty());
+        assert!(goal.events.iter().any(|event| {
+            event.kind == "goal_pursuit" && event.text.contains("budget_exhausted")
+        }));
+        assert!(!session.messages.iter().any(|message| {
+            message
+                .extra
+                .get("event")
+                .and_then(|event| event.get("payload"))
+                .and_then(|payload| payload.get("kind"))
+                .and_then(|kind| kind.as_str())
+                == Some("verified")
+        }));
+    }
+
+    #[tokio::test]
+    async fn no_progress_exhausted_finish_records_terminal_status() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = session_with_goal();
+        session.goal.as_mut().unwrap().progress.no_progress_turns =
+            GoalBudget::default().no_progress_turns;
+        assert!(should_verify_goal_on_done(&session));
+        let session_arc = Arc::new(AMutex::new(session));
+
+        let outcome = verify_goal_before_completion(app, session_arc.clone(), "task_done").await;
+
+        assert_eq!(
+            outcome,
+            GoalCompletionGateOutcome::BudgetExhausted(GoalStatus::NoProgress)
+        );
+        let session = session_arc.lock().await;
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.status, GoalStatus::NoProgress);
+        assert!(goal
+            .events
+            .iter()
+            .any(|event| { event.kind == "goal_pursuit" && event.text.contains("no_progress") }));
+    }
+
+    #[test]
+    fn verifier_goal_text_uses_synthesized_goal_with_deltas() {
+        let mut session = session_with_goal();
+        session.add_message(internal_roles::goal_delta(
+            "tool.update_goal",
+            json!({"seq": 1}),
+            "also update docs",
+        ));
+
+        let inputs = goal_verifier_prepare_inputs(&session, vec![]).unwrap();
+        let verifier_text = inputs.messages.last().unwrap().content.content_text_only();
+
+        assert!(verifier_text.contains("ship feature"));
+        assert!(verifier_text.contains("## Goal updates"));
+        assert!(verifier_text.contains("also update docs"));
+        assert_eq!(
+            goal_text_for_verifier(&session).unwrap(),
+            crate::chat::goal_role::synthesize_current_goal(&session).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_cancel_uses_user_interrupt_not_existing_finish_abort() {
+        let session_arc = Arc::new(AMutex::new(session_with_goal()));
+        {
+            let session = session_arc.lock().await;
+            session.abort_flag.store(true, Ordering::SeqCst);
+        }
+
+        assert!(!verifier_cancel_requested(&session_arc).await);
+        {
+            let session = session_arc.lock().await;
+            assert!(session.abort_flag.load(Ordering::SeqCst));
+            session.user_interrupt_flag.store(true, Ordering::SeqCst);
+        }
+        assert!(verifier_cancel_requested(&session_arc).await);
+    }
+
+    #[test]
+    fn verifier_prepare_inputs_preserve_parent_cache_and_messages() {
+        let mut session = session_with_goal();
+        session.thread.frozen_request_prefix = Some(FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            system_prompt: Some("cached system".to_string()),
+            tools_canonical: Some(json!([{"name": "finish"}])),
+        });
+        session.add_message(ChatMessage {
+            message_id: "user-1".to_string(),
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("please ship".to_string()),
+            ..Default::default()
+        });
+        session.add_message(ChatMessage {
+            message_id: "assistant-1".to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("working".to_string()),
+            thinking_blocks: Some(vec![json!({"type": "thinking", "signature": "sig-1"})]),
+            ..Default::default()
+        });
+        let original_messages = session.messages.clone();
+        let tools = vec![tool_desc("task_done")];
+
+        let inputs = goal_verifier_prepare_inputs(&session, tools.clone()).unwrap();
+
+        assert_eq!(inputs.messages.len(), original_messages.len() + 1);
+        for (left, right) in inputs.messages.iter().zip(original_messages.iter()) {
+            assert_eq!(left.message_id, right.message_id);
+            assert_eq!(left.role, right.role);
+            assert_eq!(
+                left.content.content_text_only(),
+                right.content.content_text_only()
+            );
+            assert_eq!(left.thinking_blocks, right.thinking_blocks);
+        }
+        let appended = inputs.messages.last().unwrap();
+        assert_eq!(appended.role, "user");
+        assert!(appended.extra.contains_key("goal_verification"));
+        assert_eq!(
+            inputs.options.frozen_request_prefix,
+            session.thread.frozen_request_prefix
+        );
+        assert!(!inputs.options.prepend_system_prompt);
+        assert!(!inputs.options.allow_at_commands);
+        assert!(!inputs.options.allow_tool_prerun);
+        assert!(matches!(inputs.options.tool_choice, Some(ToolChoice::None)));
+        assert_eq!(inputs.options.parallel_tool_calls, Some(false));
+        assert_eq!(
+            serde_json::to_value(&inputs.tools).unwrap(),
+            serde_json::to_value(&tools).unwrap()
         );
     }
 
