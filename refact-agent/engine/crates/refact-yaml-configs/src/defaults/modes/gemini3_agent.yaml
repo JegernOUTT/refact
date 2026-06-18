@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: gemini3_agent
 title: Gemini 3 Agent
 description: Optimized for Gemini 3 and latest Gemini models with function calling, thinking levels, and inherited Agent tools
@@ -185,6 +185,8 @@ override:
     ## Runtime & Process Tools
 
     **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
+
+    **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
     **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 

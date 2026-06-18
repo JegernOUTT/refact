@@ -440,6 +440,15 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_update_plan::ToolUpdatePlan {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_get_goal::ToolGetGoal::new(
+            config_path.clone(),
+        )),
+        Box::new(crate::tools::tool_set_goal::ToolSetGoal {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_update_goal::ToolUpdateGoal {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_compress_chat::ToolCompressChatProbe {
             config_path: config_path.clone(),
         }),

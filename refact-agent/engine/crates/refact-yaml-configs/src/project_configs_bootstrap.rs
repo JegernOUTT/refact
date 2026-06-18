@@ -448,4 +448,20 @@ tools:
             );
         }
     }
+
+    #[test]
+    fn default_modes_with_update_goal_guidance_require_schema_20() {
+        for (filename, content) in get_defaults_for_kind("modes") {
+            if !content.contains("update_goal") {
+                continue;
+            }
+            let config: crate::customization_types::ModeConfig = serde_yaml::from_str(&content)
+                .unwrap_or_else(|err| panic!("{filename} should parse: {err}"));
+            assert!(
+                config.schema_version >= 20,
+                "{filename} contains update_goal guidance but has schema_version {}",
+                config.schema_version
+            );
+        }
+    }
 }

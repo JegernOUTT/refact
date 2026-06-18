@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -223,6 +223,8 @@ prompt: |
 
   **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
 
+  **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
+
   **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 
   **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
@@ -294,6 +296,9 @@ tools:
   - set_plan
   - update_plan
   - get_plan
+  - set_goal
+  - update_goal
+  - get_goal
   - process_start
   - process_list
   - process_read
@@ -358,6 +363,12 @@ tool_confirm:
     - match: "update_plan"
       action: auto
     - match: "get_plan"
+      action: auto
+    - match: "set_goal"
+      action: auto
+    - match: "update_goal"
+      action: auto
+    - match: "get_goal"
       action: auto
     - match: "process_list"
       action: auto

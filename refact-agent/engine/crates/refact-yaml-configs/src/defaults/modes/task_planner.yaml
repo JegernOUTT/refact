@@ -311,6 +311,8 @@ prompt: |
   **Chat Management:** `compress_chat_probe`, `compress_chat_apply`
   **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
 
+  **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
+
   ## When to Use Web Tools
   - Integrating external API → research docs, auth, rate limits
   - Using unfamiliar library → find examples, common patterns
@@ -406,6 +408,9 @@ tools:
   - set_plan
   - update_plan
   - get_plan
+  - set_goal
+  - update_goal
+  - get_goal
   - compress_chat_probe
   - compress_chat_apply
   - task_mem_search
@@ -447,6 +452,12 @@ tool_confirm:
     - match: "update_plan"
       action: auto
     - match: "get_plan"
+      action: auto
+    - match: "set_goal"
+      action: auto
+    - match: "update_goal"
+      action: auto
+    - match: "get_goal"
       action: auto
     - match: "agent_diff"
       action: auto
