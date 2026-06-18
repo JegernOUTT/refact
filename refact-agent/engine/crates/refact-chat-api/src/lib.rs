@@ -120,6 +120,81 @@ pub enum CompressionReason {
     InsufficientSavings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    Verifying,
+    Paused,
+    Completed,
+    Stopped,
+    BudgetExhausted,
+    NoProgress,
+    Transferred,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalBudget {
+    pub max_turns: u32,
+    pub max_minutes: u32,
+    pub max_tokens: u64,
+    pub cooldown_ms: u64,
+    pub no_progress_token_threshold: u64,
+    pub no_progress_turns: u32,
+}
+
+impl Default for GoalBudget {
+    fn default() -> Self {
+        Self {
+            max_turns: 10,
+            max_minutes: 15,
+            max_tokens: 200_000,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GoalProgress {
+    pub turns_used: u32,
+    pub tokens_used: u64,
+    pub started_at_ms: u64,
+    pub no_progress_turns: u32,
+    pub last_nudge_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalAttempt {
+    pub at_ms: u64,
+    pub trigger: String,
+    pub verdict: String,
+    pub gaps: Vec<String>,
+    pub verifier_reply: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalEvent {
+    pub at_ms: u64,
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalSnapshot {
+    pub content: String,
+    pub version: u32,
+    pub active: bool,
+    pub status: GoalStatus,
+    pub budget: GoalBudget,
+    pub progress: GoalProgress,
+    pub attempts: Vec<GoalAttempt>,
+    pub events: Vec<GoalEvent>,
+    pub transferred_from: Option<String>,
+    pub transferred_to: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TaskMeta {
     pub task_id: String,
@@ -277,6 +352,16 @@ pub struct RuntimeState {
     pub error: Option<String>,
     pub queue_size: usize,
     #[serde(default)]
+    pub goal_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_status: Option<GoalStatus>,
+    #[serde(default)]
+    pub goal_turns_used: u32,
+    #[serde(default)]
+    pub goal_tokens_used: u64,
+    #[serde(default)]
+    pub goal_no_progress_turns: u32,
+    #[serde(default)]
     pub is_compressing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_phase: Option<CompressionPhase>,
@@ -301,6 +386,11 @@ impl Default for RuntimeState {
             paused: false,
             error: None,
             queue_size: 0,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -355,6 +445,8 @@ pub enum ChatEvent {
         runtime: RuntimeState,
         messages: Vec<ChatMessage>,
         background_agents: Vec<BackgroundAgentSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<GoalSnapshot>,
     },
     BackgroundAgentUpdated {
         chat_id: String,
@@ -420,6 +512,16 @@ pub enum ChatEvent {
         state: SessionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default)]
+        goal_active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_status: Option<GoalStatus>,
+        #[serde(default)]
+        goal_turns_used: u32,
+        #[serde(default)]
+        goal_tokens_used: u64,
+        #[serde(default)]
+        goal_no_progress_turns: u32,
         #[serde(default)]
         is_compressing: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -554,6 +656,15 @@ pub enum ChatCommand {
     SetParams {
         patch: serde_json::Value,
     },
+    SetGoal {
+        content: String,
+    },
+    UpdateGoal {
+        note: String,
+    },
+    GoalControl {
+        action: String,
+    },
     Abort {},
     CleanBackgroundProcesses {
         #[serde(default)]
@@ -656,6 +767,15 @@ impl CommandRequest {
                     format!("model={}", model),
                     String::new(),
                 )
+            }
+            ChatCommand::SetGoal { content } => {
+                ("set_goal".to_string(), content.clone(), content.clone())
+            }
+            ChatCommand::UpdateGoal { note } => {
+                ("update_goal".to_string(), note.clone(), note.clone())
+            }
+            ChatCommand::GoalControl { action } => {
+                ("goal_control".to_string(), action.clone(), String::new())
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
             ChatCommand::CleanBackgroundProcesses { include_services } => (
@@ -823,6 +943,37 @@ mod tests {
         }
     }
 
+    fn goal_snapshot() -> GoalSnapshot {
+        GoalSnapshot {
+            content: "Ship the frog pond".to_string(),
+            version: 2,
+            active: true,
+            status: GoalStatus::Verifying,
+            budget: GoalBudget::default(),
+            progress: GoalProgress {
+                turns_used: 3,
+                tokens_used: 1234,
+                started_at_ms: 10,
+                no_progress_turns: 1,
+                last_nudge_at_ms: 20,
+            },
+            attempts: vec![GoalAttempt {
+                at_ms: 30,
+                trigger: "done".to_string(),
+                verdict: "needs_work".to_string(),
+                gaps: vec!["tests".to_string()],
+                verifier_reply: "Run tests".to_string(),
+            }],
+            events: vec![GoalEvent {
+                at_ms: 40,
+                kind: "delta".to_string(),
+                text: "Added verification".to_string(),
+            }],
+            transferred_from: Some("source-chat".to_string()),
+            transferred_to: Some("target-chat".to_string()),
+        }
+    }
+
     #[test]
     fn test_session_state_default() {
         assert_eq!(SessionState::default(), SessionState::Idle);
@@ -836,6 +987,44 @@ mod tests {
 
         let parsed: SessionState = serde_json::from_str("\"executing_tools\"").unwrap();
         assert_eq!(parsed, SessionState::ExecutingTools);
+    }
+
+    #[test]
+    fn test_goal_status_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&GoalStatus::BudgetExhausted).unwrap(),
+            "\"budget_exhausted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GoalStatus::NoProgress).unwrap(),
+            "\"no_progress\""
+        );
+
+        let parsed: GoalStatus = serde_json::from_str("\"budget_exhausted\"").unwrap();
+        assert_eq!(parsed, GoalStatus::BudgetExhausted);
+        let parsed: GoalStatus = serde_json::from_str("\"no_progress\"").unwrap();
+        assert_eq!(parsed, GoalStatus::NoProgress);
+    }
+
+    #[test]
+    fn test_goal_snapshot_roundtrip_full() {
+        let snapshot = goal_snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(json["content"], "Ship the frog pond");
+        assert_eq!(json["status"], "verifying");
+        assert_eq!(json["budget"]["max_turns"], 10);
+        assert_eq!(json["budget"]["max_minutes"], 15);
+        assert_eq!(json["budget"]["max_tokens"], 200000);
+        assert_eq!(json["budget"]["cooldown_ms"], 1500);
+        assert_eq!(json["budget"]["no_progress_token_threshold"], 50);
+        assert_eq!(json["budget"]["no_progress_turns"], 2);
+        assert_eq!(json["progress"]["turns_used"], 3);
+        assert_eq!(json["attempts"][0]["gaps"][0], "tests");
+        assert_eq!(json["events"][0]["text"], "Added verification");
+
+        let roundtrip: GoalSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, snapshot);
     }
 
     #[test]
@@ -938,12 +1127,17 @@ mod tests {
         assert!(!runtime.paused);
         assert!(runtime.error.is_none());
         assert_eq!(runtime.queue_size, 0);
+        assert!(!runtime.goal_active);
+        assert_eq!(runtime.goal_status, None);
+        assert_eq!(runtime.goal_turns_used, 0);
+        assert_eq!(runtime.goal_tokens_used, 0);
+        assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
         assert!(runtime.pause_reasons.is_empty());
     }
 
     #[test]
-    fn test_runtime_state_missing_is_compressing_defaults_false() {
+    fn test_runtime_state_missing_goal_and_compression_fields_defaults() {
         let json = r#"{
             "state":"idle",
             "paused":false,
@@ -953,6 +1147,11 @@ mod tests {
 
         let runtime: RuntimeState = serde_json::from_str(json).unwrap();
 
+        assert!(!runtime.goal_active);
+        assert_eq!(runtime.goal_status, None);
+        assert_eq!(runtime.goal_turns_used, 0);
+        assert_eq!(runtime.goal_tokens_used, 0);
+        assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
     }
 
@@ -1062,6 +1261,9 @@ mod tests {
             json!({"type":"user_message","content":"hi","attachments":[]}),
             json!({"type":"retry_from_index","index":2,"content":"retry","attachments":[]}),
             json!({"type":"set_params","patch":{"title":"New"}}),
+            json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"update_goal","note":"verify the reeds"}),
+            json!({"type":"goal_control","action":"pause"}),
             json!({"type":"abort"}),
             json!({"type":"tool_decision","tool_call_id":"tc1","accepted":true}),
             json!({"type":"tool_decisions","decisions":[{"tool_call_id":"tc1","accepted":false}]}),
@@ -1073,6 +1275,21 @@ mod tests {
             let cmd: ChatCommand = serde_json::from_value(cmd_json.clone()).unwrap();
             let roundtrip = serde_json::to_value(&cmd).unwrap();
             assert_eq!(roundtrip["type"], cmd_json["type"]);
+        }
+    }
+
+    #[test]
+    fn test_chat_command_goal_variants_roundtrip() {
+        let commands = vec![
+            json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"update_goal","note":"verify the reeds"}),
+            json!({"type":"goal_control","action":"resume"}),
+        ];
+
+        for cmd_json in commands {
+            let cmd: ChatCommand = serde_json::from_value(cmd_json.clone()).unwrap();
+            let roundtrip = serde_json::to_value(&cmd).unwrap();
+            assert_eq!(roundtrip, cmd_json);
         }
     }
 
@@ -1121,11 +1338,73 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![],
+            goal: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
+        assert!(json.get("goal").is_none());
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         matches!(parsed, ChatEvent::Snapshot { .. });
+    }
+
+    #[test]
+    fn test_chat_event_snapshot_goal_roundtrip() {
+        let goal = goal_snapshot();
+        let event = ChatEvent::Snapshot {
+            thread: ThreadParams::default(),
+            runtime: RuntimeState::default(),
+            messages: vec![],
+            background_agents: vec![],
+            goal: Some(goal.clone()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "snapshot");
+        assert_eq!(json["goal"]["content"], "Ship the frog pond");
+        assert_eq!(json["goal"]["status"], "verifying");
+
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::Snapshot { goal: parsed, .. } => assert_eq!(parsed, Some(goal)),
+            _ => panic!("Expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_missing_goal_defaults_none() {
+        let json = r#"{
+            "type":"snapshot",
+            "thread":{
+                "id":"test",
+                "title":"Test",
+                "model":"gpt-4",
+                "mode":"agent",
+                "tool_use":"agent",
+                "context_tokens_cap":null,
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            },
+            "runtime":{
+                "state":"idle",
+                "paused":false,
+                "error":null,
+                "queue_size":0
+            },
+            "messages":[],
+            "background_agents":[]
+        }"#;
+
+        let event: ChatEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ChatEvent::Snapshot { runtime, goal, .. } => {
+                assert!(!runtime.goal_active);
+                assert_eq!(runtime.goal_status, None);
+                assert_eq!(runtime.goal_turns_used, 0);
+                assert_eq!(runtime.goal_tokens_used, 0);
+                assert_eq!(runtime.goal_no_progress_turns, 0);
+                assert_eq!(goal, None);
+            }
+            _ => panic!("Expected Snapshot"),
+        }
     }
 
     #[test]
@@ -1164,6 +1443,7 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![background_agent_summary()],
+            goal: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
@@ -1263,6 +1543,11 @@ mod tests {
         let event = ChatEvent::RuntimeUpdated {
             state: SessionState::Completed,
             error: None,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -1276,6 +1561,11 @@ mod tests {
         let event_with_error = ChatEvent::RuntimeUpdated {
             state: SessionState::Error,
             error: Some("test error".into()),
+            goal_active: true,
+            goal_status: Some(GoalStatus::NoProgress),
+            goal_turns_used: 4,
+            goal_tokens_used: 5678,
+            goal_no_progress_turns: 2,
             is_compressing: true,
             compression_phase: Some(CompressionPhase::Failed),
             compression_reason: Some(CompressionReason::TransientFailure),
@@ -1284,13 +1574,18 @@ mod tests {
         assert_eq!(json2["type"], "runtime_updated");
         assert_eq!(json2["state"], "error");
         assert_eq!(json2["error"], "test error");
+        assert_eq!(json2["goal_active"], true);
+        assert_eq!(json2["goal_status"], "no_progress");
+        assert_eq!(json2["goal_turns_used"], 4);
+        assert_eq!(json2["goal_tokens_used"], 5678);
+        assert_eq!(json2["goal_no_progress_turns"], 2);
         assert_eq!(json2["is_compressing"], true);
         assert_eq!(json2["compression_phase"], "failed");
         assert_eq!(json2["compression_reason"], "transient_failure");
     }
 
     #[test]
-    fn test_runtime_updated_missing_is_compressing_defaults_false() {
+    fn test_runtime_updated_missing_goal_and_compression_fields_defaults() {
         let json = r#"{
             "type":"runtime_updated",
             "state":"completed"
@@ -1302,12 +1597,22 @@ mod tests {
             ChatEvent::RuntimeUpdated {
                 state,
                 error,
+                goal_active,
+                goal_status,
+                goal_turns_used,
+                goal_tokens_used,
+                goal_no_progress_turns,
                 is_compressing,
                 compression_phase,
                 compression_reason,
             } => {
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);
+                assert!(!goal_active);
+                assert_eq!(goal_status, None);
+                assert_eq!(goal_turns_used, 0);
+                assert_eq!(goal_tokens_used, 0);
+                assert_eq!(goal_no_progress_turns, 0);
                 assert!(!is_compressing);
                 assert_eq!(compression_phase, None);
                 assert_eq!(compression_reason, None);
