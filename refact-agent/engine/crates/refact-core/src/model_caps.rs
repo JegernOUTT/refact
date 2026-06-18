@@ -120,11 +120,12 @@ const MAX_REASONABLE_OUTPUT_TOKENS: usize = 1_000_000;
 
 pub const ANTHROPIC_CLOUD_TOKENIZER: &str = "anthropic";
 pub const CLAUDE_CLOUD_TOKENIZER_ALIAS: &str = "claude";
+pub const OPENAI_CLOUD_TOKENIZER: &str = "openai";
 
 pub fn is_predefined_cloud_tokenizer(tokenizer: &str) -> bool {
     matches!(
         tokenizer.trim().to_ascii_lowercase().as_str(),
-        ANTHROPIC_CLOUD_TOKENIZER | CLAUDE_CLOUD_TOKENIZER_ALIAS
+        ANTHROPIC_CLOUD_TOKENIZER | CLAUDE_CLOUD_TOKENIZER_ALIAS | OPENAI_CLOUD_TOKENIZER
     )
 }
 
@@ -608,6 +609,12 @@ mod tests {
             caps.get("claude").unwrap().tokenizer,
             ANTHROPIC_CLOUD_TOKENIZER
         );
+    }
+
+    #[test]
+    fn predefined_cloud_tokenizer_matches_explicit_openai_name() {
+        assert!(is_predefined_cloud_tokenizer("openai"));
+        assert!(is_predefined_cloud_tokenizer(" OpenAI "));
     }
 
     #[test]
