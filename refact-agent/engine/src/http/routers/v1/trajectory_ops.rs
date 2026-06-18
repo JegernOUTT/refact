@@ -12,10 +12,15 @@ use crate::chat::trajectory_ops::{
     CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select,
     sanitize_messages_for_new_thread,
 };
+use crate::call_validation::ChatMessage;
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
-use crate::agentic::mode_transition::{AgenticPathContext, analyze_mode_transition, assemble_new_chat};
+use crate::agentic::mode_transition::{
+    AgenticPathContext, GoalTransferResult, analyze_mode_transition, assemble_new_chat,
+    insert_goal_messages_before_plan, transfer_goal_ownership,
+};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
+use refact_chat_api::GoalSnapshot;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
 use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
@@ -28,6 +33,64 @@ fn reset_transition_snapshot_identity(snapshot: &mut TrajectorySnapshot) {
     snapshot.previous_response_id = None;
     snapshot.frozen_request_prefix = None;
     snapshot.claude_code_identity = None;
+}
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn transfer_goal_into_transition_messages(
+    source_messages: &[ChatMessage],
+    source_goal: Option<&GoalSnapshot>,
+    target_existing_messages: &[ChatMessage],
+    source_chat_id: &str,
+    target_chat_id: &str,
+    target_mode: &str,
+    target_messages: &mut Vec<ChatMessage>,
+    at_ms: u64,
+) -> GoalTransferResult {
+    let transferred_goal = transfer_goal_ownership(
+        source_messages,
+        source_goal,
+        target_existing_messages,
+        source_chat_id,
+        target_chat_id,
+        target_mode,
+        at_ms,
+    );
+    if transferred_goal.transferred() {
+        insert_goal_messages_before_plan(target_messages, transferred_goal.target_messages.clone());
+    }
+    transferred_goal
+}
+
+async fn persist_live_source_goal_transfer(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    transferred_goal: &GoalTransferResult,
+) -> Result<(), String> {
+    if !transferred_goal.transferred() {
+        return Ok(());
+    }
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        {
+            let mut session = session_arc.lock().await;
+            session.replace_messages(transferred_goal.source_messages.clone());
+        }
+        crate::chat::trajectories::try_save_trajectory(
+            AppState::from_gcx(gcx.clone()).await,
+            session_arc,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn create_initial_plan_document_for_transition(
@@ -491,12 +554,13 @@ pub async fn handle_mode_transition_apply(
     )
     .await;
 
-    let (messages, thread, task_meta, session_state) = {
+    let (messages, thread, task_meta, source_goal, session_state) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
             session.thread.task_meta.clone(),
+            session.goal.clone(),
             session.runtime.state.clone(),
         )
     };
@@ -526,12 +590,26 @@ pub async fn handle_mode_transition_apply(
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_chat_id = Uuid::new_v4().to_string();
+    let transferred_goal = transfer_goal_into_transition_messages(
+        &messages,
+        source_goal.as_ref(),
+        &[],
+        &chat_id,
+        &new_chat_id,
+        &target_mode,
+        &mut new_messages,
+        epoch_ms_now(),
+    );
+    persist_live_source_goal_transfer(gcx.clone(), &chat_id, &transferred_goal)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let new_messages = sanitize_messages_for_new_thread(&new_messages);
-    let new_chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let root_chat_id = thread
@@ -540,7 +618,7 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
-        goal: None,
+        goal: transferred_goal.target_goal.clone(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -638,11 +716,12 @@ pub async fn handle_planner_from_transition(
     )
     .await;
 
-    let (messages, thread, session_state) = {
+    let (messages, thread, source_goal, session_state) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
+            session.goal.clone(),
             session.runtime.state.clone(),
         )
     };
@@ -671,15 +750,28 @@ pub async fn handle_planner_from_transition(
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let new_messages = sanitize_messages_for_new_thread(&new_messages);
 
     let new_chat_id = crate::tasks::storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let transferred_goal = transfer_goal_into_transition_messages(
+        &messages,
+        source_goal.as_ref(),
+        &[],
+        &req.source_chat_id,
+        &new_chat_id,
+        &target_mode,
+        &mut new_messages,
+        epoch_ms_now(),
+    );
+    persist_live_source_goal_transfer(gcx.clone(), &req.source_chat_id, &transferred_goal)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_messages = sanitize_messages_for_new_thread(&new_messages);
     let now = chrono::Utc::now().to_rfc3339();
 
     let task_meta = crate::chat::types::TaskMeta {
@@ -693,7 +785,7 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
-        goal: None,
+        goal: transferred_goal.target_goal.clone(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -776,6 +868,7 @@ pub async fn handle_planner_from_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
 
     fn sample_worktree(root: &std::path::Path) -> crate::worktrees::types::WorktreeMeta {
@@ -851,6 +944,164 @@ mod tests {
         };
         reset_transition_snapshot_identity(&mut snapshot);
         snapshot
+    }
+
+    fn plan_message(content: &str) -> ChatMessage {
+        crate::chat::internal_roles::plan("task_agent", 1, content, None)
+    }
+
+    fn source_session_with_active_goal(
+        chat_id: &str,
+    ) -> (crate::chat::types::ChatSession, GoalBudget) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.thread.mode = "agent".to_string();
+        session.thread.tool_use = "agent".to_string();
+        session.thread.model = "model".to_string();
+        session.add_message(ChatMessage::new(
+            "user".to_string(),
+            "Please pursue this goal".to_string(),
+        ));
+        let budget = GoalBudget {
+            max_turns: 7,
+            max_minutes: 11,
+            max_tokens: 13_000,
+            cooldown_ms: 1_234,
+            no_progress_token_threshold: 55,
+            no_progress_turns: 3,
+        };
+        session.install_goal("agent", "Ship the HTTP goal transfer", true, budget.clone());
+        let goal = session.goal.as_mut().expect("goal installed");
+        goal.progress = GoalProgress {
+            turns_used: 4,
+            tokens_used: 9_999,
+            started_at_ms: 42,
+            no_progress_turns: 2,
+            last_nudge_at_ms: 77,
+        };
+        goal.attempts.push(GoalAttempt {
+            at_ms: 100,
+            trigger: "finish".to_string(),
+            verdict: "retry".to_string(),
+            gaps: vec!["missing verification".to_string()],
+            verifier_reply: "Run tests".to_string(),
+        });
+        (session, budget)
+    }
+
+    #[tokio::test]
+    async fn http_mode_transition_goal_transfer_deactivates_source_and_resets_target_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let source_chat_id = "http-source-goal";
+        let target_chat_id = "http-target-goal";
+        let (source_session, budget) = source_session_with_active_goal(source_chat_id);
+        let source_messages = source_session.messages.clone();
+        let source_goal = source_session.goal.clone();
+        gcx.chat_sessions.write().await.insert(
+            source_chat_id.to_string(),
+            Arc::new(tokio::sync::Mutex::new(source_session)),
+        );
+
+        let at_ms = 123_456_789;
+        let mut target_messages = vec![plan_message("Target plan")];
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &source_messages,
+            source_goal.as_ref(),
+            &[],
+            source_chat_id,
+            target_chat_id,
+            "task_agent",
+            &mut target_messages,
+            at_ms,
+        );
+
+        assert!(transferred_goal.transferred());
+        let target_goal = transferred_goal.target_goal.as_ref().unwrap();
+        assert!(target_goal.active);
+        assert_eq!(target_goal.status, GoalStatus::Active);
+        assert_eq!(
+            target_goal.transferred_from.as_deref(),
+            Some(source_chat_id)
+        );
+        assert_eq!(target_goal.transferred_to, None);
+        assert_eq!(target_goal.budget, budget);
+        assert_eq!(target_goal.progress.started_at_ms, at_ms);
+        assert_eq!(target_goal.progress.turns_used, 0);
+        assert_eq!(target_goal.progress.tokens_used, 0);
+        assert_eq!(target_goal.progress.no_progress_turns, 0);
+        assert_eq!(target_goal.progress.last_nudge_at_ms, 0);
+        assert_eq!(target_goal.attempts.len(), 1);
+        assert_eq!(target_messages[0].role, "goal");
+        assert_eq!(target_messages[1].role, "event");
+        assert_eq!(target_messages[2].role, "plan");
+
+        persist_live_source_goal_transfer(gcx.clone(), source_chat_id, &transferred_goal)
+            .await
+            .unwrap();
+
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(source_chat_id)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        let source_goal = session.goal.as_ref().unwrap();
+        assert!(!source_goal.active);
+        assert_eq!(source_goal.status, GoalStatus::Transferred);
+        assert_eq!(source_goal.transferred_to.as_deref(), Some(target_chat_id));
+        let source_goal_message = session
+            .messages
+            .iter()
+            .find(|message| message.role == "goal")
+            .unwrap();
+        assert_eq!(source_goal_message.extra["goal"]["active"], json!(false));
+        assert_eq!(
+            source_goal_message.extra["goal"]["status"],
+            json!("transferred")
+        );
+        assert_eq!(
+            source_goal_message.extra["goal"]["transferred_to"],
+            json!(target_chat_id)
+        );
+    }
+
+    #[test]
+    fn http_mode_transition_goal_transfer_no_goal_is_noop() {
+        let source_messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        let mut target_messages = vec![plan_message("Target plan")];
+        let original_role = target_messages[0].role.clone();
+        let original_content = target_messages[0].content.content_text_only();
+
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &source_messages,
+            None,
+            &[],
+            "source-chat",
+            "target-chat",
+            "task_agent",
+            &mut target_messages,
+            1,
+        );
+
+        assert!(!transferred_goal.transferred());
+        assert!(transferred_goal.target_goal.is_none());
+        assert!(transferred_goal.source_goal.is_none());
+        assert_eq!(target_messages.len(), 1);
+        assert_eq!(target_messages[0].role, original_role);
+        assert_eq!(
+            target_messages[0].content.content_text_only(),
+            original_content
+        );
     }
 
     #[test]
