@@ -97,6 +97,39 @@ function rerenderToolbar(
   view.rerender(<Toolbar activeTab={activeTab} />);
 }
 
+function arrangeFocusedWorkspaceChatWithHiddenCurrent(
+  view: ReturnType<typeof renderToolbar>,
+  focusedId = "chat-focused",
+  hiddenId = "chat-hidden",
+) {
+  const focusedSurface = makeSurfaceKey("chat", focusedId);
+
+  act(() => {
+    view.store.dispatch(createChatWithId({ id: focusedId, title: "Focused" }));
+    view.store.dispatch(openTab(focusedSurface));
+    view.store.dispatch(setActiveTab(focusedSurface));
+    view.store.dispatch(
+      createChatWithId({ id: hiddenId, title: "Hidden", openTab: false }),
+    );
+    view.store.dispatch(switchToThread({ id: hiddenId, openTab: false }));
+  });
+}
+
+async function expectNewChatCleansFocusedWorkspaceChat(
+  view: ReturnType<typeof renderToolbar>,
+  focusedId = "chat-focused",
+  hiddenId = "chat-hidden",
+) {
+  await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+
+  await waitFor(() => {
+    expect(view.store.getState().chat.current_thread_id).not.toBe(hiddenId);
+  });
+  expect(view.store.getState().chat.threads[focusedId]).toBeUndefined();
+  expect(view.store.getState().chat.threads[hiddenId]).toBeDefined();
+  expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -155,9 +188,7 @@ describe("Toolbar single workspace tab row", () => {
       screen.getByRole("tablist", { name: "Open workspace tabs" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: /Task Alpha/ }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
 
     act(() => {
       view.store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
@@ -195,9 +226,7 @@ describe("Toolbar single workspace tab row", () => {
       screen.getByRole("tablist", { name: "Open workspace tabs" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: /Task Alpha/ }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "New Chat" }),
@@ -276,7 +305,9 @@ describe("Toolbar single workspace tab row", () => {
           openTab: false,
         }),
       );
-      view.store.dispatch(switchToThread({ id: "task-hidden", openTab: false }));
+      view.store.dispatch(
+        switchToThread({ id: "task-hidden", openTab: false }),
+      );
     });
     rerenderToolbar(view, activeTab);
 
@@ -298,6 +329,63 @@ describe("Toolbar single workspace tab row", () => {
     expect(view.store.getState().chat.current_thread_id).not.toBe(
       "chat-visible",
     );
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from dashboard", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, { type: "dashboard" });
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
+  });
+
+  it("does not clean a hidden current chat from dashboard without focused workspace chat", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({
+          id: "chat-hidden",
+          title: "Hidden",
+          openTab: false,
+        }),
+      );
+      view.store.dispatch(
+        switchToThread({ id: "chat-hidden", openTab: false }),
+      );
+    });
+    rerenderToolbar(view, { type: "dashboard" });
+
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+
+    expect(view.store.getState().chat.threads["chat-hidden"]).toBeDefined();
+    expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from task workspace", async () => {
+    useToolbarHandlers();
+    const activeTab = {
+      type: "task" as const,
+      taskId: "task-a",
+      taskName: "Task Alpha",
+    };
+    const view = renderToolbar(activeTab);
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, activeTab);
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from buddy", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "buddy" as const };
+    const view = renderToolbar(activeTab);
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, activeTab);
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
   });
 });
 

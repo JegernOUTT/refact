@@ -70,6 +70,7 @@ import {
 import styles from "./App.module.css";
 import { usePatchesAndDiffsEventsForIDE } from "../hooks/usePatchesAndDiffEventsForIDE";
 import {
+  getProjectStorageNamespace,
   isProjectStorageNamespaceTrusted,
   loadPersistedActiveTab,
   savePersistedActiveTab,
@@ -95,6 +96,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const persistedActiveTabRef = useRef<ReturnType<
     typeof loadPersistedActiveTab
   > | null>(null);
+  const lastTrustedProjectStorageNamespaceRef = useRef<string | null>(null);
 
   const pages = useAppSelector(selectPages);
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -127,6 +129,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useBrowserOnlineStatus();
 
   const config = useConfig();
+  const trustedProjectStorageNamespace = isProjectStorageNamespaceTrusted()
+    ? getProjectStorageNamespace()
+    : null;
 
   useEffectOnce(() => {
     if (crashSessionStartedRef.current) return;
@@ -413,6 +418,25 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       };
     }
   }, [desiredPage, chatId, focusedWorkspaceChatId]);
+
+  useEffect(() => {
+    if (trustedProjectStorageNamespace === null) return;
+
+    const previousNamespace = lastTrustedProjectStorageNamespaceRef.current;
+    if (previousNamespace === null) {
+      lastTrustedProjectStorageNamespaceRef.current =
+        trustedProjectStorageNamespace;
+      return;
+    }
+
+    if (trustedProjectStorageNamespace !== previousNamespace) {
+      restoredActiveTabRef.current = false;
+      persistedActiveTabRef.current = null;
+    }
+
+    lastTrustedProjectStorageNamespaceRef.current =
+      trustedProjectStorageNamespace;
+  }, [trustedProjectStorageNamespace]);
 
   useEffect(() => {
     if (!restoredActiveTabRef.current) return;

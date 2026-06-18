@@ -14,7 +14,10 @@ import {
 } from "../../features/Chat/Thread";
 import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
 import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
-import { selectTabs } from "../../features/Workspace";
+import {
+  selectFocusedWorkspaceChatId,
+  selectTabs,
+} from "../../features/Workspace";
 import { TabBar } from "../../features/Workspace/TabBar";
 import {
   useAppDispatch,
@@ -158,12 +161,17 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const engineUrl = useMemo(() => resolveBrowserEngineUrl(config), [config]);
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
+  const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
   const workspaceTabs = useAppSelector(selectTabs);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const pages = useAppSelector(selectPages);
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
-    activeTab.type === "chat" ? activeTab.id : currentChatId;
+    activeTab.type === "chat"
+      ? activeTab.id
+      : focusedWorkspaceChatId ?? currentChatId;
+  const shouldCleanToolbarChat =
+    activeTab.type === "chat" || focusedWorkspaceChatId !== null;
   const showTabBar =
     workspaceTabs.length > 0 ||
     openTasks.length > 0 ||
@@ -200,22 +208,26 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   );
 
   const onCreateNewChat = useCallback(() => {
-    const currentThread = allThreads[toolbarChatId] as
-      | { thread: { messages: unknown[] } }
-      | undefined;
+    const currentThread = shouldCleanToolbarChat
+      ? (allThreads[toolbarChatId] as
+          | { thread: { messages: unknown[] } }
+          | undefined)
+      : undefined;
 
     if (currentThread && toolbarChatId !== currentChatId) {
       dispatch(switchToThread({ id: toolbarChatId, openTab: false }));
     }
 
-    dispatch(clearThreadPauseReasons({ id: toolbarChatId }));
-    dispatch(
-      setThreadConfirmationStatus({
-        id: toolbarChatId,
-        wasInteracted: false,
-        confirmationStatus: true,
-      }),
-    );
+    if (shouldCleanToolbarChat) {
+      dispatch(clearThreadPauseReasons({ id: toolbarChatId }));
+      dispatch(
+        setThreadConfirmationStatus({
+          id: toolbarChatId,
+          wasInteracted: false,
+          confirmationStatus: true,
+        }),
+      );
+    }
 
     if (currentThread && currentThread.thread.messages.length === 0) {
       dispatch(closeThread({ id: toolbarChatId }));
@@ -223,7 +235,14 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
     dispatch(newChatAction());
     handleNavigation("chat");
-  }, [allThreads, currentChatId, toolbarChatId, dispatch, handleNavigation]);
+  }, [
+    allThreads,
+    currentChatId,
+    shouldCleanToolbarChat,
+    toolbarChatId,
+    dispatch,
+    handleNavigation,
+  ]);
 
   const onCreateNewTask = useCallback(() => {
     void createTask({ name: "New Task" })
