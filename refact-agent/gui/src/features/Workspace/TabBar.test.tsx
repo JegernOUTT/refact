@@ -7,6 +7,12 @@ import {
   createChatWithId,
   updateChatRuntimeFromSessionState,
 } from "../Chat/Thread";
+import {
+  hasTabDragType,
+  readTabDragData,
+  readTabDragSurfaceKey,
+  setTabDragData,
+} from "../ChatPanes/tabDrag";
 import { notificationAdded } from "../Notifications";
 import type { ProcessCompletedNotification } from "../Notifications/notificationsSlice";
 import { push } from "../Pages/pagesSlice";
@@ -240,6 +246,53 @@ describe("TabBar", () => {
       "draggable",
       "true",
     );
+  });
+
+  it("makes grouped top-bar tabs non-draggable while ordinary chat tabs stay draggable", () => {
+    const store = createStoreWithGroupedTabs();
+    renderTabBar(store);
+
+    expect(screen.getByRole("tab", { name: /Chat Beta/ })).toHaveAttribute(
+      "draggable",
+      "false",
+    );
+    expect(screen.getByRole("tab", { name: /Chat Gamma/ })).toHaveAttribute(
+      "draggable",
+      "true",
+    );
+  });
+
+  it("does not start a tab drag from a grouped top-bar tab", () => {
+    const store = createStoreWithGroupedTabs();
+    renderTabBar(store);
+    const dataTransfer = createDataTransferStub();
+
+    fireEvent.dragStart(screen.getByRole("tab", { name: /Chat Beta/ }), {
+      dataTransfer,
+    });
+
+    expect(dataTransfer.types).toEqual([]);
+    expect(dataTransfer.effectAllowed).toBe("uninitialized");
+  });
+
+  it("requires Refact drag MIME provenance before reading tab drag data", () => {
+    const foreignDataTransfer = createDataTransferStub();
+    foreignDataTransfer.setData("text/plain", "chat:chat-x");
+
+    expect(readTabDragData(foreignDataTransfer)).toBeNull();
+    expect(readTabDragSurfaceKey(foreignDataTransfer)).toBeNull();
+    expect(hasTabDragType(foreignDataTransfer, "chat")).toBe(false);
+
+    const refactDataTransfer = createDataTransferStub();
+    setTabDragData(refactDataTransfer, "chat", "chat-a", chat("chat-a"));
+
+    expect(readTabDragData(refactDataTransfer)).toEqual({
+      type: "chat",
+      id: "chat-a",
+      surfaceKey: chat("chat-a"),
+    });
+    expect(readTabDragSurfaceKey(refactDataTransfer)).toBe(chat("chat-a"));
+    expect(hasTabDragType(refactDataTransfer, "chat")).toBe(true);
   });
 
   it("closes task and active buddy navigation tabs without closing chat tabs", async () => {

@@ -4,6 +4,7 @@ import { waitFor } from "@testing-library/react";
 import { type AppStore, setUpStore } from "../../app/store";
 import { fireEvent, render, screen, within } from "../../utils/test-utils";
 import { createChatWithId, switchToThread } from "../Chat/Thread";
+import { setTabDragData } from "../ChatPanes/tabDrag";
 import {
   addSurfaceToPane,
   openTab,
@@ -157,7 +158,7 @@ describe("WorkspaceView", () => {
     const store = createWorkspaceStore();
     renderWorkspaceView(store);
     const dataTransfer = createDataTransferStub();
-    dataTransfer.setData("text/plain", "chat:chat-b");
+    setTabDragData(dataTransfer, "chat", "chat-b", chat("chat-b"));
     const dropTarget = document.querySelector(
       "[data-workspace-unsplit-drop-target='true']",
     );
@@ -203,7 +204,7 @@ describe("WorkspaceView", () => {
     const store = createEmptySplitWorkspaceStore();
     renderWorkspaceView(store);
     const dataTransfer = createDataTransferStub();
-    dataTransfer.setData("text/plain", "chat:chat-b");
+    setTabDragData(dataTransfer, "chat", "chat-b", chat("chat-b"));
     const targetPane = screen.getByLabelText("Workspace pane root");
 
     fireEvent.dragEnter(targetPane, { dataTransfer });
@@ -226,7 +227,7 @@ describe("WorkspaceView", () => {
     const store = createEmptySplitWorkspaceStore();
     renderWorkspaceView(store);
     const dataTransfer = createDataTransferStub();
-    dataTransfer.setData("text/plain", "chat:chat-b");
+    setTabDragData(dataTransfer, "chat", "chat-b", chat("chat-b"));
     const emptyPane = screen.getByLabelText(
       "Workspace pane root:sibling:chat:chat-a",
     );

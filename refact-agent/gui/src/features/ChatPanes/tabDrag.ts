@@ -15,7 +15,17 @@ const tabDragMimeTypes: Record<TabDragKind, string> = {
   surface: "application/x-refact-surface-tab",
 };
 
+const knownTabDragMimeTypes = Object.values(tabDragMimeTypes);
 const surfaceTabDragMimeType = tabDragMimeTypes.surface;
+
+function dataTransferTypes(dataTransfer: DataTransfer): string[] {
+  return Array.from(dataTransfer.types);
+}
+
+function hasKnownTabDragMimeType(dataTransfer: DataTransfer): boolean {
+  const types = dataTransferTypes(dataTransfer);
+  return knownTabDragMimeTypes.some((mimeType) => types.includes(mimeType));
+}
 
 export function tabDragData(type: TabDragKind, id: string): string {
   return `${type}:${id}`;
@@ -53,12 +63,14 @@ export function parseTabDragData(value: string): TabDragPayload | null {
 export function readTabDragData(
   dataTransfer: DataTransfer,
 ): TabDragPayload | null {
+  if (!hasKnownTabDragMimeType(dataTransfer)) return null;
+
   const surfaceKey = dataTransfer.getData(surfaceTabDragMimeType) || undefined;
   const textPayload = parseTabDragData(dataTransfer.getData("text/plain"));
   if (textPayload) return { ...textPayload, surfaceKey };
 
-  for (const type of Object.values(tabDragMimeTypes)) {
-    const payload = parseTabDragData(dataTransfer.getData(type));
+  for (const mimeType of knownTabDragMimeTypes) {
+    const payload = parseTabDragData(dataTransfer.getData(mimeType));
     if (payload) return { ...payload, surfaceKey };
   }
 
@@ -84,7 +96,13 @@ export function hasTabDragType(
   dataTransfer: DataTransfer,
   type: TabDragKind,
 ): boolean {
+  const types = dataTransferTypes(dataTransfer);
+  if (!types.some((mimeType) => knownTabDragMimeTypes.includes(mimeType))) {
+    return false;
+  }
+  if (types.includes(tabDragMimeTypes[type])) return true;
+
   const payload = readTabDragData(dataTransfer);
   if (payload) return payload.type === type;
-  return Array.from(dataTransfer.types).includes(tabDragMimeTypes[type]);
+  return false;
 }

@@ -298,7 +298,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           is_task_chat: display.is_task_chat,
           isGroup,
           paneCount: group ? collectLeafIds(group.root).length : 1,
-          draggable: true,
+          draggable: !isGroup,
           closable: display.kind !== "buddy" || currentPage?.name === "buddy",
         };
       }),
@@ -376,12 +376,20 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [],
   );
 
-  const handleDragStart = useCallback((event: DragEvent, tabId: SurfaceKey) => {
-    event.dataTransfer.effectAllowed = "move";
-    const payload = tabDragPayloadForSurface(tabId);
-    setTabDragData(event.dataTransfer, payload.type, payload.id, tabId);
-    setDraggingTabId(tabId);
-  }, []);
+  const handleDragStart = useCallback(
+    (event: DragEvent, tabId: SurfaceKey) => {
+      if (groups[tabId]) {
+        event.preventDefault();
+        return;
+      }
+
+      event.dataTransfer.effectAllowed = "move";
+      const payload = tabDragPayloadForSurface(tabId);
+      setTabDragData(event.dataTransfer, payload.type, payload.id, tabId);
+      setDraggingTabId(tabId);
+    },
+    [groups],
+  );
 
   const handleDragEnd = useCallback(() => {
     setDraggingTabId(null);
