@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refact_chat_api::{GoalBudget, GoalProgress, GoalStatus};
+use refact_chat_api::{GoalProgress, GoalStatus};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -285,7 +285,7 @@ mod tests {
             "agent",
             "base goal",
             true,
-            GoalBudget::default(),
+            refact_chat_api::GoalBudget::default(),
         );
         session.add_message(internal_roles::goal_delta(
             "tool.update_goal",
