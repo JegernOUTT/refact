@@ -35,6 +35,18 @@ export type ChatCommandBase =
       patch: Record<string, unknown>;
     }
   | {
+      type: "set_goal";
+      content: string;
+    }
+  | {
+      type: "update_goal";
+      note: string;
+    }
+  | {
+      type: "goal_control";
+      action: GoalControlAction;
+    }
+  | {
       type: "abort";
     }
   | {
@@ -89,6 +101,8 @@ export type ChatCommand = ChatCommandBase & {
   client_request_id: string;
   priority?: boolean;
 };
+
+export type GoalControlAction = "pause" | "resume" | "stop";
 
 function commandUrl(connection: PortOrConnection, chatId: string): string {
   return buildApiUrl(
@@ -204,6 +218,42 @@ export async function updateChatParams(
     type: "set_params",
     patch: params,
   } as ChatCommandBase);
+}
+
+export async function setGoal(
+  chatId: string,
+  content: string,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "set_goal",
+    content,
+  });
+}
+
+export async function updateGoal(
+  chatId: string,
+  note: string,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "update_goal",
+    note,
+  });
+}
+
+export async function goalControl(
+  chatId: string,
+  action: GoalControlAction,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "goal_control",
+    action,
+  });
 }
 
 export async function abortGeneration(

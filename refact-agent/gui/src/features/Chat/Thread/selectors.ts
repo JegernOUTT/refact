@@ -7,10 +7,12 @@ import {
   isToolMessage,
   isUserMessage,
   isEventMessage,
+  isGoalMessage,
   isPlanMessage,
   ChatMessages,
   DiffMessage,
   EventMessage,
+  GoalSnapshot,
   getEventMetadata,
   getPlanMetadata,
   normalizeEventMessageMetadata,
@@ -231,7 +233,10 @@ export const selectVisibleMessages = (
   threadId: string,
 ): ChatMessages =>
   selectMessagesById(state, threadId).filter(
-    (message) => message.role !== "event" && message.role !== "plan",
+    (message) =>
+      message.role !== "event" &&
+      message.role !== "plan" &&
+      !isGoalMessage(message),
   );
 
 export const selectEventLog = (
@@ -242,7 +247,14 @@ export const selectEventLog = (
     (message) => {
       if (!isEventMessage(message)) return [];
       const metadata = getEventMetadata(message);
-      if (!metadata || metadata.subkind === "plan_delta") return [];
+      if (
+        !metadata ||
+        metadata.subkind === "plan_delta" ||
+        metadata.subkind === "goal_delta" ||
+        metadata.subkind === "goal_pursuit"
+      ) {
+        return [];
+      }
       return [normalizeEventMessageMetadata(message)];
     },
   );
@@ -979,6 +991,35 @@ export const selectTaskWidgetExpandedById = (
   state: RootState,
   chatId: string,
 ) => state.chat.threads[chatId]?.task_widget_expanded ?? false;
+
+export const selectTaskGoalExpanded = (state: RootState) =>
+  selectTaskGoalExpandedById(state, state.chat.current_thread_id);
+
+export const selectTaskGoalExpandedById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.task_goal_expanded ?? false;
+
+export const selectGoalById = (
+  state: RootState,
+  chatId: string,
+): GoalSnapshot | null => state.chat.threads[chatId]?.thread.goal ?? null;
+
+export const selectGoal = (state: RootState): GoalSnapshot | null =>
+  selectGoalById(state, state.chat.current_thread_id);
+
+export const selectGoalStatusById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.status;
+
+export const selectGoalActiveById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.active ?? false;
+
+export const selectGoalContentById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.content ?? "";
+
+export const selectGoalAttemptsById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.attempts ?? [];
+
+export const selectGoalEventsById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.events ?? [];
 
 function normalizeTaskStatus(status: unknown): TodoStatus | null {
   if (typeof status !== "string") return null;

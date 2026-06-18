@@ -4,6 +4,11 @@ import { chatReducer } from "../features/Chat/Thread/reducer";
 import {
   selectCurrentPlan,
   selectEventLog,
+  selectGoalAttemptsById,
+  selectGoalById,
+  selectGoalContentById,
+  selectGoalEventsById,
+  selectGoalStatusById,
   selectPlanDeltaEvents,
   selectPlanHistory,
   selectSynthesizedPlanText,
@@ -14,6 +19,8 @@ import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import type {
   ChatMessages,
   EventMessage,
+  GoalMessage,
+  GoalSnapshot,
   PlanMessage,
 } from "../services/refact/types";
 
@@ -21,7 +28,44 @@ type SelectorRootState = Parameters<typeof selectVisibleMessages>[0];
 
 const threadId = "hidden-role-chat";
 
-function makeRuntime(messages: ChatMessages = []): ChatThreadRuntime {
+const projectedGoal: GoalSnapshot = {
+  content: "Projected goal",
+  version: 2,
+  active: true,
+  status: "active",
+  budget: {
+    max_turns: 10,
+    max_minutes: 15,
+    max_tokens: 200000,
+    cooldown_ms: 1500,
+    no_progress_token_threshold: 50,
+    no_progress_turns: 2,
+  },
+  progress: {
+    turns_used: 1,
+    tokens_used: 25,
+    started_at_ms: 1000,
+    no_progress_turns: 0,
+    last_nudge_at_ms: 1500,
+  },
+  attempts: [
+    {
+      at_ms: 2000,
+      trigger: "manual",
+      verdict: "blocked",
+      gaps: ["missing tests"],
+      verifier_reply: "Add coverage",
+    },
+  ],
+  events: [{ at_ms: 2500, kind: "started", text: "Goal started" }],
+  transferred_from: null,
+  transferred_to: null,
+};
+
+function makeRuntime(
+  messages: ChatMessages = [],
+  goal: GoalSnapshot | null = null,
+): ChatThreadRuntime {
   return {
     thread: {
       id: threadId,
@@ -34,6 +78,7 @@ function makeRuntime(messages: ChatMessages = []): ChatThreadRuntime {
       increase_max_tokens: false,
       include_project_info: true,
       auto_enrichment_enabled: false,
+      goal,
     },
     streaming: false,
     waiting_for_response: false,
@@ -54,17 +99,21 @@ function makeRuntime(messages: ChatMessages = []): ChatThreadRuntime {
     },
     snapshot_received: true,
     task_widget_expanded: false,
+    task_goal_expanded: false,
     memory_enrichment_user_touched: false,
     manual_preview_items: [],
     manual_preview_ran: false,
   };
 }
 
-function makeState(messages: ChatMessages = []): Chat {
+function makeState(
+  messages: ChatMessages = [],
+  goal: GoalSnapshot | null = null,
+): Chat {
   return {
     current_thread_id: threadId,
     open_thread_ids: [threadId],
-    threads: { [threadId]: makeRuntime(messages) },
+    threads: { [threadId]: makeRuntime(messages, goal) },
     system_prompt: {},
     tool_use: "agent",
     sse_refresh_requested: null,
@@ -124,6 +173,24 @@ function makePlanMessage(
   };
 }
 
+function makeGoalMessage(overrides: Partial<GoalMessage> = {}): GoalMessage {
+  return {
+    role: "goal",
+    content: "hidden goal body",
+    message_id: "goal-1",
+    extra: {
+      goal: {
+        mode: "agent",
+        version: 1,
+        created_at_ms: 1000,
+        active: true,
+        budget: projectedGoal.budget,
+      },
+    },
+    ...overrides,
+  };
+}
+
 const eventOne = makeEventMessage({
   message_id: "event-1",
   content: "first event",
@@ -156,14 +223,28 @@ const backendModeEvent = makeBackendEventMessage(
   { mode: "agent" },
   "backend-mode-event",
 );
+const goalDelta = makeEventMessage({
+  message_id: "goal-delta-1",
+  content: "goal update",
+  subkind: "goal_delta",
+});
+const goalPursuit = makeEventMessage({
+  message_id: "goal-pursuit-1",
+  content: "goal pursuit",
+  subkind: "goal_pursuit",
+});
 const planOne = makePlanMessage(1, { message_id: "plan-1" });
 const planTwo = makePlanMessage(3, { message_id: "plan-3" });
 const planThree = makePlanMessage(2, { message_id: "plan-2" });
+const goalMessage = makeGoalMessage();
 
 const mixedMessages: ChatMessages = [
   { role: "system", content: "system prompt", message_id: "system-1" },
   { role: "user", content: "visible user", message_id: "user-1" },
   eventOne,
+  goalMessage,
+  goalDelta,
+  goalPursuit,
   {
     role: "assistant",
     content: "visible assistant",
@@ -192,7 +273,7 @@ function makeMessageAddedEvent(
 }
 
 describe("hidden chat roles", () => {
-  it("selectVisibleMessages excludes event, plan, and plan_delta", () => {
+  it("selectVisibleMessages excludes event, plan, and goal roles", () => {
     const visible = selectVisibleMessages(
       makeRootState(mixedMessages),
       threadId,
@@ -206,7 +287,7 @@ describe("hidden chat roles", () => {
     ]);
   });
 
-  it("selectEventLog returns only non-plan-delta event messages", () => {
+  it("selectEventLog returns only non-plan and non-goal event messages", () => {
     const events = selectEventLog(makeRootState(mixedMessages), threadId);
 
     expect(events.map((event) => event.message_id)).toEqual([
@@ -219,6 +300,20 @@ describe("hidden chat roles", () => {
       source: "tool.update_plan",
       payload: { mode: "agent" },
     });
+  });
+
+  it("selectGoal selectors read the thread projection", () => {
+    const state = {
+      chat: makeState(mixedMessages, projectedGoal),
+    } as SelectorRootState;
+
+    expect(selectGoalById(state, threadId)).toEqual(projectedGoal);
+    expect(selectGoalStatusById(state, threadId)).toBe("active");
+    expect(selectGoalContentById(state, threadId)).toBe("Projected goal");
+    expect(selectGoalAttemptsById(state, threadId)).toEqual(
+      projectedGoal.attempts,
+    );
+    expect(selectGoalEventsById(state, threadId)).toEqual(projectedGoal.events);
   });
 
   it("selectCurrentPlan returns highest-version plan", () => {

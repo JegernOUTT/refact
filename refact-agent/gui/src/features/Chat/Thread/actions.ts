@@ -612,6 +612,11 @@ export const setTaskWidgetExpanded = createAction<{
   expanded: boolean;
 }>("chatThread/setTaskWidgetExpanded");
 
+export const setTaskGoalExpanded = createAction<{
+  id: string;
+  expanded: boolean;
+}>("chatThread/setTaskGoalExpanded");
+
 export const openBuddyChat = createAction<{ chat_id: string; title?: string }>(
   "chat/openBuddyChat",
 );

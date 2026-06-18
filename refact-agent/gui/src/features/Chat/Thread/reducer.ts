@@ -69,6 +69,7 @@ import {
   requestSseRefresh,
   clearSseRefreshRequest,
   setTaskWidgetExpanded,
+  setTaskGoalExpanded,
   setAutoEnrichmentEnabled,
   setAutoCompactEnabled,
   markMemoryEnrichmentUserTouched,
@@ -80,13 +81,14 @@ import {
   hydratePersistedChatTabs,
   reorderOpenThreads,
 } from "./actions";
-import { applyDeltaOps } from "../../../services/refact/chatSubscription";
+import {
+  applyDeltaOps,
+  type CompressionPhase,
+  type CompressionReason,
+  type RuntimeState,
+} from "../../../services/refact/chatSubscription";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { loadPersistedChatTabs } from "../../../utils/chatUiPersistence";
-import type {
-  CompressionPhase,
-  CompressionReason,
-} from "../../../services/refact/chatSubscription";
 import {
   AssistantMessage,
   ChatMessages,
@@ -173,6 +175,7 @@ const createThreadRuntime = (
     },
     snapshot_received: false,
     task_widget_expanded: false,
+    task_goal_expanded: false,
     memory_enrichment_user_touched: false,
     manual_preview_items: [],
     manual_preview_ran: false,
@@ -410,6 +413,36 @@ function compressionPhaseIsActive(phase: CompressionPhase | undefined) {
   return phase === "checking" || phase === "running";
 }
 
+function applyGoalRuntimeMirror(
+  rt: ChatThreadRuntime | Draft<ChatThreadRuntime>,
+  runtime: Pick<
+    RuntimeState,
+    | "goal_active"
+    | "goal_status"
+    | "goal_turns_used"
+    | "goal_tokens_used"
+    | "goal_no_progress_turns"
+  >,
+) {
+  const goal = rt.thread.goal;
+  if (!goal) return;
+  if (typeof runtime.goal_active === "boolean") {
+    goal.active = runtime.goal_active;
+  }
+  if (runtime.goal_status !== undefined && runtime.goal_status !== null) {
+    goal.status = runtime.goal_status;
+  }
+  if (typeof runtime.goal_turns_used === "number") {
+    goal.progress.turns_used = runtime.goal_turns_used;
+  }
+  if (typeof runtime.goal_tokens_used === "number") {
+    goal.progress.tokens_used = runtime.goal_tokens_used;
+  }
+  if (typeof runtime.goal_no_progress_turns === "number") {
+    goal.progress.no_progress_turns = runtime.goal_no_progress_turns;
+  }
+}
+
 function shouldReplaceBackgroundAgent(
   existing: { status: string; change_seq: number } | undefined,
   incoming: { status: string; change_seq: number },
@@ -523,6 +556,7 @@ function applyRestoredThread(
       payload.auto_compact_enabled,
       existing.auto_compact_enabled,
     ),
+    goal: valueOrExisting(payload.goal, existing.goal),
   };
   rt.streaming = false;
   rt.waiting_for_response = false;
@@ -534,6 +568,7 @@ function applyRestoredThread(
   rt.confirmation.status.wasInteracted = false;
   rt.confirmation.status.confirmationStatus = true;
   clearCompressionState(rt);
+  rt.task_goal_expanded = rt.task_goal_expanded ?? false;
   rt.message_index_by_id = rebuildMessageIndexById(messages);
 }
 
@@ -867,6 +902,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (rt) rt.task_widget_expanded = action.payload.expanded;
   });
 
+  builder.addCase(setTaskGoalExpanded, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt) rt.task_goal_expanded = action.payload.expanded;
+  });
+
   builder.addCase(openBuddyChat, (state, action) => {
     const { chat_id, title } = action.payload;
     const existingRt = getRuntime(state, chat_id);
@@ -1038,6 +1078,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       },
       snapshot_received: false,
       task_widget_expanded: false,
+      task_goal_expanded: false,
       memory_enrichment_user_touched: false,
       manual_preview_items: [],
       manual_preview_ran: false,
@@ -1491,6 +1532,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           link_type: event.thread.link_type ?? existing?.link_type,
           root_chat_id: event.thread.root_chat_id ?? existing?.root_chat_id,
           buddy_meta: snapshotBuddyMeta,
+          goal: event.goal ?? null,
         };
 
         const snapshotState = event.runtime.state as string;
@@ -1548,6 +1590,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           compression_reason: snapshotCompressionReason,
           compression_pulse_seq: snapshotCompressionPulseSeq,
           task_widget_expanded: existingRuntime?.task_widget_expanded ?? false,
+          task_goal_expanded: existingRuntime?.task_goal_expanded ?? false,
           last_applied_seq: event.seq,
           message_index_by_id: rebuildMessageIndexById(snapshotMessages),
           memory_enrichment_user_touched:
@@ -1555,6 +1598,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
           manual_preview_items: existingRuntime?.manual_preview_items ?? [],
           manual_preview_ran: existingRuntime?.manual_preview_ran ?? false,
         };
+
+        applyGoalRuntimeMirror(newRt, event.runtime);
 
         state.threads[chat_id] = newRt;
 
@@ -2129,6 +2174,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           rt.compression_reason = undefined;
           rt.compression_pulse_seq = undefined;
         }
+        applyGoalRuntimeMirror(rt, event);
         rt.last_applied_seq = event.seq;
         break;
       }

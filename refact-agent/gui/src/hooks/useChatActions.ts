@@ -22,12 +22,16 @@ import {
   retryFromIndex as retryFromIndexApi,
   regenerate as regenerateApi,
   updateChatParams,
+  setGoal as setGoalApi,
+  updateGoal as updateGoalApi,
+  goalControl as goalControlApi,
   abortGeneration,
   respondToToolConfirmation,
   respondToToolConfirmations,
   updateMessage as updateMessageApi,
   removeMessage as removeMessageApi,
   cancelQueuedItem,
+  type GoalControlAction,
   type MessageContent,
 } from "../services/refact/chatCommands";
 import type { UserMessage } from "../services/refact/types";
@@ -206,6 +210,30 @@ export function useChatActions(explicitChatId?: string) {
     [chatId, config, apiKey],
   );
 
+  const setGoal = useCallback(
+    async (content: string) => {
+      if (!chatId) return;
+      await setGoalApi(chatId, content, config, apiKey ?? undefined);
+    },
+    [chatId, config, apiKey],
+  );
+
+  const updateGoal = useCallback(
+    async (note: string) => {
+      if (!chatId) return;
+      await updateGoalApi(chatId, note, config, apiKey ?? undefined);
+    },
+    [chatId, config, apiKey],
+  );
+
+  const controlGoal = useCallback(
+    async (action: GoalControlAction) => {
+      if (!chatId) return;
+      await goalControlApi(chatId, action, config, apiKey ?? undefined);
+    },
+    [chatId, config, apiKey],
+  );
+
   /**
    * Respond to tool confirmation (accept or reject).
    */
@@ -315,6 +343,9 @@ export function useChatActions(explicitChatId?: string) {
     submit,
     abort,
     setParams,
+    setGoal,
+    updateGoal,
+    controlGoal,
     respondToTool,
     respondToTools,
     retryFromIndex,

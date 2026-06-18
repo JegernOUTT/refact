@@ -1,5 +1,10 @@
 import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
-import type { BackgroundAgentSummary, ChatMessage } from "./types";
+import type {
+  BackgroundAgentSummary,
+  ChatMessage,
+  GoalSnapshot,
+  GoalStatus,
+} from "./types";
 import type { WorktreeMeta } from "./worktrees";
 
 export type SessionState =
@@ -93,6 +98,11 @@ export type RuntimeState = {
   paused: boolean;
   error: string | null;
   queue_size: number;
+  goal_active?: boolean;
+  goal_status?: GoalStatus | null;
+  goal_turns_used?: number;
+  goal_tokens_used?: number;
+  goal_no_progress_turns?: number;
   pause_reasons: PauseReason[];
   queued_items: QueuedItem[];
   is_compressing?: boolean;
@@ -154,6 +164,7 @@ export type EventEnvelope =
       runtime: RuntimeState;
       messages: ChatMessage[];
       background_agents: BackgroundAgentSummary[];
+      goal?: GoalSnapshot | null;
       browser?: {
         runtime_id: string;
         connected: boolean;
@@ -280,6 +291,11 @@ export type EventEnvelope =
       type: "runtime_updated";
       state: string;
       error?: string;
+      goal_active?: boolean;
+      goal_status?: GoalStatus | null;
+      goal_turns_used?: number;
+      goal_tokens_used?: number;
+      goal_no_progress_turns?: number;
       is_compressing?: boolean;
       compression_phase?: CompressionPhase | null;
       compression_reason?: CompressionReason | null;
