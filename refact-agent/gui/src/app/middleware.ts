@@ -112,7 +112,11 @@ import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
 } from "../services/refact/apiUrl";
-import { collectTabIds, findLeafByTab } from "../features/ChatPanes/panesTree";
+import {
+  collectTabIds,
+  findLeaf,
+  findLeafByTab,
+} from "../features/ChatPanes/panesTree";
 import {
   addSurfaceToPane as addSurfaceToWorkspacePane,
   closePane as closeWorkspacePane,
@@ -403,6 +407,28 @@ function closeWorkspaceChatTab(
   }
 }
 
+function closeWorkspacePaneChats(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getOriginalState: () => RootState;
+  },
+  payload: { tabId: string; leafId: string },
+): void {
+  const originalWorkspace = listenerApi.getOriginalState().workspace;
+  const group = originalWorkspace.groups[payload.tabId];
+  if (!group) return;
+
+  const leaf = findLeaf(group.root, payload.leafId);
+  if (!leaf) return;
+
+  for (const key of new Set(leaf.tabIds)) {
+    if (!isChatSurface(key)) continue;
+    listenerApi.dispatch(
+      closeThread({ id: key.slice("chat:".length), force: true }),
+    );
+  }
+}
+
 startListening({
   matcher: isAnyOf(
     setWorkspaceActiveTab,
@@ -424,6 +450,13 @@ startListening({
   actionCreator: closeWorkspaceTab,
   effect: (action, listenerApi) => {
     closeWorkspaceChatTab(listenerApi, action.payload);
+  },
+});
+
+startListening({
+  actionCreator: closeWorkspacePane,
+  effect: (action, listenerApi) => {
+    closeWorkspacePaneChats(listenerApi, action.payload);
   },
 });
 

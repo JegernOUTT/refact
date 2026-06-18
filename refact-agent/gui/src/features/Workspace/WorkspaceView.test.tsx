@@ -103,9 +103,13 @@ describe("WorkspaceView", () => {
     });
     renderWorkspaceView(store);
 
-    expect(document.querySelector(`[data-surface-key="${task("task-a")}"]`)).toBeNull();
+    expect(
+      document.querySelector(`[data-surface-key="${task("task-a")}"]`),
+    ).toBeNull();
     expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Split active tab" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Split active tab" }),
+    ).toBeNull();
   });
 
   it("reconciles current thread to the active workspace chat on entry", async () => {
@@ -149,12 +153,15 @@ describe("WorkspaceView", () => {
     );
   });
 
-  it("clicking a pane close ungroups the split", async () => {
+  it("clicking a pane close ungroups the split and closes the removed chat", async () => {
     const store = createSplitWorkspaceStore();
     const view = renderWorkspaceView(store);
     const siblingPane = screen.getByLabelText(
       "Workspace pane root:sibling:chat:chat-a",
     );
+
+    expect(store.getState().chat.open_thread_ids).toEqual(["chat-a", "chat-b"]);
+    expect(store.getState().chat.threads["chat-b"]).toBeDefined();
 
     await view.user.click(
       within(siblingPane).getByRole("button", { name: "Close Pane" }),
@@ -162,6 +169,9 @@ describe("WorkspaceView", () => {
 
     expect(store.getState().workspace.groups[chat("chat-a")]).toBeUndefined();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expect(store.getState().chat.open_thread_ids).toEqual(["chat-a"]);
+    expect(store.getState().chat.threads["chat-a"]).toBeDefined();
+    expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
     expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
     expectSurface(chat("chat-a"));
   });
