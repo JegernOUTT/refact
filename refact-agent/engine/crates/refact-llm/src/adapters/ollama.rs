@@ -200,8 +200,8 @@ fn reasoning_requested(reasoning: &ReasoningIntent) -> bool {
 
 fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     use super::render_extra::{
-        append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
-        render_context_message, render_event_message, render_plan_message,
+        append_text_to_tool_json, is_context_role, is_event_role, is_goal_role, is_plan_role,
+        render_context_message, render_event_message, render_goal_message, render_plan_message,
     };
 
     let mut result: Vec<Value> = Vec::new();
@@ -213,13 +213,18 @@ fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     // history tool_calls include matching IDs when available. Tool-result images are deferred
     // to the next user message because Ollama expects images on user messages.
     for msg in messages {
-        if is_plan_role(&msg.role) {
+        if is_goal_role(&msg.role) || is_plan_role(&msg.role) {
             push_pending_user_message(
                 &mut result,
                 &mut pending_user_text,
                 &mut pending_user_images,
             );
-            if let Some(text) = render_plan_message(msg) {
+            let text = if is_goal_role(&msg.role) {
+                render_goal_message(msg)
+            } else {
+                render_plan_message(msg)
+            };
+            if let Some(text) = text {
                 result.push(json!({"role": "user", "content": text}));
             }
             continue;
@@ -568,6 +573,50 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: false,
         }
+    }
+
+    fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "plan".to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
+        let messages = vec![
+            goal_message("agent", 1, "Reach the goal"),
+            plan_message("agent", 1, "Do the thing"),
+        ];
+
+        let converted = convert_messages_to_ollama(&messages);
+        let serialized = json!({"messages": converted}).to_string();
+
+        assert_eq!(serialized.matches("<goal mode=").count(), 1);
+        assert_eq!(serialized.matches("<plan mode=").count(), 1);
+        assert!(serialized.find("<goal mode=").unwrap() < serialized.find("<plan mode=").unwrap());
+        assert!(!serialized.contains("\"role\":\"goal\""));
     }
 
     #[test]
