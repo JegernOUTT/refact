@@ -24,6 +24,7 @@ use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::constants::CHAT_TOP_N;
 use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 
+use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
@@ -1713,6 +1714,12 @@ pub fn start_generation(
                     if should_continue {
                         continue;
                     }
+                    if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    }
+                    if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
+                        break;
+                    }
                     let app_stop = AppState::from_gcx(gcx.clone()).await;
                     let session_id_stop = chat_id.clone();
                     let handle = tokio::spawn(async move {
@@ -1746,9 +1753,6 @@ pub fn start_generation(
                     }
                     maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
                         .await;
-                    if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
-                    }
                     break;
                 }
                 ToolStepOutcome::Paused => {

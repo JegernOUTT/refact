@@ -61,6 +61,7 @@ pub async fn start_background_tasks(
     let gcx_for_knowledge_index = gcx.clone();
     let gcx_for_stats = gcx.clone();
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let mut bg = BackgroundTasksHolder::new(vec![
@@ -85,6 +86,7 @@ pub async fn start_background_tasks(
         )),
         crate::chat::notifications::spawn_notification_subscriber(gcx.clone()),
         tokio::spawn(crate::chat::start_agent_monitor(app_state)),
+        tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
         tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
             background_agent_monitor_app,
             background_agent_monitor_shutdown,
