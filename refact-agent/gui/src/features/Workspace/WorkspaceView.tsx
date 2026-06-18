@@ -1,6 +1,11 @@
 import classNames from "classnames";
 import { Columns3 } from "lucide-react";
-import { useCallback, useEffect } from "react";
+import {
+  type DragEvent,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 
 import { IconButton, Tooltip } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -10,6 +15,10 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
+import {
+  hasTabDragType,
+  readTabDragSurfaceKey,
+} from "../ChatPanes/tabDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
 import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
@@ -26,6 +35,7 @@ import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
   const dispatch = useAppDispatch();
+  const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const openThreadIds = useAppSelector(selectOpenThreadIds);
@@ -80,6 +90,73 @@ export function WorkspaceView() {
     dispatch(splitTab({ tabId: activeTabId, dir: "row" }));
   }, [activeTabCanSplit, activeTabId, dispatch]);
 
+  const handleUnsplitDragEnter = useCallback(
+    (event: DragEvent) => {
+      if (!activeTabCanSplit || !hasTabDragType(event.dataTransfer, "chat")) {
+        return;
+      }
+      setUnsplitDragActive(true);
+    },
+    [activeTabCanSplit],
+  );
+
+  const handleUnsplitDragOver = useCallback(
+    (event: DragEvent) => {
+      if (!activeTabCanSplit || !hasTabDragType(event.dataTransfer, "chat")) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setUnsplitDragActive(true);
+    },
+    [activeTabCanSplit],
+  );
+
+  const handleUnsplitDragLeave = useCallback(
+    (event: DragEvent<HTMLElement>) => {
+      const nextTarget = event.relatedTarget;
+      if (
+        nextTarget instanceof Node &&
+        event.currentTarget.contains(nextTarget)
+      ) {
+        return;
+      }
+      setUnsplitDragActive(false);
+    },
+    [],
+  );
+
+  const handleUnsplitDrop = useCallback(
+    (event: DragEvent) => {
+      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
+      if (
+        !activeTabId ||
+        !activeTabCanSplit ||
+        !draggedSurfaceKey ||
+        !isChatSurface(draggedSurfaceKey) ||
+        draggedSurfaceKey === activeTabId
+      ) {
+        setUnsplitDragActive(false);
+        return;
+      }
+
+      event.preventDefault();
+      setUnsplitDragActive(false);
+      dispatch(
+        splitTab({
+          tabId: activeTabId,
+          dir: "row",
+          surfaceKey: draggedSurfaceKey,
+        }),
+      );
+    },
+    [activeTabCanSplit, activeTabId, dispatch],
+  );
+
+  const handleUnsplitDragEnd = useCallback(() => {
+    setUnsplitDragActive(false);
+  }, []);
+
   return (
     <div className={styles.workspaceView}>
       <div
@@ -93,8 +170,29 @@ export function WorkspaceView() {
         {activeTabId && activeTabCanSplit && isSplit ? (
           <GroupSplitView tabId={activeTabId} />
         ) : (
-          <div className={styles.unsplitSurfaceWrap}>
+          <div
+            className={classNames(
+              styles.unsplitSurfaceWrap,
+              unsplitDragActive && styles.unsplitSurfaceDragActive,
+            )}
+            onDragEnter={handleUnsplitDragEnter}
+            onDragOver={handleUnsplitDragOver}
+            onDragLeave={handleUnsplitDragLeave}
+            onDragEnd={handleUnsplitDragEnd}
+            onDrop={handleUnsplitDrop}
+            data-workspace-unsplit-drop-target={
+              activeTabCanSplit ? "true" : undefined
+            }
+          >
             <SurfacePane surfaceKey={activeTabId} />
+            {unsplitDragActive ? (
+              <div
+                className={classNames(styles.unsplitDropOverlay, "rf-enter")}
+                aria-hidden="true"
+              >
+                <div className={styles.unsplitDropHint}>Drop to split</div>
+              </div>
+            ) : null}
             {activeTabCanSplit ? (
               <div className={styles.unsplitSplitAffordance}>
                 <Tooltip content="Split this tab">

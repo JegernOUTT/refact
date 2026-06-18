@@ -153,6 +153,29 @@ describe("WorkspaceView", () => {
     );
   });
 
+  it("dropping a chat tab on an unsplit chat surface creates a split", () => {
+    const store = createWorkspaceStore();
+    renderWorkspaceView(store);
+    const dataTransfer = createDataTransferStub();
+    dataTransfer.setData("text/plain", "chat:chat-b");
+    const dropTarget = document.querySelector(
+      "[data-workspace-unsplit-drop-target='true']",
+    );
+    if (!dropTarget) throw new Error("missing unsplit drop target");
+
+    fireEvent.dragEnter(dropTarget, { dataTransfer });
+    fireEvent.dragOver(dropTarget, { dataTransfer });
+    fireEvent.drop(dropTarget, { dataTransfer });
+
+    const group = store.getState().workspace.groups[chat("chat-a")];
+    expect(group).toBeDefined();
+    if (!group) throw new Error("missing split group");
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expectSurface(chat("chat-a"));
+    expectSurface(chat("chat-b"));
+    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
+  });
+
   it("clicking a pane close ungroups the split and closes the removed chat", async () => {
     const store = createSplitWorkspaceStore();
     const view = renderWorkspaceView(store);
@@ -192,9 +215,30 @@ describe("WorkspaceView", () => {
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
+    if (!group) throw new Error("missing split group");
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
     expectSurface(chat("chat-a"));
     expectSurface(chat("chat-b"));
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
+  });
+
+  it("dropping a workspace tab on an empty pane fills the pane", () => {
+    const store = createEmptySplitWorkspaceStore();
+    renderWorkspaceView(store);
+    const dataTransfer = createDataTransferStub();
+    dataTransfer.setData("text/plain", "chat:chat-b");
+    const emptyPane = screen.getByLabelText(
+      "Workspace pane root:sibling:chat:chat-a",
+    );
+
+    fireEvent.dragEnter(emptyPane, { dataTransfer });
+    fireEvent.dragOver(emptyPane, { dataTransfer });
+    fireEvent.drop(emptyPane, { dataTransfer });
+
+    const group = store.getState().workspace.groups[chat("chat-a")];
+    expect(group).toBeDefined();
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expectSurface(chat("chat-a"));
+    expectSurface(chat("chat-b"));
   });
 });

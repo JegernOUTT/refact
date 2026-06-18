@@ -759,9 +759,11 @@ export const workspaceSlice = createSlice({
         tabId: SurfaceKey;
         dir: SplitNode["dir"];
         placement?: SplitPlacement;
+        surfaceKey?: SurfaceKey;
       }>,
     ) => {
-      const { tabId, dir, placement } = action.payload;
+      const { tabId, dir, placement, surfaceKey: draggedSurfaceKey } =
+        action.payload;
       if (!isChatSurface(tabId)) return;
       if (!state.tabs.includes(tabId)) return;
 
@@ -782,6 +784,10 @@ export const workspaceSlice = createSlice({
         focusedLeaf?.activeTabId ?? focusedLeaf?.tabIds[0] ?? null;
       if (surfaceKey && !isChatSurface(surfaceKey)) return;
       if (!focusedLeaf || !surfaceKey) return;
+      if (draggedSurfaceKey) {
+        if (!isChatSurface(draggedSurfaceKey)) return;
+        if (draggedSurfaceKey === surfaceKey) return;
+      }
 
       const splitResult = splitLeafWithEmptySibling(
         currentGroup.root,
@@ -796,13 +802,24 @@ export const workspaceSlice = createSlice({
       const nextLeafIds = collectLeafIds(nextRoot);
       if (nextLeafIds.length === leafCount) return;
 
+      if (draggedSurfaceKey) {
+        detachSurfaceForGroup(state, tabId, draggedSurfaceKey);
+      }
+
       state.groups[tabId] = ensureGroupFocus(
         {
-          root: nextRoot,
+          root: draggedSurfaceKey
+            ? addSurfaceToLeaf(
+                nextRoot,
+                splitResult.siblingLeafId,
+                draggedSurfaceKey,
+              )
+            : nextRoot,
           focusedLeafId: currentGroup.focusedLeafId,
         },
         splitResult.siblingLeafId,
       );
+      state.activeTabId = tabId;
     },
     closePane: (
       state,

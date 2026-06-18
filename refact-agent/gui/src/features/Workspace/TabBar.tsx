@@ -30,9 +30,10 @@ import {
   findLeaf,
 } from "../ChatPanes/panesTree";
 import {
+  hasTabDragType,
   readTabDragData,
   setTabDragData,
-  type TabDragKind,
+  surfaceKeyFromTabDragPayload,
 } from "../ChatPanes/tabDrag";
 import {
   closeTask,
@@ -50,7 +51,6 @@ import {
   type PaneGroup,
 } from "./workspaceSlice";
 import {
-  isChatSurface,
   makeSurfaceKey,
   parseSurfaceKey,
   type SurfaceKey,
@@ -130,12 +130,8 @@ function taskSessionState(task: OpenTask | undefined): string | undefined {
   return task?.plannerChats[0]?.sessionState;
 }
 
-function isSurfaceKind(type: TabDragKind): type is "chat" | "task" | "buddy" {
-  return type === "chat" || type === "task" || type === "buddy";
-}
-
 function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
-  type: TabDragKind;
+  type: "chat" | "task" | "buddy" | "surface";
   id: string;
 } {
   try {
@@ -147,16 +143,6 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
   } catch {
     return { type: "surface", id: surfaceKey };
   }
-}
-
-function surfaceKeyFromDragData(
-  payload: ReturnType<typeof readTabDragData>,
-): SurfaceKey | null {
-  if (!payload) return null;
-  if (payload.surfaceKey) return payload.surfaceKey;
-  if (payload.type === "surface") return payload.id;
-  if (!isSurfaceKind(payload.type)) return null;
-  return makeSurfaceKey(payload.type, payload.id);
 }
 
 function displayInfoForSurface(
@@ -312,19 +298,11 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
           is_task_chat: display.is_task_chat,
           isGroup,
           paneCount: group ? collectLeafIds(group.root).length : 1,
-          draggable: isChatSurface(tabId) || taskSurfaceKeys.includes(tabId),
+          draggable: true,
           closable: display.kind !== "buddy" || currentPage?.name === "buddy",
         };
       }),
-    [
-      currentPage?.name,
-      groups,
-      tabsById,
-      taskSurfaceKeys,
-      tasksById,
-      threads,
-      visibleTabKeys,
-    ],
+    [currentPage?.name, groups, tabsById, tasksById, threads, visibleTabKeys],
   );
 
   const handleTabClick = useCallback(
@@ -412,16 +390,16 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
 
   const handleTabDragOver = useCallback(
     (event: DragEvent, targetKey: SurfaceKey) => {
-      const sourceKey = surfaceKeyFromDragData(
-        readTabDragData(event.dataTransfer),
-      );
+      const target = parseSurfaceKey(targetKey);
       const chatReorder =
-        sourceKey && tabs.includes(sourceKey) && tabs.includes(targetKey);
+        target.kind === "chat" &&
+        tabs.includes(targetKey) &&
+        hasTabDragType(event.dataTransfer, "chat");
       const taskReorder =
-        sourceKey &&
-        taskSurfaceKeys.includes(sourceKey) &&
-        taskSurfaceKeys.includes(targetKey);
-      if (!sourceKey || sourceKey === targetKey || (!chatReorder && !taskReorder)) {
+        target.kind === "task" &&
+        taskSurfaceKeys.includes(targetKey) &&
+        hasTabDragType(event.dataTransfer, "task");
+      if (!chatReorder && !taskReorder) {
         return;
       }
       event.preventDefault();
@@ -446,7 +424,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     (event: DragEvent, targetKey: SurfaceKey) => {
       event.preventDefault();
       event.stopPropagation();
-      const sourceKey = surfaceKeyFromDragData(
+      const sourceKey = surfaceKeyFromTabDragPayload(
         readTabDragData(event.dataTransfer),
       );
       setDragTargetTabId(null);

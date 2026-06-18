@@ -34,6 +34,34 @@
   overflow: hidden;
 }
 
+.unsplitSurfaceDragActive {
+  background: var(--rf-color-accent-soft);
+}
+
+.unsplitDropOverlay {
+  position: absolute;
+  inset: var(--rf-space-3);
+  z-index: var(--rf-z-dropdown);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: var(--rf-color-accent-soft);
+  border: var(--rf-hairline) solid var(--rf-color-accent);
+  border-radius: var(--rf-radius-card);
+}
+
+.unsplitDropHint {
+  padding: var(--rf-space-2) var(--rf-space-4);
+  color: var(--rf-color-accent);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
 .unsplitSplitAffordance {
   position: absolute;
   top: var(--rf-space-2);
@@ -62,12 +90,16 @@
   background: var(--rf-surface-1);
 }
 
-:global(.radix-themes[data-host="jetbrains"]) .unsplitSplitButton {
+:global(.radix-themes[data-host="jetbrains"]) .unsplitSplitButton,
+:global(.radix-themes[data-host="jetbrains"]) .unsplitDropHint {
   backdrop-filter: none;
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .body,
+  .unsplitSurfaceWrap,
+  .unsplitDropOverlay,
+  .unsplitDropHint,
   .unsplitSplitAffordance,
   .unsplitSplitButton {
     transition:
@@ -82,7 +114,8 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .unsplitSplitButton {
+  .unsplitSplitButton,
+  .unsplitDropHint {
     background: var(--rf-surface-2);
     backdrop-filter: none;
   }
@@ -90,6 +123,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .body,
+  .unsplitSurfaceWrap,
+  .unsplitDropOverlay,
+  .unsplitDropHint,
   .unsplitSplitAffordance,
   .unsplitSplitButton {
     transition: none;

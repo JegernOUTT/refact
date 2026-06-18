@@ -227,6 +227,29 @@ describe("workspaceSlice", () => {
     );
   });
 
+  test("splitTab can move a dragged top-level chat into the new sibling", () => {
+    const chatA = chat("a");
+    const chatB = chat("b");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, openTab(chatB));
+    state = reducer(state, setActiveTab(chatA));
+
+    state = reducer(
+      state,
+      splitTab({ tabId: chatA, dir: "row", surfaceKey: chatB }),
+    );
+
+    const group = groupFor(state, chatA);
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
+    expect(findLeaf(group.root, "root")).toEqual(leaf("root", [chatA], chatA));
+    expect(findLeaf(group.root, "root:sibling:chat:a")).toEqual(
+      leaf("root:sibling:chat:a", [chatB], chatB),
+    );
+    expect(group.focusedLeafId).toBe("root:sibling:chat:a");
+    expect(selectVisibleSurfaceKeys(rootState(state))).toEqual([chatA, chatB]);
+  });
+
   test("closePane collapses a two-pane group back to a normal tab", () => {
     const chatA = chat("a");
     let state = reducer(undefined, openTab(chatA));

@@ -10,7 +10,7 @@ import {
 import { notificationAdded } from "../Notifications";
 import type { ProcessCompletedNotification } from "../Notifications/notificationsSlice";
 import { push } from "../Pages/pagesSlice";
-import { openTask } from "../Tasks/tasksSlice";
+import { openTask, reorderOpenTasks } from "../Tasks/tasksSlice";
 import {
   addSurfaceToPane,
   closeTab,
@@ -221,6 +221,27 @@ describe("TabBar", () => {
     expect(store.getState().pages.at(-1)).toEqual({ name: "buddy" });
   });
 
+  it("makes chat, task, and buddy top-bar tabs draggable", () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    store.dispatch(push({ name: "buddy" }));
+    store.dispatch(push({ name: "chat" }));
+    renderTabBar(store);
+
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toHaveAttribute(
+      "draggable",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
+      "draggable",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: /Buddy/ })).toHaveAttribute(
+      "draggable",
+      "true",
+    );
+  });
+
   it("closes task and active buddy navigation tabs without closing chat tabs", async () => {
     const store = createStoreWithChatTabs();
     store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
@@ -277,6 +298,30 @@ describe("TabBar", () => {
       chat("chat-c"),
       chat("chat-a"),
       chat("chat-b"),
+    ]);
+  });
+
+  it("dispatches reorderOpenTasks when a task tab is dropped on another task tab", () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    store.dispatch(openTask({ id: "task-b", name: "Task Beta" }));
+    const dispatchSpy = vi.spyOn(store, "dispatch");
+    renderTabBar(store);
+
+    const dataTransfer = createDataTransferStub();
+    fireEvent.dragStart(screen.getByRole("tab", { name: /Task Beta/ }), {
+      dataTransfer,
+    });
+    const target = getTabWrap(/Task Alpha/);
+    fireEvent.dragOver(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      reorderOpenTasks({ sourceId: "task-b", targetId: "task-a" }),
+    );
+    expect(store.getState().tasksUI.openTasks.map((task) => task.id)).toEqual([
+      "task-b",
+      "task-a",
     ]);
   });
 });

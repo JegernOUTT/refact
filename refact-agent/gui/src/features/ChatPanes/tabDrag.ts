@@ -1,4 +1,4 @@
-import type { SurfaceKey } from "../Workspace/surfaceKey";
+import { makeSurfaceKey, type SurfaceKey } from "../Workspace/surfaceKey";
 
 export type TabDragKind = "chat" | "task" | "buddy" | "surface";
 
@@ -63,6 +63,21 @@ export function readTabDragData(
   }
 
   return null;
+}
+
+export function surfaceKeyFromTabDragPayload(
+  payload: TabDragPayload | null,
+): SurfaceKey | null {
+  if (!payload) return null;
+  if (payload.surfaceKey) return payload.surfaceKey;
+  if (payload.type === "surface") return payload.id;
+  return makeSurfaceKey(payload.type, payload.id);
+}
+
+export function readTabDragSurfaceKey(
+  dataTransfer: DataTransfer,
+): SurfaceKey | null {
+  return surfaceKeyFromTabDragPayload(readTabDragData(dataTransfer));
 }
 
 export function hasTabDragType(

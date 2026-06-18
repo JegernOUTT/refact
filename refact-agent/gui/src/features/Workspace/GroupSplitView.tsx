@@ -14,6 +14,7 @@ import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useDashboardLayout } from "../Dashboard/hooks/useDashboardLayout";
 import type { LeafPane, PaneNode, SplitNode } from "../ChatPanes/panesTree";
 import {
+  addSurfaceToPane,
   closePane,
   focusPane,
   resizeGroupSplit,
@@ -21,8 +22,11 @@ import {
   splitPaneWithSurface,
   splitTab,
 } from "./workspaceSlice";
-import { isChatSurface, makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
-import { readTabDragData } from "../ChatPanes/tabDrag";
+import { isChatSurface, type SurfaceKey } from "./surfaceKey";
+import {
+  hasTabDragType,
+  readTabDragSurfaceKey,
+} from "../ChatPanes/tabDrag";
 import { SurfacePane } from "./SurfacePane";
 import styles from "./GroupSplitView.module.css";
 
@@ -112,17 +116,8 @@ function resizeAtDivider(
   return normalizedSizes(next, next.length);
 }
 
-function hasSurfaceTabDrag(dataTransfer: DataTransfer): boolean {
-  const surfaceKey = surfaceKeyFromDragData(dataTransfer);
-  return Boolean(surfaceKey && isChatSurface(surfaceKey));
-}
-
-function surfaceKeyFromDragData(dataTransfer: DataTransfer): SurfaceKey | null {
-  const dragged = readTabDragData(dataTransfer);
-  if (!dragged) return null;
-  if (dragged.surfaceKey) return dragged.surfaceKey;
-  if (dragged.type === "surface") return dragged.id;
-  return makeSurfaceKey(dragged.type, dragged.id);
+function hasChatTabDrag(dataTransfer: DataTransfer): boolean {
+  return hasTabDragType(dataTransfer, "chat");
 }
 
 function PaneDivider({ dir, dragging, onMouseDown }: DividerProps) {
@@ -225,12 +220,12 @@ function LeafView({
   }, [dispatch, leaf.id, tabId]);
 
   const handlePaneDragEnter = useCallback((event: DragEvent) => {
-    if (!hasSurfaceTabDrag(event.dataTransfer)) return;
+    if (!hasChatTabDrag(event.dataTransfer)) return;
     setSurfaceDragActive(true);
   }, []);
 
   const handlePaneDragOver = useCallback((event: DragEvent) => {
-    if (!hasSurfaceTabDrag(event.dataTransfer)) return;
+    if (!hasChatTabDrag(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     setSurfaceDragActive(true);
@@ -247,10 +242,33 @@ function LeafView({
     setSurfaceDragActive(false);
   }, []);
 
-  const handlePaneDrop = useCallback((event: DragEvent) => {
-    if (hasSurfaceTabDrag(event.dataTransfer)) {
+  const handlePaneDrop = useCallback(
+    (event: DragEvent) => {
+      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
+      if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) {
+        setSurfaceDragActive(false);
+        return;
+      }
+      if (draggedSurfaceKey === surfaceKey) {
+        setSurfaceDragActive(false);
+        return;
+      }
+
       event.preventDefault();
-    }
+      event.stopPropagation();
+      setSurfaceDragActive(false);
+      dispatch(
+        addSurfaceToPane({
+          tabId,
+          leafId: leaf.id,
+          surfaceKey: draggedSurfaceKey,
+        }),
+      );
+    },
+    [dispatch, leaf.id, surfaceKey, tabId],
+  );
+
+  const handlePaneDragEnd = useCallback(() => {
     setSurfaceDragActive(false);
   }, []);
 
@@ -265,8 +283,9 @@ function LeafView({
       event.preventDefault();
       event.stopPropagation();
       setSurfaceDragActive(false);
-      const draggedSurfaceKey = surfaceKeyFromDragData(event.dataTransfer);
+      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
       if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) return;
+      if (draggedSurfaceKey === surfaceKey) return;
       dispatch(
         splitPaneWithSurface({
           tabId,
@@ -277,7 +296,7 @@ function LeafView({
         }),
       );
     },
-    [dispatch, leaf.id, tabId],
+    [dispatch, leaf.id, surfaceKey, tabId],
   );
 
   return (
@@ -293,7 +312,7 @@ function LeafView({
       onDragEnter={handlePaneDragEnter}
       onDragOver={handlePaneDragOver}
       onDragLeave={handlePaneDragLeave}
-      onDragEnd={handlePaneDrop}
+      onDragEnd={handlePaneDragEnd}
       onDrop={handlePaneDrop}
     >
       <PaneHeader leaf={leaf} tabId={tabId} />

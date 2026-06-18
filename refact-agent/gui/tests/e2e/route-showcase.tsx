@@ -7,6 +7,7 @@ import { setUpStore, type RootState } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
+import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
 import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
 import { TrajectoryButton } from "../../src/components/Trajectory";
@@ -60,6 +61,9 @@ const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
+const chatRoute = route === "chat" || route === "chat-split";
+const chatDndRoute = route === "chat-dnd";
+const multiChatRoute = route === "chat-split" || chatDndRoute;
 
 const buddySettings: BuddySettings = {
   enabled: true,
@@ -1079,19 +1083,17 @@ const preloadedState: Partial<RootState> = {
   },
   chat: {
     current_thread_id: route === "chat-split" ? splitChatId : chatId,
-    open_thread_ids:
-      route === "chat-split" ? [chatId, splitChatId] : [chatId],
-    threads:
-      route === "chat-split"
-        ? { [chatId]: chatRuntime, [splitChatId]: splitChatRuntime }
-        : { [chatId]: chatRuntime },
+    open_thread_ids: multiChatRoute ? [chatId, splitChatId] : [chatId],
+    threads: multiChatRoute
+      ? { [chatId]: chatRuntime, [splitChatId]: splitChatRuntime }
+      : { [chatId]: chatRuntime },
     max_new_tokens: 4096,
     tool_use: "agent",
     system_prompt: {},
     sse_refresh_requested: null,
     stream_version: 0,
   },
-  ...(route === "chat" || route === "chat-split"
+  ...(chatRoute || chatDndRoute
     ? {
         workspace:
           route === "chat-split"
@@ -1125,7 +1127,9 @@ const preloadedState: Partial<RootState> = {
                 },
               }
             : {
-                tabs: [chatSurface(chatId)],
+                tabs: chatDndRoute
+                  ? [chatSurface(chatId), chatSurface(splitChatId)]
+                  : [chatSurface(chatId)],
                 activeTabId: chatSurface(chatId),
                 groups: {},
               },
@@ -1200,7 +1204,27 @@ const ShowcaseSurface = () => {
     return <OverlayRegressionSurface />;
   }
 
-  if (route === "chat" || route === "chat-split") {
+  if (chatDndRoute) {
+    return (
+      <Flex
+        direction="column"
+        style={{
+          width: "100%",
+          minWidth: 0,
+          minHeight: 0,
+          flex: "1 1 auto",
+          overflow: "hidden",
+        }}
+      >
+        <TabBar />
+        <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
+          <WorkspaceView />
+        </Flex>
+      </Flex>
+    );
+  }
+
+  if (chatRoute) {
     return <WorkspaceView />;
   }
 
