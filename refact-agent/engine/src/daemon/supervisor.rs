@@ -1460,7 +1460,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
-    #[cfg_attr(windows, ignore = "Windows artifact runners can starve fake worker shutdown")]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners can starve fake worker shutdown"
+    )]
     async fn stop_worker_can_run_during_stuck_startup() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -1505,7 +1508,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
-    #[cfg_attr(windows, ignore = "Windows artifact runners can starve fake worker shutdown")]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners can starve fake worker shutdown"
+    )]
     async fn readiness_wait_exits_on_shutdown() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

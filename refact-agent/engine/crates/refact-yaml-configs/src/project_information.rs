@@ -213,7 +213,8 @@ pub fn to_relative_path(absolute_path: &str, project_roots: &[PathBuf]) -> Optio
 }
 
 pub fn override_key(absolute_path: &str, project_roots: &[PathBuf]) -> String {
-    to_relative_path(absolute_path, project_roots).unwrap_or_else(|| absolute_path.replace('\\', "/"))
+    to_relative_path(absolute_path, project_roots)
+        .unwrap_or_else(|| absolute_path.replace('\\', "/"))
 }
 
 fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
@@ -221,7 +222,8 @@ fn is_under_any_root(path: &Path, roots: &[PathBuf]) -> bool {
         if path.starts_with(root) {
             return true;
         }
-        if let (Ok(path_canonical), Ok(root_canonical)) = (path.canonicalize(), root.canonicalize()) {
+        if let (Ok(path_canonical), Ok(root_canonical)) = (path.canonicalize(), root.canonicalize())
+        {
             if dunce::simplified(&path_canonical).starts_with(dunce::simplified(&root_canonical)) {
                 return true;
             }

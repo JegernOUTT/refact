@@ -466,9 +466,7 @@ fn compress_chat_apply_head_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_chat_history::trajectory_ops::{
-        build_compression_report_message, TOOLS_TO_PRESERVE,
-    };
+    use refact_chat_history::trajectory_ops::{build_compression_report_message, TOOLS_TO_PRESERVE};
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
 
     fn user_message(text: &str) -> ChatMessage {

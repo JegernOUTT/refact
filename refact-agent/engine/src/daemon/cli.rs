@@ -2710,7 +2710,10 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    #[cfg_attr(windows, ignore = "Windows artifact runners can leave proxy worker unavailable")]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners can leave proxy worker unavailable"
+    )]
     async fn cron_cli_dispatches_through_daemon_proxy() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();

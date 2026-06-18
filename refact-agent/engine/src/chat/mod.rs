@@ -8,6 +8,7 @@ pub mod config;
 mod content;
 pub mod diagnostics;
 mod generation;
+pub mod goal_role;
 mod handlers;
 pub mod history_limit;
 pub mod internal_roles;
