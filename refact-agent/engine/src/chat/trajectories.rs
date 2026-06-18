@@ -2078,6 +2078,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
     };
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -2133,6 +2134,7 @@ pub async fn save_trajectory_as(
         return;
     }
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -5659,6 +5661,7 @@ mod tests {
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -13230,6 +13233,7 @@ mod tests {
         let worktree = created.worktree.meta.clone();
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),

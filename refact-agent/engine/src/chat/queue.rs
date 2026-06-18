@@ -1013,6 +1013,11 @@ pub async fn process_command_queue(
                     let compression_phase = session.compression_phase;
                     let compression_reason = session.compression_reason;
                     session.emit(super::types::ChatEvent::RuntimeUpdated {
+                        goal_active: false,
+                        goal_status: None,
+                        goal_turns_used: 0,
+                        goal_tokens_used: 0,
+                        goal_no_progress_turns: 0,
                         state: super::types::SessionState::Error,
                         error: Some(format!("Message blocked by hook: {}", reason)),
                         is_compressing: false,
@@ -1279,6 +1284,11 @@ pub async fn process_command_queue(
                         let compression_phase = session.compression_phase;
                         let compression_reason = session.compression_reason;
                         session.emit(ChatEvent::RuntimeUpdated {
+                            goal_active: false,
+                            goal_status: None,
+                            goal_turns_used: 0,
+                            goal_tokens_used: 0,
+                            goal_no_progress_turns: 0,
                             state: SessionState::Error,
                             error: Some(e),
                             is_compressing: false,
@@ -1384,6 +1394,11 @@ pub async fn process_command_queue(
                         let compression_phase = session.compression_phase;
                         let compression_reason = session.compression_reason;
                         session.emit(ChatEvent::RuntimeUpdated {
+                            goal_active: false,
+                            goal_status: None,
+                            goal_turns_used: 0,
+                            goal_tokens_used: 0,
+                            goal_no_progress_turns: 0,
                             state: SessionState::Error,
                             error: Some(error),
                             is_compressing: false,

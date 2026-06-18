@@ -195,6 +195,7 @@ mod tests {
     #[test]
     fn snapshot_roundtrips_with_background_agents() {
         let event = ChatEvent::Snapshot {
+            goal: None,
             thread: ThreadParams::default(),
             runtime: RuntimeState::default(),
             messages: vec![],

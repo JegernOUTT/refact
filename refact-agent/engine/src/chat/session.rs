@@ -485,6 +485,7 @@ impl ChatSession {
         runtime.compression_reason = self.compression_reason;
         runtime.queued_items = self.build_queued_items();
         ChatEvent::Snapshot {
+            goal: None,
             thread: self.thread.clone(),
             runtime,
             messages,
@@ -1084,6 +1085,11 @@ impl ChatSession {
         }
 
         self.emit(ChatEvent::RuntimeUpdated {
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             state,
             error: error.clone(),
             is_compressing: self.is_compressing,
@@ -1616,6 +1622,11 @@ impl ChatSession {
                     reasons: self.runtime.pause_reasons.clone(),
                 });
                 self.emit(ChatEvent::RuntimeUpdated {
+                    goal_active: false,
+                    goal_status: None,
+                    goal_turns_used: 0,
+                    goal_tokens_used: 0,
+                    goal_no_progress_turns: 0,
                     state: self.runtime.state,
                     error: self.runtime.error.clone(),
                     is_compressing: self.is_compressing,

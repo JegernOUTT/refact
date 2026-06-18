@@ -142,6 +142,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
         );
 
         let snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.clone(),
             title: "Investigation".to_string(),
             model: String::new(),

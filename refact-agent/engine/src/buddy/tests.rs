@@ -6053,6 +6053,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),

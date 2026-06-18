@@ -1521,6 +1521,7 @@ mod tests {
         planner_chat_id: Option<&str>,
     ) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.to_string(),
             title: chat_id.to_string(),
             model: "test-model".to_string(),

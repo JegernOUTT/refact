@@ -804,6 +804,7 @@ pub async fn handle_v1_buddy_conversations_create(
         .unwrap_or_else(|| "New Conversation".to_string());
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.clone(),
         title: title.clone(),
         model: String::new(),

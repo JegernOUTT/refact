@@ -366,6 +366,7 @@ pub async fn handle_handoff_apply(
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: new_chat_id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -539,6 +540,7 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -691,6 +693,7 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -794,6 +797,7 @@ mod tests {
 
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: "transition-identity".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -943,6 +947,7 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: "transition-chat".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),

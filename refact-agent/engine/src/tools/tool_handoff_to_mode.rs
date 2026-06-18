@@ -492,6 +492,7 @@ impl Tool for ToolHandoffToMode {
 
         let snapshot_task_meta = task_meta.clone();
         let snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: new_chat_id.clone(),
             title: String::new(),
             model: thread.model.clone(),
@@ -935,6 +936,7 @@ mod tests {
         crate::chat::trajectories::save_trajectory_snapshot(
             app.gcx.clone(),
             TrajectorySnapshot {
+                goal: None,
                 chat_id: planner_chat_id.clone(),
                 title: String::new(),
                 model: "model".to_string(),

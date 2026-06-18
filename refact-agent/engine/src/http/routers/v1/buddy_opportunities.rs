@@ -1022,6 +1022,7 @@ async fn create_investigation_chat(
     let now = chrono::Utc::now().to_rfc3339();
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),

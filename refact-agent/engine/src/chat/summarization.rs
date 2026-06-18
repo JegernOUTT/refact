@@ -2179,6 +2179,11 @@ fn emit_compression_status(
     let state = session.runtime.state;
     let error = session.runtime.error.clone();
     session.emit(ChatEvent::RuntimeUpdated {
+        goal_active: false,
+        goal_status: None,
+        goal_turns_used: 0,
+        goal_tokens_used: 0,
+        goal_no_progress_turns: 0,
         state,
         error,
         is_compressing,
