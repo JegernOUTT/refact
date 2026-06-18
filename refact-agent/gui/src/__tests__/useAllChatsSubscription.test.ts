@@ -1,14 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { pickDesiredChatSubscriptions } from "../hooks/useAllChatsSubscription";
 import {
-  addSurfaceToPane,
-  openTab,
-  selectVisibleThreadIds,
-  setActiveTab,
-  splitTab,
-  workspaceSlice,
-} from "../features/Workspace";
-import { makeSurfaceKey } from "../features/Workspace/surfaceKey";
+  connectionSlice,
+  registerVisibleChatMount,
+  unregisterVisibleChatMount,
+  selectVisibleChatMountIds,
+} from "../features/Connection";
+import type { RootState } from "../app/store";
 
 describe("pickDesiredChatSubscriptions", () => {
   it("subscribes only chats visible on screen", () => {
@@ -36,30 +34,29 @@ describe("pickDesiredChatSubscriptions", () => {
     expect(result).toEqual([]);
   });
 
-  it("subscribes visible chat surfaces from the active workspace group only", () => {
-    const chatA = makeSurfaceKey("chat", "chat-a");
-    const chatB = makeSurfaceKey("chat", "chat-b");
-    const chatC = makeSurfaceKey("chat", "chat-c");
-    let workspace = workspaceSlice.reducer(undefined, openTab(chatA));
-    workspace = workspaceSlice.reducer(workspace, openTab(chatB));
-    workspace = workspaceSlice.reducer(workspace, openTab(chatC));
-    workspace = workspaceSlice.reducer(workspace, setActiveTab(chatA));
-    workspace = workspaceSlice.reducer(
-      workspace,
-      splitTab({ tabId: chatA, dir: "row" }),
+  it("derives desired subscriptions from registered visible chat mounts", () => {
+    let connection = connectionSlice.reducer(
+      undefined,
+      registerVisibleChatMount({ chatId: "chat-a" }),
     );
-    workspace = workspaceSlice.reducer(
-      workspace,
-      addSurfaceToPane({
-        tabId: chatA,
-        leafId: "root:sibling:chat:chat-a",
-        surfaceKey: chatB,
-      }),
+    connection = connectionSlice.reducer(
+      connection,
+      registerVisibleChatMount({ chatId: "chat-b" }),
+    );
+    connection = connectionSlice.reducer(
+      connection,
+      registerVisibleChatMount({ chatId: "chat-b" }),
+    );
+    connection = connectionSlice.reducer(
+      connection,
+      unregisterVisibleChatMount({ chatId: "chat-a" }),
     );
 
-    const visibleThreadIds = selectVisibleThreadIds({ workspace });
+    const visibleThreadIds = selectVisibleChatMountIds({
+      connection,
+    } as unknown as RootState);
     const result = pickDesiredChatSubscriptions({ visibleThreadIds });
 
-    expect(result).toEqual(["chat-a", "chat-b"]);
+    expect(result).toEqual(["chat-b"]);
   });
 });

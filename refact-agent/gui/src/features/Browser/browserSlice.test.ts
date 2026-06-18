@@ -19,6 +19,7 @@ import {
   type BrowserFrame,
 } from "./browserSlice";
 import { applyChatEvent } from "../Chat/Thread/actions";
+import type { ChatEventEnvelope } from "../../services/refact/chatSubscription";
 
 const reducer = browserSlice.reducer;
 
@@ -413,5 +414,126 @@ describe("browserSlice", () => {
       }),
     );
     expect(state.runtimes["chat-1"]).toBeUndefined();
+  });
+});
+
+describe("browserSlice snapshot reconcile", () => {
+  type SnapshotBrowser = Extract<
+    ChatEventEnvelope,
+    { type: "snapshot" }
+  >["browser"];
+
+  function snapshotEvent(chatId: string, browser: SnapshotBrowser) {
+    return applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "snapshot",
+      thread: { id: chatId },
+      runtime: {},
+      messages: [],
+      background_agents: [],
+      browser,
+    } as unknown as ChatEventEnvelope);
+  }
+
+  test("creates a runtime from snapshot browser status when the panel is open", () => {
+    let state = reducer(undefined, openBrowserUi({ chatId: "chat-snap" }));
+    state = reducer(
+      state,
+      snapshotEvent("chat-snap", {
+        runtime_id: "rt-1",
+        connected: true,
+        url: "https://example.com",
+        title: "Example",
+        active_tab: "tab-1",
+        tabs: [
+          { tab_id: "tab-1", url: "https://example.com", title: "Example" },
+        ],
+      }),
+    );
+    const rt = state.runtimes["chat-snap"];
+    expect(rt?.runtime_id).toBe("rt-1");
+    expect(rt?.connected).toBe(true);
+    expect(rt?.url).toBe("https://example.com");
+    expect(rt?.title).toBe("Example");
+    expect(rt?.active_tab).toBe("tab-1");
+    expect(rt?.tabs).toHaveLength(1);
+  });
+
+  test("does not create a runtime from snapshot when the panel is closed", () => {
+    const state = reducer(
+      undefined,
+      snapshotEvent("chat-snap", { runtime_id: "rt-1", connected: true }),
+    );
+    expect(state.runtimes["chat-snap"]).toBeUndefined();
+  });
+
+  test("marks the runtime disconnected without closing it when a reconnect snapshot reports no browser", () => {
+    let state = reducer(undefined, openBrowserUi({ chatId: "chat-snap" }));
+    state = reducer(
+      state,
+      snapshotEvent("chat-snap", { runtime_id: "rt-1", connected: true }),
+    );
+    expect(state.runtimes["chat-snap"]?.connected).toBe(true);
+
+    state = reducer(state, snapshotEvent("chat-snap", undefined));
+
+    expect(state.runtimes["chat-snap"]?.runtime_id).toBe("rt-1");
+    expect(state.runtimes["chat-snap"]?.connected).toBe(false);
+    expect(state.browserUiOpen["chat-snap"]).toBe(true);
+  });
+
+  test("a later browser_status recovers the panel after an absent-browser snapshot", () => {
+    let state = reducer(undefined, openBrowserUi({ chatId: "chat-snap" }));
+    state = reducer(
+      state,
+      snapshotEvent("chat-snap", { runtime_id: "rt-1", connected: true }),
+    );
+    state = reducer(state, snapshotEvent("chat-snap", undefined));
+    expect(state.runtimes["chat-snap"]?.connected).toBe(false);
+
+    state = reducer(
+      state,
+      applyChatEvent({
+        chat_id: "chat-snap",
+        seq: "2",
+        type: "browser_status",
+        connected: true,
+        runtime_id: "rt-1",
+        url: "https://example.com",
+      }),
+    );
+
+    expect(state.runtimes["chat-snap"]?.connected).toBe(true);
+    expect(state.runtimes["chat-snap"]?.url).toBe("https://example.com");
+  });
+
+  test("rebuilds runtime state when the backend restarts the browser with a new runtime id", () => {
+    let state = reducer(undefined, openBrowserUi({ chatId: "chat-snap" }));
+    state = reducer(
+      state,
+      snapshotEvent("chat-snap", { runtime_id: "rt-1", connected: true }),
+    );
+    state = reducer(
+      state,
+      updateBrowserFrame({
+        chatId: "chat-snap",
+        frame: { mime: "image/jpeg", data: "stale", diff_boxes: [] },
+      }),
+    );
+    expect(state.runtimes["chat-snap"]?.latest_frame?.data).toBe("stale");
+
+    state = reducer(
+      state,
+      snapshotEvent("chat-snap", {
+        runtime_id: "rt-2",
+        connected: true,
+        url: "https://new.example",
+      }),
+    );
+
+    expect(state.runtimes["chat-snap"]?.runtime_id).toBe("rt-2");
+    expect(state.runtimes["chat-snap"]?.url).toBe("https://new.example");
+    expect(state.runtimes["chat-snap"]?.latest_frame).toBeNull();
   });
 });

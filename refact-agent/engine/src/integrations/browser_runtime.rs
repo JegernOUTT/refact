@@ -894,6 +894,38 @@ pub async fn find_runtime_by_chat_id(
     None
 }
 
+pub async fn browser_snapshot_for_chat(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+) -> Option<crate::chat::types::BrowserSnapshot> {
+    let (runtime_id, runtime_arc) = find_runtime_by_chat_id(app, chat_id).await?;
+    let rt = runtime_arc.lock().await;
+    let tabs = rt
+        .list_tab_infos()
+        .into_iter()
+        .map(|t| crate::chat::types::BrowserTabInfo {
+            tab_id: t.tab_id,
+            url: t.url,
+            title: t.title,
+        })
+        .collect::<Vec<_>>();
+    let (url, title) = match rt.get_active_tab() {
+        Some(tab) => (
+            Some(tab.get_url()).filter(|s| !s.is_empty()),
+            Some(tab.get_title().unwrap_or_default()).filter(|s| !s.is_empty()),
+        ),
+        None => (None, None),
+    };
+    Some(crate::chat::types::BrowserSnapshot {
+        runtime_id,
+        connected: rt.is_connected,
+        active_tab: rt.active_tab_target_id().map(|s| s.to_string()),
+        url,
+        title,
+        tabs,
+    })
+}
+
 pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
     loop {
         let shutdown_flag = app.runtime.shutdown_flag.clone();

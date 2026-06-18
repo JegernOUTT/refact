@@ -1018,6 +1018,11 @@ pub async fn process_command_queue(
                         is_compressing: false,
                         compression_phase,
                         compression_reason,
+                        goal_active: false,
+                        goal_status: None,
+                        goal_turns_used: 0,
+                        goal_tokens_used: 0,
+                        goal_no_progress_turns: 0,
                     });
                     session.set_runtime_state(super::types::SessionState::Idle, None);
                     continue;
@@ -1279,6 +1284,11 @@ pub async fn process_command_queue(
                             is_compressing: false,
                             compression_phase,
                             compression_reason,
+                            goal_active: false,
+                            goal_status: None,
+                            goal_turns_used: 0,
+                            goal_tokens_used: 0,
+                            goal_no_progress_turns: 0,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         continue;
@@ -1379,6 +1389,11 @@ pub async fn process_command_queue(
                             is_compressing: false,
                             compression_phase,
                             compression_reason,
+                            goal_active: false,
+                            goal_status: None,
+                            goal_turns_used: 0,
+                            goal_tokens_used: 0,
+                            goal_no_progress_turns: 0,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                     }
@@ -1663,6 +1678,11 @@ pub async fn process_command_queue(
                     continue;
                 }
                 start_generation(app.clone(), session_arc.clone()).await;
+            }
+            ChatCommand::SetGoal { .. }
+            | ChatCommand::UpdateGoal { .. }
+            | ChatCommand::GoalControl { .. } => {
+                warn!("goal command received but goal handling is not yet implemented");
             }
         }
     }

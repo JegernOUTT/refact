@@ -24,6 +24,7 @@ import {
   removeSseConnection,
   clearAllSseConnections,
   selectVisibleChatMountIds,
+  setConnectionSuspended,
 } from "../features/Connection";
 import { calculateBackoff } from "../utils/backoff";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
@@ -49,6 +50,11 @@ function cancelScheduledFlush(handle: FlushHandle) {
     return;
   }
   clearTimeout(handle.id);
+}
+
+function isDocumentVisible(): boolean {
+  if (typeof document === "undefined") return true;
+  return document.visibilityState !== "hidden";
 }
 
 type PickDesiredChatSubscriptionsArgs = {
@@ -104,10 +110,7 @@ export function useAllChatsSubscription() {
     shallowEqual,
   );
   const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);
-  const [documentVisible, setDocumentVisible] = useState(
-    () =>
-      typeof document === "undefined" || document.visibilityState === "visible",
-  );
+  const [documentVisible, setDocumentVisible] = useState(isDocumentVisible);
 
   const subscriptionsRef = useRef<Map<string, () => void>>(new Map());
   const seqMapRef = useRef<Map<string, bigint>>(new Map());
@@ -592,7 +595,13 @@ export function useAllChatsSubscription() {
     configRef.current = subscriptionConfig;
     hasEndpointRef.current = hasEndpoint;
 
-    if (!hasEndpoint) return;
+    if (!hasEndpoint) {
+      desiredIdsRef.current = new Set();
+      for (const chatId of Array.from(subscriptionsRef.current.keys())) {
+        unsubscribe(chatId);
+      }
+      return;
+    }
 
     const subscribedIds = Array.from(subscriptionsRef.current.keys());
     const desiredOrder = pickDesiredChatSubscriptions({
@@ -629,6 +638,7 @@ export function useAllChatsSubscription() {
   useEffect(() => {
     if (!sseRefreshRequested) return;
     if (!hasEndpoint) return;
+    if (!desiredIdsRef.current.has(sseRefreshRequested)) return;
     if (sseRefreshTimeoutRef.current) {
       clearTimeout(sseRefreshTimeoutRef.current);
       sseRefreshTimeoutRef.current = null;
@@ -649,6 +659,8 @@ export function useAllChatsSubscription() {
     sseRefreshRequested,
     subscribe,
     unsubscribe,
+    visibleThreadIds,
+    documentVisible,
   ]);
 
   useEffect(() => {
@@ -662,11 +674,19 @@ export function useAllChatsSubscription() {
   }, [unsubscribeAll]);
 
   useEffect(() => {
+    if (
+      typeof document === "undefined" ||
+      typeof document.addEventListener !== "function"
+    ) {
+      return;
+    }
+
+    dispatch(setConnectionSuspended(!isDocumentVisible()));
+
     const handleVisibilityChange = () => {
-      const nextDocumentVisible =
-        typeof document === "undefined" ||
-        document.visibilityState === "visible";
+      const nextDocumentVisible = isDocumentVisible();
       setDocumentVisible(nextDocumentVisible);
+      dispatch(setConnectionSuspended(!nextDocumentVisible));
 
       if (nextDocumentVisible) return;
 
@@ -680,5 +700,5 @@ export function useAllChatsSubscription() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [unsubscribe]);
+  }, [dispatch, unsubscribe]);
 }

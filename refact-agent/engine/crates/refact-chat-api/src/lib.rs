@@ -25,6 +25,20 @@ pub struct BrowserTabInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserSnapshot {
+    pub runtime_id: String,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<BrowserTabInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEntry {
     pub timestamp: String,
     pub source: String,
@@ -445,6 +459,8 @@ pub enum ChatEvent {
         runtime: RuntimeState,
         messages: Vec<ChatMessage>,
         background_agents: Vec<BackgroundAgentSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser: Option<BrowserSnapshot>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<GoalSnapshot>,
     },
@@ -1338,6 +1354,7 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![],
+            browser: None,
             goal: None,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1355,6 +1372,7 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![],
+            browser: None,
             goal: Some(goal.clone()),
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1443,6 +1461,7 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![background_agent_summary()],
+            browser: None,
             goal: None,
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1451,6 +1470,42 @@ mod tests {
             ChatEvent::Snapshot {
                 background_agents, ..
             } => assert_eq!(background_agents, vec![background_agent_summary()]),
+            _ => panic!("Expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_roundtrip_with_browser() {
+        let event = ChatEvent::Snapshot {
+            thread: ThreadParams::default(),
+            runtime: RuntimeState::default(),
+            messages: vec![],
+            background_agents: vec![],
+            browser: Some(BrowserSnapshot {
+                runtime_id: "rt-1".to_string(),
+                connected: true,
+                active_tab: Some("tab-1".to_string()),
+                url: Some("https://example.com".to_string()),
+                title: Some("Example".to_string()),
+                tabs: vec![BrowserTabInfo {
+                    tab_id: "tab-1".to_string(),
+                    url: "https://example.com".to_string(),
+                    title: "Example".to_string(),
+                }],
+            }),
+            goal: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["browser"]["runtime_id"], "rt-1");
+        assert_eq!(json["browser"]["connected"], true);
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::Snapshot { browser, .. } => {
+                let browser = browser.expect("browser snapshot present");
+                assert_eq!(browser.runtime_id, "rt-1");
+                assert_eq!(browser.url.as_deref(), Some("https://example.com"));
+                assert_eq!(browser.tabs.len(), 1);
+            }
             _ => panic!("Expected Snapshot"),
         }
     }

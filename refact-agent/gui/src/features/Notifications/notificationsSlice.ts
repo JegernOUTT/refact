@@ -20,6 +20,16 @@ export type ProcessCompletedNotification = {
   shortDescription: string;
   mode: string;
   receivedAt: number;
+  silent?: boolean;
+};
+
+export type RecoveredProcessCompletion = {
+  processId: string;
+  status: string;
+  exitCode: number | null;
+  shortDescription: string;
+  mode: string;
+  seq?: string;
 };
 
 export type NotificationsState = {
@@ -97,7 +107,7 @@ export const notificationsSlice = createSlice({
 
         const pending = state.pendingByThread[notification.threadId] ?? [];
         const existingIndex = pending.findIndex(
-          (item) => item.id === notification.id,
+          (item) => item.processId === notification.processId,
         );
         if (existingIndex >= 0) {
           pending[existingIndex] = notification;
@@ -133,6 +143,39 @@ export const notificationsSlice = createSlice({
       state.pendingByThread = {};
       state.lastSeenByThread = {};
     },
+    processCompletionsRecovered: (
+      state,
+      action: PayloadAction<{
+        threadId: string;
+        completions: RecoveredProcessCompletion[];
+      }>,
+    ) => {
+      const { threadId, completions } = action.payload;
+      if (completions.length === 0) return;
+      const pending = state.pendingByThread[threadId] ?? [];
+      const receivedAt = Date.now();
+      for (const completion of completions) {
+        if (pending.some((item) => item.processId === completion.processId)) {
+          continue;
+        }
+        pending.push({
+          id: `${threadId}:${completion.processId}`,
+          threadId,
+          seq: completion.seq ?? "0",
+          processId: completion.processId,
+          status: completion.status,
+          exitCode: completion.exitCode,
+          shortDescription: completion.shortDescription,
+          mode: completion.mode,
+          receivedAt,
+          silent: true,
+        });
+      }
+      if (pending.length > MAX_PENDING_PER_THREAD) {
+        pending.splice(0, pending.length - MAX_PENDING_PER_THREAD);
+      }
+      state.pendingByThread[threadId] = pending;
+    },
   },
   extraReducers: (builder) => {
     builder.addMatcher(isThreadVisitAction, (state, action) => {
@@ -141,8 +184,12 @@ export const notificationsSlice = createSlice({
   },
 });
 
-export const { notificationAdded, notificationSeen, clearProcessCompletions } =
-  notificationsSlice.actions;
+export const {
+  notificationAdded,
+  notificationSeen,
+  clearProcessCompletions,
+  processCompletionsRecovered,
+} = notificationsSlice.actions;
 export const processCompleted = notificationAdded;
 
 export const selectPendingNotificationsByThread = (state: {
@@ -158,7 +205,10 @@ export const selectProcessCompletions = createSelector(
   (pendingByThread): ProcessCompletedNotification[] => {
     const notifications: ProcessCompletedNotification[] = [];
     for (const pending of Object.values(pendingByThread)) {
-      if (pending) notifications.push(...pending);
+      if (!pending) continue;
+      for (const notification of pending) {
+        if (!notification.silent) notifications.push(notification);
+      }
     }
     return notifications;
   },

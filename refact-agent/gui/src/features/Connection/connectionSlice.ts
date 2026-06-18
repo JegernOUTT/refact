@@ -18,6 +18,7 @@ export type ConnectionState = {
   backendError: string | null;
   sseConnections: Partial<Record<string, SseConnectionInfo>>;
   visibleChatMounts?: Partial<Record<string, number>>;
+  suspended?: boolean;
 };
 
 const initialState: ConnectionState = {
@@ -27,6 +28,7 @@ const initialState: ConnectionState = {
   backendError: null,
   sseConnections: {},
   visibleChatMounts: {},
+  suspended: false,
 };
 
 export const connectionSlice = createSlice({
@@ -132,6 +134,10 @@ export const connectionSlice = createSlice({
       }
       mounts[action.payload.chatId] = count - 1;
     },
+
+    setConnectionSuspended: (state, action: PayloadAction<boolean>) => {
+      state.suspended = action.payload;
+    },
   },
 });
 
@@ -145,6 +151,7 @@ export const {
   clearAllSseConnections,
   registerVisibleChatMount,
   unregisterVisibleChatMount,
+  setConnectionSuspended,
 } = connectionSlice.actions;
 
 export const selectBrowserOnline = (state: RootState) =>
@@ -176,11 +183,12 @@ export const selectSseStatusForChat = (state: RootState, chatId: string) =>
 export const selectCurrentChatSseStatus = (
   state: RootState,
 ): SseStatus | null => {
+  if (state.connection.suspended) return null;
   const currentId = state.chat.current_thread_id;
   if (!currentId) return null;
   if (!isChatMounted(state, currentId)) return null;
   const conn = state.connection.sseConnections[currentId];
-  return conn?.status ?? "disconnected";
+  return conn?.status ?? "connecting";
 };
 
 export const selectGlobalSseStatus = (state: RootState): SseStatus => {

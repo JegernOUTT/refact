@@ -489,6 +489,8 @@ impl ChatSession {
             runtime,
             messages,
             background_agents,
+            browser: None,
+            goal: None,
         }
     }
 
@@ -502,6 +504,11 @@ impl ChatSession {
             session.background_agents.clone();
         let mut snapshot = session.snapshot();
         async move {
+            let browser = crate::integrations::browser_runtime::browser_snapshot_for_chat(
+                app.clone(),
+                &chat_id,
+            )
+            .await;
             let mut background_agents = base_background_agents;
             let agents = app
                 .agents
@@ -520,10 +527,12 @@ impl ChatSession {
             });
             if let ChatEvent::Snapshot {
                 background_agents: snapshot_background_agents,
+                browser: snapshot_browser,
                 ..
             } = &mut snapshot
             {
                 *snapshot_background_agents = background_agents.clone();
+                *snapshot_browser = browser;
             }
             (snapshot, background_agents)
         }
@@ -1080,6 +1089,11 @@ impl ChatSession {
             is_compressing: self.is_compressing,
             compression_phase: self.compression_phase,
             compression_reason: self.compression_reason,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
         });
         self.emit_trajectory_state_change();
     }
@@ -1607,6 +1621,11 @@ impl ChatSession {
                     is_compressing: self.is_compressing,
                     compression_phase: self.compression_phase,
                     compression_reason: self.compression_reason,
+                    goal_active: false,
+                    goal_status: None,
+                    goal_turns_used: 0,
+                    goal_tokens_used: 0,
+                    goal_no_progress_turns: 0,
                 });
             }
         }

@@ -4,6 +4,7 @@ export {
   notificationSeen,
   processCompleted,
   clearProcessCompletions,
+  processCompletionsRecovered,
   selectPendingNotificationsByThread,
   selectLastSeenByThread,
   selectProcessCompletions,
@@ -14,4 +15,5 @@ export type {
   NotificationsState,
   ProcessCompletedEvent,
   ProcessCompletedNotification,
+  RecoveredProcessCompletion,
 } from "./notificationsSlice";

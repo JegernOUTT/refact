@@ -154,6 +154,14 @@ export type EventEnvelope =
       runtime: RuntimeState;
       messages: ChatMessage[];
       background_agents: BackgroundAgentSummary[];
+      browser?: {
+        runtime_id: string;
+        connected: boolean;
+        active_tab?: string | null;
+        url?: string | null;
+        title?: string | null;
+        tabs?: { tab_id: string; url: string; title: string }[];
+      } | null;
     }
   | {
       chat_id: string;

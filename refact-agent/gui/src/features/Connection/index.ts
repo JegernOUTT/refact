@@ -9,6 +9,7 @@ export {
   clearAllSseConnections,
   registerVisibleChatMount,
   unregisterVisibleChatMount,
+  setConnectionSuspended,
   selectBrowserOnline,
   selectBackendStatus,
   selectBackendLastOkAt,

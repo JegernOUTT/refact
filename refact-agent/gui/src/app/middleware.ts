@@ -98,12 +98,23 @@ import {
 } from "../features/Pages/pagesSlice";
 import { cronFireReceived } from "../features/Scheduler";
 import {
+  processCompletionsRecovered,
+  type RecoveredProcessCompletion,
+} from "../features/Notifications";
+import {
   ideToolCallResponse,
   ideTaskDone,
   ideAskQuestions,
 } from "../hooks/useEventBusForIDE";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
-import { isToolMessage, modelsApi, providersApi } from "../services/refact";
+import {
+  getEventMetadata,
+  isEventMessage,
+  isToolMessage,
+  modelsApi,
+  providersApi,
+  type ChatMessage,
+} from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
@@ -954,9 +965,90 @@ startListening({
     const event = action.payload;
     if (event.type !== "message_added") return;
     const message = event.message;
-    if (message.role !== "event" || message.subkind !== "cron_fire") return;
+    if (!isEventMessage(message)) return;
+    if (getEventMetadata(message)?.subkind !== "cron_fire") return;
     listenerApi.dispatch(cronFireReceived(Date.now()));
     listenerApi.dispatch(schedulerApi.util.invalidateTags(["CronTasks"]));
+  },
+});
+
+function readRecoveredProcessCompletion(
+  message: ChatMessage,
+): RecoveredProcessCompletion | null {
+  if (!isEventMessage(message)) return null;
+  const metadata = getEventMetadata(message);
+  if (!metadata || metadata.subkind !== "process_completed") return null;
+  const payload = metadata.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+  const processId = record.process_id;
+  if (typeof processId !== "string" || processId.length === 0) return null;
+  return {
+    processId,
+    status: typeof record.status === "string" ? record.status : "",
+    exitCode: typeof record.exit_code === "number" ? record.exit_code : null,
+    shortDescription:
+      typeof record.short_description === "string"
+        ? record.short_description
+        : "",
+    mode: typeof record.mode === "string" ? record.mode : "",
+  };
+}
+
+export function planProcessCompletionRecovery(
+  chatId: string,
+  currentThreadId: string | null | undefined,
+  prevSnapshotReceived: boolean,
+  prevMessages: readonly ChatMessage[],
+  snapshotMessages: readonly ChatMessage[],
+): RecoveredProcessCompletion[] {
+  if (!prevSnapshotReceived) return [];
+  if (currentThreadId === chatId) return [];
+
+  const knownProcessIds = new Set<string>();
+  for (const message of prevMessages) {
+    const completion = readRecoveredProcessCompletion(message);
+    if (completion) knownProcessIds.add(completion.processId);
+  }
+
+  const completions: RecoveredProcessCompletion[] = [];
+  const collected = new Set<string>();
+  for (const message of snapshotMessages) {
+    const completion = readRecoveredProcessCompletion(message);
+    if (!completion) continue;
+    if (knownProcessIds.has(completion.processId)) continue;
+    if (collected.has(completion.processId)) continue;
+    collected.add(completion.processId);
+    completions.push(completion);
+  }
+  return completions;
+}
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "snapshot") return;
+    const prevRuntime =
+      listenerApi.getOriginalState().chat.threads[event.chat_id];
+    if (!prevRuntime) return;
+
+    const completions = planProcessCompletionRecovery(
+      event.chat_id,
+      listenerApi.getState().chat.current_thread_id,
+      prevRuntime.snapshot_received,
+      prevRuntime.thread.messages,
+      event.messages,
+    );
+
+    if (completions.length > 0) {
+      listenerApi.dispatch(
+        processCompletionsRecovered({
+          threadId: event.chat_id,
+          completions,
+        }),
+      );
+    }
   },
 });
 

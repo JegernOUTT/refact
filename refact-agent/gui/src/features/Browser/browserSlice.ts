@@ -323,6 +323,35 @@ export const browserSlice = createSlice({
     builder.addCase(applyChatEvent, (state, action) => {
       const event = action.payload;
 
+      if (event.type === "snapshot") {
+        const browser = event.browser;
+        const existing = state.runtimes[event.chat_id];
+        const uiOpen = !!state.browserUiOpen[event.chat_id];
+        if (browser) {
+          if (!existing && !uiOpen) return;
+          const isNewRuntime =
+            !existing || existing.runtime_id !== browser.runtime_id;
+          const rt = isNewRuntime
+            ? makeBrowserRuntime(browser.runtime_id)
+            : existing;
+          rt.runtime_id = browser.runtime_id;
+          rt.connected = browser.connected;
+          rt.url = browser.url ?? null;
+          rt.title = browser.title ?? null;
+          rt.active_tab = browser.active_tab ?? null;
+          rt.tabs = (browser.tabs ?? []).map((t) => ({
+            tab_id: t.tab_id,
+            url: t.url,
+            title: t.title,
+          }));
+          if (browser.connected) rt.notification = null;
+          state.runtimes[event.chat_id] = rt;
+        } else if (existing) {
+          existing.connected = false;
+        }
+        return;
+      }
+
       if (event.type === "browser_closed") {
         const rt = state.runtimes[event.chat_id];
         // If a runtime exists, only apply if runtime_id matches (ignore stale events from
