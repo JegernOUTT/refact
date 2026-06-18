@@ -19,6 +19,7 @@ use crate::vendored::terminal_hyperlinks::{
 const COLLAPSED_OUTPUT_LINES: usize = 12;
 const EXPANDED_OUTPUT_LINES: usize = 200;
 const PLAN_SYNTHESIS_SEPARATOR: &str = "\n\n---\n\n## Plan updates\n\n";
+const GOAL_SYNTHESIS_SEPARATOR: &str = "\n\n---\n\n## Goal updates\n\n";
 
 mod approval;
 mod exec;
@@ -36,7 +37,7 @@ pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
 pub use messages::{AssistantCell, AssistantStreamCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
 pub use patches::{DiffCell, DiffToolCell};
-pub use plans::{PlanCell, PlanCellData, PlanStreamCell};
+pub use plans::{GoalCell, GoalCellData, PlanCell, PlanCellData, PlanStreamCell};
 pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
 pub use server::{CitationCell, ServerContentBlockCell, ServerToolCell};
@@ -54,6 +55,7 @@ pub enum HistoryCellKind {
     Exec,
     Diff,
     Plan,
+    Goal,
     Citation,
     ServerContentBlock,
     Search,
@@ -312,6 +314,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         }
         TranscriptItem::Tool(card) => cell_from_tool_card(card.clone(), selected),
         TranscriptItem::Plan(data) => Box::new(PlanCell::new(data.clone())),
+        TranscriptItem::Goal(data) => Box::new(GoalCell::new(data.clone())),
         TranscriptItem::PlanStream(lines) => Box::new(PlanStreamCell::new(lines.clone(), false)),
         TranscriptItem::Citation(text) => Box::new(CitationCell::new(text.clone())),
         TranscriptItem::ServerContentBlock(text) => {
@@ -380,6 +383,14 @@ pub fn synthesize_plan_content(base: &str, deltas: &[String]) -> String {
         base.to_string()
     } else {
         format!("{base}{PLAN_SYNTHESIS_SEPARATOR}{}", deltas.join("\n\n"))
+    }
+}
+
+pub fn synthesize_goal_content(base: &str, deltas: &[String]) -> String {
+    if deltas.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}{GOAL_SYNTHESIS_SEPARATOR}{}", deltas.join("\n\n"))
     }
 }
 

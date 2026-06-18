@@ -6,8 +6,10 @@ use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 use refact_tui::app::{App, SessionState, UsageSummary};
 use refact_tui::client::{ChatEvent, OpenProjectResponse, WorkerInfo};
+use refact_tui::commands::{command_by_name, workflow, CommandAction};
 use refact_tui::commands::session::{PermissionPolicy, StatusSnapshot, StatusUsage};
 use refact_tui::pickers::{PickerKind, PickerItem, PickerState};
+use refact_tui::protocol::TranscriptMessage;
 use refact_tui::theme::TuiTheme;
 use refact_tui::ui::{footer, status_card, status_indicator};
 use serde_json::{json, Value};
@@ -227,6 +229,70 @@ fn transcript_cells_golden_snapshot() {
 › Ask Refact…
   Enter send   Ctrl-J newline
  98% context left (1.54K used) · fixture · gpt-demo · agent · reason:off · ● idle · daemon online ·…"#,
+    );
+}
+
+#[test]
+fn goal_role_renders_as_goal_banner() {
+    let mut app = App::new(project());
+    app.apply_chat_event(chat_event(
+        &app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "title": "Goal sweep", "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": [
+                {
+                    "message_id": "goal-1",
+                    "role": "goal",
+                    "content": "## Goal\n- ship hidden role rendering",
+                    "extra": {"goal": {"version": 2}}
+                },
+                {
+                    "message_id": "goal-delta-1",
+                    "role": "event",
+                    "content": "Add TUI parity coverage.",
+                    "extra": {"event": {"subkind": "goal_delta", "source": "tool.update_goal", "payload": {"seq": 1}}}
+                }
+            ]
+        }),
+    ));
+
+    let actual = render_app_snapshot(&mut app, 90, 28);
+
+    assert!(actual.contains("• Current Goal"));
+    assert!(actual.contains("goal · v2 · 1 update"));
+    assert!(actual.contains("## Goal updates"));
+    assert!(actual.contains("Add TUI parity coverage."));
+}
+
+#[test]
+fn goal_command_is_state_display_and_synthesizes_goal_updates() {
+    let command = command_by_name("goal").unwrap();
+    assert_eq!(
+        command.action,
+        CommandAction::Workflow {
+            command: workflow::WorkflowCommand::ShowGoal,
+        }
+    );
+
+    let messages = vec![
+        TranscriptMessage::from_wire(&json!({
+            "role": "goal",
+            "content": "base goal",
+            "extra": {"goal": {"version": 1}}
+        })),
+        TranscriptMessage::from_wire(&json!({
+            "role": "event",
+            "content": "delta one",
+            "extra": {"event": {"subkind": "goal_delta", "payload": {"seq": 1}}}
+        })),
+    ];
+
+    assert_eq!(
+        workflow::synthesize_current_goal(&messages).unwrap(),
+        "base goal\n\n---\n\n## Goal updates\n\ndelta one"
     );
 }
 

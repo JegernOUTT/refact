@@ -262,6 +262,7 @@ pub enum TranscriptRole {
     Tool,
     Notice,
     Plan,
+    Goal,
     Event,
     Other(String),
 }
@@ -274,6 +275,7 @@ impl TranscriptRole {
             "tool" => Self::Tool,
             "notice" => Self::Notice,
             "plan" => Self::Plan,
+            "goal" => Self::Goal,
             "event" => Self::Event,
             other => Self::Other(other.to_string()),
         }
@@ -286,6 +288,7 @@ impl TranscriptRole {
             Self::Tool => "tool",
             Self::Notice => "notice",
             Self::Plan => "plan",
+            Self::Goal => "goal",
             Self::Event => "event",
             Self::Other(role) => role.as_str(),
         }

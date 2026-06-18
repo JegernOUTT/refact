@@ -30,7 +30,8 @@ use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{
-    synthesize_plan_content, ApprovalOutcome, HistoryCellKind, HistoryRenderMode, PlanCellData,
+    synthesize_goal_content, synthesize_plan_content, ApprovalOutcome, GoalCellData,
+    HistoryCellKind, HistoryRenderMode, PlanCellData,
 };
 use crate::history::{
     insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
@@ -135,6 +136,7 @@ pub enum TranscriptItem {
     Reasoning(String, bool),
     Tool(ToolCard),
     Plan(PlanCellData),
+    Goal(GoalCellData),
     PlanStream(Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>),
     Citation(String),
     ServerContentBlock(String),
@@ -154,6 +156,7 @@ impl TranscriptItem {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
             || matches!(self, Self::Approval(_, None))
             || matches!(self, Self::Plan(_))
+            || matches!(self, Self::Goal(_))
             || matches!(self, Self::PlanStream(_))
     }
 
@@ -1500,6 +1503,15 @@ impl App {
         AppAction::None
     }
 
+    fn show_current_goal(&mut self) -> AppAction {
+        self.composer.clear();
+        match current_goal_cell_data(self.transcript_state.messages()) {
+            Some(goal) => self.push_history_item(TranscriptItem::Goal(goal)),
+            None => self.add_notice("No current goal is installed for this chat"),
+        }
+        AppAction::None
+    }
+
     fn switch_to_agent_mode(&mut self) -> AppAction {
         self.composer.clear();
         self.mode = Some("agent".to_string());
@@ -1799,9 +1811,7 @@ impl App {
     fn execute_workflow_command(&mut self, command: workflow::WorkflowCommand) -> AppAction {
         match command {
             workflow::WorkflowCommand::ShowPlan => self.show_current_plan(),
-            workflow::WorkflowCommand::GoalPrompt => {
-                self.submit_structured_prompt(workflow::goal_prompt())
-            }
+            workflow::WorkflowCommand::ShowGoal => self.show_current_goal(),
             workflow::WorkflowCommand::AgentMode => self.switch_to_agent_mode(),
             workflow::WorkflowCommand::GitDiff => {
                 self.composer.clear();
@@ -3099,7 +3109,10 @@ impl App {
                 TranscriptRole::Notice => {
                     items.push(TranscriptItem::Notice(message.content.clone()))
                 }
-                TranscriptRole::Plan | TranscriptRole::Event | TranscriptRole::Other(_) => {}
+                TranscriptRole::Plan
+                | TranscriptRole::Goal
+                | TranscriptRole::Event
+                | TranscriptRole::Other(_) => {}
             }
         }
         items
@@ -3757,6 +3770,9 @@ impl App {
                     );
                 }
             }
+            TranscriptRole::Goal => {
+                self.upsert_current_goal_item(render_message_key(message, "goal", 0));
+            }
             TranscriptRole::Event => {
                 if is_plan_delta_message(message) {
                     if message.stream_finished {
@@ -3767,6 +3783,8 @@ impl App {
                             &message.content,
                         );
                     }
+                } else if is_goal_delta_message(message) {
+                    self.upsert_current_goal_item(render_message_key(message, "goal_delta", 0));
                 } else {
                     self.push_internal_event(message);
                 }
@@ -3806,6 +3824,23 @@ impl App {
             *existing = plan;
         } else {
             self.push_history_item(TranscriptItem::Plan(plan));
+        }
+    }
+
+    fn upsert_current_goal_item(&mut self, key: String) {
+        let Some(goal) = current_goal_cell_data(self.transcript_state.messages()) else {
+            return;
+        };
+        if !self.record_state_history_key(key) {
+            return;
+        }
+        if let Some(existing) = self.transcript.iter_mut().find_map(|item| match item {
+            TranscriptItem::Goal(existing) => Some(existing),
+            _ => None,
+        }) {
+            *existing = goal;
+        } else {
+            self.push_history_item(TranscriptItem::Goal(goal));
         }
     }
 
@@ -4485,6 +4520,7 @@ impl App {
             TranscriptRole::Assistant
             | TranscriptRole::User
             | TranscriptRole::Plan
+            | TranscriptRole::Goal
             | TranscriptRole::Event => self.append_render_message(&message),
             _ => {}
         }
@@ -7567,8 +7603,42 @@ fn current_plan_message(messages: &[TranscriptMessage]) -> Option<&TranscriptMes
         })
 }
 
+fn current_goal_cell_data(messages: &[TranscriptMessage]) -> Option<GoalCellData> {
+    let base = current_goal_message(messages)?;
+    let deltas = messages
+        .iter()
+        .filter(|message| is_goal_delta_message(message))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    let content = synthesize_goal_content(&base.content, &deltas);
+    let goal_meta = base.extra.get("goal").and_then(Value::as_object);
+    let version = goal_meta
+        .and_then(|meta| meta.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u32;
+    Some(GoalCellData::new(content, version, deltas.len()))
+}
+
+fn current_goal_message(messages: &[TranscriptMessage]) -> Option<&TranscriptMessage> {
+    messages
+        .iter()
+        .filter(|message| message.role == TranscriptRole::Goal)
+        .max_by_key(|message| {
+            message
+                .extra
+                .get("goal")
+                .and_then(|goal| goal.get("version"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+}
+
 fn is_plan_delta_message(message: &TranscriptMessage) -> bool {
     event_subkind(message) == Some("plan_delta")
+}
+
+fn is_goal_delta_message(message: &TranscriptMessage) -> bool {
+    event_subkind(message) == Some("goal_delta")
 }
 
 fn event_metadata(message: &TranscriptMessage) -> (String, String, Value) {
@@ -8173,7 +8243,7 @@ fn state_key_has_stable_identity(key: &str) -> bool {
     }
     !matches!(
         identity,
-        "user" | "assistant" | "tool" | "notice" | "plan" | "event" | "session"
+        "user" | "assistant" | "tool" | "notice" | "plan" | "goal" | "event" | "session"
     )
 }
 
@@ -8371,10 +8441,13 @@ fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
         TranscriptRole::Tool => vec![render_message_key(message, "tool", 0)],
         TranscriptRole::Notice => vec![render_message_key(message, "notice", 0)],
         TranscriptRole::Plan => vec![render_message_key(message, "plan", 0)],
+        TranscriptRole::Goal => vec![render_message_key(message, "goal", 0)],
         TranscriptRole::Event => vec![render_message_key(
             message,
             if is_plan_delta_message(message) {
                 "plan_delta"
+            } else if is_goal_delta_message(message) {
+                "goal_delta"
             } else {
                 "event"
             },
@@ -10887,13 +10960,30 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn goal_review_and_compact_insert_structured_prompts() {
+    fn goal_command_shows_current_goal_cell() {
         let mut app = App::new(project());
-        assert!(matches!(
-            app.execute_command_name("goal"),
-            AppAction::SendMessage { prompt, .. } if prompt.contains("clarify the current goal")
-        ));
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "goal", "content": "base goal", "extra": {"goal": {"version": 1}}}}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "event", "content": "delta one", "extra": {"event": {"subkind": "goal_delta", "payload": {"seq": 1}}}}}),
+        });
 
+        assert_eq!(app.execute_command_name("goal"), AppAction::None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Goal(data) if data.content.contains("base goal") && data.content.contains("delta one"))
+        }));
+    }
+
+    #[test]
+    fn review_and_compact_insert_structured_prompts() {
         let mut app = App::new(project());
         assert!(matches!(
             app.execute_command_name("review"),

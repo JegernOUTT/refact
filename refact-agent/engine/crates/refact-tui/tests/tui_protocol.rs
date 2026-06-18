@@ -207,6 +207,9 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Plan(plan) => {
                 format!("plan:{}:{}:{}", plan.mode, plan.version, plan.content)
             }
+            TranscriptItem::Goal(goal) => {
+                format!("goal:{}:{}", goal.version, goal.content)
+            }
             TranscriptItem::PlanStream(lines) => format!(
                 "plan_stream:{}",
                 lines

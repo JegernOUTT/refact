@@ -51,6 +51,46 @@ impl PlanCell {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GoalCellData {
+    pub content: String,
+    pub version: u32,
+    pub delta_count: usize,
+}
+
+impl GoalCellData {
+    pub fn new(content: impl Into<String>, version: u32, delta_count: usize) -> Self {
+        Self {
+            content: content.into(),
+            version,
+            delta_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GoalCell {
+    data: GoalCellData,
+}
+
+impl GoalCell {
+    pub fn new(data: GoalCellData) -> Self {
+        Self { data }
+    }
+
+    fn title(&self) -> &'static str {
+        "Current Goal"
+    }
+
+    fn metadata(&self) -> String {
+        format!(
+            "goal · v{} · {}",
+            self.data.version,
+            update_label(self.data.delta_count)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStreamCell {
     lines: Vec<HyperlinkLine>,
@@ -69,6 +109,47 @@ impl PlanStreamCell {
 impl HistoryCell for PlanCell {
     fn kind(&self) -> HistoryCellKind {
         HistoryCellKind::Plan
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        self.render_with_links(width)
+            .into_iter()
+            .map(|line| line.line)
+            .collect()
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let mut lines = vec![HyperlinkLine::new(plan_header_line(self.title()))];
+        let mut card = vec![HyperlinkLine::new(Line::from(" "))];
+        card.push(HyperlinkLine::new(Line::from(Span::styled(
+            self.metadata(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ))));
+        card.push(HyperlinkLine::new(Line::from(" ")));
+
+        let renderer = MarkdownRenderer::new(Some(width.saturating_sub(2).max(1)));
+        card.extend(prefix_hyperlink_lines(
+            renderer.render_with_links(&self.data.content),
+            Span::raw("  "),
+            Span::raw("  "),
+        ));
+        card.push(HyperlinkLine::new(Line::from(" ")));
+
+        let plan_style = proposed_plan_style();
+        lines.extend(card.into_iter().map(|line| line.style(plan_style)));
+        finish_links(lines)
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(self.kind(), &self.data))
+    }
+}
+
+impl HistoryCell for GoalCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Goal
     }
 
     fn render(&self, width: usize) -> Vec<Line<'static>> {
@@ -200,6 +281,20 @@ mod tests {
         assert_eq!(
             text(&cell.render(80)),
             "• Proposed Plan\n \nplan · agent · v2 · 2 updates\n \n  ## Plan\n  \n  - base\n  \n  ———\n  \n  ## Plan updates\n  \n  first update\n  \n  second update\n \n"
+        );
+    }
+
+    #[test]
+    fn goal_cell_snapshot_merges_deltas() {
+        let content = synthesize_goal_content(
+            "## Goal\n- base",
+            &["first update".to_string(), "second update".to_string()],
+        );
+        let cell = GoalCell::new(GoalCellData::new(content, 2, 2));
+
+        assert_eq!(
+            text(&cell.render(80)),
+            "• Current Goal\n \ngoal · v2 · 2 updates\n \n  ## Goal\n  \n  - base\n  \n  ———\n  \n  ## Goal updates\n  \n  first update\n  \n  second update\n \n"
         );
     }
 }
