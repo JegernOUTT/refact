@@ -188,44 +188,49 @@ pub(crate) fn goal_snapshot_from_messages(
     let _ = base_index;
     let meta = base.extra.get("goal");
     let prior = existing.filter(|goal| goal.version == version);
-    let active = prior
-        .map(|goal| goal.active)
-        .or_else(|| {
-            meta.and_then(|meta| meta.get("active"))
-                .and_then(|value| value.as_bool())
-        })
+    let active = meta
+        .and_then(|meta| meta.get("active"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| prior.map(|goal| goal.active))
         .unwrap_or(true);
-    let status = prior.map(|goal| goal.status).unwrap_or(if active {
-        GoalStatus::Active
-    } else {
-        GoalStatus::Paused
-    });
-    let budget = prior
-        .map(|goal| goal.budget.clone())
-        .or_else(|| {
-            meta.and_then(|meta| meta.get("budget"))
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-        })
+    let status = meta
+        .and_then(|meta| meta.get("status"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.status))
+        .unwrap_or(if active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        });
+    let budget = meta
+        .and_then(|meta| meta.get("budget"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.budget.clone()))
         .unwrap_or_default();
     let created_at_ms = meta
         .and_then(|meta| goal_meta_u64(meta, "created_at_ms"))
         .unwrap_or_else(epoch_ms_now);
-    let mut progress = prior.map(|goal| goal.progress.clone()).unwrap_or_else(|| {
-        let started_at_ms = if active { created_at_ms } else { 0 };
-        GoalProgress {
-            started_at_ms,
-            ..Default::default()
-        }
-    });
+    let mut progress = meta
+        .and_then(|meta| meta.get("progress"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.progress.clone()))
+        .unwrap_or_else(|| {
+            let started_at_ms = if active { created_at_ms } else { 0 };
+            GoalProgress {
+                started_at_ms,
+                ..Default::default()
+            }
+        });
     if active && progress.started_at_ms == 0 {
         progress.started_at_ms = created_at_ms;
     }
     let derived_events = goal_events_from_messages(messages);
-    let events = if derived_events.is_empty() {
-        prior.map(|goal| goal.events.clone()).unwrap_or_default()
-    } else {
-        derived_events
-    };
+    let events = meta
+        .and_then(|meta| meta.get("events"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.events.clone()))
+        .filter(|events: &Vec<GoalEvent>| !events.is_empty())
+        .unwrap_or(derived_events);
     Some(GoalSnapshot {
         content: synthesized_goal_content(messages, base),
         version,
@@ -233,10 +238,22 @@ pub(crate) fn goal_snapshot_from_messages(
         status,
         budget,
         progress,
-        attempts: prior.map(|goal| goal.attempts.clone()).unwrap_or_default(),
+        attempts: meta
+            .and_then(|meta| meta.get("attempts"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .or_else(|| prior.map(|goal| goal.attempts.clone()))
+            .unwrap_or_default(),
         events,
-        transferred_from: prior.and_then(|goal| goal.transferred_from.clone()),
-        transferred_to: prior.and_then(|goal| goal.transferred_to.clone()),
+        transferred_from: meta
+            .and_then(|meta| meta.get("transferred_from"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| prior.and_then(|goal| goal.transferred_from.clone())),
+        transferred_to: meta
+            .and_then(|meta| meta.get("transferred_to"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| prior.and_then(|goal| goal.transferred_to.clone())),
     })
 }
 

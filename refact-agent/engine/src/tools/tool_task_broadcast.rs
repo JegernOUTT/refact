@@ -514,6 +514,7 @@ mod tests {
                 thread: refact_chat_api::ThreadParams::default(),
                 session_state: SessionState::Idle,
                 pause_reasons: vec![],
+                goal: None,
             })
         }
 

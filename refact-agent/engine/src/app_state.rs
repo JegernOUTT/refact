@@ -187,6 +187,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             thread: session.thread.clone(),
             session_state: session.runtime.state,
             pause_reasons: session.runtime.pause_reasons.clone(),
+            goal: session.goal.clone(),
         })
     }
 

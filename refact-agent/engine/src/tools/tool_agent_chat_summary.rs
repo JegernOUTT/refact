@@ -727,6 +727,7 @@ mod tests {
                 thread: ThreadParams::default(),
                 session_state: SessionState::Idle,
                 pause_reasons: vec![],
+                goal: None,
             }),
         );
         facade

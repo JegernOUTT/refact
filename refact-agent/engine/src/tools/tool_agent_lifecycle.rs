@@ -1013,6 +1013,7 @@ mod tests {
                 thread: refact_chat_api::ThreadParams::default(),
                 session_state: self.state.lock().unwrap().unwrap_or(SessionState::Idle),
                 pause_reasons: vec![],
+                goal: None,
             })
         }
 

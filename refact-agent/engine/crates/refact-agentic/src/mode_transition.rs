@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use refact_chat_api::{GoalBudget, GoalEvent, GoalProgress, GoalSnapshot, GoalStatus};
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, MultimodalElement};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
@@ -764,12 +765,35 @@ fn plan_version(message: &ChatMessage) -> Option<u32> {
         .and_then(|version| u32::try_from(version).ok())
 }
 
+fn goal_version(message: &ChatMessage) -> Option<u32> {
+    if message.role != "goal" {
+        return None;
+    }
+    message
+        .extra
+        .get("goal")?
+        .get("version")?
+        .as_u64()
+        .and_then(|version| u32::try_from(version).ok())
+}
+
 fn current_base_plan_message(messages: &[ChatMessage]) -> Option<&ChatMessage> {
     messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
             plan_version(message).map(|version| (index, version, message))
+        })
+        .max_by_key(|(index, version, _)| (*version, *index))
+        .map(|(_, _, message)| message)
+}
+
+pub fn current_base_goal_message(messages: &[ChatMessage]) -> Option<&ChatMessage> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            goal_version(message).map(|version| (index, version, message))
         })
         .max_by_key(|(index, version, _)| (*version, *index))
         .map(|(_, _, message)| message)
@@ -783,6 +807,25 @@ fn is_plan_delta_event(message: &ChatMessage) -> bool {
             .and_then(|event| event.get("subkind"))
             .and_then(|subkind| subkind.as_str())
             == Some("plan_delta")
+}
+
+pub fn is_goal_delta_event(message: &ChatMessage) -> bool {
+    goal_event_subkind(message) == Some("goal_delta")
+}
+
+fn is_goal_pursuit_event(message: &ChatMessage) -> bool {
+    goal_event_subkind(message) == Some("goal_pursuit")
+}
+
+fn goal_event_subkind(message: &ChatMessage) -> Option<&str> {
+    if message.role != "event" {
+        return None;
+    }
+    message
+        .extra
+        .get("event")
+        .and_then(|event| event.get("subkind"))
+        .and_then(|subkind| subkind.as_str())
 }
 
 /// Tools whose result message is a self-contained plan/spec artifact worth pinning
@@ -868,6 +911,328 @@ fn normalize_plan_message_content(mut message: ChatMessage) -> ChatMessage {
         message.content = ChatContent::SimpleText(normalized);
     }
     message
+}
+
+pub fn normalize_goal_message_content(mut message: ChatMessage) -> ChatMessage {
+    if message.role != "goal" {
+        return message;
+    }
+    let ChatContent::SimpleText(text) = &message.content else {
+        return message;
+    };
+    let normalized = text.trim().to_string();
+    if normalized != *text {
+        message.content = ChatContent::SimpleText(normalized);
+    }
+    message
+}
+
+fn goal_meta(message: &ChatMessage) -> Option<&serde_json::Value> {
+    message.extra.get("goal")
+}
+
+fn goal_meta_string(meta: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    meta.and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn goal_meta_u64(meta: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+    meta.and_then(|meta| meta.get(key)).and_then(|value| value.as_u64())
+}
+
+fn goal_meta_value<T: serde::de::DeserializeOwned>(
+    meta: Option<&serde_json::Value>,
+    key: &str,
+) -> Option<T> {
+    meta.and_then(|meta| meta.get(key))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let subkind = goal_event_subkind(message)?;
+            if !matches!(subkind, "goal_delta" | "goal_pursuit") {
+                return None;
+            }
+            let payload = message.extra.get("event").and_then(|event| event.get("payload"));
+            let at_ms = payload
+                .and_then(|payload| payload.get("at_ms"))
+                .or_else(|| payload.and_then(|payload| payload.get("created_at_ms")))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let kind = payload
+                .and_then(|payload| payload.get("kind"))
+                .and_then(|value| value.as_str())
+                .unwrap_or(subkind)
+                .to_string();
+            Some(GoalEvent {
+                at_ms,
+                kind,
+                text: message.content.content_text_only(),
+            })
+        })
+        .collect()
+}
+
+fn synthesized_goal_content(messages: &[ChatMessage], base: &ChatMessage) -> String {
+    let base = base.content.content_text_only();
+    let notes = messages
+        .iter()
+        .filter(|message| is_goal_delta_event(message))
+        .map(|message| message.content.content_text_only())
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        base
+    } else {
+        format!("{base}\n\n---\n\n## Goal updates\n\n{}", notes.join("\n\n"))
+    }
+}
+
+fn goal_snapshot_for_transfer(
+    messages: &[ChatMessage],
+    existing: Option<&GoalSnapshot>,
+) -> Option<GoalSnapshot> {
+    let base = current_base_goal_message(messages)?;
+    let version = goal_version(base)?;
+    let meta = goal_meta(base);
+    let active = meta
+        .and_then(|meta| meta.get("active"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| existing.map(|goal| goal.active))
+        .unwrap_or(true);
+    let status = goal_meta_value::<GoalStatus>(meta, "status")
+        .or_else(|| existing.map(|goal| goal.status))
+        .unwrap_or(if active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        });
+    let budget = goal_meta_value::<GoalBudget>(meta, "budget")
+        .or_else(|| existing.map(|goal| goal.budget.clone()))
+        .unwrap_or_default();
+    let progress = goal_meta_value::<GoalProgress>(meta, "progress")
+        .or_else(|| existing.map(|goal| goal.progress.clone()))
+        .unwrap_or_else(|| {
+            let started_at_ms = if active {
+                goal_meta_u64(meta, "created_at_ms").unwrap_or_else(now_ms)
+            } else {
+                0
+            };
+            GoalProgress {
+                started_at_ms,
+                ..Default::default()
+            }
+        });
+    let attempts = goal_meta_value(meta, "attempts")
+        .or_else(|| existing.map(|goal| goal.attempts.clone()))
+        .unwrap_or_default();
+    let meta_events: Option<Vec<GoalEvent>> = goal_meta_value(meta, "events");
+    let events = meta_events
+        .or_else(|| existing.map(|goal| goal.events.clone()))
+        .filter(|events| !events.is_empty())
+        .unwrap_or_else(|| goal_events_from_messages(messages));
+    Some(GoalSnapshot {
+        content: synthesized_goal_content(messages, base),
+        version,
+        active,
+        status,
+        budget,
+        progress,
+        attempts,
+        events,
+        transferred_from: goal_meta_string(meta, "transferred_from")
+            .or_else(|| existing.and_then(|goal| goal.transferred_from.clone())),
+        transferred_to: goal_meta_string(meta, "transferred_to")
+            .or_else(|| existing.and_then(|goal| goal.transferred_to.clone())),
+    })
+}
+
+fn set_goal_message_metadata(
+    message: &mut ChatMessage,
+    goal: &GoalSnapshot,
+    mode: &str,
+    created_at_ms: u64,
+    supersedes: Option<String>,
+) {
+    let mut meta = message
+        .extra
+        .get("goal")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    meta.insert("mode".to_string(), serde_json::json!(mode));
+    meta.insert("version".to_string(), serde_json::json!(goal.version));
+    meta.insert("created_at_ms".to_string(), serde_json::json!(created_at_ms));
+    meta.insert("supersedes".to_string(), serde_json::json!(supersedes));
+    meta.insert("active".to_string(), serde_json::json!(goal.active));
+    meta.insert("status".to_string(), serde_json::json!(goal.status));
+    meta.insert("budget".to_string(), serde_json::json!(goal.budget));
+    meta.insert("progress".to_string(), serde_json::json!(goal.progress));
+    meta.insert("attempts".to_string(), serde_json::json!(goal.attempts));
+    meta.insert("events".to_string(), serde_json::json!(goal.events));
+    meta.insert(
+        "transferred_from".to_string(),
+        serde_json::json!(goal.transferred_from),
+    );
+    meta.insert(
+        "transferred_to".to_string(),
+        serde_json::json!(goal.transferred_to),
+    );
+    message
+        .extra
+        .insert("goal".to_string(), serde_json::Value::Object(meta));
+}
+
+fn target_goal_version(source_version: u32, target_existing_messages: &[ChatMessage]) -> u32 {
+    current_base_goal_message(target_existing_messages)
+        .and_then(goal_version)
+        .map(|version| version.saturating_add(1).max(source_version))
+        .unwrap_or(source_version)
+}
+
+fn target_goal_supersedes(
+    source_base: &ChatMessage,
+    target_existing_messages: &[ChatMessage],
+) -> Option<String> {
+    current_base_goal_message(target_existing_messages)
+        .and_then(|message| (!message.message_id.is_empty()).then(|| message.message_id.clone()))
+        .or_else(|| {
+            (!source_base.message_id.is_empty()).then(|| source_base.message_id.clone())
+        })
+}
+
+fn transfer_event(source_chat_id: &str, target_chat_id: &str, at_ms: u64) -> (ChatMessage, GoalEvent) {
+    let content = format!("Goal ownership transferred from {source_chat_id} to {target_chat_id}.");
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "event".to_string(),
+        serde_json::json!({
+            "subkind": "goal_pursuit",
+            "source": "chat.goal",
+            "payload": {
+                "kind": "transfer",
+                "source_chat_id": source_chat_id,
+                "target_chat_id": target_chat_id,
+                "at_ms": at_ms,
+            },
+        }),
+    );
+    (
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(content.clone()),
+            extra,
+            preserve: Some(true),
+            ..Default::default()
+        },
+        GoalEvent {
+            at_ms,
+            kind: "transfer".to_string(),
+            text: content,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoalTransferResult {
+    pub source_messages: Vec<ChatMessage>,
+    pub target_messages: Vec<ChatMessage>,
+    pub source_goal: Option<GoalSnapshot>,
+    pub target_goal: Option<GoalSnapshot>,
+}
+
+impl GoalTransferResult {
+    pub fn transferred(&self) -> bool {
+        self.source_goal.is_some() && self.target_goal.is_some()
+    }
+}
+
+pub fn transfer_goal_ownership(
+    source_messages: &[ChatMessage],
+    source_goal: Option<&GoalSnapshot>,
+    target_existing_messages: &[ChatMessage],
+    source_chat_id: &str,
+    target_chat_id: &str,
+    target_mode: &str,
+    at_ms: u64,
+) -> GoalTransferResult {
+    let Some(source_base) = current_base_goal_message(source_messages) else {
+        return GoalTransferResult {
+            source_messages: source_messages.to_vec(),
+            ..Default::default()
+        };
+    };
+    let Some(source_snapshot) = goal_snapshot_for_transfer(source_messages, source_goal) else {
+        return GoalTransferResult {
+            source_messages: source_messages.to_vec(),
+            ..Default::default()
+        };
+    };
+    if !source_snapshot.active || source_snapshot.status == GoalStatus::Transferred {
+        return GoalTransferResult {
+            source_messages: source_messages.to_vec(),
+            ..Default::default()
+        };
+    }
+
+    let mut source_goal = source_snapshot.clone();
+    source_goal.active = false;
+    source_goal.status = GoalStatus::Transferred;
+    source_goal.transferred_to = Some(target_chat_id.to_string());
+
+    let (transfer_message, transfer_goal_event) =
+        transfer_event(source_chat_id, target_chat_id, at_ms);
+    let mut target_goal = source_snapshot.clone();
+    target_goal.version = target_goal_version(source_snapshot.version, target_existing_messages);
+    target_goal.active = true;
+    target_goal.status = GoalStatus::Active;
+    target_goal.progress = GoalProgress {
+        started_at_ms: at_ms,
+        ..Default::default()
+    };
+    target_goal.transferred_from = Some(source_chat_id.to_string());
+    target_goal.transferred_to = None;
+    target_goal.events.push(transfer_goal_event);
+
+    let mut source_messages = source_messages.to_vec();
+    if let Some(source_message) = source_messages
+        .iter_mut()
+        .find(|message| message.message_id == source_base.message_id && message.role == "goal")
+    {
+        let created_at_ms = goal_meta_u64(goal_meta(source_message), "created_at_ms").unwrap_or(at_ms);
+        let mode = goal_meta_string(goal_meta(source_message), "mode").unwrap_or_default();
+        set_goal_message_metadata(source_message, &source_goal, &mode, created_at_ms, None);
+    }
+
+    let mut target_base = normalize_goal_message_content(source_base.clone());
+    target_base.preserve = Some(true);
+    let target_supersedes = target_goal_supersedes(source_base, target_existing_messages);
+    set_goal_message_metadata(
+        &mut target_base,
+        &target_goal,
+        target_mode,
+        at_ms,
+        target_supersedes,
+    );
+    let mut target_messages = vec![target_base];
+    target_messages.extend(
+        source_messages
+            .iter()
+            .filter(|message| is_goal_delta_event(message))
+            .cloned(),
+    );
+    target_messages.push(transfer_message);
+
+    GoalTransferResult {
+        source_messages,
+        target_messages,
+        source_goal: Some(source_goal),
+        target_goal: Some(target_goal),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1014,6 +1379,46 @@ pub fn carried_plan_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         )];
     }
     Vec::new()
+}
+
+pub fn carried_goal_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if let Some(existing_goal) = current_base_goal_message(messages) {
+        let mut carried = vec![normalize_goal_message_content(existing_goal.clone())];
+        carried.extend(
+            messages
+                .iter()
+                .filter(|message| is_goal_delta_event(message) || is_goal_pursuit_event(message))
+                .cloned(),
+        );
+        return carried;
+    }
+    Vec::new()
+}
+
+pub fn insert_goal_messages_before_plan(
+    messages: &mut Vec<ChatMessage>,
+    goal_messages: Vec<ChatMessage>,
+) {
+    if goal_messages.is_empty() {
+        return;
+    }
+    let existing_ids: HashSet<String> = messages
+        .iter()
+        .map(|message| message.message_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut deduped = goal_messages
+        .into_iter()
+        .filter(|message| message.message_id.is_empty() || !existing_ids.contains(&message.message_id))
+        .collect::<Vec<_>>();
+    if deduped.is_empty() {
+        return;
+    }
+    let index = messages
+        .iter()
+        .position(|message| message.role == "plan")
+        .unwrap_or(messages.len());
+    messages.splice(index..index, deduped.drain(..));
 }
 
 pub async fn assemble_new_chat(

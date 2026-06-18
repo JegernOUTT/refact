@@ -415,6 +415,7 @@ mod tests {
                 thread: self.thread.lock().unwrap().clone(),
                 session_state: *self.state.lock().unwrap(),
                 pause_reasons: vec![],
+                goal: None,
             })
         }
 

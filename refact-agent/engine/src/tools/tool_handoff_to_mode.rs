@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
-use crate::agentic::mode_transition::{AgenticPathContext, ParsedDecisions, assemble_new_chat};
+use crate::agentic::mode_transition::{
+    AgenticPathContext, ParsedDecisions, assemble_new_chat, insert_goal_messages_before_plan,
+    transfer_goal_ownership,
+};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::trajectories::{
     chat_id_is_planner_for_task, resolve_task_planner_controller_chat_id,
@@ -53,6 +56,13 @@ fn parse_optional_string(args: &HashMap<String, Value>, key: &str) -> Option<Str
         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,
     }
+}
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn apply_overrides(decisions: &mut ParsedDecisions, args: &HashMap<String, Value>) {
@@ -222,6 +232,20 @@ async fn existing_messages_for_handoff_target(
         })
 }
 
+async fn replace_live_source_messages_if_present(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    chat_id: &str,
+    messages: Vec<ChatMessage>,
+) {
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        session_arc.lock().await.replace_messages(messages);
+    }
+}
+
 pub struct ToolHandoffToMode {
     pub config_path: String,
 }
@@ -331,6 +355,7 @@ impl Tool for ToolHandoffToMode {
 
         let session_snapshot = chat_facade.session_snapshot(&chat_id).await?;
         let messages = session_snapshot.messages;
+        let source_goal = session_snapshot.goal;
         let thread = session_snapshot.thread;
         let existing_task_meta = thread.task_meta.clone();
         let session_state = session_snapshot.session_state;
@@ -444,11 +469,9 @@ impl Tool for ToolHandoffToMode {
             });
 
         let path_context = { AgenticPathContext::from_context(&*gcx) };
-        let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+        let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
             .await
             .map_err(|e| format!("handoff assembly failed: {}", e))?;
-
-        let new_messages = sanitize_messages_for_new_thread(&new_messages);
         let task_meta = ensure_task_for_planner_handoff(
             gcx.clone(),
             &canonical_mode,
@@ -473,13 +496,37 @@ impl Tool for ToolHandoffToMode {
                 .clone()
                 .or_else(|| Some(chat_id.clone()))
         };
-        let now = chrono::Utc::now().to_rfc3339();
-
         let existing_target = if canonical_mode == "task_planner" {
             existing_messages_for_handoff_target(gcx.clone(), &new_chat_id).await
         } else {
             None
         };
+        let existing_target_messages = existing_target
+            .as_ref()
+            .map(|existing| existing.messages.as_slice())
+            .unwrap_or(&[]);
+        let transferred_goal = transfer_goal_ownership(
+            &messages,
+            source_goal.as_ref(),
+            existing_target_messages,
+            &chat_id,
+            &new_chat_id,
+            &canonical_mode,
+            epoch_ms_now(),
+        );
+        if transferred_goal.transferred() {
+            insert_goal_messages_before_plan(&mut new_messages, transferred_goal.target_messages.clone());
+            replace_live_source_messages_if_present(
+                gcx.clone(),
+                &chat_id,
+                transferred_goal.source_messages.clone(),
+            )
+            .await;
+            chat_facade.maybe_save_session(&chat_id).await?;
+        }
+
+        let new_messages = sanitize_messages_for_new_thread(&new_messages);
+        let now = chrono::Utc::now().to_rfc3339();
         let live_target_session = existing_target
             .as_ref()
             .is_some_and(|existing| existing.live_session);
@@ -492,7 +539,7 @@ impl Tool for ToolHandoffToMode {
 
         let snapshot_task_meta = task_meta.clone();
         let snapshot = TrajectorySnapshot {
-            goal: None,
+            goal: transferred_goal.target_goal.clone(),
             chat_id: new_chat_id.clone(),
             title: String::new(),
             model: thread.model.clone(),
@@ -742,6 +789,7 @@ mod tests {
             thread,
             session_state: SessionState::Idle,
             pause_reasons: vec![],
+            goal: None,
         }
     }
 

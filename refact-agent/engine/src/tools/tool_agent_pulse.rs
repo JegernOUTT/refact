@@ -956,6 +956,7 @@ mod tests {
             },
             session_state: SessionState::ExecutingTools,
             pause_reasons: vec![],
+            goal: None,
         };
         facade
             .snapshots
@@ -1000,6 +1001,7 @@ mod tests {
             },
             session_state: SessionState::Generating,
             pause_reasons: vec![],
+            goal: None,
         };
         facade
             .snapshots

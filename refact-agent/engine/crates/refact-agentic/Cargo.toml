@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
+refact-chat-api = { path = "../refact-chat-api" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 lazy_static = { workspace = true }

@@ -1,11 +1,13 @@
 pub use refact_agentic::mode_transition::{
     ConversationMetadata, FileReference, ParsedDecisions, TransitionContextBudget,
     assemble_new_chat as assemble_new_chat_pure, calculate_transition_context_budget,
-    carried_plan_messages, context_file_rendered_symbols, count_images_in_messages,
-    extract_conversation_metadata, extract_initial_plan_text, format_annotated_messages,
-    format_budget_summary, format_file_list, format_memory_list, make_pinned_plan_message,
-    message_symbols, parse_llm_response, push_context_file_with_budget, text_symbols,
-    truncate_utf8,
+    carried_goal_messages, carried_plan_messages, context_file_rendered_symbols,
+    count_images_in_messages, current_base_goal_message, extract_conversation_metadata,
+    extract_initial_plan_text, format_annotated_messages, format_budget_summary,
+    format_file_list, format_memory_list, insert_goal_messages_before_plan, is_goal_delta_event,
+    make_pinned_plan_message, message_symbols, normalize_goal_message_content,
+    parse_llm_response, push_context_file_with_budget, text_symbols, transfer_goal_ownership,
+    GoalTransferResult, truncate_utf8,
 };
 
 use std::path::PathBuf;
