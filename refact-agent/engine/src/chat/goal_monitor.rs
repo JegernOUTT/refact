@@ -178,18 +178,7 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
 }
 
 fn goal_turn_end_blocks_completion(outcome: GoalNudgeOutcome) -> bool {
-    match outcome {
-        GoalNudgeOutcome::Nudged(_) | GoalNudgeOutcome::BudgetExhausted(_) => true,
-        GoalNudgeOutcome::Skipped(skip) => !matches!(
-            skip,
-            GoalNudgeSkip::NoGoal
-                | GoalNudgeSkip::InactiveGoal
-                | GoalNudgeSkip::NonActiveGoalStatus
-                | GoalNudgeSkip::Aborted
-                | GoalNudgeSkip::Closed
-                | GoalNudgeSkip::NotStalled
-        ),
-    }
+    outcome.changed()
 }
 
 pub async fn dispatch_goal_nudge(
@@ -282,13 +271,30 @@ pub fn try_apply_goal_nudge(
         priority: true,
         command: ChatCommand::Regenerate {},
     };
-    if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+    if enqueue_regenerate_for_nudge(session, reason, request) != EnqueueCommandOutcome::Accepted {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::QueueRejected);
     }
 
     session.add_message(goal_nudge_event(trigger, reason, now_ms));
     session.goal_record_nudge(now_ms);
     GoalNudgeOutcome::Nudged(reason)
+}
+
+fn enqueue_regenerate_for_nudge(
+    session: &mut ChatSession,
+    reason: GoalNudgeReason,
+    request: CommandRequest,
+) -> EnqueueCommandOutcome {
+    if reason == GoalNudgeReason::GeneratingNoTokens
+        && session.runtime.state == SessionState::Generating
+    {
+        if session.command_queue.len() >= max_queue_size() {
+            return EnqueueCommandOutcome::Full;
+        }
+        session.abort_stream();
+        session.clear_pending_tool_calls_for_interruption();
+    }
+    session.enqueue_priority_command(request)
 }
 
 fn waiting_for_user_or_ide(session: &ChatSession) -> bool {
@@ -718,6 +724,31 @@ mod tests {
     }
 
     #[test]
+    fn goal_monitor_no_token_stall_interrupts_running_generation() {
+        let mut session = active_goal_session();
+        let now = Instant::now();
+        session.start_stream();
+        session.last_activity = now - Duration::from_secs(10);
+        session
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
+        );
+        assert!(session.abort_flag.load(Ordering::SeqCst));
+        assert!(session.user_interrupt_flag.load(Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.draft_message.is_none());
+        assert_eq!(session.command_queue.len(), 1);
+        assert!(matches!(
+            session.command_queue.front().unwrap().command,
+            ChatCommand::Regenerate {}
+        ));
+    }
+
+    #[test]
     fn goal_monitor_pending_non_user_command_prevents_double_fire() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
@@ -747,6 +778,38 @@ mod tests {
         assert!(!goal_turn_end_blocks_completion(GoalNudgeOutcome::Skipped(
             GoalNudgeSkip::NoGoal,
         )));
+    }
+
+    #[test]
+    fn goal_monitor_turn_end_skip_without_work_does_not_block_completion() {
+        let (mut session, now) = old_idle_session();
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+        let cooldown_outcome = try_apply_goal_nudge(
+            &mut session,
+            GoalNudgeTrigger::InlineTurnEnd,
+            10_100,
+            now + Duration::from_secs(1),
+            config(),
+        );
+        assert_eq!(
+            cooldown_outcome,
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
+        );
+        assert!(!goal_turn_end_blocks_completion(cooldown_outcome));
+        for skip in [
+            GoalNudgeSkip::Busy,
+            GoalNudgeSkip::PendingCommand,
+            GoalNudgeSkip::UserMessageQueued,
+            GoalNudgeSkip::WaitingForInput,
+            GoalNudgeSkip::QueueRejected,
+        ] {
+            assert!(!goal_turn_end_blocks_completion(GoalNudgeOutcome::Skipped(
+                skip,
+            )));
+        }
     }
 
     #[test]
