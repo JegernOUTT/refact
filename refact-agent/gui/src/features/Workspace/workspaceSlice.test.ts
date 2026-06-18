@@ -489,6 +489,25 @@ describe("workspaceSlice", () => {
     expect(state.tabs).toEqual([chatA]);
   });
 
+  test("focusPane is a no-op for the already focused leaf", () => {
+    const chatA = chat("a");
+    let state = reducer(undefined, openTab(chatA));
+    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
+
+    const next = reducer(
+      state,
+      focusPane({
+        tabId: chatA,
+        leafId: groupFor(state, chatA).focusedLeafId,
+      }),
+    );
+
+    expect(next).toBe(state);
+    expect(groupFor(next, chatA).focusedLeafId).toBe(
+      groupFor(state, chatA).focusedLeafId,
+    );
+  });
+
   test("reconcileWorkspace prunes stale chat surfaces and drops or ungroups groups", () => {
     const chatA = chat("a");
     const chatB = chat("b");

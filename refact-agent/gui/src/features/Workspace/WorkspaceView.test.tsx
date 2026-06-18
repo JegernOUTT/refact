@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 
 import { type AppStore, setUpStore } from "../../app/store";
 import { fireEvent, render, screen, within } from "../../utils/test-utils";
 import { createChatWithId, switchToThread } from "../Chat/Thread";
+import {
+  collectLeafIds,
+  collectTabIds,
+  findLeaf,
+} from "../ChatPanes/panesTree";
 import { setTabDragData } from "../ChatPanes/tabDrag";
 import {
   addSurfaceToPane,
@@ -238,8 +243,98 @@ describe("WorkspaceView", () => {
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
+    if (!group) throw new Error("missing split group");
+    const leafIds = collectLeafIds(group.root);
+    expect(leafIds).toHaveLength(2);
+    expect(
+      leafIds.map((leafId) => findLeaf(group.root, leafId)?.tabIds.length),
+    ).toEqual([1, 1]);
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
     expectSurface(chat("chat-a"));
     expectSurface(chat("chat-b"));
+  });
+
+  it("dropping a workspace tab on an occupied pane center creates a sibling pane", () => {
+    const store = createSplitWorkspaceStore();
+    store.dispatch(createChatWithId({ id: "chat-c", title: "Chat Gamma" }));
+    store.dispatch(openTab(chat("chat-c")));
+    store.dispatch(setActiveTab(chat("chat-a")));
+    renderWorkspaceView(store);
+    const dataTransfer = createDataTransferStub();
+    setTabDragData(dataTransfer, "chat", "chat-c", chat("chat-c"));
+    const occupiedPane = screen.getByLabelText("Workspace pane root");
+
+    fireEvent.dragEnter(occupiedPane, { dataTransfer });
+    fireEvent.dragOver(occupiedPane, { dataTransfer });
+    fireEvent.drop(occupiedPane, { dataTransfer });
+
+    const group = store.getState().workspace.groups[chat("chat-a")];
+    expect(group).toBeDefined();
+    if (!group) throw new Error("missing split group");
+    const leafIds = collectLeafIds(group.root);
+    expect(leafIds).toHaveLength(3);
+    expect(
+      leafIds.every((leafId) => {
+        const leaf = findLeaf(group.root, leafId);
+        return Boolean(leaf && leaf.tabIds.length <= 1);
+      }),
+    ).toBe(true);
+    expect(collectTabIds(group.root).sort()).toEqual(
+      [chat("chat-a"), chat("chat-b"), chat("chat-c")].sort(),
+    );
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expectSurface(chat("chat-a"));
+    expectSurface(chat("chat-b"));
+    expectSurface(chat("chat-c"));
+    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(3);
+  });
+
+  it("keeps split sizes unchanged for non-finite resize input", async () => {
+    const clientWidthSpy = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(1024);
+    const store = createEmptySplitWorkspaceStore();
+    renderWorkspaceView(store);
+
+    try {
+      const divider = await screen.findByTestId("workspace-vertical-divider");
+      const split = document.querySelector<HTMLElement>(
+        "[data-pane-split-id='root:split:row']",
+      );
+      if (!split) throw new Error("missing split");
+      const groupBefore = store.getState().workspace.groups[chat("chat-a")];
+      if (!groupBefore || groupBefore.root.kind !== "split") {
+        throw new Error("missing split group");
+      }
+      const sizesBefore = [...groupBefore.root.sizes];
+      const rectSpy = vi.spyOn(split, "getBoundingClientRect").mockReturnValue({
+        x: Number.POSITIVE_INFINITY,
+        y: 0,
+        width: 1024,
+        height: 768,
+        top: 0,
+        right: Number.POSITIVE_INFINITY,
+        bottom: 768,
+        left: Number.POSITIVE_INFINITY,
+        toJSON: () => ({}),
+      });
+
+      try {
+        fireEvent.mouseDown(divider);
+        fireEvent.mouseMove(window, { clientX: 500 });
+        fireEvent.mouseUp(window);
+      } finally {
+        rectSpy.mockRestore();
+      }
+
+      const groupAfter = store.getState().workspace.groups[chat("chat-a")];
+      expect(groupAfter?.root.kind).toBe("split");
+      if (!groupAfter || groupAfter.root.kind !== "split") {
+        throw new Error("missing split group");
+      }
+      expect(groupAfter.root.sizes).toEqual(sizesBefore);
+    } finally {
+      clientWidthSpy.mockRestore();
+    }
   });
 });

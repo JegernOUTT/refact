@@ -762,8 +762,12 @@ export const workspaceSlice = createSlice({
         surfaceKey?: SurfaceKey;
       }>,
     ) => {
-      const { tabId, dir, placement, surfaceKey: draggedSurfaceKey } =
-        action.payload;
+      const {
+        tabId,
+        dir,
+        placement,
+        surfaceKey: draggedSurfaceKey,
+      } = action.payload;
       if (!isChatSurface(tabId)) return;
       if (!state.tabs.includes(tabId)) return;
 
@@ -874,6 +878,7 @@ export const workspaceSlice = createSlice({
     ) => {
       const group = state.groups[action.payload.tabId];
       if (!group || !findLeaf(group.root, action.payload.leafId)) return;
+      if (group.focusedLeafId === action.payload.leafId) return;
       state.groups[action.payload.tabId] = ensureGroupFocus(
         group,
         action.payload.leafId,
@@ -1012,7 +1017,9 @@ export const workspaceSlice = createSlice({
       return {
         tabs,
         activeTabId:
-          activeTabId && isChatSurface(activeTabId) && tabs.includes(activeTabId)
+          activeTabId &&
+          isChatSurface(activeTabId) &&
+          tabs.includes(activeTabId)
             ? activeTabId
             : tabs[0] ?? null,
         groups,

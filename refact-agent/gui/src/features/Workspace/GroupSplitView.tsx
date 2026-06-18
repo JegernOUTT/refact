@@ -23,10 +23,7 @@ import {
   splitTab,
 } from "./workspaceSlice";
 import { isChatSurface, type SurfaceKey } from "./surfaceKey";
-import {
-  hasTabDragType,
-  readTabDragSurfaceKey,
-} from "../ChatPanes/tabDrag";
+import { hasTabDragType, readTabDragSurfaceKey } from "../ChatPanes/tabDrag";
 import { SurfacePane } from "./SurfacePane";
 import styles from "./GroupSplitView.module.css";
 
@@ -97,6 +94,8 @@ function resizeAtDivider(
   dividerIndex: number,
   pointerFraction: number,
 ): number[] {
+  if (!Number.isFinite(pointerFraction)) return sizes;
+
   const next = [...sizes];
   const before = next
     .slice(0, dividerIndex)
@@ -257,20 +256,29 @@ function LeafView({
       event.preventDefault();
       event.stopPropagation();
       setSurfaceDragActive(false);
+      if (surfaceKey === null) {
+        dispatch(
+          addSurfaceToPane({
+            tabId,
+            leafId: leaf.id,
+            surfaceKey: draggedSurfaceKey,
+          }),
+        );
+        return;
+      }
+
       dispatch(
-        addSurfaceToPane({
+        splitPaneWithSurface({
           tabId,
           leafId: leaf.id,
           surfaceKey: draggedSurfaceKey,
+          dir: "row",
+          placement: "after",
         }),
       );
     },
     [dispatch, leaf.id, surfaceKey, tabId],
   );
-
-  const handlePaneDragEnd = useCallback(() => {
-    setSurfaceDragActive(false);
-  }, []);
 
   const handleEdgeDragOver = useCallback((event: DragEvent) => {
     event.preventDefault();
@@ -312,7 +320,6 @@ function LeafView({
       onDragEnter={handlePaneDragEnter}
       onDragOver={handlePaneDragOver}
       onDragLeave={handlePaneDragLeave}
-      onDragEnd={handlePaneDragEnd}
       onDrop={handlePaneDrop}
     >
       <PaneHeader leaf={leaf} tabId={tabId} />
