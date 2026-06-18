@@ -91,7 +91,7 @@ fn can_suppress_source_preserving_source(
     !msg.message_id.is_empty()
         && suppressed.contains(&msg.message_id)
         && !preserved.contains(&msg.message_id)
-        && !matches!(msg.role.as_str(), "user" | "system" | "plan")
+        && !matches!(msg.role.as_str(), "user" | "system" | "plan" | "goal")
         && !is_authoritative_summary(msg)
         && exemption_for(msg) != CompressionExemption::Never
 }
@@ -504,6 +504,14 @@ mod tests {
         }
     }
 
+    fn goal(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
     fn system(text: &str) -> ChatMessage {
         ChatMessage {
             role: "system".to_string(),
@@ -518,6 +526,19 @@ mod tests {
             "event".to_string(),
             serde_json::json!({
                 "subkind": "plan_delta",
+                "source": "test",
+                "payload": {"seq": 1},
+            }),
+        );
+        message
+    }
+
+    fn goal_delta_event(text: &str) -> ChatMessage {
+        let mut message = event(text);
+        message.extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "goal_delta",
                 "source": "test",
                 "payload": {"seq": 1},
             }),
@@ -666,6 +687,24 @@ mod tests {
         assert_eq!(result[0].content.content_text_only(), "old");
         assert_eq!(result[1].content.content_text_only(), "sum");
         assert_eq!(result[2].content.content_text_only(), "sacred plan");
+        assert_eq!(result[3].content.content_text_only(), "new");
+    }
+
+    #[test]
+    fn linearize_keeps_goal_when_summary_range_overlaps_it() {
+        let messages = vec![
+            user("old"),
+            goal("sacred goal"),
+            user("new"),
+            summarization("sum", Some((0, 2))),
+        ];
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "goal", "user"]);
+        assert_eq!(result[0].content.content_text_only(), "old");
+        assert_eq!(result[1].content.content_text_only(), "sum");
+        assert_eq!(result[2].content.content_text_only(), "sacred goal");
         assert_eq!(result[3].content.content_text_only(), "new");
     }
 
@@ -888,9 +927,14 @@ mod tests {
         let messages = vec![
             with_id(system("UNIQUE_SYSTEM_SOURCE_ANCHOR"), "system-source"),
             with_id(plan("UNIQUE_PLAN_SOURCE_ANCHOR"), "plan-source"),
+            with_id(goal("UNIQUE_GOAL_SOURCE_ANCHOR"), "goal-source"),
             with_id(
                 plan_delta_event("UNIQUE_NEVER_EVENT_SOURCE_ANCHOR"),
                 "never-event-source",
+            ),
+            with_id(
+                goal_delta_event("UNIQUE_GOAL_DELTA_SOURCE_ANCHOR"),
+                "goal-delta-source",
             ),
             with_id(
                 assistant("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"),
@@ -901,7 +945,9 @@ mod tests {
                 &[
                     "system-source",
                     "plan-source",
+                    "goal-source",
                     "never-event-source",
+                    "goal-delta-source",
                     "assistant-source",
                 ],
                 &[],
@@ -917,10 +963,23 @@ mod tests {
             .join("\n");
         let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
 
-        assert_eq!(roles, vec!["system", "plan", "event", "assistant", "user"]);
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "plan",
+                "goal",
+                "event",
+                "event",
+                "assistant",
+                "user"
+            ]
+        );
         assert!(text.contains("UNIQUE_SYSTEM_SOURCE_ANCHOR"));
         assert!(text.contains("UNIQUE_PLAN_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_GOAL_SOURCE_ANCHOR"));
         assert!(text.contains("UNIQUE_NEVER_EVENT_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_GOAL_DELTA_SOURCE_ANCHOR"));
         assert!(text.contains("UNIQUE_SUMMARY_WITH_ANCHORS"));
         assert!(!text.contains("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"));
     }

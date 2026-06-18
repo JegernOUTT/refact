@@ -11,9 +11,9 @@ use super::config::{limits, timeouts};
 pub use refact_chat_api::{
     ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserSnapshot, BrowserTabInfo,
     BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest, CompressionPhase, CompressionReason,
-    DeltaOp, DiffBox, EventEnvelope, PauseReason, PendingSkillDeactivation, QueuedItem,
-    RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem,
-    WindowBounds, WorktreeMeta,
+    DeltaOp, DiffBox, EventEnvelope, GoalBudget, GoalEvent, GoalProgress, GoalSnapshot, GoalStatus,
+    PauseReason, PendingSkillDeactivation, QueuedItem, RuntimeState, SessionState, TaskMeta,
+    ThreadParams, TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta,
 };
 
 pub fn max_queue_size() -> usize {
@@ -239,6 +239,12 @@ pub struct ChatSession {
     pub thread: ThreadParams,
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,
+    pub goal: Option<GoalSnapshot>,
+    pub goal_active: bool,
+    pub goal_status: Option<GoalStatus>,
+    pub goal_turns_used: u32,
+    pub goal_tokens_used: u64,
+    pub goal_no_progress_turns: u32,
     pub is_compressing: bool,
     pub compression_phase: Option<CompressionPhase>,
     pub compression_reason: Option<CompressionReason>,

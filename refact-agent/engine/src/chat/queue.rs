@@ -1018,18 +1018,14 @@ pub async fn process_command_queue(
                     let mut session = session_arc.lock().await;
                     let compression_phase = session.compression_phase;
                     let compression_reason = session.compression_reason;
-                    session.emit(super::types::ChatEvent::RuntimeUpdated {
-                        goal_active: false,
-                        goal_status: None,
-                        goal_turns_used: 0,
-                        goal_tokens_used: 0,
-                        goal_no_progress_turns: 0,
-                        state: super::types::SessionState::Error,
-                        error: Some(format!("Message blocked by hook: {}", reason)),
-                        is_compressing: false,
+                    let event = session.runtime_update_event(
+                        super::types::SessionState::Error,
+                        Some(format!("Message blocked by hook: {}", reason)),
+                        false,
                         compression_phase,
                         compression_reason,
-                    });
+                    );
+                    session.emit(event);
                     session.set_runtime_state(super::types::SessionState::Idle, None);
                     continue;
                 }
@@ -1284,18 +1280,14 @@ pub async fn process_command_queue(
                         let mut session = session_arc.lock().await;
                         let compression_phase = session.compression_phase;
                         let compression_reason = session.compression_reason;
-                        session.emit(ChatEvent::RuntimeUpdated {
-                            goal_active: false,
-                            goal_status: None,
-                            goal_turns_used: 0,
-                            goal_tokens_used: 0,
-                            goal_no_progress_turns: 0,
-                            state: SessionState::Error,
-                            error: Some(e),
-                            is_compressing: false,
+                        let event = session.runtime_update_event(
+                            SessionState::Error,
+                            Some(e),
+                            false,
                             compression_phase,
                             compression_reason,
-                        });
+                        );
+                        session.emit(event);
                         session.set_runtime_state(SessionState::Idle, None);
                         continue;
                     }
@@ -1389,18 +1381,14 @@ pub async fn process_command_queue(
                         let mut session = session_arc.lock().await;
                         let compression_phase = session.compression_phase;
                         let compression_reason = session.compression_reason;
-                        session.emit(ChatEvent::RuntimeUpdated {
-                            goal_active: false,
-                            goal_status: None,
-                            goal_turns_used: 0,
-                            goal_tokens_used: 0,
-                            goal_no_progress_turns: 0,
-                            state: SessionState::Error,
-                            error: Some(error),
-                            is_compressing: false,
+                        let event = session.runtime_update_event(
+                            SessionState::Error,
+                            Some(error),
+                            false,
                             compression_phase,
                             compression_reason,
-                        });
+                        );
+                        session.emit(event);
                         session.set_runtime_state(SessionState::Idle, None);
                     }
                 }
@@ -1699,8 +1687,35 @@ fn is_plan_delta_event(msg: &ChatMessage) -> bool {
             == Some("plan_delta")
 }
 
+fn is_goal_delta_event(msg: &ChatMessage) -> bool {
+    msg.role == "event"
+        && msg
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(|subkind| subkind.as_str())
+            == Some("goal_delta")
+}
+
+fn is_goal_pursuit_event(msg: &ChatMessage) -> bool {
+    msg.role == "event"
+        && msg
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(|subkind| subkind.as_str())
+            == Some("goal_pursuit")
+}
+
+fn is_goal_hidden_event(msg: &ChatMessage) -> bool {
+    is_goal_delta_event(msg) || is_goal_pursuit_event(msg)
+}
+
 fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
-    if matches!(msg.role.as_str(), "plan" | "event" | "compression_report") {
+    if matches!(
+        msg.role.as_str(),
+        "plan" | "goal" | "event" | "compression_report"
+    ) {
         msg.extra.clone()
     } else {
         serde_json::Map::new()
@@ -1710,8 +1725,9 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
 fn is_allowed_for_restore(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
-        "user" | "assistant" | "system" | "tool" | "plan" | "compression_report"
+        "user" | "assistant" | "system" | "tool" | "plan" | "goal" | "compression_report"
     ) || is_plan_delta_event(msg)
+        || is_goal_hidden_event(msg)
 }
 
 /// Sanitize message for restoring from external trajectory — strips tool_calls for security
@@ -1763,8 +1779,16 @@ fn sanitize_message_for_branch(msg: &ChatMessage) -> ChatMessage {
 fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
-        "user" | "assistant" | "system" | "tool" | "context_file" | "plan" | "compression_report"
+        "user"
+            | "assistant"
+            | "system"
+            | "tool"
+            | "context_file"
+            | "plan"
+            | "goal"
+            | "compression_report"
     ) || is_plan_delta_event(msg)
+        || is_goal_hidden_event(msg)
 }
 
 async fn handle_tool_decisions(
@@ -3118,6 +3142,29 @@ mod tests {
         }
     }
 
+    fn make_goal_message(content: &str) -> ChatMessage {
+        crate::chat::internal_roles::goal("agent", 1, content, None, true, GoalBudget::default())
+    }
+
+    fn make_goal_event(content: &str, subkind: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            json!({
+                "subkind": subkind,
+                "source": "goal.test",
+                "payload": {"seq": 1},
+            }),
+        );
+        ChatMessage {
+            message_id: Uuid::new_v4().to_string(),
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn restore_keeps_plan_role() {
         let plan = make_plan_message("base plan");
@@ -3128,6 +3175,31 @@ mod tests {
         assert_eq!(sanitized.content.content_text_only(), "base plan");
         assert_eq!(sanitized.preserve, Some(true));
         assert_eq!(sanitized.extra["plan"]["version"], json!(1));
+    }
+
+    #[test]
+    fn restore_keeps_goal_and_goal_events() {
+        let goal = make_goal_message("ship the frog");
+        let delta = make_goal_event("tighten acceptance", "goal_delta");
+        let pursuit = make_goal_event("verifying", "goal_pursuit");
+
+        for message in [&goal, &delta, &pursuit] {
+            assert!(is_allowed_for_restore(message));
+        }
+        let restored_goal = sanitize_message_for_restore(&goal);
+        let restored_delta = sanitize_message_for_restore(&delta);
+        let restored_pursuit = sanitize_message_for_restore(&pursuit);
+
+        assert_eq!(restored_goal.role, "goal");
+        assert_eq!(restored_goal.extra["goal"]["version"], json!(1));
+        assert_eq!(
+            restored_delta.extra["event"]["subkind"],
+            json!("goal_delta")
+        );
+        assert_eq!(
+            restored_pursuit.extra["event"]["subkind"],
+            json!("goal_pursuit")
+        );
     }
 
     #[test]
@@ -3155,5 +3227,37 @@ mod tests {
             json!("plan_delta")
         );
         assert_eq!(branched_delta.extra["event"]["payload"]["seq"], json!(2));
+    }
+
+    #[test]
+    fn branch_keeps_goal_and_goal_events() {
+        let goal = make_goal_message("base goal");
+        let delta = make_goal_event("update", "goal_delta");
+        let pursuit = make_goal_event("verifying", "goal_pursuit");
+        let other_event = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "test",
+            json!({}),
+            "skip",
+        );
+
+        assert!(is_allowed_for_branch(&goal));
+        assert!(is_allowed_for_branch(&delta));
+        assert!(is_allowed_for_branch(&pursuit));
+        assert!(!is_allowed_for_branch(&other_event));
+        let branched_goal = sanitize_message_for_branch(&goal);
+        let branched_delta = sanitize_message_for_branch(&delta);
+        let branched_pursuit = sanitize_message_for_branch(&pursuit);
+
+        assert_eq!(branched_goal.role, "goal");
+        assert_eq!(branched_goal.extra["goal"]["version"], json!(1));
+        assert_eq!(
+            branched_delta.extra["event"]["subkind"],
+            json!("goal_delta")
+        );
+        assert_eq!(
+            branched_pursuit.extra["event"]["subkind"],
+            json!("goal_pursuit")
+        );
     }
 }

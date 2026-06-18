@@ -24,6 +24,8 @@ use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
+use refact_chat_api::GoalSnapshot;
+
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -327,6 +329,7 @@ pub struct LoadedTrajectory {
     pub source_path: PathBuf,
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
+    pub goal: Option<GoalSnapshot>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -378,7 +381,18 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     );
     snapshot.wake_up_at = session.wake_up_at;
     snapshot.waiting_for_card_ids = session.waiting_for_card_ids.clone();
+    snapshot.goal = session.goal.clone();
     snapshot
+}
+
+fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
+    goal.progress.turns_used = goal.progress.turns_used.min(goal.budget.max_turns);
+    goal.progress.tokens_used = goal.progress.tokens_used.min(goal.budget.max_tokens);
+    goal.progress.no_progress_turns = goal
+        .progress
+        .no_progress_turns
+        .min(goal.budget.no_progress_turns);
+    goal
 }
 
 pub async fn apply_mode_defaults_to_thread(
@@ -1119,6 +1133,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "link_type"
             | "root_chat_id"
             | "task_meta"
+            | "goal"
             | "browser_meta"
     )
 }
@@ -1668,6 +1683,12 @@ async fn load_trajectory_candidate(
         .get("waiting_for_card_ids")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let persisted_goal: Option<GoalSnapshot> = t
+        .get("goal")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .map(clamp_goal_snapshot_for_load);
+    let goal = super::session::goal_snapshot_from_messages(&messages, persisted_goal.as_ref())
+        .or(persisted_goal);
 
     let parent_id = t
         .get("parent_id")
@@ -1837,6 +1858,7 @@ async fn load_trajectory_candidate(
         source_path: traj_path,
         messages,
         thread,
+        goal,
         created_at,
         updated_at,
         wake_up_at,
@@ -2193,6 +2215,7 @@ pub async fn save_trajectory_snapshot(
         && snapshot.task_meta.is_none()
         && snapshot.buddy_meta.is_none()
         && snapshot.frozen_request_prefix.is_none()
+        && snapshot.goal.is_none()
         && existing_no_meta_path.is_none()
     {
         return Ok(());
@@ -2271,6 +2294,9 @@ pub async fn save_trajectory_snapshot(
     }
     if !snapshot.waiting_for_card_ids.is_empty() {
         trajectory["waiting_for_card_ids"] = json!(snapshot.waiting_for_card_ids);
+    }
+    if let Some(ref goal) = snapshot.goal {
+        trajectory["goal"] = serde_json::to_value(goal).unwrap_or_default();
     }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
@@ -2741,6 +2767,7 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.created_at = chrono::Utc::now().to_rfc3339();
     session.wake_up_at = None;
     session.waiting_for_card_ids.clear();
+    session.set_goal_projection(None);
     session.reset_compaction_runtime_state();
     session.external_reload_pending = None;
     let snapshot = session.snapshot();
@@ -2755,6 +2782,7 @@ fn apply_loaded_external_update_to_session(
     session.messages = loaded.messages;
     session.thread = loaded.thread;
     session.reset_compaction_runtime_state();
+    session.set_goal_projection(loaded.goal);
     session.created_at = loaded.created_at;
     session.wake_up_at = loaded.wake_up_at;
     session.waiting_for_card_ids = loaded.waiting_for_card_ids;
@@ -3784,6 +3812,7 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
                 | "cd_instruction"
                 | "compression_report"
                 | "plan"
+                | "goal"
                 | "event"
         ) {
             continue;
@@ -5471,7 +5500,10 @@ mod tests {
         ActiveCommandContext, BurstGuard, ChatEvent, CompressionPhase, CompressionReason,
         EventEnvelope,
     };
-    use refact_chat_api::{BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix};
+    use refact_chat_api::{
+        BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalBudget, GoalProgress,
+        GoalStatus,
+    };
     use serial_test::serial;
     use std::path::Path;
     use std::process::Command;
@@ -12574,6 +12606,12 @@ mod tests {
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),
+            goal: None,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -12663,6 +12701,12 @@ mod tests {
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: RuntimeState::default(),
+            goal: None,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -12890,6 +12934,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.wake_up_at, Some(wake_up_at));
+    }
+
+    #[test]
+    fn trajectory_snapshot_from_session_preserves_goal_projection() {
+        let mut session = ChatSession::new("goal-snapshot".to_string());
+        session.install_goal("agent", "ship the goal", true, GoalBudget::default());
+        session.goal.as_mut().unwrap().progress = GoalProgress {
+            turns_used: 2,
+            tokens_used: 345,
+            started_at_ms: 123,
+            no_progress_turns: 1,
+            last_nudge_at_ms: 456,
+        };
+        session.refresh_goal_runtime_mirror();
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+        let goal = snapshot.goal.expect("goal snapshot");
+
+        assert_eq!(goal.content, "ship the goal");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.progress.turns_used, 2);
+        assert_eq!(goal.progress.tokens_used, 345);
+        assert_eq!(goal.progress.no_progress_turns, 1);
+    }
+
+    #[tokio::test]
+    async fn goal_round_trips_through_trajectory_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let mut session = ChatSession::new("goal-roundtrip".to_string());
+        session.thread.title = "Goal Roundtrip".to_string();
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.install_goal("agent", "finish the card", true, GoalBudget::default());
+        session.add_message(crate::chat::internal_roles::goal_delta(
+            "tool.update_goal",
+            json!({"seq": 1, "at_ms": 999}),
+            "add tests",
+        ));
+        session.goal.as_mut().unwrap().progress = GoalProgress {
+            turns_used: 3,
+            tokens_used: 456,
+            started_at_ms: 111,
+            no_progress_turns: 1,
+            last_nudge_at_ms: 222,
+        };
+        session.refresh_goal_runtime_mirror();
+
+        let started_at_ms = session.goal.as_ref().unwrap().progress.started_at_ms;
+        let snapshot = trajectory_snapshot_from_session(&session);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "goal-roundtrip")
+            .await
+            .unwrap();
+        let loaded_goal = loaded.goal.clone().expect("loaded goal");
+
+        assert_eq!(
+            loaded_goal.content,
+            "finish the card\n\n---\n\n## Goal updates\n\nadd tests"
+        );
+        assert_eq!(loaded_goal.status, GoalStatus::Active);
+        assert_eq!(loaded_goal.progress.turns_used, 3);
+        assert_eq!(loaded_goal.progress.tokens_used, 456);
+        assert_eq!(loaded_goal.progress.no_progress_turns, 1);
+        assert_eq!(loaded_goal.progress.started_at_ms, started_at_ms);
+        assert_eq!(loaded_goal.transferred_from, None);
+        assert_eq!(loaded_goal.transferred_to, None);
+        assert!(loaded.messages.iter().any(|message| message.role == "goal"));
+        assert!(loaded.messages.iter().any(|message| {
+            message.role == "event" && message.extra["event"]["subkind"] == json!("goal_delta")
+        }));
+
+        let rehydrated = ChatSession::new_with_trajectory(
+            "goal-roundtrip".to_string(),
+            loaded.messages,
+            loaded.thread,
+            loaded.created_at,
+            loaded.wake_up_at,
+            loaded.waiting_for_card_ids,
+            loaded.goal,
+        );
+        assert_eq!(rehydrated.goal_turns_used, 3);
+        assert_eq!(rehydrated.goal_tokens_used, 456);
+        assert_eq!(rehydrated.goal_no_progress_turns, 1);
+        assert_eq!(rehydrated.event_seq, 0);
     }
 
     #[tokio::test]

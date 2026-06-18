@@ -229,7 +229,13 @@ fn is_excluded_from_segment(message: &ChatMessage) -> bool {
 }
 
 fn is_segment_boundary(message: &ChatMessage) -> bool {
-    message.role == "user" || message.role == crate::chat::internal_roles::PLAN_ROLE
+    matches!(
+        message.role.as_str(),
+        "user" | crate::chat::internal_roles::PLAN_ROLE | crate::chat::internal_roles::GOAL_ROLE
+    ) || matches!(
+        refact_chat_history::compression_exemption::event_subkind(message),
+        Some("goal_delta" | "goal_pursuit")
+    )
 }
 
 pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
@@ -482,8 +488,13 @@ fn current_tail_has_active_pending_tool_calls(messages: &[ChatMessage]) -> bool 
     let mut completed_context_file_after_call = HashSet::new();
 
     for message in messages[start..].iter().rev() {
-        if message.role == crate::chat::internal_roles::PLAN_ROLE
-            || is_trimmable_tail_diagnostic(message)
+        if matches!(
+            message.role.as_str(),
+            crate::chat::internal_roles::PLAN_ROLE | crate::chat::internal_roles::GOAL_ROLE
+        ) || matches!(
+            refact_chat_history::compression_exemption::event_subkind(message),
+            Some("goal_delta" | "goal_pursuit")
+        ) || is_trimmable_tail_diagnostic(message)
         {
             continue;
         }
@@ -2178,18 +2189,9 @@ fn emit_compression_status(
     }
     let state = session.runtime.state;
     let error = session.runtime.error.clone();
-    session.emit(ChatEvent::RuntimeUpdated {
-        goal_active: false,
-        goal_status: None,
-        goal_turns_used: 0,
-        goal_tokens_used: 0,
-        goal_no_progress_turns: 0,
-        state,
-        error,
-        is_compressing,
-        compression_phase: Some(phase),
-        compression_reason: reason,
-    });
+    session.refresh_goal_runtime_mirror();
+    let event = session.runtime_update_event(state, error, is_compressing, Some(phase), reason);
+    session.emit(event);
 }
 
 fn set_compression_status_quiet(
@@ -2211,6 +2213,7 @@ fn set_compression_status_quiet(
     session.runtime.compression_phase = Some(phase);
     session.runtime.compression_reason = reason;
     session.active_compression_attempt = None;
+    session.refresh_goal_runtime_mirror();
 }
 
 fn compression_reason_outcome_text(reason: CompressionReason) -> &'static str {
@@ -3290,6 +3293,30 @@ mod tests {
 
     fn plan(text: &str) -> ChatMessage {
         crate::chat::internal_roles::plan("task_planner", 1, text.to_string(), None)
+    }
+
+    fn goal(text: &str) -> ChatMessage {
+        crate::chat::internal_roles::goal(
+            "task_agent",
+            1,
+            text.to_string(),
+            None,
+            true,
+            crate::chat::types::GoalBudget::default(),
+        )
+    }
+
+    fn goal_event(text: &str, subkind: &str) -> ChatMessage {
+        crate::chat::internal_roles::event(
+            if subkind == "goal_pursuit" {
+                crate::chat::internal_roles::EventSubkind::GoalPursuit
+            } else {
+                crate::chat::internal_roles::EventSubkind::GoalDelta
+            },
+            "test.summarization",
+            json!({"seq": 1}),
+            text.to_string(),
+        )
     }
 
     fn cd_instruction(text: &str) -> ChatMessage {
@@ -4426,6 +4453,51 @@ mod tests {
             closed_non_user_segments(&messages),
             vec![SummarySegment { start: 1, end: 1 }]
         );
+    }
+
+    #[test]
+    fn goal_roles_split_segments_like_plan_roles() {
+        let messages = vec![
+            user("a"),
+            assistant("before goal"),
+            goal("goal anchor"),
+            assistant("after goal"),
+            user("b"),
+        ];
+
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![
+                SummarySegment { start: 1, end: 1 },
+                SummarySegment { start: 3, end: 3 }
+            ]
+        );
+    }
+
+    #[test]
+    fn goal_events_split_segments_and_tail_pending_tool_scan_skips_them() {
+        let messages = vec![
+            user("a"),
+            assistant("before delta"),
+            goal_event("delta", "goal_delta"),
+            assistant("after delta"),
+            user("b"),
+        ];
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![
+                SummarySegment { start: 1, end: 1 },
+                SummarySegment { start: 3, end: 3 }
+            ]
+        );
+
+        let tail = vec![
+            user("run"),
+            assistant_with_tool_call(),
+            tool("ok"),
+            goal_event("verifying", "goal_pursuit"),
+        ];
+        assert!(!current_tail_has_active_pending_tool_calls(&tail));
     }
 
     #[test]
