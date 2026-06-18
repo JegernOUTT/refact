@@ -181,6 +181,20 @@ export function useAllChatsSubscription() {
     }
   }, []);
 
+  const clearRetryStateForUndesiredChats = useCallback(
+    (desired: Set<string>) => {
+      for (const chatId of Array.from(timeoutRef.current.keys())) {
+        if (desired.has(chatId)) continue;
+        clearPendingTimeout(chatId);
+      }
+      for (const chatId of Array.from(retryCountRef.current.keys())) {
+        if (desired.has(chatId)) continue;
+        retryCountRef.current.delete(chatId);
+      }
+    },
+    [clearPendingTimeout],
+  );
+
   // Clear all per-chat streaming state. Used by unsubscribe() and the
   // onError/onDisconnected callbacks so state never leaks between reconnects.
   const clearChatStreamState = useCallback((chatId: string) => {
@@ -596,7 +610,9 @@ export function useAllChatsSubscription() {
     hasEndpointRef.current = hasEndpoint;
 
     if (!hasEndpoint) {
-      desiredIdsRef.current = new Set();
+      const desired = new Set<string>();
+      desiredIdsRef.current = desired;
+      clearRetryStateForUndesiredChats(desired);
       for (const chatId of Array.from(subscriptionsRef.current.keys())) {
         unsubscribe(chatId);
       }
@@ -610,6 +626,7 @@ export function useAllChatsSubscription() {
     });
     const desired = new Set(desiredOrder);
     desiredIdsRef.current = desired;
+    clearRetryStateForUndesiredChats(desired);
 
     for (const id of subscribedIds) {
       if (!desiredIdsRef.current.has(id)) {
@@ -629,6 +646,7 @@ export function useAllChatsSubscription() {
     hasEndpoint,
     config.lspPort,
     endpointIdentity,
+    clearRetryStateForUndesiredChats,
     subscribe,
     subscriptionConfig,
     unsubscribe,
