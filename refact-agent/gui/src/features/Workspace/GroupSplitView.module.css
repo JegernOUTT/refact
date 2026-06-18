@@ -274,7 +274,7 @@
 }
 
 .stackedLayout {
-  overflow: auto hidden;
+  overflow: hidden auto;
 }
 
 .stackedLayout .tree {
