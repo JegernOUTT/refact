@@ -69,7 +69,7 @@ impl Tool for ToolSubagent {
                         "string",
                         "Optional comma-separated analysis tools (e.g. 'cat,tree,search_pattern,shell'). Empty means use the configured `subagent` toolset.",
                     ),
-                    ("max_steps", "string", "Step budget (default 15, max 50)."),
+                    ("max_steps", "string", "Step budget (default 50, max 50)."),
                     (
                         "wait",
                         "string",
@@ -242,7 +242,7 @@ fn parse_optional_usize(
 }
 
 fn parse_max_steps(args: &HashMap<String, Value>) -> Result<usize, String> {
-    Ok(parse_optional_usize(args, "max_steps", 15)?.clamp(1, 50))
+    Ok(parse_optional_usize(args, "max_steps", 50)?.clamp(1, 50))
 }
 
 fn parse_optional_bool(
@@ -876,7 +876,7 @@ mod tests {
         let default = HashMap::new();
         assert_eq!(parse_max_steps(&low).unwrap(), 1);
         assert_eq!(parse_max_steps(&high).unwrap(), 50);
-        assert_eq!(parse_max_steps(&default).unwrap(), 15);
+        assert_eq!(parse_max_steps(&default).unwrap(), 50);
     }
 
     #[test]

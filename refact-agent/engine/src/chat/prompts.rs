@@ -2000,6 +2000,7 @@ async fn run_task_briefing_subchat(
                     parent_subchat_tx: None,
                     abort_flag: None,
                     subchat_depth: 0,
+                    final_step_force_answer: false,
                     buddy_meta: None,
                 };
                 let result = crate::subchat::run_subchat(app.gcx.clone(), messages, config).await?;
