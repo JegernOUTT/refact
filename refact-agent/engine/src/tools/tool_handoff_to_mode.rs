@@ -242,7 +242,9 @@ async fn replace_live_source_messages_if_present(
         sessions.get(chat_id).cloned()
     };
     if let Some(session_arc) = session_arc {
-        session_arc.lock().await.replace_messages(messages);
+        let mut session = session_arc.lock().await;
+        session.replace_messages(messages);
+        session.emit_goal_status();
     }
 }
 
@@ -515,7 +517,10 @@ impl Tool for ToolHandoffToMode {
             epoch_ms_now(),
         );
         if transferred_goal.transferred() {
-            insert_goal_messages_before_plan(&mut new_messages, transferred_goal.target_messages.clone());
+            insert_goal_messages_before_plan(
+                &mut new_messages,
+                transferred_goal.target_messages.clone(),
+            );
             replace_live_source_messages_if_present(
                 gcx.clone(),
                 &chat_id,
@@ -969,6 +974,158 @@ mod tests {
             .iter()
             .skip(1)
             .any(|message| message.content.content_text_only().contains("Lineage plan")));
+    }
+
+    #[tokio::test]
+    async fn handoff_goal_transfer_recomputes_live_source_and_target_projections() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Goal Transfer Task")
+            .await
+            .unwrap();
+        let source_chat_id = "source-goal-owner";
+        let target_chat_id = "planner-goal-owner";
+
+        let mut source = crate::chat::types::ChatSession::new(source_chat_id.to_string());
+        source.thread.mode = "agent".to_string();
+        source.thread.tool_use = "agent".to_string();
+        source.thread.model = "model".to_string();
+        source.thread.root_chat_id = Some(target_chat_id.to_string());
+        source.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: task.id.clone(),
+            role: "subchats".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(target_chat_id.to_string()),
+        });
+        source.install_goal(
+            "agent",
+            "Finish the transferred goal",
+            true,
+            refact_chat_api::GoalBudget::default(),
+        );
+        source.add_message(ChatMessage::new(
+            "user".to_string(),
+            "Please plan this goal.".to_string(),
+        ));
+
+        let mut target = crate::chat::types::ChatSession::new(target_chat_id.to_string());
+        target.thread.mode = "task_planner".to_string();
+        target.thread.tool_use = "agent".to_string();
+        target.thread.model = "model".to_string();
+        target.thread.root_chat_id = Some(target_chat_id.to_string());
+        target.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: task.id.clone(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(target_chat_id.to_string()),
+        });
+
+        let source_arc = Arc::new(tokio::sync::Mutex::new(source));
+        let target_arc = Arc::new(tokio::sync::Mutex::new(target));
+        let mut source_rx = source_arc.lock().await.subscribe();
+        let mut target_rx = target_arc.lock().await.subscribe();
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(source_chat_id.to_string(), source_arc.clone());
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(target_chat_id.to_string(), target_arc.clone());
+
+        let ccx = handoff_ccx_with_chat_id(app, source_chat_id).await;
+        let mut tool = ToolHandoffToMode {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"handoff-call".to_string(),
+            &handoff_args("Transfer projection regression plan"),
+        )
+        .await
+        .unwrap();
+
+        let source = source_arc.lock().await;
+        let source_goal = source.goal.as_ref().unwrap();
+        assert!(!source_goal.active);
+        assert_eq!(source_goal.status, refact_chat_api::GoalStatus::Transferred);
+        assert_eq!(source_goal.transferred_to.as_deref(), Some(target_chat_id));
+        assert!(!source.goal_active);
+        assert_eq!(
+            source.goal_status,
+            Some(refact_chat_api::GoalStatus::Transferred)
+        );
+        assert!(!source.runtime.goal_active);
+        assert_eq!(
+            source.runtime.goal_status,
+            Some(refact_chat_api::GoalStatus::Transferred)
+        );
+        let source_is_active_owner =
+            source_goal.active && source_goal.status == refact_chat_api::GoalStatus::Active;
+        drop(source);
+
+        let target = target_arc.lock().await;
+        let target_goal = target.goal.as_ref().unwrap();
+        assert!(target_goal.active);
+        assert_eq!(target_goal.status, refact_chat_api::GoalStatus::Active);
+        assert_eq!(
+            target_goal.transferred_from.as_deref(),
+            Some(source_chat_id)
+        );
+        assert!(target.goal_active);
+        assert_eq!(
+            target.goal_status,
+            Some(refact_chat_api::GoalStatus::Active)
+        );
+        assert!(target.runtime.goal_active);
+        assert_eq!(
+            target.runtime.goal_status,
+            Some(refact_chat_api::GoalStatus::Active)
+        );
+
+        let active_owners = usize::from(source_is_active_owner)
+            + usize::from(
+                target_goal.active && target_goal.status == refact_chat_api::GoalStatus::Active,
+            );
+        assert_eq!(active_owners, 1);
+
+        let mut saw_source_runtime_transferred = false;
+        while let Ok(json) = source_rx.try_recv() {
+            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let crate::chat::types::ChatEvent::RuntimeUpdated {
+                goal_active,
+                goal_status,
+                ..
+            } = envelope.event
+            {
+                if !goal_active && goal_status == Some(refact_chat_api::GoalStatus::Transferred) {
+                    saw_source_runtime_transferred = true;
+                }
+            }
+        }
+        assert!(saw_source_runtime_transferred);
+
+        let mut saw_target_active_snapshot = false;
+        while let Ok(json) = target_rx.try_recv() {
+            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let crate::chat::types::ChatEvent::Snapshot { goal, runtime, .. } = envelope.event {
+                if goal.is_some_and(|goal| {
+                    goal.active
+                        && goal.status == refact_chat_api::GoalStatus::Active
+                        && goal.transferred_from.as_deref() == Some(source_chat_id)
+                }) && runtime.goal_active
+                    && runtime.goal_status == Some(refact_chat_api::GoalStatus::Active)
+                {
+                    saw_target_active_snapshot = true;
+                }
+            }
+        }
+        assert!(saw_target_active_snapshot);
     }
 
     #[tokio::test]
