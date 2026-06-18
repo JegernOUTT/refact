@@ -13,7 +13,7 @@ use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
-use crate::chat::internal_roles::mode_switch_event;
+use crate::chat::internal_roles::{self, mode_switch_event, EventSubkind};
 use crate::chat::plan_role;
 use crate::yaml_configs::customization_registry::get_mode_config;
 
@@ -611,6 +611,130 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
     true
 }
 
+fn epoch_ms_now() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
+}
+
+fn goal_exists_including_pending(session: &ChatSession) -> bool {
+    session.goal.is_some()
+        || crate::chat::goal_role::current_base_goal(session).is_some()
+        || session
+            .post_tool_side_effects
+            .iter()
+            .any(|message| message.role == internal_roles::GOAL_ROLE)
+}
+
+fn goal_base_exists_including_pending(session: &ChatSession) -> bool {
+    crate::chat::goal_role::current_base_goal(session).is_some()
+        || session
+            .post_tool_side_effects
+            .iter()
+            .any(|message| message.role == internal_roles::GOAL_ROLE)
+}
+
+fn goal_delta_count_including_pending(session: &ChatSession) -> usize {
+    crate::chat::goal_role::goal_delta_events(session).len()
+        + session
+            .post_tool_side_effects
+            .iter()
+            .filter(|message| is_goal_delta_event(message))
+            .count()
+}
+
+fn update_goal_result(
+    seq: usize,
+    truncation: Option<internal_roles::PlanDeltaTruncation>,
+) -> serde_json::Value {
+    let Some(truncation) = truncation else {
+        return serde_json::json!({"seq": seq, "truncated": false});
+    };
+    serde_json::json!({
+        "seq": seq,
+        "truncated": true,
+        "original_chars": truncation.original_chars,
+        "kept_chars": truncation.kept_chars,
+    })
+}
+
+fn handle_set_goal_command(
+    session: &mut ChatSession,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    if content.trim().is_empty() {
+        return Err("argument `content` must be non-empty".to_string());
+    }
+    if goal_exists_including_pending(session) {
+        return Err("goal already exists; use update_goal".to_string());
+    }
+    let current_mode =
+        crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&session.thread.mode)
+            .to_string();
+    let report = session.install_goal(&current_mode, &content, true, GoalBudget::default());
+    session.add_message(internal_roles::event(
+        EventSubkind::SystemNotice,
+        "chat.command.set_goal",
+        serde_json::json!({"version": report.version}),
+        format!("Goal updated to v{}", report.version),
+    ));
+    Ok(serde_json::json!({
+        "version": report.version,
+        "supersedes": report.supersedes,
+    }))
+}
+
+fn handle_update_goal_command(
+    session: &mut ChatSession,
+    note: String,
+) -> Result<serde_json::Value, String> {
+    if note.trim().is_empty() {
+        return Err("argument `note` must be non-empty".to_string());
+    }
+    if !goal_base_exists_including_pending(session) {
+        return Err("no goal to update; call set_goal first".to_string());
+    }
+    let seq = goal_delta_count_including_pending(session) + 1;
+    let (delta, truncation) = internal_roles::goal_delta_with_truncation(
+        "chat.command.update_goal",
+        serde_json::json!({"seq": seq, "at_ms": epoch_ms_now()}),
+        note,
+    );
+    session.add_message(delta);
+    session.emit_goal_status();
+    Ok(update_goal_result(seq, truncation))
+}
+
+fn handle_goal_control_command(
+    session: &mut ChatSession,
+    action: String,
+) -> Result<serde_json::Value, String> {
+    if session.goal.is_none() {
+        return Err("no goal to control; call set_goal first".to_string());
+    }
+    let normalized = action.trim().to_ascii_lowercase();
+    let status = match normalized.as_str() {
+        "pause" => GoalStatus::Paused,
+        "resume" => GoalStatus::Active,
+        "stop" => GoalStatus::Stopped,
+        _ => return Err("goal_control action must be pause, resume, or stop".to_string()),
+    };
+    session.goal_set_status(status);
+    Ok(serde_json::json!({
+        "action": normalized,
+        "status": status,
+    }))
+}
+
+fn emit_goal_command_error(session: &mut ChatSession, error: String) {
+    let event = session.runtime_update_event(
+        SessionState::Error,
+        Some(error),
+        session.is_compressing,
+        session.compression_phase,
+        session.compression_reason,
+    );
+    session.emit(event);
+}
+
 #[derive(Clone)]
 pub struct WorktreeSetParamsUpdate {
     pub worktree: Option<WorktreeMeta>,
@@ -866,11 +990,47 @@ pub async fn process_command_queue(
         };
 
         match request.command {
-            ChatCommand::SetGoal { .. }
-            | ChatCommand::UpdateGoal { .. }
-            | ChatCommand::GoalControl { .. } => {
-                // Goal command processing is implemented in card G-6; this placeholder
-                // keeps the match exhaustive after G-0 added the goal command variants.
+            ChatCommand::SetGoal { content } => {
+                let result = {
+                    let mut session = session_arc.lock().await;
+                    handle_set_goal_command(&mut session, content)
+                };
+                match result {
+                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Err(error) => {
+                        warn!("SetGoal command rejected: {}", error);
+                        let mut session = session_arc.lock().await;
+                        emit_goal_command_error(&mut session, error);
+                    }
+                }
+            }
+            ChatCommand::UpdateGoal { note } => {
+                let result = {
+                    let mut session = session_arc.lock().await;
+                    handle_update_goal_command(&mut session, note)
+                };
+                match result {
+                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Err(error) => {
+                        warn!("UpdateGoal command rejected: {}", error);
+                        let mut session = session_arc.lock().await;
+                        emit_goal_command_error(&mut session, error);
+                    }
+                }
+            }
+            ChatCommand::GoalControl { action } => {
+                let result = {
+                    let mut session = session_arc.lock().await;
+                    handle_goal_control_command(&mut session, action)
+                };
+                match result {
+                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Err(error) => {
+                        warn!("GoalControl command rejected: {}", error);
+                        let mut session = session_arc.lock().await;
+                        emit_goal_command_error(&mut session, error);
+                    }
+                }
             }
             ChatCommand::UserMessage {
                 mut content,
@@ -3163,6 +3323,95 @@ mod tests {
             extra,
             ..Default::default()
         }
+    }
+
+    fn drain_events(rx: &mut tokio::sync::broadcast::Receiver<Arc<String>>) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        while let Ok(json) = rx.try_recv() {
+            let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+            events.push(envelope.event);
+        }
+        events
+    }
+
+    #[test]
+    fn goal_budget_set_goal_command_installs_snapshot_and_runtime() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        let mut rx = session.subscribe();
+
+        let result = handle_set_goal_command(&mut session, "Ship the pond".to_string()).unwrap();
+
+        assert_eq!(result, json!({"version": 1, "supersedes": null}));
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.content, "Ship the pond");
+        assert!(goal.active);
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.progress.turns_used, 0);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert!(drain_events(&mut rx).into_iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                goal_active: true,
+                goal_status: Some(GoalStatus::Active),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn goal_budget_set_goal_command_rejects_when_exists() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "First".to_string()).unwrap();
+
+        let error = handle_set_goal_command(&mut session, "Second".to_string()).unwrap_err();
+
+        assert_eq!(error, "goal already exists; use update_goal");
+        assert_eq!(session.goal.as_ref().unwrap().content, "First");
+    }
+
+    #[test]
+    fn goal_budget_update_goal_command_appends_delta_and_emits_runtime() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string()).unwrap();
+        let mut rx = session.subscribe();
+
+        let result = handle_update_goal_command(&mut session, "Add tests".to_string()).unwrap();
+
+        assert_eq!(result, json!({"seq": 1, "truncated": false}));
+        assert_eq!(crate::chat::goal_role::goal_delta_events(&session).len(), 1);
+        assert_eq!(
+            session.goal.as_ref().unwrap().content,
+            "Base\n\n---\n\n## Goal updates\n\nAdd tests"
+        );
+        assert!(drain_events(&mut rx).into_iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                goal_active: true,
+                goal_status: Some(GoalStatus::Active),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn goal_budget_goal_control_command_transitions_status() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string()).unwrap();
+
+        let paused = handle_goal_control_command(&mut session, "pause".to_string()).unwrap();
+        assert_eq!(paused, json!({"action": "pause", "status": "paused"}));
+        assert_eq!(session.goal_status, Some(GoalStatus::Paused));
+        assert!(!session.goal_can_pursue());
+
+        let resumed = handle_goal_control_command(&mut session, "resume".to_string()).unwrap();
+        assert_eq!(resumed, json!({"action": "resume", "status": "active"}));
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert!(session.goal_can_pursue());
+
+        let stopped = handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
+        assert_eq!(stopped, json!({"action": "stop", "status": "stopped"}));
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert!(!session.goal_can_pursue());
     }
 
     #[test]

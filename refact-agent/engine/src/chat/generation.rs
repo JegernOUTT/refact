@@ -1746,6 +1746,9 @@ pub fn start_generation(
                     }
                     maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
                         .await;
+                    if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    }
                     break;
                 }
                 ToolStepOutcome::Paused => {
@@ -2791,6 +2794,63 @@ fn is_result_empty(result: &ChoiceFinal) -> bool {
         && result.server_content_blocks.is_empty()
 }
 
+fn event_payload_bool(message: &ChatMessage, subkind: &str, key: &str) -> bool {
+    message.role == crate::chat::internal_roles::EVENT_ROLE
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(|value| value.as_str())
+            == Some(subkind)
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("payload"))
+            .and_then(|payload| payload.get(key))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn assistant_goal_pursuit_accounting_enabled(message: &ChatMessage) -> bool {
+    message
+        .extra
+        .get("goal_pursuit")
+        .and_then(|value| value.get("account_progress"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn latest_goal_pursuit_usage(session: &ChatSession) -> Option<ChatUsage> {
+    let goal = session.goal.as_ref()?;
+    if !goal.active || goal.status != GoalStatus::Active {
+        return None;
+    }
+    let assistant_index = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == "assistant")?;
+    let assistant = &session.messages[assistant_index];
+    let marked_on_assistant = assistant_goal_pursuit_accounting_enabled(assistant);
+    let marked_before_assistant = session.messages[..assistant_index]
+        .iter()
+        .rev()
+        .take_while(|message| message.role != "assistant")
+        .any(|message| event_payload_bool(message, "goal_pursuit", "account_progress"));
+    if marked_on_assistant || marked_before_assistant {
+        assistant.usage.clone()
+    } else {
+        None
+    }
+}
+
+async fn maybe_record_goal_pursuit_progress(session_arc: Arc<AMutex<ChatSession>>) -> bool {
+    let mut session = session_arc.lock().await;
+    let Some(usage) = latest_goal_pursuit_usage(&session) else {
+        return false;
+    };
+    session.goal_record_progress_from_usage(&usage)
+}
+
 fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stage: &str) {
     if result.finish_reason.as_deref() != Some("tool_calls") || !result.tool_calls_raw.is_empty() {
         return;
@@ -2889,6 +2949,72 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn goal_budget_pursuit_usage_requires_marker() {
+        let mut session = ChatSession::new("goal-generation".to_string());
+        session.install_goal("agent", "ship it", true, GoalBudget::default());
+        session.add_message(make_assistant_msg("not a pursuit"));
+        session.messages.last_mut().unwrap().usage = Some(ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        });
+        assert!(latest_goal_pursuit_usage(&session).is_none());
+
+        session.messages.last_mut().unwrap().extra.insert(
+            "goal_pursuit".to_string(),
+            json!({"account_progress": true}),
+        );
+        let usage = latest_goal_pursuit_usage(&session).unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        assert!(session.goal_record_progress_from_usage(&usage));
+        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
+        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 15);
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+    }
+
+    #[test]
+    fn goal_budget_pursuit_usage_records_expiring_turn() {
+        let mut session = ChatSession::new("goal-generation-expiring".to_string());
+        session.install_goal(
+            "agent",
+            "ship it",
+            true,
+            GoalBudget {
+                max_turns: 10,
+                max_minutes: 1,
+                max_tokens: 1_000,
+                cooldown_ms: 1_500,
+                no_progress_token_threshold: 10,
+                no_progress_turns: 2,
+            },
+        );
+        session.goal.as_mut().unwrap().progress.started_at_ms = 1;
+        let mut assistant = make_assistant_msg("late pursuit");
+        assistant.usage = Some(ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 15,
+            total_tokens: 25,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        });
+        assistant.extra.insert(
+            "goal_pursuit".to_string(),
+            json!({"account_progress": true}),
+        );
+        session.add_message(assistant);
+
+        let usage = latest_goal_pursuit_usage(&session).unwrap();
+        assert!(session.goal_record_progress_from_usage(&usage));
+        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
+        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 25);
+        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
     }
 
     fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
