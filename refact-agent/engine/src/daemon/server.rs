@@ -659,6 +659,7 @@ mod tests {
             WorkerStatusReport {
                 project_id: project_id.to_string(),
                 pid,
+                instance_token: "token".to_string(),
                 lsp_clients,
                 busy_chats,
                 exec_running: 0,
@@ -680,6 +681,7 @@ mod tests {
                 &entry.id,
                 123,
                 crate::daemon::supervisor::WorkerState::Ready,
+                "token",
             )
             .await;
 
@@ -741,6 +743,7 @@ mod tests {
             WorkerStatusReport {
                 project_id: project_id.to_string(),
                 pid,
+                instance_token: "token".to_string(),
                 lsp_clients: 1,
                 busy_chats: 0,
                 exec_running: 0,
@@ -761,6 +764,7 @@ mod tests {
                 &entry.id,
                 123,
                 crate::daemon::supervisor::WorkerState::Ready,
+                "token",
             )
             .await;
 

@@ -536,6 +536,7 @@ mod tests {
         WorkerStatusReport {
             project_id: project_id.to_string(),
             pid: 123,
+            instance_token: "token".to_string(),
             lsp_clients,
             busy_chats: 2,
             exec_running: 1,

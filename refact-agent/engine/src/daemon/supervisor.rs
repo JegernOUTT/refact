@@ -21,7 +21,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::daemon::events::EventBus;
 use crate::daemon::ports::PortPair;
 use crate::daemon::projects::{ProjectEntry, ProjectSettings};
-use crate::daemon::state::now_ms;
+use crate::daemon::state::{now_ms, ProxyActivity};
 
 const READINESS_POLL: Duration = Duration::from_millis(250);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(120);
@@ -77,6 +77,7 @@ impl From<&ProjectEntry> for WorkerLaunchSpec {
 struct WorkerRecord {
     info: WorkerInfo,
     child: Option<Child>,
+    instance_token: Option<String>,
     generation: u64,
     crash_history: VecDeque<u64>,
     monitor_task: Option<JoinHandle<()>>,
@@ -116,6 +117,7 @@ pub struct Supervisor {
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
+    proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
     proxy_restarts: Mutex<ProxyRestartTracker>,
     child_reap_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
@@ -130,6 +132,7 @@ impl Supervisor {
             daemon_dir,
             daemon_port,
             Arc::new(SyncRwLock::new(HashMap::new())),
+            Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             None,
         )
@@ -140,6 +143,7 @@ impl Supervisor {
         daemon_dir: PathBuf,
         daemon_port: u16,
         cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+        proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
         idle_timeout_secs: u64,
         daemon_auth_token: Option<String>,
     ) -> Arc<Self> {
@@ -153,6 +157,7 @@ impl Supervisor {
             cron_pending,
             reserved_ports: Arc::new(SyncMutex::new(HashSet::new())),
             project_liveness: RwLock::new(HashMap::new()),
+            proxy_activity,
             proxy_restarts: Mutex::new(ProxyRestartTracker::default()),
             child_reap_tasks: Mutex::new(JoinSet::new()),
             idle_timeout_secs,
@@ -314,7 +319,15 @@ impl Supervisor {
         Some(record.generation)
     }
 
-    pub async fn worker_pid_matches(&self, project_id: &str, pid: u32) -> bool {
+    pub async fn worker_identity_matches(
+        &self,
+        project_id: &str,
+        pid: u32,
+        instance_token: &str,
+    ) -> bool {
+        if instance_token.is_empty() {
+            return false;
+        }
         let Some(slot) = self.get_slot(project_id).await else {
             return false;
         };
@@ -323,6 +336,7 @@ impl Supervisor {
             record.info.state,
             WorkerState::Ready | WorkerState::Starting
         ) && record.info.pid == Some(pid)
+            && record.instance_token.as_deref() == Some(instance_token)
     }
 
     #[cfg(test)]
@@ -336,10 +350,12 @@ impl Supervisor {
         project_id: &str,
         pid: u32,
         state: WorkerState,
+        instance_token: &str,
     ) {
         let slot = self.slot_for(project_id).await;
         let mut record = slot.record.lock().await;
         record.generation = record.generation.saturating_add(1);
+        record.instance_token = Some(instance_token.to_string());
         record.info = WorkerInfo {
             project_id: project_id.to_string(),
             pid: Some(pid),
@@ -457,6 +473,15 @@ impl Supervisor {
         {
             return true;
         }
+        if self
+            .proxy_activity
+            .read()
+            .get(project_id)
+            .map(|activity| activity.live_proxy_streams > 0)
+            .unwrap_or(false)
+        {
+            return true;
+        }
         let liveness = self.project_liveness.read().await.get(project_id).cloned();
         let Some(liveness) = liveness else {
             return false;
@@ -493,6 +518,7 @@ impl Supervisor {
                     return Some(record.info.clone());
                 }
                 record.child = None;
+                record.instance_token = None;
                 record.info.pid = None;
                 None
             }
@@ -500,6 +526,7 @@ impl Supervisor {
                 if child_is_alive(&mut record.child) {
                     return Some(record.info.clone());
                 }
+                record.instance_token = None;
                 record.info.pid = None;
                 None
             }
@@ -537,6 +564,7 @@ impl Supervisor {
                 abort_task(&mut record.monitor_task);
                 record.generation = record.generation.saturating_add(1);
                 record.child = Some(child);
+                record.instance_token = Some(nonce.clone());
                 record.info = WorkerInfo {
                     project_id: spec.project_id.clone(),
                     pid,
@@ -998,6 +1026,7 @@ impl Supervisor {
                 return false;
             }
             record.info.pid = None;
+            record.instance_token = None;
             record.info.state = WorkerState::Stopped;
             record.info.last_error = None;
             record.info.clone()
@@ -1031,6 +1060,7 @@ impl Supervisor {
         let delay =
             next_restart_delay_from_window(&record.crash_history, now).map(runtime_restart_delay);
         record.child = None;
+        record.instance_token = None;
         record.info.pid = None;
         record.info.last_error = Some(match exit_code {
             Some(code) => format!("{reason} (exit code {code})"),
@@ -1151,6 +1181,7 @@ impl Supervisor {
         let info = {
             let mut record = slot.record.lock().await;
             record.child = None;
+            record.instance_token = None;
             record.info.pid = None;
             record.info.state = WorkerState::Stopped;
             record.info.last_error = None;
@@ -1237,6 +1268,7 @@ impl Supervisor {
                     return;
                 }
                 record.info.pid = None;
+                record.instance_token = None;
                 if matches!(record.info.state, WorkerState::Stopping) {
                     record.info.state = WorkerState::Stopped;
                     record.info.last_error = None;
@@ -1262,6 +1294,7 @@ impl Supervisor {
     ) -> WorkerInfo {
         let mut record = slot.record.lock().await;
         record.child = None;
+        record.instance_token = None;
         record.info = WorkerInfo {
             project_id: project_id.to_string(),
             pid: None,
@@ -1315,6 +1348,7 @@ impl WorkerSlot {
                     last_error: None,
                 },
                 child: None,
+                instance_token: None,
                 generation: 0,
                 crash_history: VecDeque::new(),
                 monitor_task: None,
@@ -1448,6 +1482,7 @@ async fn poll_generation_child(
         Ok(Some(status)) => {
             let code = status.code();
             record.child = None;
+            record.instance_token = None;
             record.info.pid = None;
             Ok(ChildPoll::Exited(code))
         }
@@ -1740,6 +1775,7 @@ mod tests {
             EventBus::new(dir.path().join("events.jsonl")),
             dir.path().join("daemon"),
             8488,
+            Arc::new(SyncRwLock::new(HashMap::new())),
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             Some("secret-token".to_string()),

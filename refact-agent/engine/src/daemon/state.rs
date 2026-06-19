@@ -77,7 +77,7 @@ pub struct DaemonState {
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
-    pub proxy_activity: SyncRwLock<HashMap<String, ProxyActivity>>,
+    pub proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
     pub proxy_stream_client: reqwest::Client,
@@ -108,6 +108,7 @@ impl DaemonState {
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
+        let proxy_activity = Arc::new(SyncRwLock::new(HashMap::new()));
         let worker_auth_token = auth_token.clone().or_else(|| {
             config
                 .hooks
@@ -120,6 +121,7 @@ impl DaemonState {
             daemon_dir.clone(),
             daemon_port,
             cron_pending.clone(),
+            proxy_activity.clone(),
             config.idle_timeout_secs,
             worker_auth_token,
         );
@@ -145,7 +147,7 @@ impl DaemonState {
                 daemon_dir.join("projects.json"),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
-            proxy_activity: SyncRwLock::new(HashMap::new()),
+            proxy_activity,
             supervisor,
             proxy_client,
             proxy_stream_client,
@@ -248,7 +250,7 @@ impl DaemonState {
         }
         if !self
             .supervisor
-            .worker_pid_matches(&project_id, report.pid)
+            .worker_identity_matches(&project_id, report.pid, &report.instance_token)
             .await
         {
             return Err("worker status does not match the current worker".to_string());
@@ -696,6 +698,7 @@ mod tests {
         WorkerStatusReport {
             project_id: "project".to_string(),
             pid: 7,
+            instance_token: "token".to_string(),
             lsp_clients,
             busy_chats,
             exec_running,

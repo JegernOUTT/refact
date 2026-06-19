@@ -538,6 +538,41 @@ async fn concurrent_proxy_failures_queue_one_restart_for_generation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn active_proxy_stream_keeps_killed_idle_worker_wanted_for_restart() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "active-stream-project");
+    let config = DaemonConfig {
+        idle_timeout_secs: 1,
+        ..DaemonConfig::default()
+    };
+    let state = DaemonState::new_with_daemon_dir(
+        config,
+        EventBus::new(dir.path().join("events.jsonl")),
+        None,
+        dir.path().join("daemon"),
+        0,
+    );
+
+    let info = state.supervisor.ensure_worker(&entry).await.unwrap();
+    let pid = info.pid.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    state.increment_live_proxy_stream(&entry.id).await;
+    kill_pid(pid);
+
+    let restarted = wait_for_ready_with_new_pid(&state.supervisor, &entry.id, pid).await;
+
+    assert_eq!(restarted.state, WorkerState::Ready);
+    state.decrement_live_proxy_stream(&entry.id);
+    state.supervisor.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stop_all_stops_children_for_daemon_shutdown() {
     let Some(_env) = EnvGuard::set(false) else {
         return;
@@ -585,19 +620,58 @@ async fn auth_enabled_daemon_accepts_fake_worker_status() {
 
     let info = state.supervisor.ensure_worker(&entry).await.unwrap();
     assert_eq!(info.state, WorkerState::Ready);
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Some(report) = state.latest_worker_status(&entry.id).await {
-            assert_eq!(report.project_id, entry.id);
-            assert_eq!(report.pid, info.pid.unwrap_or_default());
-            break;
+    let accepted = {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(report) = state.latest_worker_status(&entry.id).await {
+                assert_eq!(report.project_id, entry.id);
+                assert_eq!(report.pid, info.pid.unwrap_or_default());
+                break report;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker status was not accepted in time"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "worker status was not accepted in time"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://127.0.0.1:{port}/daemon/v1/worker-status");
+    let mut wrong_token = accepted.clone();
+    wrong_token.instance_token = "wrong-token".to_string();
+    let response = client
+        .post(&url)
+        .bearer_auth("secret-token")
+        .json(&wrong_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let mut empty_token = accepted.clone();
+    empty_token.instance_token.clear();
+    let response = client
+        .post(&url)
+        .bearer_auth("secret-token")
+        .json(&empty_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let response = client
+        .post(&url)
+        .bearer_auth("secret-token")
+        .json(&accepted)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let report = state.latest_worker_status(&entry.id).await.unwrap();
+    assert_eq!(report.project_id, entry.id);
+    assert_eq!(report.pid, info.pid.unwrap_or_default());
+    assert_eq!(report.instance_token, accepted.instance_token);
 
     state.supervisor.stop_all().await;
     server_task.abort();

@@ -253,10 +253,11 @@ class LspServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
 
-def worker_status_payload(project_id):
+def worker_status_payload(project_id, instance_token):
     return {
         "project_id": project_id,
         "pid": os.getpid(),
+        "instance_token": instance_token,
         "lsp_clients": 0,
         "busy_chats": 0,
         "exec_running": 0,
@@ -267,6 +268,7 @@ def worker_status_payload(project_id):
 def start_status_pusher(args):
     endpoint = (args.daemon_endpoint or "").rstrip("/")
     project_id = args.project_id or ""
+    instance_token = args.ping_message or ""
     if not endpoint or not project_id:
         return
     url = endpoint + "/daemon/v1/worker-status"
@@ -276,7 +278,7 @@ def start_status_pusher(args):
 
     def run():
         while True:
-            body = json.dumps(worker_status_payload(project_id)).encode("utf-8")
+            body = json.dumps(worker_status_payload(project_id, instance_token)).encode("utf-8")
             headers = {"content-type": "application/json"}
             if token:
                 headers["Authorization"] = "Bearer " + token
