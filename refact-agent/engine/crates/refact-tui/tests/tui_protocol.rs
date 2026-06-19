@@ -657,7 +657,7 @@ async fn daemon_info_env_override_selects_custom_port_and_token() {
 }
 
 #[tokio::test]
-async fn explicit_url_override_preserves_discovered_token() {
+async fn explicit_url_override_drops_discovered_token_on_origin_change() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("daemon.json"),
@@ -669,7 +669,7 @@ async fn explicit_url_override_preserves_discovered_token() {
     let endpoint = resolve_daemon_endpoint(Some("http://127.0.0.1:45454".to_string())).unwrap();
 
     assert_eq!(endpoint.base_url, "http://127.0.0.1:45454");
-    assert_eq!(endpoint.auth_token.as_deref(), Some("secret-token"));
+    assert_eq!(endpoint.auth_token, None);
 }
 
 #[tokio::test]

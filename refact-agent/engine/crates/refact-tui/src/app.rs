@@ -17,8 +17,8 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
-    CompetitorImportInfoResponse, CompetitorImportRunResponse, HooksResponse,
+    worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient,
+    DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse, HooksResponse,
     KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry, ProviderListResponse,
     ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision, WorkerInfo,
 };
@@ -4956,8 +4956,11 @@ impl App {
         self.retry_hint = retry_hint_from_message(message);
     }
 
-    fn record_chat_disconnected(&mut self, message: &str) {
-        if worker_waking_message(message) {
+    fn record_chat_disconnected(&mut self, message: &str, unreachable: bool, auth_stale: bool) {
+        if auth_stale {
+            self.subscription_status = SubscriptionStatus::Offline;
+            self.daemon_online = true;
+        } else if unreachable || worker_waking_message(message) {
             self.subscription_status = SubscriptionStatus::Waking;
             self.daemon_online = true;
         } else {
@@ -5957,6 +5960,8 @@ enum RuntimeEvent {
     ChatDisconnected {
         generation: u64,
         message: String,
+        unreachable: bool,
+        auth_stale: bool,
     },
     InputError(String),
     DaemonEvent {
@@ -6208,10 +6213,11 @@ impl Drop for SubscriptionManager {
 }
 
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
-    let endpoint = match crate::client::resolve_daemon_endpoint(
+    let endpoint = match crate::client::resolve_daemon_endpoint_with_auth(
         options
             .daemon_url
             .or_else(|| std::env::var("REFACT_DAEMON_URL").ok()),
+        std::env::var("REFACT_DAEMON_TOKEN").ok(),
     ) {
         Ok(endpoint) => endpoint,
         Err(warning) => {
@@ -6329,7 +6335,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     app.add_notice(format!("SSE resync: {message}"));
                     if let Err(error) = subscriptions.reconnect_current(client.clone(), tx.clone())
                     {
-                        app.record_chat_disconnected(&error);
+                        app.record_chat_disconnected(&error, true, false);
                         app.add_notice(error);
                     }
                 }
@@ -6337,11 +6343,19 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::ChatDisconnected {
                 generation,
                 message,
+                unreachable,
+                auth_stale,
             } => {
                 if !subscriptions.is_current(generation) {
                     continue;
                 }
-                app.record_chat_disconnected(&message);
+                app.record_chat_disconnected(&message, unreachable, auth_stale);
+                if auth_stale {
+                    app.add_notice(format!(
+                        "SSE disconnected: {message}; daemon auth token is stale"
+                    ));
+                    continue;
+                }
                 match subscriptions.reconnect_current(client.clone(), tx.clone()) {
                     Ok(()) => app.add_notice(format!("SSE disconnected: {message}; reconnecting…")),
                     Err(error) => app.add_notice(format!("SSE disconnected: {message}; {error}")),
@@ -7539,10 +7553,14 @@ fn spawn_subscription_task(
                             }
                         },
                         Err(error) => {
+                            let unreachable = error.is_unreachable();
+                            let auth_stale = error.is_auth_stale();
                             let _ = tx
                                 .send(RuntimeEvent::ChatDisconnected {
                                     generation,
                                     message: error.to_string(),
+                                    unreachable,
+                                    auth_stale,
                                 })
                                 .await;
                             return;
@@ -7553,14 +7571,21 @@ fn spawn_subscription_task(
                     .send(RuntimeEvent::ChatDisconnected {
                         generation,
                         message: "stream ended".to_string(),
+                        unreachable: ClientError::SseDisconnect("stream ended".to_string())
+                            .is_unreachable(),
+                        auth_stale: false,
                     })
                     .await;
             }
             Err(error) => {
+                let unreachable = error.is_unreachable();
+                let auth_stale = error.is_auth_stale();
                 let _ = tx
                     .send(RuntimeEvent::ChatDisconnected {
                         generation,
                         message: error.to_string(),
+                        unreachable,
+                        auth_stale,
                     })
                     .await;
             }
@@ -12864,14 +12889,18 @@ new-chat = "ctrl-x"
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
         assert!(app.daemon_online());
 
-        app.record_chat_disconnected("request failed with status 503: worker starting");
+        app.record_chat_disconnected(
+            "request failed with status 503: worker starting",
+            true,
+            false,
+        );
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
         assert_eq!(app.retry_hint(), Some("worker waking; retrying"));
         assert!(app.daemon_online());
 
-        app.record_chat_disconnected("connection refused");
-        assert_eq!(app.subscription_status(), SubscriptionStatus::Offline);
-        assert!(!app.daemon_online());
+        app.record_chat_disconnected("connection refused", true, false);
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
+        assert!(app.daemon_online());
 
         app.record_chat_resubscribe("request failed with status 429: retry-after: 2s");
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
