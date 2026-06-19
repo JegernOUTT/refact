@@ -7,6 +7,7 @@ use refact_lsp::daemon::projects::{ProjectEntry, ProjectSettings};
 use refact_lsp::daemon::state::DaemonState;
 use refact_lsp::daemon::supervisor::{Supervisor, WorkerInfo, WorkerState};
 use serial_test::serial;
+use serde_json::Value;
 use tempfile::tempdir;
 
 struct EnvGuard {
@@ -48,6 +49,10 @@ impl EnvGuard {
                 "FAKE_WORKER_PUSH_STATUS",
                 std::env::var("FAKE_WORKER_PUSH_STATUS").ok(),
             ),
+            (
+                "FAKE_WORKER_SKIP_LSP",
+                std::env::var("FAKE_WORKER_SKIP_LSP").ok(),
+            ),
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
@@ -64,6 +69,7 @@ impl EnvGuard {
             None => std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT"),
         }
         std::env::remove_var("FAKE_WORKER_PUSH_STATUS");
+        std::env::remove_var("FAKE_WORKER_SKIP_LSP");
         Some(Self { keys: previous })
     }
 }
@@ -113,14 +119,6 @@ async fn wait_for_ready_with_new_pid(
         assert!(Instant::now() < deadline, "worker did not restart in time");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn wait_for_state(
-    supervisor: &Supervisor,
-    project_id: &str,
-    state: WorkerState,
-) -> WorkerInfo {
-    wait_for_state_with_timeout(supervisor, project_id, state, Duration::from_secs(8)).await
 }
 
 async fn wait_for_state_with_timeout(
@@ -179,6 +177,44 @@ async fn ensure_worker_reaches_ready() {
     assert!(info.lsp_port > 0);
 
     supervisor.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn readiness_requires_lsp_port_open() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    std::env::set_var("FAKE_WORKER_SKIP_LSP", "1");
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "no-lsp-project");
+    let supervisor = supervisor(&dir);
+    let start = tokio::spawn({
+        let supervisor = supervisor.clone();
+        let entry = entry.clone();
+        async move { supervisor.ensure_worker(&entry).await }
+    });
+
+    let starting = wait_for_state_with_timeout(
+        &supervisor,
+        &entry.id,
+        WorkerState::Starting,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(starting.lsp_port > 0);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let info = supervisor.worker_info(&entry.id).await.unwrap();
+    assert_eq!(info.state, WorkerState::Starting);
+    supervisor.request_shutdown("test shutdown".to_string());
+    let info = tokio::time::timeout(Duration::from_secs(10), start)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(info.state, WorkerState::Failed { .. }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -255,6 +291,59 @@ async fn crash_loop_reaches_crashed() {
     )
     .await;
     assert_eq!(crashed.state, WorkerState::Crashed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn open_project_returns_bad_gateway_when_crash_loop_exhausts() {
+    let Some(_env) = EnvGuard::set(true) else {
+        return;
+    };
+    use axum::body::Body;
+    use hyper::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let state = DaemonState::new(
+        DaemonConfig::default(),
+        EventBus::new(dir.path().join("events.jsonl")),
+        None,
+    );
+    state.load_projects(dir.path().join("projects.json")).await;
+    let router = refact_lsp::daemon::server::make_router(state.clone(), 8488);
+    let body = serde_json::to_vec(&serde_json::json!({
+        "root": root.to_string_lossy(),
+    }))
+    .unwrap();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        router.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/daemon/v1/projects/open")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(value["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("worker exited"));
+    let entries = state.projects.read().await.list();
+    assert_eq!(entries.len(), 1);
+    let info = state.supervisor.worker_info(&entries[0].id).await.unwrap();
+    assert_eq!(info.state, WorkerState::Crashed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

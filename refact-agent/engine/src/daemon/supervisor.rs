@@ -4,14 +4,14 @@
 //! The supervisor appends the normal worker flags to that command, so `tests/fake_worker.py` can
 //! exercise readiness, graceful shutdown, and crash-loop handling without launching the full engine.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock as SyncRwLock;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Child;
@@ -25,6 +25,7 @@ use crate::daemon::state::now_ms;
 
 const READINESS_POLL: Duration = Duration::from_millis(250);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(120);
+const LSP_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CRASH_WINDOW_MS: u64 = 10 * 60 * 1000;
@@ -97,6 +98,7 @@ pub struct Supervisor {
     daemon_auth_token: Option<String>,
     daemon_port: RwLock<u16>,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
+    reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
     proxy_restart_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
@@ -132,6 +134,7 @@ impl Supervisor {
             daemon_auth_token,
             daemon_port: RwLock::new(daemon_port),
             cron_pending,
+            reserved_ports: Arc::new(SyncMutex::new(HashSet::new())),
             project_liveness: RwLock::new(HashMap::new()),
             proxy_restart_tasks: Mutex::new(JoinSet::new()),
             idle_timeout_secs,
@@ -174,10 +177,10 @@ impl Supervisor {
         entry: &ProjectEntry,
     ) -> Result<WorkerInfo, String> {
         let info = self.ensure_worker(entry).await?;
-        if matches!(info.state, WorkerState::Ready) {
-            Ok(info)
-        } else {
-            Err("worker unavailable".to_string())
+        match &info.state {
+            WorkerState::Ready => Ok(info),
+            WorkerState::Starting => self.wait_for_ready_state(&entry.id).await,
+            _ => Err(worker_unavailable_reason(&info)),
         }
     }
 
@@ -434,7 +437,8 @@ impl Supervisor {
         reason: &str,
     ) -> Result<WorkerInfo, String> {
         for attempt in 1..=MAX_PORT_BUSY_RETRIES {
-            let ports = crate::daemon::ports::allocate_port_pair()?;
+            let reservation = self.reserve_port_pair()?;
+            let ports = reservation.ports();
             let nonce = uuid::Uuid::new_v4().to_string();
             let (pid, generation) = {
                 let _guard = slot.op_lock.lock().await;
@@ -479,7 +483,14 @@ impl Supervisor {
                 .await;
 
             match self
-                .wait_until_ready_or_exit(&slot, generation, ports.http_port, &nonce)
+                .wait_until_ready_or_exit(
+                    &slot,
+                    generation,
+                    pid,
+                    ports.http_port,
+                    ports.lsp_port,
+                    &nonce,
+                )
                 .await?
             {
                 ReadinessOutcome::Superseded(info) => return Ok(info),
@@ -612,6 +623,48 @@ impl Supervisor {
         Ok(info)
     }
 
+    fn reserve_port_pair(&self) -> Result<PortReservation, String> {
+        for _ in 0..32 {
+            let ports = crate::daemon::ports::allocate_port_pair()?;
+            let mut reserved = self.reserved_ports.lock();
+            if reserved.contains(&ports.http_port) || reserved.contains(&ports.lsp_port) {
+                continue;
+            }
+            reserved.insert(ports.http_port);
+            reserved.insert(ports.lsp_port);
+            return Ok(PortReservation {
+                ports,
+                reserved_ports: self.reserved_ports.clone(),
+            });
+        }
+        Err("failed to allocate unreserved worker ports".to_string())
+    }
+
+    async fn wait_for_ready_state(&self, project_id: &str) -> Result<WorkerInfo, String> {
+        let deadline = Instant::now() + READINESS_TIMEOUT;
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        loop {
+            let info = self
+                .worker_info(project_id)
+                .await
+                .ok_or_else(|| "worker unavailable".to_string())?;
+            match &info.state {
+                WorkerState::Ready => return Ok(info),
+                WorkerState::Starting => {}
+                _ => return Err(worker_unavailable_reason(&info)),
+            }
+            if Instant::now() >= deadline {
+                return Err("worker readiness timed out".to_string());
+            }
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    return Err("worker startup cancelled by daemon shutdown".to_string());
+                }
+                _ = tokio::time::sleep(READINESS_POLL) => {}
+            }
+        }
+    }
+
     async fn spawn_child(
         &self,
         spec: &WorkerLaunchSpec,
@@ -692,7 +745,9 @@ impl Supervisor {
         &self,
         slot: &Arc<WorkerSlot>,
         generation: u64,
+        pid: Option<u32>,
         http_port: u16,
+        lsp_port: u16,
         nonce: &str,
     ) -> Result<ReadinessOutcome, String> {
         let deadline = Instant::now() + READINESS_TIMEOUT;
@@ -705,6 +760,9 @@ impl Supervisor {
             if let Some(exit_code) = take_exited_child(slot, generation).await? {
                 return Ok(ReadinessOutcome::Exited(exit_code));
             }
+            if let Some(info) = info_if_pid_changed(slot, generation, pid).await {
+                return Ok(ReadinessOutcome::Superseded(info));
+            }
             if Instant::now() >= deadline {
                 return Ok(ReadinessOutcome::Timeout);
             }
@@ -714,7 +772,10 @@ impl Supervisor {
             };
             if let Ok(response) = response {
                 if let Ok(body) = response.text().await {
-                    if body.trim() == nonce {
+                    if body.trim() == nonce
+                        && lsp_port_accepts(lsp_port).await
+                        && info_if_pid_changed(slot, generation, pid).await.is_none()
+                    {
                         return Ok(ReadinessOutcome::Ready);
                     }
                 }
@@ -1089,6 +1150,25 @@ impl WorkerSlot {
     }
 }
 
+struct PortReservation {
+    ports: PortPair,
+    reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
+}
+
+impl PortReservation {
+    fn ports(&self) -> PortPair {
+        self.ports
+    }
+}
+
+impl Drop for PortReservation {
+    fn drop(&mut self) {
+        let mut reserved = self.reserved_ports.lock();
+        reserved.remove(&self.ports.http_port);
+        reserved.remove(&self.ports.lsp_port);
+    }
+}
+
 enum ReadinessOutcome {
     Superseded(WorkerInfo),
     Ready,
@@ -1176,6 +1256,37 @@ async fn take_exited_child(
 async fn info_if_generation_changed(slot: &Arc<WorkerSlot>, generation: u64) -> Option<WorkerInfo> {
     let record = slot.record.lock().await;
     (record.generation != generation).then(|| record.info.clone())
+}
+
+async fn info_if_pid_changed(
+    slot: &Arc<WorkerSlot>,
+    generation: u64,
+    pid: Option<u32>,
+) -> Option<WorkerInfo> {
+    let record = slot.record.lock().await;
+    (record.generation == generation && record.info.pid != pid).then(|| record.info.clone())
+}
+
+async fn lsp_port_accepts(port: u16) -> bool {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    matches!(
+        tokio::time::timeout(LSP_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await,
+        Ok(Ok(_))
+    )
+}
+
+fn worker_unavailable_reason(info: &WorkerInfo) -> String {
+    match &info.state {
+        WorkerState::Failed { reason } => reason.clone(),
+        WorkerState::Crashed => info
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "worker crashed".to_string()),
+        WorkerState::Stopped => "worker stopped".to_string(),
+        WorkerState::Stopping => "worker stopping".to_string(),
+        WorkerState::Starting => "worker starting".to_string(),
+        WorkerState::Ready => "worker unavailable".to_string(),
+    }
 }
 
 fn abort_task(task: &mut Option<JoinHandle<()>>) {

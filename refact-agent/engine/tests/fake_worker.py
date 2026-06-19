@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -58,6 +59,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             self.send_header("content-type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"success":true}')
+            if self.server.lsp_server:
+                threading.Thread(target=self.server.lsp_server.shutdown, daemon=True).start()
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         if self.path.startswith("/v1/echo"):
@@ -238,6 +241,16 @@ class WorkerServer(ThreadingHTTPServer):
         self.ready_at = time.time() + float(os.environ.get("FAKE_WORKER_DELAY_READY", "0") or "0")
         self.commands = []
         self.chat_cond = threading.Condition()
+        self.lsp_server = None
+
+
+class LspHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        return
+
+
+class LspServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
 
 
 def worker_status_payload(project_id):
@@ -277,6 +290,19 @@ def start_status_pusher(args):
     threading.Thread(target=run, daemon=True).start()
 
 
+def start_lsp_server(port):
+    if not port or os.environ.get("FAKE_WORKER_SKIP_LSP") == "1":
+        return None
+    server = LspServer(("127.0.0.1", int(port)), LspHandler)
+
+    def run():
+        server.serve_forever()
+        server.server_close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return server
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--http-port", type=int, required=True)
@@ -301,10 +327,14 @@ def main():
     if os.environ.get("FAKE_WORKER_CRASH") == "1":
         sys.exit(1)
 
+    lsp_server = start_lsp_server(args.lsp_port)
     server = WorkerServer(("127.0.0.1", args.http_port), WorkerHandler, args.ping_message)
+    server.lsp_server = lsp_server
     start_status_pusher(args)
 
     def stop(_signum, _frame):
+        if server.lsp_server:
+            server.lsp_server.shutdown()
         server.shutdown()
 
     signal.signal(signal.SIGTERM, stop)

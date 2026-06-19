@@ -295,14 +295,10 @@ pub async fn open_project(
         }
     };
     state.sync_project_liveness(&entry).await;
-    let worker = match state.supervisor.ensure_worker(&entry).await {
+    let worker = match state.supervisor.ensure_ready_worker(&entry).await {
         Ok(worker) => worker,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
         }
     };
     let cron_pending = state.cron_pending(&entry.id).await;
