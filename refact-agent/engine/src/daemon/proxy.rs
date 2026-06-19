@@ -70,14 +70,18 @@ async fn proxy_to_worker(
     };
 
     state.update_proxy_activity(&project_id).await;
-    state.increment_live_proxy_stream(&project_id).await;
-    let guard = ProxyStreamGuard::new(state.clone(), project_id.clone());
+    let use_stream_client = is_sse_request(request.headers(), &worker_path);
+    let guard = if use_stream_client {
+        state.increment_live_proxy_stream(&project_id).await;
+        Some(ProxyStreamGuard::new(state.clone(), project_id.clone()))
+    } else {
+        None
+    };
     let worker = match ready_worker(&state, &entry).await {
         Ok(worker) => worker,
         Err(response) => return response,
     };
 
-    let use_stream_client = is_sse_request(request.headers(), &worker_path);
     let (parts, body) = request.into_parts();
     let body = match limited_body_bytes(body).await {
         Ok(body) => body,
@@ -203,21 +207,30 @@ async fn worker_response(
     entry: ProjectEntry,
     worker_pid: Option<u32>,
     response: reqwest::Response,
-    guard: ProxyStreamGuard,
+    guard: Option<ProxyStreamGuard>,
 ) -> Response<Body> {
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let headers = response_headers(response.headers());
     let stream_state = state.clone();
     let stream_entry = entry.clone();
+    let stream_refreshes_activity = guard.is_some();
     let stream = async_stream::stream! {
         let _guard = guard;
         let mut upstream = response.bytes_stream();
         while let Some(chunk) = upstream.next().await {
             match chunk {
-                Ok(chunk) => yield Ok::<_, io::Error>(chunk),
+                Ok(chunk) => {
+                    if stream_refreshes_activity {
+                        stream_state.refresh_proxy_activity(&stream_entry.id).await;
+                    }
+                    yield Ok::<_, io::Error>(chunk);
+                }
                 Err(error) => {
                     let message = crate::daemon::auth::redact_daemon_query_token(&error.to_string());
+                    if stream_refreshes_activity {
+                        stream_state.refresh_proxy_activity(&stream_entry.id).await;
+                    }
                     let _ = stream_state.events.emit(
                         "proxy_worker_unreachable",
                         Some(stream_entry.id.clone()),
@@ -235,6 +248,9 @@ async fn worker_response(
                     break;
                 }
             }
+        }
+        if stream_refreshes_activity {
+            stream_state.refresh_proxy_activity(&stream_entry.id).await;
         }
     };
     let mut proxied = Response::new(Body::wrap_stream(stream));

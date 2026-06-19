@@ -345,6 +345,13 @@ impl Supervisor {
     }
 
     #[cfg(test)]
+    pub(crate) async fn test_worker_instance_token(&self, project_id: &str) -> Option<String> {
+        let slot = self.get_slot(project_id).await?;
+        let record = slot.record.lock().await;
+        record.instance_token.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn set_test_worker_info(
         &self,
         project_id: &str,

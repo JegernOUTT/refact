@@ -254,6 +254,14 @@ async fn proxy_roundtrip_preserves_method_query_headers_body_and_auto_wakes() {
             .last_proxy_activity_ms
             > 0
     );
+    assert_eq!(
+        harness
+            .state
+            .proxy_activity(&harness.entry.id)
+            .await
+            .live_proxy_streams,
+        0
+    );
 
     let build_info = send(
         harness.router.clone(),
@@ -333,12 +341,18 @@ async fn proxy_sse_delivers_first_chunk_before_second_is_sent() {
         harness.router.clone(),
         Request::builder()
             .uri(harness.v1_uri("/sse"))
+            .header("accept", "text/event-stream")
             .body(Body::empty())
             .unwrap(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     wait_for_live_streams(&harness.state, &harness.entry.id, 1).await;
+    let opened_activity = harness
+        .state
+        .proxy_activity(&harness.entry.id)
+        .await
+        .last_proxy_activity_ms;
     let mut body = response.into_body();
     let mut collected = String::new();
     let mut first_at = None;
@@ -354,10 +368,24 @@ async fn proxy_sse_delivers_first_chunk_before_second_is_sent() {
     }
     let first_at = first_at.unwrap();
     let second_at = second_at.unwrap();
+    let streamed_activity = harness
+        .state
+        .proxy_activity(&harness.entry.id)
+        .await
+        .last_proxy_activity_ms;
     assert!(first_at.duration_since(started) < Duration::from_millis(400));
     assert!(second_at.duration_since(first_at) >= Duration::from_millis(400));
+    assert!(streamed_activity > opened_activity);
     drop(body);
     wait_for_live_streams(&harness.state, &harness.entry.id, 0).await;
+    assert!(
+        harness
+            .state
+            .proxy_activity(&harness.entry.id)
+            .await
+            .last_proxy_activity_ms
+            >= streamed_activity
+    );
     harness.stop().await;
 }
 
