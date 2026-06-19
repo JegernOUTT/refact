@@ -901,14 +901,15 @@ async fn test_settings_update_fallback_response_includes_storage_metadata() {
     .await
     .unwrap();
     let storage = response.0["storage"].as_object().expect("storage object");
-    let expected_project_root = dir.path().to_string_lossy().to_string();
-    let expected_settings_path = dir
-        .path()
+    let expected_project_root =
+        crate::files_correction::canonicalize_normalized_path(dir.path().to_path_buf());
+    let expected_settings_path = expected_project_root
         .join(".refact")
         .join("buddy")
         .join("settings.json")
         .to_string_lossy()
         .to_string();
+    let expected_project_root = expected_project_root.to_string_lossy().to_string();
 
     assert_eq!(
         storage["project_root"].as_str(),

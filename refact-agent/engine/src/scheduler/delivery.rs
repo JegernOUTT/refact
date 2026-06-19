@@ -399,7 +399,10 @@ mod tests {
             .serve(router.into_make_service());
         let server_task = tokio::spawn(server);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![crate::files_correction::canonicalize_normalized_path(
+                temp.path().to_path_buf(),
+            )];
         let config_dir = temp.path().join(".refact").join("integrations.d");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(

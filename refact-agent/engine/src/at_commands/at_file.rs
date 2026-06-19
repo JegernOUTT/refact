@@ -631,28 +631,35 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    fn normalized_path(path: &Path) -> PathBuf {
+        canonicalize_normalized_path(path.to_path_buf())
+    }
+
     fn worktree_root(cache_dir: &Path, source: &Path, id: &str) -> PathBuf {
+        let source = normalized_path(source);
         cache_dir
             .join("worktrees")
-            .join(refact_worktrees::service::project_hash_for_path(source))
+            .join(refact_worktrees::service::project_hash_for_path(&source))
             .join(id)
     }
 
     fn write_worktree_registry(cache_dir: &Path, source: &Path, worktree: &Path) {
-        let hash = refact_worktrees::service::project_hash_for_path(source);
+        let source = normalized_path(source);
+        let worktree = normalized_path(worktree);
+        let hash = refact_worktrees::service::project_hash_for_path(&source);
         let registry_dir = cache_dir.join("worktrees").join(&hash);
         fs::create_dir_all(&registry_dir).unwrap();
         let registry = WorktreeRegistry {
             schema_version: 1,
-            source_workspace_root: source.to_path_buf(),
+            source_workspace_root: source.clone(),
             project_hash: hash,
             records: vec![WorktreeRegistryRecord {
                 meta: WorktreeMeta {
                     id: "wt".to_string(),
                     kind: "chat".to_string(),
-                    root: worktree.to_path_buf(),
-                    source_workspace_root: source.to_path_buf(),
-                    repo_root: source.to_path_buf(),
+                    root: worktree,
+                    source_workspace_root: source.clone(),
+                    repo_root: source.clone(),
                     branch: Some("refact/chat/test".to_string()),
                     base_branch: Some("main".to_string()),
                     base_commit: None,

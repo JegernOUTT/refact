@@ -3389,11 +3389,13 @@ fn task_trajectory_context_from_path(
     path: &Path,
     task_roots: &[PathBuf],
 ) -> Option<(String, String, Option<String>)> {
+    let path = crate::files_correction::canonicalize_normalized_path(path.to_path_buf());
     for root in task_roots {
-        if !is_real_dir_sync(root) {
+        let root = crate::files_correction::canonicalize_normalized_path(root.clone());
+        if !is_real_dir_sync(&root) {
             continue;
         }
-        let Ok(relative) = path.strip_prefix(root) else {
+        let Ok(relative) = path.strip_prefix(&root) else {
             continue;
         };
         let parts: Vec<String> = relative
@@ -3421,9 +3423,11 @@ fn task_trajectory_context_from_path(
 }
 
 fn is_under_task_root(path: &Path, task_roots: &[PathBuf]) -> bool {
-    task_roots
-        .iter()
-        .any(|root| is_real_dir_sync(root) && path.starts_with(root))
+    let path = crate::files_correction::canonicalize_normalized_path(path.to_path_buf());
+    task_roots.iter().any(|root| {
+        let root = crate::files_correction::canonicalize_normalized_path(root.clone());
+        is_real_dir_sync(&root) && path.starts_with(&root)
+    })
 }
 
 fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool {
@@ -5505,8 +5509,24 @@ mod tests {
         GoalStatus,
     };
     use serial_test::serial;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    fn normalized_test_path(path: &Path) -> PathBuf {
+        crate::files_correction::canonicalize_normalized_path(path.to_path_buf())
+    }
+
+    fn assert_same_path(left: &Path, right: &Path) {
+        assert_eq!(normalized_test_path(left), normalized_test_path(right));
+    }
+
+    fn assert_same_optional_path(left: Option<PathBuf>, right: &Path) {
+        assert_same_path(&left.expect("path should exist"), right);
+    }
+
+    fn assert_same_path_str(left: &str, right: &Path) {
+        assert_same_path(Path::new(left), right);
+    }
 
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -5540,7 +5560,7 @@ mod tests {
             .documents_state
             .workspace_folders
             .lock()
-            .unwrap() = vec![root.to_path_buf()];
+            .unwrap() = vec![normalized_test_path(root)];
         (gcx, app)
     }
 
@@ -6839,10 +6859,7 @@ mod tests {
         .await;
         write_trajectory_file(&task_path, chat_id, "Valid Task", "2024-01-01T00:00:01Z").await;
 
-        assert_eq!(
-            find_trajectory_path(gcx.clone(), chat_id).await,
-            Some(task_path)
-        );
+        assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &task_path);
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.thread.title, "Valid Task");
     }
@@ -6868,10 +6885,7 @@ mod tests {
         write_schema_incomplete_trajectory_file(&normal_path, chat_id).await;
         write_trajectory_file(&task_path, chat_id, "Valid Task", "2024-01-01T00:00:01Z").await;
 
-        assert_eq!(
-            find_trajectory_path(gcx.clone(), chat_id).await,
-            Some(task_path)
-        );
+        assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &task_path);
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.thread.title, "Valid Task");
     }
@@ -6919,9 +6933,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
+        assert_same_optional_path(
             find_trajectory_path(gcx.clone(), chat_id).await,
-            Some(global_path)
+            &global_path,
         );
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.thread.title, "Valid Global");
@@ -14462,9 +14476,9 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_eq!(raw["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(
+        assert_same_optional_path(
             find_trajectory_or_buddy_path(gcx.clone(), chat_id).await,
-            Some(path)
+            &path,
         );
         let all_dirs = get_all_trajectories_dirs(gcx).await;
         assert_eq!(all_dirs, vec![global_trajectories_dir]);
@@ -14508,13 +14522,15 @@ mod tests {
             serde_json::from_str(&tokio::fs::read_to_string(&buddy_path).await.unwrap()).unwrap();
         assert_eq!(buddy_raw["title"], "Keep Buddy Collision");
         assert!(buddy_raw.get("buddy_meta").is_some());
-        assert_eq!(
+        assert_same_optional_path(
             find_trajectory_path(gcx.clone(), chat_id).await,
-            Some(normal_path)
+            &normal_path,
         );
         assert_ne!(
-            find_trajectory_or_buddy_path(gcx, chat_id).await,
-            Some(buddy_path)
+            find_trajectory_or_buddy_path(gcx, chat_id)
+                .await
+                .map(|path| normalized_test_path(&path)),
+            Some(normalized_test_path(&buddy_path))
         );
     }
 
@@ -14571,11 +14587,16 @@ mod tests {
         let task_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&task_path).await.unwrap()).unwrap();
         assert_eq!(task_raw["title"], "Keep Task Collision");
-        assert_eq!(
+        assert_same_optional_path(
             find_trajectory_path(gcx.clone(), chat_id).await,
-            Some(normal_path)
+            &normal_path,
         );
-        assert_ne!(find_trajectory_path(gcx, chat_id).await, Some(task_path));
+        assert_ne!(
+            find_trajectory_path(gcx, chat_id)
+                .await
+                .map(|path| normalized_test_path(&path)),
+            Some(normalized_test_path(&task_path))
+        );
     }
 
     #[tokio::test]
@@ -15033,7 +15054,7 @@ mod tests {
         let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
             .await
             .unwrap();
-        assert_eq!(loaded.source_path, task_path);
+        assert_same_path(&loaded.source_path, &task_path);
         assert!(loaded.transition_identity_repaired);
         apply_mode_defaults_to_thread(
             gcx.clone(),
@@ -16277,7 +16298,7 @@ mod tests {
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let returned = payload["path"].as_str().unwrap();
-        assert_eq!(returned, path.to_string_lossy());
+        assert_same_path_str(returned, &path);
     }
 
     #[serial]
@@ -16301,10 +16322,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            payload["path"].as_str().unwrap(),
-            buddy_path.to_string_lossy()
-        );
+        assert_same_path_str(payload["path"].as_str().unwrap(), &buddy_path);
     }
 
     #[serial]
@@ -16388,8 +16406,11 @@ mod tests {
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let returned = payload["path"].as_str().unwrap();
-        assert_eq!(returned, buddy_path.to_string_lossy());
-        assert_ne!(returned, normal_path.to_string_lossy());
+        assert_same_path_str(returned, &buddy_path);
+        assert_ne!(
+            normalized_test_path(Path::new(returned)),
+            normalized_test_path(&normal_path)
+        );
     }
 
     #[serial]

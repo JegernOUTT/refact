@@ -1252,6 +1252,10 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
                 .clone();
             blocklist_roots
                 .extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
+            blocklist_roots = blocklist_roots
+                .into_iter()
+                .map(crate::files_correction::canonicalize_normalized_path)
+                .collect();
             blocklist_roots.sort();
             blocklist_roots.dedup();
             (

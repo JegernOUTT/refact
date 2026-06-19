@@ -767,8 +767,9 @@ mod tests {
 
     async fn gcx_with_modes(modes: Vec<ModeConfig>) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let workspace =
-            std::env::temp_dir().join(format!("refact-frozen-prefix-{}", uuid::Uuid::new_v4()));
+        let workspace = crate::files_correction::canonicalize_normalized_path(
+            std::env::temp_dir().join(format!("refact-frozen-prefix-{}", uuid::Uuid::new_v4())),
+        );
         std::fs::create_dir_all(&workspace).unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.clone()];
         let registry = ProjectRegistry {

@@ -1217,8 +1217,20 @@ mod tests {
             .map(|card| card.file_path)
             .collect::<Vec<_>>();
 
-        assert!(indexed_paths.contains(&active_path));
-        assert!(!indexed_paths.contains(&archived_path));
+        let indexed_paths = indexed_paths
+            .into_iter()
+            .map(crate::files_correction::canonicalize_normalized_path)
+            .collect::<Vec<_>>();
+        assert!(
+            indexed_paths.contains(&crate::files_correction::canonicalize_normalized_path(
+                active_path
+            ))
+        );
+        assert!(
+            !indexed_paths.contains(&crate::files_correction::canonicalize_normalized_path(
+                archived_path
+            ))
+        );
     }
 
     #[tokio::test]
@@ -1251,8 +1263,20 @@ mod tests {
             .map(|card| card.file_path)
             .collect::<Vec<_>>();
 
-        assert!(indexed_paths.contains(&active_path));
-        assert!(!indexed_paths.contains(&old_path));
+        let indexed_paths = indexed_paths
+            .into_iter()
+            .map(crate::files_correction::canonicalize_normalized_path)
+            .collect::<Vec<_>>();
+        assert!(
+            indexed_paths.contains(&crate::files_correction::canonicalize_normalized_path(
+                active_path
+            ))
+        );
+        assert!(
+            !indexed_paths.contains(&crate::files_correction::canonicalize_normalized_path(
+                old_path
+            ))
+        );
     }
 
     #[tokio::test]

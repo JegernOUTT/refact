@@ -466,8 +466,9 @@ pub async fn check_if_its_inside_a_workspace_or_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        correct_to_nearest_filename, get_active_project_path, get_active_workspace_folder,
-        get_unscoped_project_dirs, paths_from_anywhere, project_dirs_for_unscoped_paths,
+        canonicalize_normalized_path, correct_to_nearest_filename, get_active_project_path,
+        get_active_workspace_folder, get_unscoped_project_dirs, paths_from_anywhere,
+        project_dirs_for_unscoped_paths,
     };
     use refact_worktrees::types::{WorktreeMeta, WorktreeRegistry, WorktreeRegistryRecord};
     #[cfg(all(
@@ -478,28 +479,35 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    fn normalized_path(path: &Path) -> PathBuf {
+        canonicalize_normalized_path(path.to_path_buf())
+    }
+
     fn worktree_root(cache_dir: &Path, source: &Path, id: &str) -> PathBuf {
+        let source = normalized_path(source);
         cache_dir
             .join("worktrees")
-            .join(refact_worktrees::service::project_hash_for_path(source))
+            .join(refact_worktrees::service::project_hash_for_path(&source))
             .join(id)
     }
 
     fn write_worktree_registry(cache_dir: &Path, source: &Path, worktree: &Path) {
-        let hash = refact_worktrees::service::project_hash_for_path(source);
+        let source = normalized_path(source);
+        let worktree = normalized_path(worktree);
+        let hash = refact_worktrees::service::project_hash_for_path(&source);
         let registry_dir = cache_dir.join("worktrees").join(&hash);
         fs::create_dir_all(&registry_dir).unwrap();
         let registry = WorktreeRegistry {
             schema_version: 1,
-            source_workspace_root: source.to_path_buf(),
+            source_workspace_root: source.clone(),
             project_hash: hash,
             records: vec![WorktreeRegistryRecord {
                 meta: WorktreeMeta {
                     id: "wt".to_string(),
                     kind: "chat".to_string(),
-                    root: worktree.to_path_buf(),
-                    source_workspace_root: source.to_path_buf(),
-                    repo_root: source.to_path_buf(),
+                    root: worktree,
+                    source_workspace_root: source.clone(),
+                    repo_root: source.clone(),
                     branch: Some("refact/chat/test".to_string()),
                     base_branch: Some("main".to_string()),
                     base_commit: None,
@@ -527,8 +535,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join("cache");
         let source = temp.path().join("source");
-        let worktree = worktree_root(&cache_dir, &source, "wt");
         fs::create_dir_all(&source).unwrap();
+        let worktree = worktree_root(&cache_dir, &source, "wt");
         fs::create_dir_all(&worktree).unwrap();
         write_worktree_registry(&cache_dir, &source, &worktree);
 
@@ -537,7 +545,7 @@ mod tests {
             &[worktree.clone(), source.clone(), worktree.join("nested")],
         );
 
-        assert_eq!(project_dirs, vec![source]);
+        assert_eq!(project_dirs, vec![normalized_path(&source)]);
     }
 
     #[tokio::test]
@@ -559,14 +567,17 @@ mod tests {
         *gcx.documents_state.cache_dirty.lock().await = 1.0;
 
         let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
-        assert_eq!(project_dirs, vec![source.clone()]);
+        assert_eq!(project_dirs, vec![normalized_path(&source)]);
 
         let visible_paths = paths_from_anywhere(gcx.clone()).await;
-        assert_eq!(visible_paths, vec![source_file.clone()]);
+        assert_eq!(visible_paths, vec![normalized_path(&source_file)]);
 
         let candidates =
             correct_to_nearest_filename(gcx.clone(), &"src/lib.rs".to_string(), false, 10).await;
-        assert_eq!(candidates, vec![source_file.to_string_lossy().to_string()]);
+        assert_eq!(
+            candidates,
+            vec![normalized_path(&source_file).to_string_lossy().to_string()]
+        );
     }
 
     #[tokio::test]
@@ -590,14 +601,17 @@ mod tests {
         *gcx.documents_state.cache_dirty.lock().await = 1.0;
 
         let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
-        assert_eq!(project_dirs, vec![source.clone()]);
+        assert_eq!(project_dirs, vec![normalized_path(&source)]);
 
         let visible_paths = paths_from_anywhere(gcx.clone()).await;
-        assert_eq!(visible_paths, vec![source_file.clone()]);
+        assert_eq!(visible_paths, vec![normalized_path(&source_file)]);
 
         let candidates =
             correct_to_nearest_filename(gcx, &"src/lib.rs".to_string(), false, 10).await;
-        assert_eq!(candidates, vec![source_file.to_string_lossy().to_string()]);
+        assert_eq!(
+            candidates,
+            vec![normalized_path(&source_file).to_string_lossy().to_string()]
+        );
     }
 
     #[tokio::test]
@@ -623,10 +637,10 @@ mod tests {
         *gcx.documents_state.active_file_path.lock().await = Some(active_worktree_file);
 
         let active_project = get_active_project_path(gcx.clone()).await;
-        assert_eq!(active_project, Some(source_b.clone()));
+        assert_eq!(active_project, Some(normalized_path(&source_b)));
 
         let active_workspace = get_active_workspace_folder(gcx).await;
-        assert_eq!(active_workspace, Some(source_b));
+        assert_eq!(active_workspace, Some(normalized_path(&source_b)));
     }
 
     #[tokio::test]
@@ -650,7 +664,7 @@ mod tests {
         *gcx.documents_state.active_file_path.lock().await = Some(active_worktree_file);
 
         let active_project = get_active_project_path(gcx).await;
-        assert_eq!(active_project, Some(source_b));
+        assert_eq!(active_project, Some(normalized_path(&source_b)));
     }
 
     #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
