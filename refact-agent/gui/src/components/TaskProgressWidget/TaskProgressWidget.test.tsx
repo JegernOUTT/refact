@@ -7,6 +7,7 @@ import type {
   Chat,
   ChatThreadRuntime,
   TodoItem,
+  ToolUse,
 } from "../../features/Chat/Thread/types";
 import type { ChatMessages, GoalSnapshot } from "../../services/refact/types";
 import { TaskProgressWidget } from "./TaskProgressWidget";
@@ -83,6 +84,8 @@ function makeRuntime(options: {
   messages?: ChatMessages;
   expanded?: boolean;
   goalExpanded?: boolean;
+  mode?: string;
+  toolUse?: ToolUse;
 }): ChatThreadRuntime {
   return {
     thread: {
@@ -90,7 +93,8 @@ function makeRuntime(options: {
       messages: options.messages ?? [],
       title: "Goal Widget Chat",
       model: "gpt-4",
-      tool_use: "agent",
+      mode: options.mode ?? "agent",
+      tool_use: options.toolUse ?? "agent",
       new_chat_suggested: { wasSuggested: false },
       boost_reasoning: false,
       increase_max_tokens: false,
@@ -151,6 +155,52 @@ function captureCommands() {
 }
 
 describe("TaskProgressWidget goal projection", () => {
+  test("renders in a goal-supporting fresh chat and exposes the goal editor", async () => {
+    const { user } = renderWidget(
+      makeRuntime({ goal: null, mode: "task_agent", toolUse: "explore" }),
+    );
+
+    expect(screen.getByText("Set a goal")).toBeInTheDocument();
+    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Set a goal/i }));
+    await user.click(screen.getByRole("button", { name: /Goal Not set/i }));
+
+    expect(screen.getByLabelText("Goal text")).toBeInTheDocument();
+  });
+
+  test("empty collapsed header distinguishes fresh goal creation from cleared tasks", () => {
+    const freshView = renderWidget(
+      makeRuntime({ goal: null, mode: "quick_agent", toolUse: "explore" }),
+    );
+
+    expect(screen.getByText("Set a goal")).toBeInTheDocument();
+    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
+    freshView.unmount();
+
+    renderWidget(
+      makeRuntime({
+        goal: null,
+        messages: taskMessages([]),
+        mode: "quick_agent",
+        toolUse: "explore",
+      }),
+    );
+
+    expect(screen.getByText("Tasks cleared")).toBeInTheDocument();
+    expect(screen.queryByText("Set a goal")).not.toBeInTheDocument();
+  });
+
+  test("does not render in a non-goal mode without tasks or a goal", () => {
+    renderWidget(
+      makeRuntime({ goal: null, mode: "explore", toolUse: "explore" }),
+    );
+
+    expect(screen.queryByText("Set a goal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tasks cleared")).not.toBeInTheDocument();
+    expect(screen.queryByText("Task Progress")).not.toBeInTheDocument();
+  });
+
   test("collapsed widget shows the goal-set indicator and status", () => {
     renderWidget(makeRuntime({ goal: makeGoal() }));
 

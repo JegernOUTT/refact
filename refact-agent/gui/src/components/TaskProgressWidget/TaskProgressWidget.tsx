@@ -13,6 +13,8 @@ import {
   selectTaskProgressById,
   selectTasksEverUsedById,
   selectTaskWidgetExpandedById,
+  selectThreadModeById,
+  selectThreadToolUseById,
   setTaskGoalExpanded,
   setTaskWidgetExpanded,
   useThreadId,
@@ -93,6 +95,25 @@ function goalStatusTone(
 
 function hasGoalWork(goal: GoalSnapshot | null): boolean {
   return goal !== null && goal.content.trim().length > 0;
+}
+
+const GOAL_SUPPORTED_MODES = new Set([
+  "agent",
+  "openai_agent",
+  "quick_agent",
+  "task_agent",
+  "task_planner",
+  "ultra_agent",
+]);
+
+function isGoalSupported(
+  mode: string | undefined,
+  toolUse: string | undefined,
+): boolean {
+  return (
+    toolUse === "agent" ||
+    (mode ? GOAL_SUPPORTED_MODES.has(mode.trim().toLowerCase()) : false)
+  );
 }
 
 type StatusIconProps = {
@@ -401,6 +422,12 @@ export const TaskProgressWidget: React.FC = () => {
   const goalExpanded = useAppSelector((state) =>
     selectTaskGoalExpandedById(state, chatId),
   );
+  const threadMode = useAppSelector((state) =>
+    selectThreadModeById(state, chatId),
+  );
+  const threadToolUse = useAppSelector((state) =>
+    selectThreadToolUseById(state, chatId),
+  );
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
@@ -409,7 +436,11 @@ export const TaskProgressWidget: React.FC = () => {
   );
   const { setGoal, updateGoal, controlGoal } = useChatActions(chatId);
   const hasGoal = hasGoalWork(goal);
-  const shouldRender = everUsed || hasGoal;
+  const goalSupported = isGoalSupported(threadMode, threadToolUse);
+  const isFreshGoalOpportunity =
+    !everUsed && !hasTasks && !hasGoal && goalSupported;
+  const isTasksCleared = everUsed && !hasTasks && !hasGoal;
+  const shouldRender = everUsed || hasGoal || goalSupported;
 
   const crashSummary = useMemo(() => {
     const taskSummary =
@@ -494,7 +525,24 @@ export const TaskProgressWidget: React.FC = () => {
                   </>
                 ) : null}
 
-                {!isExpanded && !hasTasks && !hasGoal ? (
+                {!isExpanded && isFreshGoalOpportunity ? (
+                  <Flex
+                    align="center"
+                    gap="2"
+                    className={styles.goalAffordance}
+                  >
+                    <Icon icon={Target} size="sm" tone="accent" />
+                    <Text
+                      size="1"
+                      weight="medium"
+                      className={styles.goalAffordanceText}
+                    >
+                      Set a goal
+                    </Text>
+                  </Flex>
+                ) : null}
+
+                {!isExpanded && isTasksCleared ? (
                   <Text size="1" color="gray">
                     Tasks cleared
                   </Text>

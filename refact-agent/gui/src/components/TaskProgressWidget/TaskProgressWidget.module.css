@@ -29,6 +29,7 @@
 .headerInner,
 .headerMain,
 .goalHeaderContent,
+.goalAffordance,
 .goalIndicator {
   min-width: 0;
 }
@@ -38,6 +39,7 @@
 }
 
 .goalIndicatorText,
+.goalAffordanceText,
 .goalTitle,
 .taskText,
 .activeHint,
@@ -46,6 +48,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.goalAffordance {
+  color: var(--rf-color-accent);
 }
 
 .content {
