@@ -749,7 +749,10 @@ mod tests {
         facade: Arc<MockChatFacade>,
     ) -> crate::app_state::AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![crate::files_correction::canonicalize_normalized_path(
+                root.to_path_buf(),
+            )];
         let mut app = crate::app_state::AppState::from_gcx(gcx).await;
         app.chat.facade = facade;
         app
