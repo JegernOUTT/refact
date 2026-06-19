@@ -900,10 +900,12 @@ mod tests {
     #[tokio::test]
     async fn idle_snapshot_ignores_status_from_previous_pid() {
         let dir = tempfile::tempdir().unwrap();
-        let state = DaemonState::new(
+        let state = DaemonState::new_with_daemon_dir(
             DaemonConfig::default(),
             EventBus::new(dir.path().join("events.jsonl")),
             None,
+            dir.path().join("daemon"),
+            0,
         );
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();

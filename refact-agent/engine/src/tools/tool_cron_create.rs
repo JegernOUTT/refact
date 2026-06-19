@@ -791,6 +791,7 @@ mod tests {
                     ("cron", json!("*/5 * * * *")),
                     ("prompt", json!("Check the build")),
                     ("description", json!("Check build")),
+                    ("durable", json!(false)),
                 ]),
             )
             .await
