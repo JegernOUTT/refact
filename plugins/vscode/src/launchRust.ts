@@ -15,12 +15,17 @@ import { backendReadyForStatus, type RefactBackendConnectionStatus } from './bac
 const DEBUG_HTTP_PORT = 8001;
 const DEBUG_LSP_PORT = 8002;
 
+type ProjectProxyRequestInit = Omit<Partial<fetchH2.RequestInit>, "headers"> & {
+    headers?: Record<string, string>;
+};
+
 export class RustBinaryBlob {
     public asset_path: string;
     public binary_cache_path: string;
     public port: number = 0;
     public project_id: string = "";
     public lsp_port: number = 0;
+    private daemon_auth_token: string = "";
     public lsp_disposable: vscode.Disposable | undefined = undefined;
     public lsp_client: lspClient.LanguageClient | undefined = undefined;
     public lsp_socket: net.Socket | undefined = undefined;
@@ -103,7 +108,7 @@ export class RustBinaryBlob {
         }
         const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
         const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
-        return refactDaemon.browserProjectUrl(host, this.port, this.project_id);
+        return refactDaemon.browserProjectUrl(host, this.port, this.project_id, this.daemon_auth_token);
     }
 
     private default_browser_host(): string {
@@ -152,6 +157,7 @@ export class RustBinaryBlob {
         } catch (error) {
             console.log(["Refact attach failed", error]);
             global.have_caps = false;
+            this.reset_daemon_state();
             this.set_attach_state("failed");
             global.status_bar.set_socket_error(true, error instanceof Error ? error.message : String(error));
         } finally {
@@ -176,6 +182,7 @@ export class RustBinaryBlob {
         this.port = DEBUG_HTTP_PORT;
         this.lsp_port = DEBUG_LSP_PORT;
         this.project_id = "";
+        this.daemon_auth_token = "";
         this.openedProjects.clear();
         console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
         console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
@@ -191,11 +198,12 @@ export class RustBinaryBlob {
 
         const daemonPort = this.daemon_port();
         const roots = this.workspace_roots();
-        if (roots.length === 0) {
-            this.project_id = "";
-            this.lsp_port = 0;
+        const rootSelection = refactDaemon.selectPrimaryWorkspaceRoot(roots);
+        if (!rootSelection.primary) {
+            this.reset_daemon_state();
             throw new Error("Open a workspace folder before starting Refact.");
         }
+        this.warn_about_ignored_roots(rootSelection);
 
         const pluginVersion = this.plugin_version();
         let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion });
@@ -218,31 +226,8 @@ export class RustBinaryBlob {
         }
 
         this.port = daemon.port;
-        this.openedProjects.clear();
-        const settings = this.project_settings();
-        let primary: refactDaemon.OpenProjectResponse | undefined;
-        for (const root of roots) {
-            const response = await refactDaemon.openProject(root, {
-                port: daemon.port,
-                authToken: daemon.authToken,
-                clientKind: "vscode",
-                settings,
-            });
-            this.openedProjects.set(root, response);
-            if (!primary) {
-                primary = response;
-            }
-        }
-
-        if (!primary) {
-            throw new Error("Refact daemon did not open a project.");
-        }
-        const lspPort = primary.worker?.lsp_port;
-        if (!lspPort) {
-            throw new Error(`Refact daemon opened project ${primary.project_id} without an LSP port.`);
-        }
-        this.project_id = primary.project_id;
-        this.lsp_port = lspPort;
+        this.daemon_auth_token = this.auth_token_for_port(daemon.port, daemon.authToken);
+        await this.open_primary_project(rootSelection.primary);
         await this.start_lsp_socket(generation);
     }
 
@@ -298,23 +283,116 @@ export class RustBinaryBlob {
         await fetchH2.disconnectAll();
         global.have_caps = false;
         global.status_bar.choose_color();
+        this.reset_daemon_state();
         this.set_attach_state("connecting");
+    }
+
+    public async fetch_project_proxy(
+        addthis: string,
+        init: ProjectProxyRequestInit,
+        fetchInit?: Partial<fetchH2.FetchInit>,
+    ): Promise<fetchH2.Response> {
+        if (this.x_debug()) {
+            return this.fetch_project_proxy_once(addthis, init, fetchInit);
+        }
+        return refactDaemon.projectProxyFetchWithRetry(
+            () => this.fetch_project_proxy_once(addthis, init, fetchInit),
+            async () => {
+                console.log(["project proxy unavailable, reopening project", addthis]);
+                await this.reopen_primary_project();
+            },
+            response => response.status,
+        );
+    }
+
+    public project_proxy_url(addthis: string): string {
+        let url = this.rust_url();
+        if (!url) {
+            return "";
+        }
+        while (url.endsWith("/")) {
+            url = url.slice(0, -1);
+        }
+        const suffix = addthis.startsWith("/") ? addthis : `/${addthis}`;
+        return url + suffix;
+    }
+
+    private async fetch_project_proxy_once(
+        addthis: string,
+        init: ProjectProxyRequestInit,
+        fetchInit?: Partial<fetchH2.FetchInit>,
+    ): Promise<fetchH2.Response> {
+        const url = this.project_proxy_url(addthis);
+        if (!url) {
+            return Promise.reject("No rust binary working");
+        }
+        const request = new fetchH2.Request(url, {
+            ...init,
+            headers: refactDaemon.daemonRequestHeaders(this.x_debug() ? "" : this.daemon_auth_token, init.headers),
+        });
+        return fetchH2.fetch(request, fetchInit);
+    }
+
+    private async reopen_primary_project(): Promise<void> {
+        const rootSelection = refactDaemon.selectPrimaryWorkspaceRoot(this.workspace_roots());
+        if (!rootSelection.primary) {
+            this.reset_daemon_state();
+            throw new Error("Open a workspace folder before starting Refact.");
+        }
+        this.warn_about_ignored_roots(rootSelection);
+        await this.open_primary_project(rootSelection.primary);
+    }
+
+    private async open_primary_project(root: string): Promise<void> {
+        if (!this.port) {
+            throw new Error("Refact daemon port is not available.");
+        }
+        const response = await refactDaemon.openProject(root, {
+            port: this.port,
+            authToken: this.daemon_auth_token,
+            clientKind: "vscode",
+            settings: this.project_settings(),
+        });
+        const lspPort = response.worker?.lsp_port;
+        if (!lspPort) {
+            throw new Error(`Refact daemon opened project ${response.project_id} without an LSP port.`);
+        }
+        this.daemon_auth_token = this.auth_token_for_port(this.port, this.daemon_auth_token);
+        this.openedProjects.clear();
+        this.openedProjects.set(root, response);
+        this.project_id = response.project_id;
+        this.lsp_port = lspPort;
+    }
+
+    private auth_token_for_port(port: number, fallback?: string | null): string {
+        const endpoint = refactDaemon.daemonEndpoints({ port }).find(candidate => candidate.port === port && candidate.authToken);
+        return endpoint?.authToken ?? fallback ?? "";
+    }
+
+    private warn_about_ignored_roots(selection: refactDaemon.PrimaryWorkspaceRootSelection): void {
+        if (!selection.warning) {
+            return;
+        }
+        console.log(selection.warning);
+        void vscode.window.showWarningMessage(selection.warning);
+    }
+
+    private reset_daemon_state(): void {
+        this.project_id = "";
+        this.lsp_port = 0;
+        this.port = 0;
+        this.daemon_auth_token = "";
+        this.openedProjects.clear();
     }
 
     public async read_caps() {
         try {
-            let url = this.rust_url();
-            if (!url) {
-                return Promise.reject("read_caps no rust binary working, very strange");
-            }
-            url += "v1/caps";
-            let req = new fetchH2.Request(url, {
+            const resp = await this.fetch_project_proxy("/v1/caps", {
                 method: "GET",
                 redirect: "follow",
                 cache: "no-cache",
                 referrer: "no-referrer"
             });
-            let resp = await fetchH2.fetch(req);
             if (resp.status !== 200) {
                 console.log(["read_caps http status", resp.status]);
                 return Promise.reject("read_caps bad status");
@@ -348,19 +426,12 @@ export class RustBinaryBlob {
 
     public async ping() {
         try {
-            let url = this.rust_url();
-            if (!url) {
-                return Promise.reject("ping no rust binary working, very strange");
-            }
-            url += "v1/ping";
-            console.log([url]);
-            let req = new fetchH2.Request(url, {
+            let resp = await this.fetch_project_proxy("/v1/ping", {
                 method: "GET",
                 redirect: "follow",
                 cache: "no-cache",
                 referrer: "no-referrer",
-            });
-            let resp = await fetchH2.fetch(req, { timeout: 5000 });
+            }, { timeout: 5000 });
             if (resp.status !== 200) {
                 console.log(["ping http status", resp.status]);
                 return false;
@@ -455,18 +526,12 @@ export class RustBinaryBlob {
 
     async rag_status() {
         try {
-            let url = this.rust_url();
-            if (!url) {
-                return Promise.reject("rag status no rust binary working, very strange");
-            }
-            url += "v1/rag-status";
-            let req = new fetchH2.Request(url, {
+            let resp = await this.fetch_project_proxy("/v1/rag-status", {
                 method: "GET",
                 redirect: "follow",
                 cache: "no-cache",
                 referrer: "no-referrer",
-            });
-            let resp = await fetchH2.fetch(req, { timeout: 5000 });
+            }, { timeout: 5000 });
             if (resp.status !== 200) {
                 console.log(["rag status http status", resp.status]);
                 return Promise.reject("rag status bad status");
@@ -480,23 +545,13 @@ export class RustBinaryBlob {
     }
 
     async fetch_toolbox_config(): Promise<ToolboxConfig> {
-        const rust_url = this.rust_url();
-
-        if (!rust_url) {
-            console.log(["fetch_toolbox_config: No rust binary working"]);
-            return Promise.reject("No rust binary working");
-        }
-        const url = rust_url + "v1/customization";
-
-        const request = new fetchH2.Request(url, { method: "GET" });
-
-        const response = await fetchH2.fetch(request, { timeout: 5000 });
+        const response = await this.fetch_project_proxy("/v1/customization", { method: "GET" }, { timeout: 5000 });
 
         if (!response.ok) {
             console.log([
                 "fetch_toolbox_config: Error fetching toolbox config",
                 response.status,
-                url,
+                this.project_proxy_url("/v1/customization"),
             ]);
             return Promise.reject(
                 `Error fetching toolbox config: [status: ${response.status}] [statusText: ${response.statusText}]`

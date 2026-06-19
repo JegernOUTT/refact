@@ -2,7 +2,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as estate from "./estate";
-import * as fetchH2 from 'fetch-h2';
 import * as fetchAPI from "./fetchAPI";
 import {
     type ChatMessages,
@@ -13,6 +12,18 @@ import {
     UserMessage,
 } from "refact-chat-js/dist/events";
 
+
+type CodeLensWireItem = {
+    line1: number;
+    line2: number;
+    spath: string;
+    debug_string: string;
+};
+
+type CodeLensWireResponse = {
+    detail?: unknown;
+    code_lens?: CodeLensWireItem[];
+};
 
 class ExperimentalLens extends vscode.CodeLens {
     public constructor(
@@ -55,10 +66,12 @@ export class LensProvider implements vscode.CodeLensProvider
             return [];
         }
 
-        let customization = await fetchAPI.get_prompt_customization();
-
-        const url = fetchAPI.rust_url("/v1/code-lens");
-        const request = new fetchH2.Request(url, {
+        let lenses: vscode.CodeLens[] = [];
+        const customization = await fetchAPI.get_prompt_customization().catch(error => {
+            console.log(["get_prompt_customization", error]);
+            return undefined;
+        });
+        const codeLensResult = await fetchAPI.get_json<CodeLensWireResponse>("/v1/code-lens", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -69,20 +82,17 @@ export class LensProvider implements vscode.CodeLensProvider
             }),
         });
 
-        const response = await fetchH2.fetch(request);
-        let lenses: vscode.CodeLens[] = [];
-        if (response.status !== 200) {
-            console.log([`${url} http status`, response.status]);
-
-        } else if ("code_lens" in customization) {
+        if (!codeLensResult.ok) {
+            console.log(["/v1/code-lens error", codeLensResult.error.status, codeLensResult.error.message]);
+        } else if (customization && "code_lens" in customization) {
             custom_code_lens = customization["code_lens"] as { [key: string]: any };
-            const this_file_lens = await response.json();
-            if ("detail" in this_file_lens) {
-                console.log(["/v1/code-lens error", this_file_lens["detail"]]);
+            const this_file_lens = codeLensResult.data;
+            if (this_file_lens.detail !== undefined) {
+                console.log(["/v1/code-lens error", this_file_lens.detail]);
             }
-            if ("code_lens" in this_file_lens) {
-                for (let i = this_file_lens["code_lens"].length - 1; i >= 0; i--) {
-                    let item = this_file_lens["code_lens"][i];
+            if (this_file_lens.code_lens) {
+                for (let i = this_file_lens.code_lens.length - 1; i >= 0; i--) {
+                    let item = this_file_lens.code_lens[i];
                     let range = new vscode.Range(item["line1"] - 1, 0, item["line2"] - 1, 0);
                     if (item["spath"] !== "") {
                         for (const [key, lensdict] of Object.entries(custom_code_lens)) {

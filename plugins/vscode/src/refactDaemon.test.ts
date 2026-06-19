@@ -9,6 +9,7 @@ import {
     DAEMON_OPEN_PROJECT_TIMEOUT_MS,
     browserProjectUrl,
     compareVersions,
+    daemonRequestHeaders,
     daemonEndpoints,
     daemonOpenProjectUrl,
     daemonSpawnCommand,
@@ -19,8 +20,11 @@ import {
     isPluginNewerThanDaemon,
     missingBundledRefactError,
     openProject,
+    projectProxyFetchWithRetry,
     projectProxyBaseUrl,
     resolveBundledRefactPath,
+    selectPrimaryWorkspaceRoot,
+    shouldRetryProjectProxyStatus,
     type DaemonStatus,
 } from "./refactDaemon";
 import {
@@ -52,6 +56,28 @@ export async function runRefactDaemonTests() {
         browserProjectUrl("machine.local", 8488, "abc"),
         "http://machine.local:8488/p/abc/",
     );
+    assert.strictEqual(
+        browserProjectUrl("machine.local", 8488, "abc", "token with/slash"),
+        "http://machine.local:8488/p/abc/?daemon_token=token%20with%2Fslash",
+    );
+    assert.deepStrictEqual(
+        daemonRequestHeaders(" secret-token ", Object.fromEntries([["Content-Type", "application/json"]])),
+        Object.fromEntries([["Content-Type", "application/json"], ["Authorization", "Bearer secret-token"]]),
+    );
+    assert.deepStrictEqual(
+        daemonRequestHeaders("", Object.fromEntries([["Accept", "application/json"]])),
+        Object.fromEntries([["Accept", "application/json"]]),
+    );
+    assert.deepStrictEqual(selectPrimaryWorkspaceRoot(["/repo"]), { primary: "/repo", ignored: [] });
+    assert.deepStrictEqual(selectPrimaryWorkspaceRoot([]), { primary: undefined, ignored: [] });
+    const multiRootSelection = selectPrimaryWorkspaceRoot(["/repo", "/other", "/third"]);
+    assert.strictEqual(multiRootSelection.primary, "/repo");
+    assert.deepStrictEqual(multiRootSelection.ignored, ["/other", "/third"]);
+    assert.strictEqual(multiRootSelection.warning?.includes("only the primary VS Code workspace folder"), true);
+    assert.strictEqual(shouldRetryProjectProxyStatus(502), true);
+    assert.strictEqual(shouldRetryProjectProxyStatus(503), true);
+    assert.strictEqual(shouldRetryProjectProxyStatus(504), true);
+    assert.strictEqual(shouldRetryProjectProxyStatus(500), false);
 
     assert.strictEqual(compareVersions("8.2.0", "8.1.9"), 1);
     assert.strictEqual(compareVersions("8.1.0", "8.1.0-alpha.1"), 1);
@@ -81,6 +107,7 @@ export async function runRefactDaemonTests() {
     await runOpenProjectStaleTokenRetryTest();
     await runShutdownTokenRotationTest();
     await runDiskPortTokenMismatchRecoveryTest();
+    await runProjectProxyRetryTest();
     await runSpawnFailureSurfacesLogTest();
 }
 
@@ -948,6 +975,28 @@ async function runDiskPortTokenMismatchRecoveryTest() {
         await new Promise<void>(resolve => server.close(() => resolve()));
         fs.rmSync(root, { recursive: true, force: true });
     }
+}
+
+async function runProjectProxyRetryTest() {
+    const statuses = [503, 200];
+    let reopenCount = 0;
+    const result = await projectProxyFetchWithRetry(
+        async () => ({ status: statuses.shift() ?? 200 }),
+        async () => { reopenCount++; },
+        response => response.status,
+    );
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(reopenCount, 1);
+
+    const noRetryResult = await projectProxyFetchWithRetry(
+        async () => ({ status: 500 }),
+        async () => { reopenCount++; },
+        response => response.status,
+    );
+
+    assert.strictEqual(noRetryResult.status, 500);
+    assert.strictEqual(reopenCount, 1);
 }
 
 async function runSpawnFailureSurfacesLogTest() {

@@ -212,7 +212,7 @@ function daemonStatusForEndpoint(status: DaemonStatus, endpoint: DaemonEndpoint)
     };
 }
 
-function requestHeaders(authToken: string | null | undefined, headers: Record<string, string> = {}): Record<string, string> {
+export function daemonRequestHeaders(authToken: string | null | undefined, headers: Record<string, string> = {}): Record<string, string> {
     const token = normalizeAuthToken(authToken);
     return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
 }
@@ -233,8 +233,47 @@ export function projectProxyBaseUrl(port: number, projectId: string): string {
     return `${daemonBaseUrl(port)}/p/${encodeURIComponent(projectId)}/`;
 }
 
-export function browserProjectUrl(host: string, port: number, projectId: string): string {
-    return `http://${host}:${normalizeDaemonPort(port)}/p/${encodeURIComponent(projectId)}/`;
+export function browserProjectUrl(host: string, port: number, projectId: string, authToken?: string | null): string {
+    const baseUrl = `http://${host}:${normalizeDaemonPort(port)}/p/${encodeURIComponent(projectId)}/`;
+    const token = normalizeAuthToken(authToken);
+    return token ? `${baseUrl}?daemon_token=${encodeURIComponent(token)}` : baseUrl;
+}
+
+export type PrimaryWorkspaceRootSelection = {
+    primary?: string;
+    ignored: string[];
+    warning?: string;
+};
+
+export function selectPrimaryWorkspaceRoot(roots: string[]): PrimaryWorkspaceRootSelection {
+    const primary = roots[0];
+    const ignored = roots.slice(1);
+    if (!primary || ignored.length === 0) {
+        return { primary, ignored };
+    }
+    const suffix = ignored.length === 1 ? "folder" : "folders";
+    return {
+        primary,
+        ignored,
+        warning: `Refact serves only the primary VS Code workspace folder (${primary}); ignoring ${ignored.length} additional file workspace ${suffix}.`,
+    };
+}
+
+export function shouldRetryProjectProxyStatus(status: number): boolean {
+    return status === 502 || status === 503 || status === 504;
+}
+
+export async function projectProxyFetchWithRetry<T>(
+    fetchOnce: () => Promise<T>,
+    reopenProject: () => Promise<void>,
+    statusOf: (result: T) => number,
+): Promise<T> {
+    const first = await fetchOnce();
+    if (!shouldRetryProjectProxyStatus(statusOf(first))) {
+        return first;
+    }
+    await reopenProject();
+    return fetchOnce();
 }
 
 export function compareVersions(left: string | undefined, right: string | undefined): number {
@@ -487,7 +526,7 @@ export async function openProject(root: string, options: OpenProjectOptions = {}
         endpoint => daemonOpenProjectUrl(endpoint.port),
         endpoint => ({
             method: "POST",
-            headers: requestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
+            headers: daemonRequestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
         }),
         options.timeoutMs ?? DAEMON_OPEN_PROJECT_TIMEOUT_MS,
@@ -506,7 +545,7 @@ async function shutdownDaemon(port: number, reason: string, authToken?: string, 
         endpoint => daemonShutdownUrl(endpoint.port),
         endpoint => ({
             method: "POST",
-            headers: requestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
+            headers: daemonRequestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
             body: JSON.stringify({ reason }),
         }),
         2000,
