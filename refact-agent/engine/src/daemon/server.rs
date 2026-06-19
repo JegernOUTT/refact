@@ -60,6 +60,7 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
         .bind
         .parse::<IpAddr>()
         .map_err(|error| format!("invalid daemon bind address '{}': {error}", config.bind))?;
+    crate::daemon::auth::validate_hooks_auth_policy(config, ip)?;
     let addr = SocketAddr::new(ip, config.port);
     let listener = TcpListener::bind(addr)
         .map_err(|error| format!("failed to bind daemon control API at {addr}: {error}"))?;
@@ -72,7 +73,9 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
 pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
     let auth_token = state.auth_token.clone();
     let hook_token = state.config.hooks.token.clone();
-    Router::new()
+    let open_hooks_allowed =
+        crate::daemon::auth::hooks_unauthenticated_allowed_for_bind(&state.config.bind);
+    let control = Router::new()
         .route("/", get(crate::daemon::web::handle_project_picker))
         .route("/hooks", post(crate::daemon::hooks::bare))
         .route("/hooks/", post(crate::daemon::hooks::bare))
@@ -122,6 +125,8 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/daemon/v1/projects/:id/stop",
             post(crate::daemon::projects::stop_project_worker),
         )
+        .layer(DefaultBodyLimit::disable());
+    let proxy = Router::new()
         .route("/p/:project_id/v1", any(crate::daemon::proxy::proxy_v1))
         .route(
             "/p/:project_id/v1/*path",
@@ -129,11 +134,13 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         )
         .layer(DefaultBodyLimit::max(
             crate::daemon::proxy::PROXY_BODY_LIMIT,
-        ))
+        ));
+    control
+        .merge(proxy)
         .layer(middleware::from_fn(move |req, next| {
             let token = auth_token.clone();
             let hook_token = hook_token.clone();
-            crate::daemon::auth::check_with_hooks(token, hook_token, req, next)
+            crate::daemon::auth::check_with_hooks(token, hook_token, open_hooks_allowed, req, next)
         }))
         .layer(CorsLayer::permissive())
         .with_state((state, port))
@@ -354,7 +361,7 @@ async fn tail_file(path: &std::path::Path, tail: usize) -> Result<String, String
     if !out.is_empty() {
         out.push('\n');
     }
-    Ok(crate::daemon::auth::redact_daemon_token(&out))
+    Ok(crate::daemon::auth::redact_daemon_query_token(&out))
 }
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {
@@ -392,6 +399,31 @@ mod tests {
             ..DaemonConfig::default()
         };
         assert!(bind_listener(&config).is_err());
+    }
+
+    #[test]
+    fn daemon_server_bind_enforces_loopback_open_hooks_policy() {
+        let loopback = DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let listener = bind_listener(&loopback).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+
+        let wildcard = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let error = bind_listener(&wildcard).unwrap_err();
+        assert!(error.contains("hooks without hooks.token or daemon auth"));
     }
 
     #[tokio::test]
@@ -561,6 +593,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_control_plane_body_is_not_proxy_limited() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let body = serde_json::json!({
+            "project_id": "missing",
+            "pid": 1,
+            "lsp_clients": 0,
+            "busy_chats": 0,
+            "exec_running": 0,
+            "last_activity_ts": 0,
+            "padding": "x".repeat(crate::daemon::proxy::PROXY_BODY_LIMIT + 1024),
+        })
+        .to_string();
+
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/worker-status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

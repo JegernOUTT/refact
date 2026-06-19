@@ -73,16 +73,20 @@ pub async fn handle_v1_hooks_fire(
 ) -> Result<Json<HookFireResponse>, ScratchError> {
     authorize_worker_hook(&app, &headers)?;
     let now_ms = unix_now_ms();
-    let inline = fire_inline(&app, &request, now_ms).await?;
     let hook_id = normalized(request.hook_id.as_deref());
-    if inline.is_none() && hook_id.is_none() {
+    let has_inline = request_has_inline(&request);
+    if !has_inline && hook_id.is_none() {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "message or hook_id is required".to_string(),
         ));
     }
     let hook_jobs = match hook_id {
-        Some(hook_id) => fire_hook_jobs(&app, &hook_id, now_ms).await?,
+        Some(hook_id) => {
+            let hook_jobs = fire_hook_jobs(&app, &hook_id, now_ms).await?;
+            validate_hook_jobs_result(&hook_jobs, has_inline)?;
+            hook_jobs
+        }
         None => HookJobsFireResponse {
             hook_id: None,
             matched: 0,
@@ -90,6 +94,7 @@ pub async fn handle_v1_hooks_fire(
             jobs: Vec::new(),
         },
     };
+    let inline = fire_inline(&app, &request, now_ms).await?;
     Ok(Json(HookFireResponse { inline, hook_jobs }))
 }
 
@@ -97,10 +102,7 @@ fn authorize_worker_hook(app: &AppState, headers: &HeaderMap) -> Result<(), Scra
     let Some(expected) = app.gcx.cmdline.daemon_auth_token.as_deref() else {
         return Ok(());
     };
-    let actual = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().strip_prefix("Bearer "));
+    let actual = crate::daemon::auth::bearer_token_from_headers(headers);
     if actual
         .map(|actual| token_matches(actual, expected))
         .unwrap_or(false)
@@ -263,6 +265,36 @@ async fn fire_hook_jobs(
         fired,
         jobs,
     })
+}
+
+fn validate_hook_jobs_result(
+    hook_jobs: &HookJobsFireResponse,
+    has_inline: bool,
+) -> Result<(), ScratchError> {
+    let hook_id = hook_jobs.hook_id.as_deref().unwrap_or_default();
+    if hook_jobs.matched == 0 && !has_inline {
+        return Err(ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("hook not found: {hook_id}"),
+        ));
+    }
+    if hook_jobs.matched > 0 && hook_jobs.fired == 0 {
+        return Err(ScratchError::new(
+            StatusCode::FAILED_DEPENDENCY,
+            format!(
+                "hook {hook_id} matched {} job(s) but none fired",
+                hook_jobs.matched
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn request_has_inline(request: &HookFireRequest) -> bool {
+    match request.kind {
+        HookFireKind::Wake => request_text(request).is_some(),
+        HookFireKind::Agent => request_message(request).is_some(),
+    }
 }
 
 fn request_text(request: &HookFireRequest) -> Option<String> {
@@ -570,12 +602,22 @@ mod tests {
         let (status, value) =
             request_json(router, json!({"kind":"wake","hook_id": hook_id}), None).await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["hook_jobs"]["matched"], json!(1));
-        assert_eq!(value["hook_jobs"]["fired"], json!(0));
-        assert_eq!(value["hook_jobs"]["jobs"][0]["id"], json!(matching_id));
-        assert_eq!(value["hook_jobs"]["jobs"][0]["fired"], json!(false));
+        assert_eq!(status, StatusCode::FAILED_DEPENDENCY);
+        assert!(value["detail"].as_str().unwrap().contains("none fired"));
         assert!(store.get(&matching_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hooks_fire_unknown_hook_id_returns_not_found() {
+        let app = test_app().await;
+        let hook_id = format!("missing-{}", Uuid::now_v7());
+        let router = router(app);
+
+        let (status, value) =
+            request_json(router, json!({"kind":"wake","hook_id": hook_id}), None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].as_str().unwrap().contains("hook not found"));
     }
 
     #[tokio::test]

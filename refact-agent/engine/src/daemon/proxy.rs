@@ -120,7 +120,7 @@ async fn proxy_to_worker(
             worker_unreachable(
                 state,
                 entry,
-                crate::daemon::auth::redact_daemon_token(&error.to_string()),
+                crate::daemon::auth::redact_daemon_query_token(&error.to_string()),
             )
             .await
         }
@@ -215,7 +215,7 @@ async fn worker_response(
             match chunk {
                 Ok(chunk) => yield Ok::<_, io::Error>(chunk),
                 Err(error) => {
-                    let message = crate::daemon::auth::redact_daemon_token(&error.to_string());
+                    let message = crate::daemon::auth::redact_daemon_query_token(&error.to_string());
                     let _ = stream_state.events.emit(
                         "proxy_worker_unreachable",
                         Some(stream_entry.id.clone()),
@@ -569,6 +569,15 @@ mod tests {
         let headers = HeaderMap::new();
 
         assert!(!is_sse_request(&headers, "/v1/chat/completions"));
+    }
+
+    #[tokio::test]
+    async fn limited_body_bytes_rejects_proxy_bodies_over_limit() {
+        let body = Body::from(vec![b'x'; PROXY_BODY_LIMIT + 1]);
+
+        let response = limited_body_bytes(body).await.unwrap_err();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test(start_paused = true)]

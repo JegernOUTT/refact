@@ -1,8 +1,12 @@
+use std::net::IpAddr;
+
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+
+use crate::daemon::config::DaemonConfig;
 
 pub(crate) const DAEMON_AUTH_COOKIE: &str = "refact_daemon_auth";
 pub(crate) const DAEMON_AUTH_QUERY: &str = "daemon_token";
@@ -33,7 +37,10 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
 }
 
 fn request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
-    bearer_token(req)
+    if has_multiple_authorization_headers(req.headers()) {
+        return false;
+    }
+    bearer_token_from_headers(req.headers())
         .map(|token| token_matches(token, expected))
         .unwrap_or(false)
         || cookie_token_matches(req, expected)
@@ -45,22 +52,40 @@ fn hook_request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
     if query_contains_daemon_token(req.uri().query()) {
         return false;
     }
-    bearer_token(req)
+    if has_multiple_authorization_headers(req.headers()) {
+        return false;
+    }
+    bearer_token_from_headers(req.headers())
         .map(|token| token_matches(token, expected))
         .unwrap_or(false)
         || req
             .headers()
             .get(REFACT_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok())
-            .map(|token| token_matches(token, expected))
+            .map(|token| token_matches(token.trim(), expected))
             .unwrap_or(false)
 }
 
-fn bearer_token<B>(req: &Request<B>) -> Option<&str> {
-    req.headers()
+pub(crate) fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    let value = headers
         .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    let mut parts = value.splitn(2, |ch: char| ch.is_ascii_whitespace());
+    let scheme = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = parts.next()?.trim();
+    (!token.is_empty()).then_some(token)
+}
+
+fn has_multiple_authorization_headers(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    values.next().is_some() && values.next().is_some()
 }
 
 fn cookie_token_matches<B>(req: &Request<B>, expected: &str) -> bool {
@@ -149,11 +174,11 @@ pub(crate) fn project_cookie_from_headers(
     project_id: &str,
     expected: &str,
 ) -> Option<String> {
-    if let Some(token) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| token_matches(token, expected))
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    if let Some(token) =
+        bearer_token_from_headers(headers).filter(|token| token_matches(token, expected))
     {
         return Some(project_cookie_value(project_id, token));
     }
@@ -211,7 +236,7 @@ pub(crate) fn query_without_daemon_token(query: Option<&str>) -> Option<String> 
     kept.then(|| serializer.finish())
 }
 
-pub(crate) fn redact_daemon_token(value: &str) -> String {
+pub(crate) fn redact_daemon_query_token(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut cursor = 0;
     while let Some((value_start, value_end)) = next_daemon_token_value(value, cursor) {
@@ -224,6 +249,30 @@ pub(crate) fn redact_daemon_token(value: &str) -> String {
     }
     out.push_str(&value[cursor..]);
     out
+}
+
+pub(crate) fn hooks_unauthenticated_allowed_for_bind(bind: &str) -> bool {
+    bind.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+pub(crate) fn validate_hooks_auth_policy(
+    config: &DaemonConfig,
+    bind_ip: IpAddr,
+) -> Result<(), String> {
+    if !config.hooks.enabled || config.auth.enabled || bind_ip.is_loopback() {
+        return Ok(());
+    }
+    if config
+        .hooks
+        .token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        return Ok(());
+    }
+    Err("daemon hooks without hooks.token or daemon auth are only allowed on loopback binds; set hooks.token, enable auth, or bind to 127.0.0.1/::1".to_string())
 }
 
 fn next_daemon_token_value(value: &str, from: usize) -> Option<(usize, usize)> {
@@ -283,6 +332,7 @@ fn is_token_delimiter(ch: char) -> bool {
 pub(crate) async fn check_with_hooks<B>(
     token: Option<String>,
     hook_token: Option<String>,
+    open_hooks_allowed: bool,
     req: Request<B>,
     next: Next<B>,
 ) -> Response
@@ -290,19 +340,35 @@ where
     B: Send + 'static,
 {
     if is_hook_request(&req) {
-        let expected = hook_token
-            .as_deref()
-            .filter(|token| !token.is_empty())
-            .or_else(|| token.as_deref().filter(|token| !token.is_empty()));
-        if !expected
-            .map(|expected| hook_request_authorized(&req, expected))
-            .unwrap_or(false)
-        {
+        if query_contains_daemon_token(req.uri().query()) {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "Unauthorized"})),
             )
                 .into_response();
+        }
+        let expected = hook_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| token.as_deref().filter(|token| !token.trim().is_empty()));
+        match expected {
+            Some(expected) => {
+                if !hook_request_authorized(&req, expected) {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": "Unauthorized"})),
+                    )
+                        .into_response();
+                }
+            }
+            None if open_hooks_allowed => {}
+            None => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "hooks require hooks.token or daemon auth on non-loopback binds"})),
+                )
+                    .into_response();
+            }
         }
         return next.run(req).await;
     }
@@ -372,6 +438,33 @@ mod tests {
             .unwrap();
 
         assert!(request_authorized(&request, "secret-token"));
+    }
+
+    #[test]
+    fn auth_middleware_accepts_ows_and_case_insensitive_bearer_scheme() {
+        let request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::AUTHORIZATION, "  bEaReR \t secret-token  ")
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(request_authorized(&request, "secret-token"));
+    }
+
+    #[test]
+    fn auth_middleware_rejects_multiple_authorization_headers() {
+        let mut request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::AUTHORIZATION, "Bearer secret-token")
+            .header(header::COOKIE, "refact_daemon_auth=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+
+        assert!(!request_authorized(&request, "secret-token"));
     }
 
     #[test]
@@ -498,6 +591,58 @@ mod tests {
     }
 
     #[test]
+    fn project_cookie_from_headers_rejects_multiple_authorization_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+
+        assert_eq!(
+            project_cookie_from_headers(&headers, "project-a", "secret-token"),
+            None
+        );
+    }
+
+    #[test]
+    fn hooks_auth_policy_allows_no_token_on_loopback_only() {
+        let loopback = DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let wildcard = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tokenized = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                token: Some("hook-secret".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(hooks_unauthenticated_allowed_for_bind("127.0.0.1"));
+        assert!(hooks_unauthenticated_allowed_for_bind("::1"));
+        assert!(!hooks_unauthenticated_allowed_for_bind("0.0.0.0"));
+        assert!(validate_hooks_auth_policy(&loopback, "127.0.0.1".parse().unwrap()).is_ok());
+        assert!(validate_hooks_auth_policy(&tokenized, "0.0.0.0".parse().unwrap()).is_ok());
+        assert!(validate_hooks_auth_policy(&wildcard, "0.0.0.0".parse().unwrap()).is_err());
+    }
+
+    #[test]
     fn query_without_daemon_token_removes_only_daemon_token() {
         assert_eq!(
             query_without_daemon_token(Some("a=1&daemon_token=secret&b=2")),
@@ -515,14 +660,16 @@ mod tests {
     }
 
     #[test]
-    fn redact_daemon_token_hides_query_values() {
-        let redacted =
-            redact_daemon_token("GET http://x/p/a/v1?daemon_token=secret-token&chat=1 failed");
+    fn redact_daemon_query_token_hides_query_values() {
+        let redacted = redact_daemon_query_token(
+            "GET http://x/p/a/v1?daemon_token=secret-token&chat=1 failed",
+        );
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("daemon_token=<redacted>&chat=1"));
 
-        let redacted =
-            redact_daemon_token("GET http://x/p/a/v1?d%61emon_token=secret-token&chat=1 failed");
+        let redacted = redact_daemon_query_token(
+            "GET http://x/p/a/v1?d%61emon_token=secret-token&chat=1 failed",
+        );
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("d%61emon_token=<redacted>&chat=1"));
     }

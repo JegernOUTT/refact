@@ -257,14 +257,16 @@ async fn forward_to_worker(
     let response = request.send().await.map_err(|error| {
         HookError::new(
             StatusCode::BAD_GATEWAY,
-            crate::daemon::auth::redact_daemon_token(&format!("failed to forward hook: {error}")),
+            crate::daemon::auth::redact_daemon_query_token(&format!(
+                "failed to forward hook: {error}"
+            )),
         )
     })?;
     let status = response.status();
     let text = response.text().await.map_err(|error| {
         HookError::new(
             StatusCode::BAD_GATEWAY,
-            crate::daemon::auth::redact_daemon_token(&format!(
+            crate::daemon::auth::redact_daemon_query_token(&format!(
                 "failed to read hook response: {error}"
             )),
         )
@@ -272,7 +274,7 @@ async fn forward_to_worker(
     if !status.is_success() {
         return Err(HookError::new(
             StatusCode::BAD_GATEWAY,
-            crate::daemon::auth::redact_daemon_token(&format!(
+            crate::daemon::auth::redact_daemon_query_token(&format!(
                 "worker hook failed with status {}: {}",
                 status.as_u16(),
                 text
@@ -394,6 +396,17 @@ mod tests {
         }
     }
 
+    fn open_hook_config(bind: &str) -> DaemonConfig {
+        DaemonConfig {
+            bind: bind.to_string(),
+            hooks: HooksConfig {
+                enabled: true,
+                ..HooksConfig::default()
+            },
+            ..DaemonConfig::default()
+        }
+    }
+
     async fn request_json(
         router: axum::Router,
         uri: &str,
@@ -480,6 +493,36 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn hook_auth_no_token_is_loopback_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let loopback = test_state(open_hook_config("127.0.0.1"), &dir).await;
+        let loopback_router = crate::daemon::server::make_router(loopback, 8488);
+        let (status, value) = request_json(
+            loopback_router,
+            "/hooks/wake",
+            None,
+            "authorization",
+            json!({"project":"missing","text":"hello"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["error"], "project not found");
+
+        let wildcard = test_state(open_hook_config("0.0.0.0"), &dir).await;
+        let wildcard_router = crate::daemon::server::make_router(wildcard, 8488);
+        let (status, value) = request_json(
+            wildcard_router,
+            "/hooks/wake",
+            None,
+            "authorization",
+            json!({"project":"missing","text":"hello"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(value["error"].as_str().unwrap().contains("hooks require"));
     }
 
     #[tokio::test]

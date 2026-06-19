@@ -122,14 +122,14 @@ pub async fn ping_daemon(info: &DaemonInfo) -> DaemonPingStatus {
         Ok(response) => response,
         Err(error) if error.is_connect() => {
             return DaemonPingStatus::NotRunning {
-                message: crate::daemon::auth::redact_daemon_token(&format!(
+                message: crate::daemon::auth::redact_daemon_query_token(&format!(
                     "failed to contact daemon: {error}"
                 )),
             };
         }
         Err(error) => {
             return DaemonPingStatus::Error {
-                message: crate::daemon::auth::redact_daemon_token(&format!(
+                message: crate::daemon::auth::redact_daemon_query_token(&format!(
                     "failed to contact daemon: {error}"
                 )),
             };
@@ -343,7 +343,7 @@ async fn send_control_request(
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, DaemonClientError> {
     request.send().await.map_err(|error| {
-        DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+        DaemonClientError::Http(crate::daemon::auth::redact_daemon_query_token(&format!(
             "failed to contact daemon: {error}"
         )))
     })
@@ -377,7 +377,7 @@ async fn decode_text_response(response: reqwest::Response) -> Result<String, Dae
         return Err(response_status_error(response).await);
     }
     response.text().await.map_err(|error| {
-        DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+        DaemonClientError::Http(crate::daemon::auth::redact_daemon_query_token(&format!(
             "failed to read daemon response: {error}"
         )))
     })
@@ -389,7 +389,7 @@ async fn response_status_error(response: reqwest::Response) -> DaemonClientError
         .text()
         .await
         .unwrap_or_else(|error| error.to_string());
-    let body = crate::daemon::auth::redact_daemon_token(&body);
+    let body = crate::daemon::auth::redact_daemon_query_token(&body);
     let body = if status == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
         let body = body.trim();
         if body.is_empty() {

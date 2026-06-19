@@ -147,7 +147,9 @@ impl EventBus {
 
 fn redact_value(value: Value) -> Value {
     match value {
-        Value::String(value) => Value::String(crate::daemon::auth::redact_daemon_token(&value)),
+        Value::String(value) => {
+            Value::String(crate::daemon::auth::redact_daemon_query_token(&value))
+        }
         Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
         Value::Object(values) => Value::Object(
             values

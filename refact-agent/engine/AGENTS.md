@@ -772,8 +772,10 @@ hooks:
 
 Project resolution order is request body `project` → mapping `project` → `default_project`.
 Allowed projects can match project id, slug, or root path. Hook auth accepts `Authorization: Bearer`
-or `x-refact-token`; query-string daemon tokens are rejected for hook routes. The worker forward token
-is the daemon auth token when present, otherwise the hook token.
+or `x-refact-token`; query-string daemon tokens are rejected for hook routes. Hooks may be open only
+when the daemon is bound to loopback (`127.0.0.1` or `::1`); non-loopback binds require `hooks.token`
+or daemon auth and refuse to start otherwise. The worker forward token is the daemon auth token when
+present, otherwise the hook token.
 
 Worker endpoint `POST /v1/hooks/fire` accepts:
 

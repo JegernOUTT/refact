@@ -682,6 +682,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_project_index_returns_escaped_404_page() {
+        let state = test_state().await.state;
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/p/%3Cbad%3E/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("&lt;bad&gt;"));
+        assert!(!body.contains("<bad>"));
+    }
+
+    #[tokio::test]
     async fn auth_enabled_picker_requires_credentials() {
         let state = test_state_with_auth(Some("secret-token")).await.state;
         let response = crate::daemon::server::make_router(state, 8488)
@@ -690,6 +709,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_dist_chat_assets_are_public() {
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/dist/chat/missing.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
