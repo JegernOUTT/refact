@@ -107,9 +107,10 @@ vi.mock("../features/Workspace/WorkspaceView", async () => {
 
 vi.mock("../features/Tasks", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
-  const actual = await vi.importActual<typeof import("../features/Tasks")>(
-    "../features/Tasks",
-  );
+  const actual =
+    await vi.importActual<typeof import("../features/Tasks")>(
+      "../features/Tasks",
+    );
 
   return {
     ...actual,

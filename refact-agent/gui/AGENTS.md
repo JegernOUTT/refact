@@ -77,21 +77,21 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### SSE Event Types
 
-| Event                           | Purpose                                                |
-| ------------------------------- | ------------------------------------------------------ |
-| `snapshot`                      | Full state sync (resets seq to 0)                      |
-| `stream_started`                | AI response beginning                                  |
-| `stream_delta`                  | Incremental content (DeltaOp[])                        |
-| `stream_finished`               | Complete with usage stats                              |
+| Event                           | Purpose                                                       |
+| ------------------------------- | ------------------------------------------------------------- |
+| `snapshot`                      | Full state sync (resets seq to 0)                             |
+| `stream_started`                | AI response beginning                                         |
+| `stream_delta`                  | Incremental content (DeltaOp[])                               |
+| `stream_finished`               | Complete with usage stats                                     |
 | `message_added/updated/removed` | Message CRUD, including hidden `event`/`goal`/`plan` messages |
-| `messages_truncated`            | Messages trimmed                                       |
-| `thread_updated`                | Thread metadata changed                                |
-| `runtime_updated`               | Runtime flags changed                                  |
-| `pause_required/cleared`        | Tool confirmation                                      |
-| `ide_tool_required`             | IDE tool execution needed                              |
-| `subchat_update`                | Nested chat update                                     |
-| `queue_updated`                 | Command queue changed                                  |
-| `ack`                           | Command acknowledgment                                 |
+| `messages_truncated`            | Messages trimmed                                              |
+| `thread_updated`                | Thread metadata changed                                       |
+| `runtime_updated`               | Runtime flags changed                                         |
+| `pause_required/cleared`        | Tool confirmation                                             |
+| `ide_tool_required`             | IDE tool execution needed                                     |
+| `subchat_update`                | Nested chat update                                            |
+| `queue_updated`                 | Command queue changed                                         |
+| `ack`                           | Command acknowledgment                                        |
 
 ### Delta Operations
 
@@ -196,16 +196,16 @@ Compression visibility rules:
 - The footer compression indicator is driven only by the thread runtime `is_compressing` selector. It appears while the backend reports an active compression attempt and disappears on terminal `RuntimeUpdated`/snapshot state when `is_compressing` becomes false or is cleared.
 - Restore paths and SSE-error/reconnect cleanup must clear `is_compressing`, `compression_phase`, and `compression_reason` so stale compression progress does not survive thread restoration or subscription failures.
 
-| Role           | Component                  | Notes                                                                |
-| -------------- | -------------------------- | -------------------------------------------------------------------- |
-| `user`         | UserInput                  | Editable, checkpoints badge, images, compression hint 🗜️             |
-| `assistant`    | AssistantInput             | ReasoningContent → Markdown → ToolsContent → DiffContent → Citations |
-| `tool`         | (inline in AssistantInput) | Skipped in top-level render                                          |
-| `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                             |
-| `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                      |
+| Role           | Component                  | Notes                                                                                                              |
+| -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `user`         | UserInput                  | Editable, checkpoints badge, images, compression hint 🗜️                                                           |
+| `assistant`    | AssistantInput             | ReasoningContent → Markdown → ToolsContent → DiffContent → Citations                                               |
+| `tool`         | (inline in AssistantInput) | Skipped in top-level render                                                                                        |
+| `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                                                                           |
+| `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                                                                    |
 | `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns, excluding plan/goal deltas and pursuit events |
-| `goal`         | TaskProgressWidget         | Hidden from normal transcript; projected through `thread.goal`       |
-| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat      |
+| `goal`         | TaskProgressWidget         | Hidden from normal transcript; projected through `thread.goal`                                                     |
+| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat                                                    |
 
 ### EventLog component pattern (src/components/ChatContent/EventLog/)
 

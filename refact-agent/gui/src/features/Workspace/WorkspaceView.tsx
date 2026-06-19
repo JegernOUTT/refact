@@ -1,11 +1,6 @@
 import classNames from "classnames";
 import { Columns3 } from "lucide-react";
-import {
-  type DragEvent,
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import { type DragEvent, useCallback, useEffect, useState } from "react";
 
 import { IconButton, Tooltip } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -15,10 +10,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import {
-  hasTabDragType,
-  readTabDragSurfaceKey,
-} from "../ChatPanes/tabDrag";
+import { hasTabDragType, readTabDragSurfaceKey } from "../ChatPanes/tabDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
 import { isChatSurface, makeSurfaceKey } from "./surfaceKey";

@@ -73,10 +73,7 @@ import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
-import {
-  reconcileWorkspaceState,
-  workspaceSlice,
-} from "../features/Workspace";
+import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",

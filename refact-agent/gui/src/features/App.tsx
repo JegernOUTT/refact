@@ -454,7 +454,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       lastTrustedProjectStorageNamespaceRef.current =
         trustedProjectStorageNamespace;
     }
-    lastProjectStorageRestoreIdentityRef.current = projectStorageRestoreIdentity;
+    lastProjectStorageRestoreIdentityRef.current =
+      projectStorageRestoreIdentity;
   }, [projectStorageRestoreIdentity, trustedProjectStorageNamespace]);
 
   useEffect(() => {

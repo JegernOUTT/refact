@@ -50,11 +50,7 @@ import {
   setActiveTab,
   type PaneGroup,
 } from "./workspaceSlice";
-import {
-  makeSurfaceKey,
-  parseSurfaceKey,
-  type SurfaceKey,
-} from "./surfaceKey";
+import { makeSurfaceKey, parseSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { getStatusFromSessionState } from "../../utils/sessionStatus";
 import styles from "./TabBar.module.css";
 
@@ -124,8 +120,9 @@ function uniqueSurfaceKeys(keys: SurfaceKey[]): SurfaceKey[] {
 function taskSessionState(task: OpenTask | undefined): string | undefined {
   const activeChat = task?.activeChat;
   if (activeChat?.type === "planner") {
-    return task?.plannerChats.find((planner) => planner.id === activeChat.chatId)
-      ?.sessionState;
+    return task?.plannerChats.find(
+      (planner) => planner.id === activeChat.chatId,
+    )?.sessionState;
   }
   return task?.plannerChats[0]?.sessionState;
 }

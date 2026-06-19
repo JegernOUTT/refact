@@ -173,11 +173,17 @@ describe("ModeSelect", () => {
     server.use(
       http.post("*/v1/chats/*/trajectory/mode-transition/apply", () => {
         genericTransitionCalled = true;
-        return HttpResponse.json({ new_chat_id: "new-chat", messages_count: 1 });
+        return HttpResponse.json({
+          new_chat_id: "new-chat",
+          messages_count: 1,
+        });
       }),
       http.post("*/v1/tasks/task-1/planner-chats/from-transition", () => {
         plannerTransitionCalled = true;
-        return HttpResponse.json({ new_chat_id: "planner-chat", messages_count: 1 });
+        return HttpResponse.json({
+          new_chat_id: "planner-chat",
+          messages_count: 1,
+        });
       }),
       http.get("*/v1/trajectories/all", () => HttpResponse.json([])),
       http.post("*/v1/chats/new-chat/commands", () =>
