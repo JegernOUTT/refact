@@ -38,6 +38,10 @@ import {
     effectiveLspPortForStatus,
     shouldReadCapsForCompletion,
 } from "./backendStatus";
+import {
+    lspSocketCloseAction,
+    shouldRunLifecycleGeneration,
+} from "./launchRustLifecycle";
 
 export async function runRefactDaemonTests() {
     assert.strictEqual(
@@ -92,6 +96,7 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(DAEMON_OPEN_PROJECT_TIMEOUT_MS >= 130000, true);
 
     runBackendStatusTests();
+    runLaunchRustLifecycleTests();
 
     await runBundledRefactSpawnTests();
     await runStandaloneResolutionTests();
@@ -125,6 +130,46 @@ function runBackendStatusTests() {
     assert.strictEqual(shouldReadCapsForCompletion(false, "connecting"), false);
     assert.strictEqual(shouldReadCapsForCompletion(false, "ready"), true);
     assert.strictEqual(shouldReadCapsForCompletion(true, "ready"), false);
+}
+
+function runLaunchRustLifecycleTests() {
+    assert.strictEqual(shouldRunLifecycleGeneration(2, 2), true);
+    assert.strictEqual(shouldRunLifecycleGeneration(1, 2), false);
+    assert.strictEqual(lspSocketCloseAction({
+        generation: 1,
+        currentGeneration: 2,
+        reconnectGeneration: 1,
+        socketIsCurrent: true,
+        debug: false,
+    }), "ignore");
+    assert.strictEqual(lspSocketCloseAction({
+        generation: 2,
+        currentGeneration: 2,
+        reconnectGeneration: 2,
+        socketIsCurrent: false,
+        debug: false,
+    }), "ignore");
+    assert.strictEqual(lspSocketCloseAction({
+        generation: 2,
+        currentGeneration: 2,
+        reconnectGeneration: 2,
+        socketIsCurrent: true,
+        debug: false,
+    }), "reconnect");
+    assert.strictEqual(lspSocketCloseAction({
+        generation: 2,
+        currentGeneration: 2,
+        reconnectGeneration: undefined,
+        socketIsCurrent: true,
+        debug: false,
+    }), "disconnect");
+    assert.strictEqual(lspSocketCloseAction({
+        generation: 2,
+        currentGeneration: 2,
+        reconnectGeneration: 2,
+        socketIsCurrent: true,
+        debug: true,
+    }), "disconnect");
 }
 
 async function runBundledRefactSpawnTests() {

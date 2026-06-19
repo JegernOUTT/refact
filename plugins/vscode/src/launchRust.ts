@@ -11,12 +11,24 @@ import { QuickActionProvider } from './quickProvider';
 import * as refactBinary from './refactBinaryResolver';
 import * as refactDaemon from './refactDaemon';
 import { backendReadyForStatus, type RefactBackendConnectionStatus } from './backendStatus';
+import {
+    lspClientReadyTimeoutMs,
+    lspClientStopTimeoutMs,
+    lspSocketCloseAction,
+    lspSocketConnectTimeoutMs,
+    shouldRunLifecycleGeneration,
+} from './launchRustLifecycle';
 
 const DEBUG_HTTP_PORT = 8001;
 const DEBUG_LSP_PORT = 8002;
 
 type ProjectProxyRequestInit = Omit<Partial<fetchH2.RequestInit>, "headers"> & {
     headers?: Record<string, string>;
+};
+
+type OpenPrimaryProjectResult = {
+    response: refactDaemon.OpenProjectResponse;
+    lspPort: number;
 };
 
 export class RustBinaryBlob {
@@ -97,6 +109,45 @@ export class RustBinaryBlob {
         global.status_bar?.choose_color();
     }
 
+    private is_current_generation(generation: number): boolean {
+        return shouldRunLifecycleGeneration(generation, this.lifecycleGeneration);
+    }
+
+    private dispose_lsp_resources(
+        socket: net.Socket,
+        client?: lspClient.LanguageClient,
+        disposable?: vscode.Disposable,
+    ): void {
+        const currentSocket = this.lsp_socket === socket;
+        if (disposable) {
+            disposable.dispose();
+            if (this.lsp_disposable === disposable) {
+                this.lsp_disposable = undefined;
+            }
+        } else if (currentSocket && this.lsp_disposable) {
+            this.lsp_disposable.dispose();
+            this.lsp_disposable = undefined;
+        }
+        if (client) {
+            if (this.lsp_client === client) {
+                this.lsp_client = undefined;
+            }
+        } else if (currentSocket) {
+            this.lsp_client = undefined;
+        }
+        if (currentSocket) {
+            this.lsp_socket = undefined;
+        }
+        if (!socket.destroyed) {
+            socket.destroy();
+        }
+    }
+
+    private mark_lsp_disconnected(): void {
+        global.have_caps = false;
+        this.set_attach_state("connecting");
+    }
+
     public browser_url(): string {
         if (this.x_debug()) {
             const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
@@ -140,7 +191,12 @@ export class RustBinaryBlob {
 
     private enqueueLifecycle(operation: (generation: number) => Promise<void>): Promise<void> {
         const generation = ++this.lifecycleGeneration;
-        const run = this.lifecycleQueue.catch(() => undefined).then(() => operation(generation));
+        const run = this.lifecycleQueue.catch(() => undefined).then(() => {
+            if (!this.is_current_generation(generation)) {
+                return undefined;
+            }
+            return operation(generation);
+        });
         this.lifecycleQueue = run.catch(() => undefined);
         return run;
     }
@@ -155,13 +211,18 @@ export class RustBinaryBlob {
                 await this.attach_daemon_serialized(generation);
             }
         } catch (error) {
+            if (!this.is_current_generation(generation)) {
+                return;
+            }
             console.log(["Refact attach failed", error]);
             global.have_caps = false;
             this.reset_daemon_state();
             this.set_attach_state("failed");
             global.status_bar.set_socket_error(true, error instanceof Error ? error.message : String(error));
         } finally {
-            global.side_panel?.handleSettingsChange();
+            if (this.is_current_generation(generation)) {
+                global.side_panel?.handleSettingsChange();
+            }
         }
     }
 
@@ -176,7 +237,7 @@ export class RustBinaryBlob {
     private async attach_debug_serialized(generation: number) {
         this.clearReconnectTimer();
         await this.stop_lsp(generation);
-        if (generation !== this.lifecycleGeneration) {
+        if (!this.is_current_generation(generation)) {
             return;
         }
         this.port = DEBUG_HTTP_PORT;
@@ -192,7 +253,7 @@ export class RustBinaryBlob {
     private async attach_daemon_serialized(generation: number) {
         this.clearReconnectTimer();
         await this.stop_lsp(generation);
-        if (generation !== this.lifecycleGeneration) {
+        if (!this.is_current_generation(generation)) {
             return;
         }
 
@@ -207,7 +268,7 @@ export class RustBinaryBlob {
 
         const pluginVersion = this.plugin_version();
         let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion });
-        if (generation !== this.lifecycleGeneration) {
+        if (!this.is_current_generation(generation)) {
             return;
         }
         this.set_attach_state(daemon ? "connecting" : "starting");
@@ -219,31 +280,47 @@ export class RustBinaryBlob {
                 pinnedVersion: pluginVersion,
                 cacheDir: this.binary_cache_path,
             });
+            if (!this.is_current_generation(generation)) {
+                return;
+            }
             daemon = await refactDaemon.ensureDaemon(binPath, { port: daemonPort, pluginVersion });
         }
-        if (generation !== this.lifecycleGeneration) {
+        if (!this.is_current_generation(generation)) {
             return;
         }
 
-        this.port = daemon.port;
-        this.daemon_auth_token = this.auth_token_for_port(daemon.port, daemon.authToken);
-        await this.open_primary_project(rootSelection.primary);
+        const daemonPortForGeneration = daemon.port;
+        const daemonAuthTokenForGeneration = this.auth_token_for_port(daemonPortForGeneration, daemon.authToken);
+        const projectResponse = await this.open_primary_project_response(
+            rootSelection.primary,
+            daemonPortForGeneration,
+            daemonAuthTokenForGeneration,
+        );
+        if (!this.is_current_generation(generation)) {
+            return;
+        }
+        this.port = daemonPortForGeneration;
+        this.daemon_auth_token = this.auth_token_for_port(daemonPortForGeneration, daemonAuthTokenForGeneration);
+        this.openedProjects.clear();
+        this.openedProjects.set(rootSelection.primary, projectResponse.response);
+        this.project_id = projectResponse.response.project_id;
+        this.lsp_port = projectResponse.lspPort;
         await this.start_lsp_socket(generation);
     }
 
     public async stop_lsp(generation: number = this.lifecycleGeneration) {
-        if (generation === this.lifecycleGeneration) {
+        if (this.is_current_generation(generation)) {
             this.reconnectGeneration = undefined;
             this.clearReconnectTimer();
         }
-        let my_lsp_client_copy = this.lsp_client;
+        const my_lsp_client_copy = this.lsp_client;
         if (my_lsp_client_copy) {
             console.log("RUST STOP");
-            let ts = Date.now();
+            const ts = Date.now();
             try {
                 await Promise.race([
                     my_lsp_client_copy.stop(),
-                    new Promise<void>(resolve => setTimeout(resolve, 5000)),
+                    new Promise<void>(resolve => setTimeout(resolve, lspClientStopTimeoutMs)),
                 ]);
                 console.log(`RUST /STOP completed in ${Date.now() - ts}ms`);
             } catch (e) {
@@ -252,7 +329,7 @@ export class RustBinaryBlob {
                 console.log("RUST STOP FINALLY");
             }
         }
-        if (generation === this.lifecycleGeneration) {
+        if (this.is_current_generation(generation)) {
             this.lsp_dispose();
         }
     }
@@ -271,14 +348,10 @@ export class RustBinaryBlob {
     }
 
     public async terminate() {
-        return this.enqueueLifecycle(async (generation) => this.terminate_serialized(generation));
-    }
-
-    private async terminate_serialized(generation: number) {
-        await this.stop_lsp(generation);
-        if (generation !== this.lifecycleGeneration) {
-            return;
-        }
+        this.lifecycleGeneration++;
+        this.reconnectGeneration = undefined;
+        this.clearReconnectTimer();
+        await this.stop_lsp(this.lifecycleGeneration);
         await refactDaemon.detach();
         await fetchH2.disconnectAll();
         global.have_caps = false;
@@ -343,13 +416,14 @@ export class RustBinaryBlob {
         await this.open_primary_project(rootSelection.primary);
     }
 
-    private async open_primary_project(root: string): Promise<void> {
-        if (!this.port) {
-            throw new Error("Refact daemon port is not available.");
-        }
+    private async open_primary_project_response(
+        root: string,
+        port: number,
+        authToken: string,
+    ): Promise<OpenPrimaryProjectResult> {
         const response = await refactDaemon.openProject(root, {
-            port: this.port,
-            authToken: this.daemon_auth_token,
+            port,
+            authToken,
             clientKind: "vscode",
             settings: this.project_settings(),
         });
@@ -357,11 +431,19 @@ export class RustBinaryBlob {
         if (!lspPort) {
             throw new Error(`Refact daemon opened project ${response.project_id} without an LSP port.`);
         }
+        return { response, lspPort };
+    }
+
+    private async open_primary_project(root: string): Promise<void> {
+        if (!this.port) {
+            throw new Error("Refact daemon port is not available.");
+        }
+        const projectResponse = await this.open_primary_project_response(root, this.port, this.daemon_auth_token);
         this.daemon_auth_token = this.auth_token_for_port(this.port, this.daemon_auth_token);
         this.openedProjects.clear();
-        this.openedProjects.set(root, response);
-        this.project_id = response.project_id;
-        this.lsp_port = lspPort;
+        this.openedProjects.set(root, projectResponse.response);
+        this.project_id = projectResponse.response.project_id;
+        this.lsp_port = projectResponse.lspPort;
     }
 
     private auth_token_for_port(port: number, fallback?: string | null): string {
@@ -392,7 +474,7 @@ export class RustBinaryBlob {
                 redirect: "follow",
                 cache: "no-cache",
                 referrer: "no-referrer"
-            });
+            }, { timeout: 5000 });
             if (resp.status !== 200) {
                 console.log(["read_caps http status", resp.status]);
                 return Promise.reject("read_caps bad status");
@@ -443,7 +525,28 @@ export class RustBinaryBlob {
         return false;
     }
 
+    private async wait_lsp_client_ready(client: lspClient.LanguageClient): Promise<void> {
+        let readyTimer: NodeJS.Timeout | undefined;
+        try {
+            await Promise.race([
+                client.onReady(),
+                new Promise<void>((_resolve, reject) => {
+                    readyTimer = setTimeout(() => {
+                        reject(new Error(`RUST LSP client onReady timed out after ${lspClientReadyTimeoutMs}ms`));
+                    }, lspClientReadyTimeoutMs);
+                }),
+            ]);
+        } finally {
+            if (readyTimer) {
+                clearTimeout(readyTimer);
+            }
+        }
+    }
+
     public async start_lsp_socket(generation: number = this.lifecycleGeneration) {
+        if (!this.is_current_generation(generation)) {
+            return;
+        }
         const lspPort = this.x_debug() ? DEBUG_LSP_PORT : this.lsp_port;
         if (!lspPort) {
             throw new Error("Refact LSP port is not available.");
@@ -451,13 +554,37 @@ export class RustBinaryBlob {
         console.log(`RUST start_lsp_socket ${lspPort}`);
         this.reconnectGeneration = this.x_debug() ? undefined : generation;
 
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
             let settled = false;
-            const finish = () => {
-                if (!settled) {
-                    settled = true;
-                    resolve();
+            let connectTimer: NodeJS.Timeout | undefined;
+            const finish = (error?: Error) => {
+                if (settled) {
+                    return;
                 }
+                settled = true;
+                if (connectTimer) {
+                    clearTimeout(connectTimer);
+                    connectTimer = undefined;
+                }
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                resolve();
+            };
+            const fail_or_reconnect = (socket: net.Socket, error: Error) => {
+                this.dispose_lsp_resources(socket);
+                if (!this.is_current_generation(generation)) {
+                    finish();
+                    return;
+                }
+                this.mark_lsp_disconnected();
+                if (this.x_debug()) {
+                    finish(error);
+                    return;
+                }
+                this.schedule_lsp_reconnect(generation);
+                finish();
             };
             const socket = new net.Socket();
             this.lsp_socket = socket;
@@ -468,38 +595,61 @@ export class RustBinaryBlob {
             });
             socket.on('close', () => {
                 console.log("RUST socket closed");
-                const shouldReconnect = this.reconnectGeneration === generation && generation === this.lifecycleGeneration && !this.x_debug();
-                this.lsp_dispose();
-                if (shouldReconnect) {
+                const closedBeforeReady = !settled;
+                const action = lspSocketCloseAction({
+                    generation,
+                    currentGeneration: this.lifecycleGeneration,
+                    reconnectGeneration: this.reconnectGeneration,
+                    socketIsCurrent: this.lsp_socket === socket,
+                    debug: Boolean(this.x_debug()),
+                });
+                if (action === "ignore") {
+                    finish();
+                    return;
+                }
+                this.dispose_lsp_resources(socket);
+                this.mark_lsp_disconnected();
+                if (action === "reconnect") {
                     this.schedule_lsp_reconnect(generation);
+                }
+                if (action === "disconnect" && this.x_debug() && closedBeforeReady) {
+                    finish(new Error("RUST LSP socket closed before ready"));
+                    return;
                 }
                 finish();
             });
             socket.on('connect', async () => {
-                if (generation !== this.lifecycleGeneration) {
+                if (connectTimer) {
+                    clearTimeout(connectTimer);
+                    connectTimer = undefined;
+                }
+                if (!this.is_current_generation(generation)) {
                     socket.destroy();
                     finish();
                     return;
                 }
                 console.log("RUST LSP socket connected");
-                this.lsp_client = new lspClient.LanguageClient(
+                const client = new lspClient.LanguageClient(
                     'Custom rust LSP server',
                     async () => {
-                        if (this.lsp_socket === undefined) {
-                            return Promise.reject("this.lsp_socket is undefined, that should not happen");
+                        if (this.lsp_socket !== socket || !this.is_current_generation(generation)) {
+                            return Promise.reject("RUST LSP socket was superseded");
                         }
                         return Promise.resolve({
-                            reader: this.lsp_socket,
-                            writer: this.lsp_socket
+                            reader: socket,
+                            writer: socket,
                         });
                     },
                     this.lsp_client_options
                 );
-                this.lsp_disposable = this.lsp_client.start();
+                this.lsp_client = client;
+                const disposable = client.start();
+                this.lsp_disposable = disposable;
                 console.log(`RUST START`);
                 try {
-                    await this.lsp_client.onReady();
-                    if (generation !== this.lifecycleGeneration) {
+                    await this.wait_lsp_client_ready(client);
+                    if (!this.is_current_generation(generation) || this.lsp_socket !== socket) {
+                        this.dispose_lsp_resources(socket, client, disposable);
                         finish();
                         return;
                     }
@@ -507,20 +657,40 @@ export class RustBinaryBlob {
                     this.reconnectAttempts = 0;
                     console.log(`RUST /START`);
                     await this.read_caps();
+                    if (!this.is_current_generation(generation)) {
+                        finish();
+                        return;
+                    }
+                    if (this.lsp_socket !== socket) {
+                        this.mark_lsp_disconnected();
+                        finish();
+                        return;
+                    }
                     await this.fetch_toolbox_config().catch(error => console.log(["fetch_toolbox_config", error]));
                 } catch (e) {
-                    console.log(`RUST START PROBLEM e=${e}`);
+                    const error = e instanceof Error ? e : new Error(String(e));
+                    console.log(`RUST START PROBLEM e=${error.message}`);
+                    this.dispose_lsp_resources(socket, client, disposable);
+                    if (!this.is_current_generation(generation)) {
+                        finish();
+                        return;
+                    }
+                    this.mark_lsp_disconnected();
+                    if (this.x_debug()) {
+                        finish(error);
+                        return;
+                    }
+                    this.schedule_lsp_reconnect(generation);
                 }
                 finish();
             });
-            socket.connect(lspPort, "127.0.0.1");
-            setTimeout(() => {
+            connectTimer = setTimeout(() => {
                 if (!settled) {
                     console.log("RUST LSP socket connect timeout");
-                    socket.destroy();
-                    finish();
+                    fail_or_reconnect(socket, new Error(`RUST LSP socket connect timed out after ${lspSocketConnectTimeoutMs}ms`));
                 }
-            }, 10000);
+            }, lspSocketConnectTimeoutMs);
+            socket.connect(lspPort, "127.0.0.1");
         });
     }
 
@@ -567,14 +737,14 @@ export class RustBinaryBlob {
     }
 
     private schedule_lsp_reconnect(generation: number) {
-        if (this.reconnectTimer || generation !== this.lifecycleGeneration) {
+        if (this.reconnectTimer || !this.is_current_generation(generation)) {
             return;
         }
         const delay = Math.min(30000, 1000 * Math.pow(2, this.reconnectAttempts++));
         console.log(`RUST scheduling daemon LSP reconnect in ${delay}ms`);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = undefined;
-            if (generation !== this.lifecycleGeneration || this.reconnectGeneration !== generation) {
+            if (!this.is_current_generation(generation) || this.reconnectGeneration !== generation) {
                 return;
             }
             this.enqueueLifecycle(async (nextGeneration) => this.attach_daemon_serialized(nextGeneration));
