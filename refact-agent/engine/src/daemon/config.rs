@@ -76,6 +76,18 @@ impl Default for HooksConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdnsConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl Default for MdnsConfig {
+    fn default() -> Self {
+        Self { enabled: None }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_port")]
@@ -89,6 +101,8 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
     #[serde(default)]
+    pub mdns: MdnsConfig,
+    #[serde(default)]
     pub scheduler: SchedulerConfig,
 }
 
@@ -100,6 +114,7 @@ impl Default for DaemonConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             auth: AuthConfig::default(),
             hooks: HooksConfig::default(),
+            mdns: MdnsConfig::default(),
             scheduler: SchedulerConfig::default(),
         }
     }
@@ -110,7 +125,7 @@ fn default_port() -> u16 {
 }
 
 fn default_bind() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_idle_timeout_secs() -> u64 {
@@ -143,22 +158,32 @@ mod tests {
         assert_eq!(config, DaemonConfig::default());
     }
 
+    #[test]
+    fn daemon_config_defaults_to_loopback_with_auth_opt_in_and_mdns_auto() {
+        let config = DaemonConfig::default();
+
+        assert_eq!(config.bind, "127.0.0.1");
+        assert!(!config.auth.enabled);
+        assert_eq!(config.mdns.enabled, None);
+    }
+
     #[tokio::test]
     async fn daemon_config_parses_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.yaml");
         tokio::fs::write(
             &path,
-            "port: 9999\nbind: 127.0.0.1\nidle_timeout_secs: 5\nauth:\n  enabled: true\n  token: secret\nscheduler:\n  enabled: false\n",
+            "port: 9999\nbind: 0.0.0.0\nidle_timeout_secs: 5\nauth:\n  enabled: true\n  token: secret\nmdns:\n  enabled: false\nscheduler:\n  enabled: false\n",
         )
         .await
         .unwrap();
         let config = load_from_path(&path).await.unwrap();
         assert_eq!(config.port, 9999);
-        assert_eq!(config.bind, "127.0.0.1");
+        assert_eq!(config.bind, "0.0.0.0");
         assert_eq!(config.idle_timeout_secs, 5);
         assert_eq!(config.auth.enabled, true);
         assert_eq!(config.auth.token.as_deref(), Some("secret"));
+        assert_eq!(config.mdns.enabled, Some(false));
         assert!(!config.scheduler.enabled);
     }
 

@@ -416,6 +416,7 @@ mod tests {
         assert!(listener.local_addr().unwrap().ip().is_loopback());
 
         let wildcard = DaemonConfig {
+            bind: "0.0.0.0".to_string(),
             hooks: crate::daemon::config::HooksConfig {
                 enabled: true,
                 ..Default::default()

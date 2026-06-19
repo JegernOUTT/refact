@@ -170,7 +170,8 @@ pub(crate) async fn run_daemon_entry_with_paths(
         )
         .await;
 
-    let mdns_advertisement = mdns::MdnsAdvertisement::start(actual_addr.port());
+    let mdns_advertisement =
+        mdns::MdnsAdvertisement::start(&config, actual_addr.ip(), actual_addr.port());
 
     let cron_clock_task = cron_clock::spawn(state.clone());
     let idle_task = idle::spawn(state.clone());

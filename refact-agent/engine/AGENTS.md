@@ -759,6 +759,8 @@ Daemon HTTP routes:
 Daemon config (`daemon.yaml`):
 
 ```yaml
+bind: 127.0.0.1
+mdns: {}
 scheduler:
   enabled: true
   disable_durable: false
@@ -783,6 +785,7 @@ or `x-refact-token`; query-string daemon tokens are rejected for hook routes. Ho
 when the daemon is bound to loopback (`127.0.0.1` or `::1`); non-loopback binds require `hooks.token`
 or daemon auth and refuse to start otherwise. The worker forward token is the daemon auth token when
 present, otherwise the hook token.
+Daemon bind defaults to `127.0.0.1`; explicit `bind: 0.0.0.0` keeps LAN exposure opt-in. Daemon mDNS uses `mdns.enabled: true|false`; omitted means auto-advertise only for non-loopback binds. Advertisements use the generic `Refact Daemon` instance name and include TXT `auth=required|none`.
 
 Worker endpoint `POST /v1/hooks/fire` accepts:
 
