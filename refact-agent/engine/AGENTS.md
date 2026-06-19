@@ -534,8 +534,9 @@ must use `chat` delivery.
 
 - Background startup spawns the session runner and, when an active project exists, a durable runner
   over `<project>/.refact/scheduled_tasks.json`. `REFACT_DISABLE_SCHEDULER=1` suppresses runner spawn.
-  `--no-scheduler` and `scheduler.enabled: false` are loaded into `SchedulerConfig.enabled` for call
-  paths that explicitly consult scheduler config.
+  `--no-scheduler`, engine `scheduler.enabled: false`, and daemon `scheduler.enabled: false` are
+  resolved through `SchedulerConfig`; disabled daemon schedulers still scan durable schedules for
+  status/idle-stop visibility but do not wake workers.
 - `schedule::next_run_ms` is the shared dispatcher used by the runner, cron-clock wakeups, list output,
   and create/update validation.
 - Existing-chat agent turns and chat-delivered command jobs defer while the chat is busy, paused, missing,
@@ -551,7 +552,8 @@ must use `chat` delivery.
   retries using `scheduler.retry` (default delays: 60s, 120s, 300s; default max attempts: 3).
 - The runner is best-effort at-most-once per due marker: successful/error fires update
   `last_fired_at_ms` / `fire_count`, clear due `trigger_at_ms`, and one-shot jobs are removed unless a
-  retry was scheduled.
+  retry was scheduled. Chat and isolated jobs are counted only after their scheduled prompt is accepted
+  by the queue; command jobs are counted after the command run completes.
 - Run history status values include `fired`, `error`, `deferred`, `skipped`, and `advanced`.
 - Recurring jobs auto-expire after `auto_expire_after_ms` when set. The default for recurring jobs is
   30 days; one-shot jobs use `0`.
@@ -614,7 +616,7 @@ Schema:
       "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
     },
     "recurring": { "type": "boolean", "default": true },
-    "durable": { "type": "boolean", "default": false },
+    "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
   },
@@ -721,9 +723,11 @@ Routes live under `/v1/scheduler/cron`:
 | `POST /v1/scheduler/cron/:id/run` | none | Sets `trigger_at_ms`; returns `{ id, triggered: true }`. |
 | `DELETE /v1/scheduler/cron/:id` | none | `{ removed }` |
 
-HTTP creation mirrors `cron_create` plus `chat_id` and `mode`. If the request creates an agent turn
-or uses `chat` delivery, `chat_id` must name an existing open chat. HTTP list responses flatten
-trigger details for the GUI and still redact webhook tokens as `has_token`.
+HTTP creation mirrors `cron_create` plus `chat_id` and `mode`. If `durable` is omitted, HTTP and
+`cron_create` persist into the active project store when one exists; explicit `durable: false`
+keeps the job session-only. If the request creates an agent turn or uses `chat` delivery, `chat_id`
+must name an existing open chat. HTTP list responses flatten trigger details for the GUI and still
+redact webhook tokens as `has_token`.
 
 ### Daemon cron clock
 
@@ -755,6 +759,9 @@ Daemon HTTP routes:
 Daemon config (`daemon.yaml`):
 
 ```yaml
+scheduler:
+  enabled: true
+  disable_durable: false
 hooks:
   enabled: true
   token: hook-secret

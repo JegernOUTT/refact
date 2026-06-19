@@ -48,7 +48,7 @@ pub(crate) struct CronCreateInput {
     pub(crate) timeout_secs: Option<u64>,
     pub(crate) delivery: Delivery,
     pub(crate) recurring: Option<bool>,
-    pub(crate) durable: bool,
+    pub(crate) durable: Option<bool>,
     pub(crate) isolated: bool,
     pub(crate) description: String,
 }
@@ -84,7 +84,7 @@ impl Tool for ToolCronCreate {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Set `durable` to true when the job should survive engine restarts in the current project; leave it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier.".to_string(),
+            description: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Omit `durable` to persist in the current project when a project store exists; set it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -132,7 +132,7 @@ impl Tool for ToolCronCreate {
                         "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
                     },
                     "recurring": { "type": "boolean", "default": true },
-                    "durable": { "type": "boolean", "default": false },
+                    "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
                     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
                     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
                 },
@@ -241,7 +241,7 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         timeout_secs: optional_u64_arg(args, "timeout_secs")?,
         delivery: delivery_arg(args)?,
         recurring: optional_bool_arg(args, "recurring")?,
-        durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
+        durable: optional_bool_arg(args, "durable")?,
         isolated: optional_bool_arg(args, "isolated")?.unwrap_or(false),
         description,
     })
@@ -471,7 +471,10 @@ pub(crate) async fn create_cron_job(
             "Too many scheduled jobs (max {MAX_CRON_JOBS}). Cancel one first."
         ));
     }
-    if input.durable && runtime.durable_store.is_none() {
+    let durable = input
+        .durable
+        .unwrap_or_else(|| runtime.durable_store.is_some());
+    if durable && runtime.durable_store.is_none() {
         return Err("No project root available for durable scheduled jobs".to_string());
     }
 
@@ -480,7 +483,7 @@ pub(crate) async fn create_cron_job(
         input.prompt.clone().unwrap_or_default(),
         input.description.clone(),
         recurring,
-        input.durable,
+        durable,
         runtime.now_ms,
     );
     task.set_trigger(trigger);
@@ -1241,5 +1244,63 @@ mod tests {
         assert!(scheduled_tasks_path(temp.path()).is_file());
         let reloaded = JsonFileCronStore::new(temp.path()).unwrap();
         assert_eq!(reloaded.list().await, vec![outcome.task]);
+    }
+
+    #[tokio::test]
+    async fn omitted_durable_defaults_to_project_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let durable_store: Arc<dyn CronStore> =
+            Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("0 10 * * *")),
+                ("prompt", json!("Daily check")),
+                ("description", json!("Daily check")),
+            ]),
+            runtime(
+                session_store.clone(),
+                Some(durable_store),
+                Arc::new(Notify::new()),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.task.durable);
+        assert!(session_store.list().await.is_empty());
+        let reloaded = JsonFileCronStore::new(temp.path()).unwrap();
+        assert_eq!(reloaded.list().await, vec![outcome.task]);
+    }
+
+    #[tokio::test]
+    async fn explicit_session_only_overrides_project_store_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let durable_store: Arc<dyn CronStore> =
+            Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("0 11 * * *")),
+                ("prompt", json!("Session check")),
+                ("description", json!("Session check")),
+                ("durable", json!(false)),
+            ]),
+            runtime(
+                session_store.clone(),
+                Some(durable_store),
+                Arc::new(Notify::new()),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.task.durable);
+        assert_eq!(session_store.list().await, vec![outcome.task]);
+        assert!(JsonFileCronStore::new(temp.path())
+            .unwrap()
+            .list()
+            .await
+            .is_empty());
     }
 }

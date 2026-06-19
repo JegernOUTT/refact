@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::scheduler::SchedulerConfig;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
@@ -86,6 +88,8 @@ pub struct DaemonConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 impl Default for DaemonConfig {
@@ -96,6 +100,7 @@ impl Default for DaemonConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             auth: AuthConfig::default(),
             hooks: HooksConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -144,7 +149,7 @@ mod tests {
         let path = dir.path().join("daemon.yaml");
         tokio::fs::write(
             &path,
-            "port: 9999\nbind: 127.0.0.1\nidle_timeout_secs: 5\nauth:\n  enabled: true\n  token: secret\n",
+            "port: 9999\nbind: 127.0.0.1\nidle_timeout_secs: 5\nauth:\n  enabled: true\n  token: secret\nscheduler:\n  enabled: false\n",
         )
         .await
         .unwrap();
@@ -154,6 +159,7 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 5);
         assert_eq!(config.auth.enabled, true);
         assert_eq!(config.auth.token.as_deref(), Some("secret"));
+        assert!(!config.scheduler.enabled);
     }
 
     #[tokio::test]

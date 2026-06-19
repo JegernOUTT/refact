@@ -835,7 +835,9 @@ fn cron_add_request(options: CronAddOptions) -> Value {
     if let Some(recurring) = options.recurring {
         request.insert("recurring".to_string(), json!(recurring));
     }
-    request.insert("durable".to_string(), json!(options.durable));
+    if options.durable {
+        request.insert("durable".to_string(), json!(true));
+    }
     request.insert("isolated".to_string(), json!(options.isolated));
     request.insert("description".to_string(), json!(options.description));
     insert_string(&mut request, "chat_id", options.chat_id);
@@ -2005,6 +2007,35 @@ mod tests {
         assert_eq!(add.recurring, Some(true));
         assert!(add.durable);
         assert_eq!(add.description, "Say hi");
+    }
+
+    #[test]
+    fn cron_add_request_omits_durable_unless_flagged() {
+        let add = CronAddOptions {
+            project: None,
+            cron: Some("0 * * * *".to_string()),
+            every: None,
+            at: None,
+            tz: None,
+            hook_id: None,
+            prompt: Some("hello".to_string()),
+            command: None,
+            command_argv: None,
+            cwd: None,
+            timeout_secs: None,
+            delivery: CronDeliveryArg::Chat,
+            recurring: None,
+            durable: false,
+            isolated: false,
+            description: "hello".to_string(),
+            chat_id: Some("chat".to_string()),
+            mode: None,
+        };
+        let value = cron_add_request(add.clone());
+        assert!(value.get("durable").is_none());
+        let mut durable = add;
+        durable.durable = true;
+        assert_eq!(cron_add_request(durable)["durable"], json!(true));
     }
 
     #[test]

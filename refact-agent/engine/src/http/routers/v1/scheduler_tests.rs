@@ -13,7 +13,7 @@ use crate::http::routers::v1::scheduler::{
     handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_patch,
     handle_v1_scheduler_cron_post, handle_v1_scheduler_cron_run,
 };
-use crate::scheduler::{Action, AgentTarget, CronRunRecord, Delivery, Job, Trigger};
+use crate::scheduler::{Action, AgentTarget, CronRunRecord, CronStore, Delivery, Job, Trigger};
 
 async fn test_app() -> (tempfile::TempDir, AppState, Router) {
     let temp = tempfile::tempdir().unwrap();
@@ -198,6 +198,74 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
 }
 
 #[tokio::test]
+async fn scheduler_cron_http_defaults_to_durable_when_project_store_exists() {
+    let (temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "default-durable-chat").await;
+
+    let (status, created) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "11 * * * *",
+                    "prompt": "Persist me",
+                    "description": "Persist me",
+                    "chat_id": "default-durable-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["durable"], json!(true));
+    assert!(crate::scheduler::session_cron_store()
+        .get(created["id"].as_str().unwrap())
+        .await
+        .is_none());
+    let store = crate::scheduler::JsonFileCronStore::new(temp.path()).unwrap();
+    let tasks = store.list().await;
+    assert!(tasks.iter().any(|task| task.id == created["id"]));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_explicit_false_stays_session_only() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "session-only-chat").await;
+
+    let (status, created) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "12 * * * *",
+                    "prompt": "Session only",
+                    "description": "Session only",
+                    "durable": false,
+                    "chat_id": "session-only-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["durable"], json!(false));
+    assert!(crate::scheduler::session_cron_store()
+        .get(created["id"].as_str().unwrap())
+        .await
+        .is_some());
+}
+
+#[tokio::test]
 async fn scheduler_create_rejects_missing_chat_id() {
     let (_temp, _app_state, app) = test_app().await;
 
@@ -284,6 +352,7 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
                     "cron": "*/5 * * * *",
                     "prompt": "Run checks",
                     "description": "Check build",
+                    "durable": false,
                     "chat_id": "active-chat",
                     "mode": "agent"
                 })
@@ -329,6 +398,7 @@ async fn scheduler_cron_http_post_agent_isolated_creates_without_live_chat() {
                     "prompt": "Run isolated checks",
                     "isolated": true,
                     "description": "Isolated check",
+                    "durable": false,
                     "mode": "agent"
                 })
                 .to_string(),
@@ -388,6 +458,7 @@ async fn scheduler_cron_http_post_command_creates_command_job() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "chat_id": "command-chat",
                     "cwd": ".",
                     "timeout_secs": 9
@@ -460,6 +531,7 @@ async fn scheduler_cron_http_post_command_ignores_isolated() {
                     "command": "printf 'hi frog'",
                     "isolated": true,
                     "description": "Print frog",
+                    "durable": false,
                     "chat_id": "command-chat"
                 })
                 .to_string(),
@@ -501,6 +573,7 @@ async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "delivery": {"kind": "webhook", "url": "http://127.0.0.1/hook", "token": "secret"}
                 })
                 .to_string(),
@@ -567,6 +640,7 @@ async fn scheduler_cron_http_post_notifier_delivery_round_trips() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "delivery": {"kind": "notifier", "integration_id": "notifier_telegram", "target": "chat-1"}
                 })
                 .to_string(),
@@ -634,7 +708,8 @@ async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
                     "trigger": {"kind": "webhook", "hook_id": "deploy"},
                     "command": "printf 'hi frog'",
                     "delivery": "none",
-                    "description": "Deploy hook"
+                    "description": "Deploy hook",
+                    "durable": false
                 })
                 .to_string(),
             ))
@@ -779,6 +854,7 @@ async fn scheduler_cron_http_post_every_creates_interval_job() {
                     "every": "30m",
                     "prompt": "Check interval frogs",
                     "description": "Interval frog check",
+                    "durable": false,
                     "chat_id": "interval-chat"
                 })
                 .to_string(),
@@ -839,6 +915,7 @@ async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
                     "cron": "*/15 * * * *",
                     "prompt": "Patch frogs",
                     "description": "Patch frog check",
+                    "durable": false,
                     "chat_id": "patch-chat"
                 })
                 .to_string(),

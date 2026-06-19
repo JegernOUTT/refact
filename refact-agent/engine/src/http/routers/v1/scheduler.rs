@@ -35,7 +35,7 @@ pub struct CronCreateRequest {
     #[serde(default)]
     pub recurring: Option<bool>,
     #[serde(default)]
-    pub durable: bool,
+    pub durable: Option<bool>,
     #[serde(default)]
     pub isolated: Option<bool>,
     pub description: String,
@@ -244,12 +244,13 @@ async fn create_http_cron_job(
             .recurring
             .unwrap_or_else(|| !matches!(trigger, Trigger::Once { .. }))
     };
+    let durable = request.durable.unwrap_or_else(|| durable_store.is_some());
     let mut task = Job::new_cron_agent_chat(
         trigger_cron_expr(&trigger).unwrap_or_default().to_string(),
         request.prompt.clone().unwrap_or_default(),
         request.description.clone(),
         recurring,
-        request.durable,
+        durable,
         now_ms,
     );
     task.set_trigger(trigger);
