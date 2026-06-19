@@ -75,11 +75,18 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
     })
 }
 
-private fun shouldWakeAndRetry(error: Throwable?): Boolean {
-    if (error is HttpStatusException) {
-        return error.statusCode == 502 || error.statusCode == 503
+internal fun isRecoverableHttpStatus(error: Throwable?): Boolean {
+    val statusCode = when (error) {
+        is HttpStatusException -> error.statusCode
+        is DaemonHttpStatusException -> error.statusCode
+        else -> null
     }
-    return error?.cause?.let { shouldWakeAndRetry(it) } ?: false
+    if (statusCode != null) return statusCode in 500..599
+    return error?.cause?.let { isRecoverableHttpStatus(it) } ?: false
+}
+
+private fun shouldWakeAndRetry(error: Throwable?): Boolean {
+    return isRecoverableHttpStatus(error)
 }
 
 private fun sleepBeforeWakeRetry(attempt: Int) {

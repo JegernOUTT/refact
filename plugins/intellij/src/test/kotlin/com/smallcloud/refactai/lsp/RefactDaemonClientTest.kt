@@ -4,12 +4,15 @@ package com.smallcloud.refactai.lsp
 
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.Dispatcher
+import mockwebserver3.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.io.IOException
@@ -669,6 +672,167 @@ class RefactDaemonClientTest {
         } finally {
             preferredServer.shutdown()
             diskServer.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun slowOpenProjectSucceedsWithinLongTimeoutAndEncodesProjectId() {
+        val root = Files.createTempDirectory("refact-daemon-slow-open")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            writeDaemonJson(root, server.port, "slow-token")
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":99,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":1}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"project with/slash\"}")
+                    .bodyDelay(5500, TimeUnit.MILLISECONDS)
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val project = client.openProject(root.toString(), LSPConfig())
+
+            assertEquals("project with/slash", project.projectId)
+            assertEquals("http://127.0.0.1:${server.port}/p/project%20with%2Fslash/", project.baseUrl.toString())
+            val statusRequest = server.takeRequest()
+            assertEquals("/daemon/v1/status", statusRequest.path)
+            val openRequest = server.takeRequest()
+            assertEquals("/daemon/v1/projects/open", openRequest.path)
+            assertEquals("Bearer slow-token", openRequest.headers["Authorization"])
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun staleTokenAfterPublicStatusRereadsDaemonJsonAndRetriesOnce() {
+        val root = Files.createTempDirectory("refact-daemon-stale-token")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        val authHeaders = mutableListOf<String?>()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            writeDaemonJson(root, server.port, "stale-token")
+            var openCalls = 0
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    authHeaders.add(request.headers["Authorization"])
+                    return when (request.path) {
+                        "/daemon/v1/status" -> {
+                            writeDaemonJson(root, server.port, "fresh-token")
+                            MockResponse.Builder()
+                                .code(200)
+                                .addHeader("Content-Type", "application/json")
+                                .body("{\"pid\":100,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":1}")
+                                .build()
+                        }
+                        "/daemon/v1/projects/open" -> {
+                            openCalls += 1
+                            if (request.headers["Authorization"] == "Bearer fresh-token") {
+                                MockResponse.Builder()
+                                    .code(200)
+                                    .addHeader("Content-Type", "application/json")
+                                    .body("{\"project_id\":\"project-fresh\"}")
+                                    .build()
+                            } else {
+                                MockResponse.Builder()
+                                    .code(401)
+                                    .addHeader("Content-Type", "application/json")
+                                    .body("stale token")
+                                    .build()
+                            }
+                        }
+                        else -> MockResponse.Builder().code(404).build()
+                    }
+                }
+            }
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val project = client.openProject(root.toString(), LSPConfig())
+
+            assertEquals("project-fresh", project.projectId)
+            assertEquals("fresh-token", project.daemon.authToken)
+            assertEquals(2, openCalls)
+            assertEquals(listOf("Bearer stale-token", "Bearer stale-token", "Bearer fresh-token"), authHeaders)
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun daemonStatusMissingVersionIsRejected() {
+        val root = Files.createTempDirectory("refact-daemon-missing-version")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":77,\"port\":${server.port},\"workers\":1}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val error = runCatching { client.status() }.exceptionOrNull()
+
+            assertTrue(error is IOException)
+            assertEquals("daemon status response missing version", error?.cause?.message)
+        } finally {
+            server.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun transientDaemonHttpErrorsPreserveStatusAndAreRecoverable() {
+        val root = Files.createTempDirectory("refact-daemon-http-error")
+        val originalHome = System.getProperty("user.home")
+        val server = MockWebServer()
+        try {
+            server.start()
+            System.setProperty("user.home", root.toString())
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(503)
+                    .addHeader("Content-Type", "application/json")
+                    .body("warming")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val error = runCatching { client.status() }.exceptionOrNull()
+
+            assertTrue(error is DaemonHttpStatusException)
+            val httpError = error as DaemonHttpStatusException
+            assertEquals(503, httpError.statusCode)
+            assertEquals("warming", httpError.responseBody)
+            assertTrue(isRecoverableHttpStatus(httpError))
+            assertTrue(isRecoverableHttpStatus(IOException("wrapped", httpError)))
+            assertFalse(isRecoverableHttpStatus(DaemonHttpStatusException(401, "auth", URI("http://127.0.0.1/"), "GET")))
+        } finally {
+            server.shutdown()
             System.setProperty("user.home", originalHome)
             root.deleteRecursively()
         }
