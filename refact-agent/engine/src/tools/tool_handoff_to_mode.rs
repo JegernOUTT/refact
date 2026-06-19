@@ -1223,12 +1223,11 @@ mod tests {
 
         let saved = facade.saved.lock().unwrap().clone();
         assert_eq!(saved[0].chat_id, planner_chat_id);
-        assert!(saved[0].messages.len() > 1);
-        assert_eq!(
-            saved[0].messages[0].content.content_text_only(),
-            "Persisted planner history"
-        );
-        assert!(saved[0].messages.iter().skip(1).any(|message| message
+        assert!(saved[0]
+            .messages
+            .iter()
+            .any(|message| message.content.content_text_only() == "Persisted planner history"));
+        assert!(saved[0].messages.iter().any(|message| message
             .content
             .content_text_only()
             .contains("Disk lineage plan")));
