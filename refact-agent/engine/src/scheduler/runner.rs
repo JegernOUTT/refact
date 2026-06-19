@@ -2043,26 +2043,36 @@ mod tests {
             let sessions = gcx.chat_sessions.read().await;
             sessions.get(chat_id).cloned().unwrap()
         };
-        let session = session_arc.lock().await;
-        let fire_event = event_message(&session, "cron_fire", task_id);
-        assert_eq!(
-            fire_event.extra["event"]["payload"]["task_id"],
-            json!(task_id)
-        );
-        let prompt_queued = session.command_queue.iter().any(|request| {
-            matches!(
-                &request.command,
-                ChatCommand::UserMessage { content, .. }
-                    if content.as_str() == Some("scheduled prompt")
-            )
-        });
-        let prompt_added = session.messages.iter().any(|message| {
-            message.role == "user" && message.content.content_text_only() == "scheduled prompt"
-        });
-        assert!(
-            prompt_queued || prompt_added,
-            "isolated session must receive the scheduled prompt"
-        );
+        let deadline = TokioInstant::now() + Duration::from_secs(2);
+        loop {
+            {
+                let session = session_arc.lock().await;
+                let fire_event = session.messages.iter().any(|message| {
+                    message.role == EVENT_ROLE
+                        && message.extra["event"]["subkind"].as_str() == Some("cron_fire")
+                        && message.extra["event"]["payload"]["task_id"].as_str() == Some(task_id)
+                });
+                let prompt_queued = session.command_queue.iter().any(|request| {
+                    matches!(
+                        &request.command,
+                        ChatCommand::UserMessage { content, .. }
+                            if content.as_str() == Some("scheduled prompt")
+                    )
+                });
+                let prompt_added = session.messages.iter().any(|message| {
+                    message.role == "user"
+                        && message.content.content_text_only() == "scheduled prompt"
+                });
+                if fire_event && (prompt_queued || prompt_added) {
+                    return;
+                }
+            }
+            assert!(
+                TokioInstant::now() < deadline,
+                "isolated session must receive the scheduled prompt"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn event_message<'a>(
