@@ -56,7 +56,7 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
         findRoots(listOfFiles)
     }.ifEmpty { listOfNotNull(project.basePath) }
         .map { path -> runCatching { File(path).canonicalPath }.getOrElse { path } }
-    val baseUrl = lsp.baseUrlOrNull() ?: return
+    val baseUrl = lsp.baseUrlOrNull() ?: throw IllegalStateException("LSP project initialize requires an attached worker")
     val url = baseUrl.resolve("v1/lsp-initialize")
     val data = Gson().toJson(
         mapOf(
@@ -72,7 +72,7 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
         if (it != null) {
             InferenceGlobalContext.lastErrorMsg = it.message
         }
-    })
+    }).join().get()
 }
 
 internal fun isRecoverableHttpStatus(error: Throwable?): Boolean {

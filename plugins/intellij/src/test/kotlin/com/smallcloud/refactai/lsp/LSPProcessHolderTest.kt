@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class LSPProcessHolderTest : BasePlatformTestCase() {
 
@@ -95,9 +96,16 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     ) : LSPProcessHolder(project) {
         private val latch = CountDownLatch(1)
         val retryAttempts = mutableListOf<Int>()
+        val initializeCalls = AtomicInteger(0)
+        val initializeEntered = CountDownLatch(1)
+        val releaseInitialize = CountDownLatch(1)
         val ensureStartedBlockingEntered = CountDownLatch(1)
         val releaseEnsureStartedBlocking = CountDownLatch(1)
+        private val healthClockMs = AtomicLong(0)
         var blockEnsureStartedBlocking = false
+        var blockInitialize = false
+        var initializeError: RuntimeException? = null
+        var probeResult = true
 
         override val daemonClient: RefactDaemonClient
             get() = fakeDaemonClient
@@ -106,7 +114,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             if (refreshWorkerState) super.refreshAttachedWorkerState()
         }
 
-        override fun initializeAttachedProject() {}
+        override fun initializeAttachedProject() {
+            initializeCalls.incrementAndGet()
+            initializeEntered.countDown()
+            if (blockInitialize) {
+                releaseInitialize.await(2, TimeUnit.SECONDS)
+            }
+            initializeError?.let { throw it }
+        }
 
         override fun requiredDaemonVersion(): String {
             return requiredVersion
@@ -114,6 +129,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         override fun sleepBeforeWakeRetry(attempt: Int) {
             retryAttempts.add(attempt)
+        }
+
+        override fun probeAttachedWorker(): Boolean {
+            return probeResult
+        }
+
+        override fun healthNowMs(): Long {
+            return healthClockMs.get()
         }
 
         fun simulateRaceConditionWithScheduledTask(makeProjectDisposed: () -> Unit): AlreadyDisposedException? {
@@ -146,6 +169,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         fun ensureStartedBlockingForTest(reason: String) {
             ensureStartedBlocking(reason)
         }
+
+        fun runHealthCheckOnceForTest() {
+            runHealthCheckOnce()
+        }
+
+        fun advanceHealthClock(ms: Long) {
+            healthClockMs.addAndGet(ms)
+        }
     }
 
     private fun mockProject(root: String? = null): Project {
@@ -174,6 +205,17 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         } finally {
             server.shutdown()
         }
+    }
+
+    private fun waitForLifecycle(holder: TestLspProcessHolder) {
+        val deadline = System.currentTimeMillis() + 3000
+        while (holder.hasPendingLifecycleWork() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25)
+        }
+        if (holder.hasPendingLifecycleWork()) {
+            Thread.sleep(25)
+        }
+        assertFalse(holder.hasPendingLifecycleWork())
     }
 
     @Test
@@ -467,6 +509,51 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
+    fun testBackendReadyWaitsForInitialize() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient()).apply {
+            blockInitialize = true
+        }
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        val future = ApplicationManager.getApplication().executeOnPooledThread {
+            holder.ensureStartedBlockingForTest("backend-ready-after-init")
+        }
+        try {
+            assertTrue(holder.initializeEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(LSPBackendConnectionStatus.STARTING, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+
+            holder.releaseInitialize.countDown()
+            future.get(3, TimeUnit.SECONDS)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+        } finally {
+            holder.releaseInitialize.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testInitializeFailureDoesNotPublishReady() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient()).apply {
+            initializeError = RuntimeException("init failed")
+        }
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("init-failure") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
     fun testBackendConnectionStatusFailedAfterAttachError() {
         val root = createTempDir().canonicalPath
         val fake = FakeDaemonClient().apply {
@@ -482,6 +569,120 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         } finally {
             holder.dispose()
         }
+    }
+
+    @Test
+    fun testFailedStateHealthCheckRetriesAndRecovers() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("first open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("transient-failure") }
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertNull(holder.baseUrlOrNull())
+
+            fake.openProjectError = null
+            holder.advanceHealthClock(1_000)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testFailedHealthProbeClearsStateAndBacksOff() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+            assertNotNull(holder.baseUrlOrNull())
+
+            holder.blockEnsureStartedBlocking = true
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            assertTrue(holder.ensureStartedBlockingEntered.await(2, TimeUnit.SECONDS))
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+            assertEquals(1, fake.openProjectCalls.get())
+
+            holder.advanceHealthClock(1_000)
+            holder.releaseEnsureStartedBlocking.countDown()
+            waitForLifecycle(holder)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.releaseEnsureStartedBlocking.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testWakeRetryRunsInitialize() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-init-start") }
+            assertEquals(1, holder.initializeCalls.get())
+
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-init") }
+
+            assertTrue(recovered)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(2, holder.initializeCalls.get())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testFailedWakeClearsAttachedWorkerState() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-failure-start") }
+            assertNotNull(holder.baseUrlOrNull())
+
+            fake.openProjectError = RuntimeException("wake failed")
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-failure") }
+
+            assertFalse(recovered)
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testHttp504IsRecoverable() {
+        assertTrue(isRecoverableHttpStatus(HttpStatusException(504, "timeout", URI("http://127.0.0.1"))))
+        assertTrue(
+            isRecoverableHttpStatus(
+                DaemonHttpStatusException(504, "timeout", URI("http://127.0.0.1"), "POST")
+            )
+        )
+        assertFalse(isRecoverableHttpStatus(HttpStatusException(499, "client closed", URI("http://127.0.0.1"))))
     }
 
     @Test
@@ -505,10 +706,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
 
             holder.releaseEnsureStartedBlocking.countDown()
-            val deadline = System.currentTimeMillis() + 3000
-            while (holder.hasPendingLifecycleWork() && System.currentTimeMillis() < deadline) {
-                Thread.sleep(25)
-            }
+            waitForLifecycle(holder)
 
             assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
             assertTrue(holder.backendReady())

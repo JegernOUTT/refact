@@ -13,7 +13,6 @@ import com.intellij.util.messages.MessageBus
 import com.intellij.util.messages.Topic
 import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.io.ConnectionStatus
-import com.smallcloud.refactai.io.HttpStatusException
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
 import java.io.File
@@ -70,6 +69,10 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     private var customizationCache: JsonObject? = null
     @Volatile
     private var startupInProgress = false
+    @Volatile
+    private var nextHealthCheckAtMs = 0L
+    @Volatile
+    private var healthBackoffMs = 1_000L
     @Volatile
     private var backendConnectionStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING
     @Volatile
@@ -309,15 +312,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
         healthCheckerScheduler.scheduleWithFixedDelay({
             try {
-                if (isDisposed || project.isDisposed) {
-                    logger.info("Skipping health check for disposed LSPProcessHolder or project")
-                    return@scheduleWithFixedDelay
-                }
-
-                if (lastConfig == null || startupInProgress) return@scheduleWithFixedDelay
-                if (attachedProject == null || !isWorking) {
-                    ensureStartedAsync("health-check-daemon-detached-or-unready")
-                }
+                runHealthCheckOnce()
             } catch (e: RejectedExecutionException) {
                 if (e.message?.contains("Already shutdown") == true) {
                     logger.info("Ignoring RejectedExecutionException during health check: ${e.message}")
@@ -329,6 +324,30 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
         }, 1, 1, TimeUnit.SECONDS)
         ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 1000, TimeUnit.MILLISECONDS)
+    }
+
+    protected open fun runHealthCheckOnce() {
+        if (isDisposed || project.isDisposed) {
+            logger.info("Skipping health check for disposed LSPProcessHolder or project")
+            return
+        }
+
+        if (lastConfig == null || startupInProgress) return
+        if (healthNowMs() < nextHealthCheckAtMs) return
+        if (attachedProject == null || !isWorking) {
+            ensureStartedAsync("health-check-daemon-detached-or-unready")
+            deferHealthRetry()
+            return
+        }
+        if (!probeAttachedWorker()) {
+            logger.warn("LSP health probe failed; restarting attached worker")
+            clearAttachedProjectState(preserveConfig = true, detach = true)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            ensureStartedAsync("health-check-worker-unreachable")
+            deferHealthRetry()
+            return
+        }
+        resetHealthBackoff()
     }
 
     open fun settingsChanged(reason: String = "settings-changed") {
@@ -375,11 +394,13 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         try {
             capabilities = LSPCapabilities()
             closeAttachedProject()
-            terminate(LSPBackendConnectionStatus.STARTING)
             if (!newConfig.isValid) {
+                terminate(LSPBackendConnectionStatus.FAILED)
                 setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
             }
+            lastConfig = newConfig
+            terminate(LSPBackendConnectionStatus.STARTING, preserveConfig = true)
             val root = projectRootPath()
             if (root == null) {
                 logger.warn("LSP daemon attach project root is null")
@@ -399,7 +420,6 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
             val openedProject = daemonClient.openProject(root, newConfig)
             attachedProject = openedProject
-            lastConfig = newConfig
             isWorking = true
             refreshAttachedWorkerState()
             if (shouldAbortLifecycleWork()) {
@@ -409,13 +429,13 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
             initializeAttachedProject()
             setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            resetHealthBackoff()
             logger.info("LSP daemon attach finished in ${System.currentTimeMillis() - startedAt}ms (working=$isWorking)")
         } catch (e: Exception) {
             logger.warn("LSP daemon attach failed: ${e.message}", e)
-            isWorking = false
-            attachedProject = null
-            lastConfig = null
+            clearAttachedProjectState(preserveConfig = true, detach = true)
             setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            deferHealthRetry()
         } finally {
             startupInProgress = false
         }
@@ -466,10 +486,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     private fun shouldWakeAndRetry(error: Throwable?): Boolean {
-        if (error is HttpStatusException) {
-            return error.statusCode == 502 || error.statusCode == 503
-        }
-        return error?.cause?.let { shouldWakeAndRetry(it) } ?: false
+        return isRecoverableHttpStatus(error)
     }
 
     protected open fun sleepBeforeWakeRetry(attempt: Int) {
@@ -477,22 +494,41 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     fun wakeWorkerForRetry(reason: String): Boolean {
-        val root = projectRootPath() ?: return false
+        val root = projectRootPath() ?: run {
+            clearAttachedProjectState(preserveConfig = true, detach = false)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            return false
+        }
         val config = lastConfig ?: currentConfig()
+        if (!config.isValid) {
+            clearAttachedProjectState(preserveConfig = false, detach = false)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            return false
+        }
         return try {
             logger.debug("LSP daemon wake retry: $reason")
+            setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
             if (compatibleDaemonStatusOrNull() == null) {
-                val bin = binaryPathForDaemon() ?: return false
+                val bin = binaryPathForDaemon() ?: run {
+                    clearAttachedProjectState(preserveConfig = true, detach = false)
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+                    return false
+                }
                 daemonClient.ensureDaemon(bin)
             }
             attachedProject = daemonClient.openProject(root, config)
             lastConfig = config
             isWorking = true
+            refreshAttachedWorkerState()
+            initializeAttachedProject()
             setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            resetHealthBackoff()
             true
         } catch (e: Exception) {
             logger.warn("LSP wake retry failed: ${e.message}")
+            clearAttachedProjectState(preserveConfig = true, detach = true)
             setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            deferHealthRetry()
             false
         }
     }
@@ -584,14 +620,47 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
-    private fun terminate(newStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING) {
+    private fun clearAttachedProjectState(preserveConfig: Boolean, detach: Boolean) {
+        if (detach) {
+            closeAttachedProject()
+        }
+        isWorking = false
+        attachedProject = null
+        if (!preserveConfig) {
+            lastConfig = null
+        }
+    }
+
+    protected open fun probeAttachedWorker(): Boolean {
+        val base = baseUrlOrNull() ?: return false
+        return runCatching {
+            InferenceGlobalContext.connection.get(base.resolve("v1/build_info")).join().get()
+        }.isSuccess
+    }
+
+    protected open fun healthNowMs(): Long {
+        return System.currentTimeMillis()
+    }
+
+    private fun resetHealthBackoff() {
+        healthBackoffMs = 1_000L
+        nextHealthCheckAtMs = 0L
+    }
+
+    private fun deferHealthRetry() {
+        nextHealthCheckAtMs = healthNowMs() + healthBackoffMs
+        healthBackoffMs = (healthBackoffMs * 2).coerceAtMost(30_000L)
+    }
+
+    private fun terminate(
+        newStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING,
+        preserveConfig: Boolean = false,
+    ) {
         if (!isDisposed) {
             logIfBlockingOperationOnEdt("terminate")
         }
         setBackendConnectionStatus(newStatus)
-        isWorking = false
-        attachedProject = null
-        lastConfig = null
+        clearAttachedProjectState(preserveConfig = preserveConfig, detach = false)
     }
 
     override fun dispose() {
