@@ -30,6 +30,8 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CRASH_WINDOW_MS: u64 = 10 * 60 * 1000;
 const MAX_PORT_BUSY_RETRIES: usize = 3;
+const MAX_RESTART_DELAY_MS: u64 = 8_000;
+const MAX_RESTART_JITTER_MS: u64 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +88,20 @@ struct WorkerLiveness {
     last_activity_ms: u64,
 }
 
+struct ProxyRestartTracker {
+    tasks: JoinSet<(String, u64)>,
+    in_flight: HashMap<String, u64>,
+}
+
+impl Default for ProxyRestartTracker {
+    fn default() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            in_flight: HashMap::new(),
+        }
+    }
+}
+
 struct WorkerSlot {
     op_lock: Mutex<()>,
     record: Mutex<WorkerRecord>,
@@ -100,7 +116,8 @@ pub struct Supervisor {
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
-    proxy_restart_tasks: Mutex<JoinSet<()>>,
+    proxy_restarts: Mutex<ProxyRestartTracker>,
+    child_reap_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
     client: reqwest::Client,
     shutdown_tx: broadcast::Sender<String>,
@@ -136,7 +153,8 @@ impl Supervisor {
             cron_pending,
             reserved_ports: Arc::new(SyncMutex::new(HashSet::new())),
             project_liveness: RwLock::new(HashMap::new()),
-            proxy_restart_tasks: Mutex::new(JoinSet::new()),
+            proxy_restarts: Mutex::new(ProxyRestartTracker::default()),
+            child_reap_tasks: Mutex::new(JoinSet::new()),
             idle_timeout_secs,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
@@ -203,6 +221,31 @@ impl Supervisor {
             .await
     }
 
+    async fn restart_worker_if_generation(
+        self: &Arc<Self>,
+        entry: &ProjectEntry,
+        expected_generation: u64,
+    ) -> Result<WorkerInfo, String> {
+        self.set_project_liveness(&entry.id, entry.pinned, now_ms())
+            .await;
+        let spec = WorkerLaunchSpec::from(entry);
+        let slot = self.slot_for(&spec.project_id).await;
+        {
+            let _guard = slot.op_lock.lock().await;
+            {
+                let record = slot.record.lock().await;
+                if record.generation != expected_generation {
+                    return Ok(record.info.clone());
+                }
+            }
+            self.stop_slot_locked(&slot, &spec.project_id, false)
+                .await?;
+            let mut record = slot.record.lock().await;
+            record.crash_history.clear();
+        }
+        self.spawn_worker(slot.clone(), spec, "proxy_restart").await
+    }
+
     pub async fn stop_worker(&self, project_id: &str) -> Result<Option<WorkerInfo>, String> {
         let Some(slot) = self.get_slot(project_id).await else {
             return Ok(None);
@@ -249,12 +292,26 @@ impl Supervisor {
         for id in ids {
             let _ = self.stop_worker(&id).await;
         }
+        self.drain_child_reap_tasks().await;
     }
 
     pub async fn worker_info(&self, project_id: &str) -> Option<WorkerInfo> {
         let slot = self.get_slot(project_id).await?;
         let info = slot.record.lock().await.info.clone();
         Some(info)
+    }
+
+    async fn worker_generation_for_proxy_failure(
+        &self,
+        project_id: &str,
+        failed_pid: Option<u32>,
+    ) -> Option<u64> {
+        let slot = self.get_slot(project_id).await?;
+        let record = slot.record.lock().await;
+        if failed_pid.is_some() && record.info.pid != failed_pid {
+            return None;
+        }
+        Some(record.generation)
     }
 
     pub async fn worker_pid_matches(&self, project_id: &str, pid: u32) -> bool {
@@ -297,18 +354,33 @@ impl Supervisor {
         self: &Arc<Self>,
         entry: ProjectEntry,
         shutting_down: bool,
+        failed_pid: Option<u32>,
     ) {
         if shutting_down {
             return;
         }
         let project_id = entry.id.clone();
+        let Some(generation) = self
+            .worker_generation_for_proxy_failure(&project_id, failed_pid)
+            .await
+        else {
+            return;
+        };
         let supervisor = self.clone();
-        let mut tasks = self.proxy_restart_tasks.lock().await;
-        drain_proxy_restart_tasks(&mut tasks);
-        tasks.spawn(async move {
-            if let Err(error) = supervisor.restart_worker(&entry).await {
+        let mut restarts = self.proxy_restarts.lock().await;
+        drain_proxy_restart_tasks(&mut restarts);
+        if restarts.in_flight.contains_key(&project_id) {
+            return;
+        }
+        restarts.in_flight.insert(project_id.clone(), generation);
+        restarts.tasks.spawn(async move {
+            if let Err(error) = supervisor
+                .restart_worker_if_generation(&entry, generation)
+                .await
+            {
                 tracing::warn!("proxy-triggered restart failed for {project_id}: {error}");
             }
+            (project_id, generation)
         });
     }
 
@@ -329,15 +401,21 @@ impl Supervisor {
     }
 
     async fn abort_proxy_restart_tasks(&self) {
-        let mut tasks = self.proxy_restart_tasks.lock().await;
-        tasks.abort_all();
-        while let Some(result) = tasks.join_next().await {
+        let mut restarts = self.proxy_restarts.lock().await;
+        restarts.tasks.abort_all();
+        while let Some(result) = restarts.tasks.join_next().await {
             if let Err(error) = result {
                 if !error.is_cancelled() {
                     tracing::warn!("proxy restart task failed during shutdown: {error}");
                 }
             }
         }
+        restarts.in_flight.clear();
+    }
+
+    async fn drain_child_reap_tasks(&self) {
+        let mut tasks = self.child_reap_tasks.lock().await;
+        drain_child_reap_tasks(&mut tasks);
     }
 
     pub(crate) async fn set_project_liveness(
@@ -425,7 +503,8 @@ impl Supervisor {
                 record.info.pid = None;
                 None
             }
-            WorkerState::Stopping | WorkerState::Crashed => Some(record.info.clone()),
+            WorkerState::Stopping => Some(record.info.clone()),
+            WorkerState::Crashed => None,
             WorkerState::Stopped | WorkerState::Failed { .. } => None,
         }
     }
@@ -580,7 +659,16 @@ impl Supervisor {
                     return Ok(info);
                 }
                 ReadinessOutcome::Timeout => {
-                    self.kill_generation_child(&slot, generation).await;
+                    let exit = self.kill_generation_child(&slot, generation).await?;
+                    if matches!(exit, GenerationExit::Timeout) {
+                        self.handoff_generation_child_to_reaper(
+                            &slot,
+                            &spec.project_id,
+                            generation,
+                            false,
+                        )
+                        .await;
+                    }
                     let info = self
                         .mark_generation_failed(
                             &slot,
@@ -600,7 +688,16 @@ impl Supervisor {
                     return Ok(info);
                 }
                 ReadinessOutcome::Shutdown => {
-                    self.kill_generation_child(&slot, generation).await;
+                    let exit = self.kill_generation_child(&slot, generation).await?;
+                    if matches!(exit, GenerationExit::Timeout) {
+                        self.handoff_generation_child_to_reaper(
+                            &slot,
+                            &spec.project_id,
+                            generation,
+                            false,
+                        )
+                        .await;
+                    }
                     let info = self
                         .mark_generation_failed(
                             &slot,
@@ -1022,21 +1119,34 @@ impl Supervisor {
             let record = slot.record.lock().await;
             (record.info.http_port, record.child.is_some())
         };
+        let mut exit = if had_child {
+            GenerationExit::Timeout
+        } else {
+            GenerationExit::NoChild
+        };
         if had_child && was_ready {
             let _ = self
                 .client
                 .post(format!("http://127.0.0.1:{http_port}/v1/graceful-shutdown"))
                 .send()
                 .await;
-            if self
+            exit = self
                 .wait_for_generation_exit(slot, generation, GRACEFUL_STOP_TIMEOUT)
-                .await?
-                .is_none()
-            {
-                self.kill_generation_child(slot, generation).await;
+                .await?;
+            if matches!(exit, GenerationExit::Timeout) {
+                exit = self.kill_generation_child(slot, generation).await?;
             }
         } else if had_child {
-            self.kill_generation_child(slot, generation).await;
+            exit = self.kill_generation_child(slot, generation).await?;
+        }
+        if matches!(exit, GenerationExit::Timeout) {
+            let handed_off = self
+                .handoff_generation_child_to_reaper(slot, project_id, generation, emit_event)
+                .await;
+            let record = slot.record.lock().await;
+            if handed_off {
+                return Ok(record.info.clone());
+            }
         }
         let info = {
             let mut record = slot.record.lock().await;
@@ -1060,31 +1170,88 @@ impl Supervisor {
         slot: &Arc<WorkerSlot>,
         generation: u64,
         timeout: Duration,
-    ) -> Result<Option<Option<i32>>, String> {
+    ) -> Result<GenerationExit, String> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(exit_code) = take_exited_child(slot, generation).await? {
-                return Ok(Some(exit_code));
+            match poll_generation_child(slot, generation).await? {
+                ChildPoll::Exited(_) => return Ok(GenerationExit::Exited),
+                ChildPoll::NoChild => return Ok(GenerationExit::NoChild),
+                ChildPoll::Superseded => return Ok(GenerationExit::Superseded),
+                ChildPoll::Running => {}
             }
             if Instant::now() >= deadline {
-                return Ok(None);
+                return Ok(GenerationExit::Timeout);
             }
             tokio::time::sleep(READINESS_POLL).await;
         }
     }
 
-    async fn kill_generation_child(&self, slot: &Arc<WorkerSlot>, generation: u64) {
+    async fn kill_generation_child(
+        &self,
+        slot: &Arc<WorkerSlot>,
+        generation: u64,
+    ) -> Result<GenerationExit, String> {
         {
             let mut record = slot.record.lock().await;
-            if record.generation == generation {
-                if let Some(child) = record.child.as_mut() {
-                    let _ = child.start_kill();
-                }
+            if record.generation != generation {
+                return Ok(GenerationExit::Superseded);
+            }
+            let Some(child) = record.child.as_mut() else {
+                return Ok(GenerationExit::NoChild);
+            };
+            if let Err(error) = child.start_kill() {
+                tracing::warn!("failed to request worker kill: {error}");
             }
         }
-        let _ = self
-            .wait_for_generation_exit(slot, generation, KILL_WAIT_TIMEOUT)
-            .await;
+        self.wait_for_generation_exit(slot, generation, KILL_WAIT_TIMEOUT)
+            .await
+    }
+
+    async fn handoff_generation_child_to_reaper(
+        &self,
+        slot: &Arc<WorkerSlot>,
+        project_id: &str,
+        generation: u64,
+        emit_stopped: bool,
+    ) -> bool {
+        let child = {
+            let mut record = slot.record.lock().await;
+            if record.generation != generation {
+                return false;
+            }
+            record.child.take()
+        };
+        let Some(mut child) = child else {
+            return false;
+        };
+        let slot = slot.clone();
+        let project_id = project_id.to_string();
+        let events = self.events.clone();
+        let mut tasks = self.child_reap_tasks.lock().await;
+        drain_child_reap_tasks(&mut tasks);
+        tasks.spawn(async move {
+            let _ = child.wait().await;
+            let stopped = {
+                let mut record = slot.record.lock().await;
+                if record.generation != generation {
+                    return;
+                }
+                record.info.pid = None;
+                if matches!(record.info.state, WorkerState::Stopping) {
+                    record.info.state = WorkerState::Stopped;
+                    record.info.last_error = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if emit_stopped && stopped {
+                let _ = events
+                    .emit("worker_stopped", Some(project_id), json!({}))
+                    .await;
+            }
+        });
+        true
     }
 
     async fn mark_failed(
@@ -1119,10 +1286,10 @@ impl Supervisor {
         if record.generation != generation {
             return record.info.clone();
         }
-        record.child = None;
+        let pid = record.info.pid;
         record.info = WorkerInfo {
             project_id: project_id.to_string(),
-            pid: None,
+            pid,
             http_port: record.info.http_port,
             lsp_port: record.info.lsp_port,
             state: WorkerState::Failed {
@@ -1183,6 +1350,20 @@ enum ReadinessOutcome {
     Shutdown,
 }
 
+enum ChildPoll {
+    Running,
+    Exited(Option<i32>),
+    NoChild,
+    Superseded,
+}
+
+enum GenerationExit {
+    Exited,
+    NoChild,
+    Superseded,
+    Timeout,
+}
+
 fn worker_args(
     spec: &WorkerLaunchSpec,
     ports: PortPair,
@@ -1226,35 +1407,51 @@ fn worker_args(
 }
 
 fn child_is_alive(child: &mut Option<Child>) -> bool {
-    let alive = match child.as_mut() {
-        Some(child) => matches!(child.try_wait(), Ok(None)),
+    match child.as_mut() {
+        Some(child_handle) => match child_handle.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                *child = None;
+                false
+            }
+            Err(error) => {
+                tracing::warn!("failed to poll worker child: {error}");
+                true
+            }
+        },
         None => false,
-    };
-    if !alive {
-        *child = None;
     }
-    alive
 }
 
 async fn take_exited_child(
     slot: &Arc<WorkerSlot>,
     generation: u64,
 ) -> Result<Option<Option<i32>>, String> {
+    match poll_generation_child(slot, generation).await? {
+        ChildPoll::Exited(exit_code) => Ok(Some(exit_code)),
+        ChildPoll::Running | ChildPoll::NoChild | ChildPoll::Superseded => Ok(None),
+    }
+}
+
+async fn poll_generation_child(
+    slot: &Arc<WorkerSlot>,
+    generation: u64,
+) -> Result<ChildPoll, String> {
     let mut record = slot.record.lock().await;
     if record.generation != generation {
-        return Ok(None);
+        return Ok(ChildPoll::Superseded);
     }
     let Some(child) = record.child.as_mut() else {
-        return Ok(None);
+        return Ok(ChildPoll::NoChild);
     };
     match child.try_wait() {
         Ok(Some(status)) => {
             let code = status.code();
             record.child = None;
             record.info.pid = None;
-            Ok(Some(code))
+            Ok(ChildPoll::Exited(code))
         }
-        Ok(None) => Ok(None),
+        Ok(None) => Ok(ChildPoll::Running),
         Err(error) => Err(format!("failed to poll worker child: {error}")),
     }
 }
@@ -1301,10 +1498,30 @@ fn abort_task(task: &mut Option<JoinHandle<()>>) {
     }
 }
 
-fn drain_proxy_restart_tasks(tasks: &mut JoinSet<()>) {
+fn drain_proxy_restart_tasks(restarts: &mut ProxyRestartTracker) {
+    while let Some(result) = restarts.tasks.try_join_next() {
+        match result {
+            Ok((project_id, generation)) => {
+                if restarts
+                    .in_flight
+                    .get(&project_id)
+                    .is_some_and(|in_flight_generation| *in_flight_generation == generation)
+                {
+                    restarts.in_flight.remove(&project_id);
+                }
+            }
+            Err(error) => {
+                tracing::warn!("proxy restart task failed: {error}");
+                restarts.in_flight.clear();
+            }
+        }
+    }
+}
+
+fn drain_child_reap_tasks(tasks: &mut JoinSet<()>) {
     while let Some(result) = tasks.try_join_next() {
         if let Err(error) = result {
-            tracing::warn!("proxy restart task failed: {error}");
+            tracing::warn!("worker reap task failed: {error}");
         }
     }
 }
@@ -1327,17 +1544,32 @@ fn push_crash(history: &mut VecDeque<u64>, now: u64) {
 pub fn next_restart_delay(crash_history: &[u64], now: u64) -> Option<Duration> {
     let recent = crash_history
         .iter()
-        .filter(|ts| now.saturating_sub(**ts) <= CRASH_WINDOW_MS)
-        .count();
-    if recent > 5 {
+        .copied()
+        .filter(|ts| now.saturating_sub(*ts) <= CRASH_WINDOW_MS)
+        .collect::<Vec<_>>();
+    let recent_count = recent.len();
+    if recent_count > 5 {
         return None;
     }
-    Some(match recent {
-        0 => Duration::from_secs(1),
-        1 => Duration::from_secs(1),
-        2 => Duration::from_secs(5),
-        _ => Duration::from_secs(30),
-    })
+    let exponent = recent_count.saturating_sub(1).min(3) as u32;
+    let base_ms = (1_000u64 << exponent).min(MAX_RESTART_DELAY_MS);
+    Some(Duration::from_millis(
+        base_ms + restart_jitter_ms(&recent, now, base_ms),
+    ))
+}
+
+fn restart_jitter_ms(crash_history: &[u64], now: u64, base_ms: u64) -> u64 {
+    if crash_history.is_empty() {
+        return 0;
+    }
+    let cap = (base_ms / 4).min(MAX_RESTART_JITTER_MS);
+    if cap == 0 {
+        return 0;
+    }
+    let seed = crash_history.iter().fold(now, |acc, ts| {
+        acc.wrapping_mul(1_099_511_628_211).wrapping_add(*ts)
+    });
+    seed % (cap + 1)
 }
 
 fn next_restart_delay_from_window(history: &VecDeque<u64>, now: u64) -> Option<Duration> {
@@ -1425,15 +1657,27 @@ mod tests {
         assert_eq!(next_restart_delay(&[], 100), Some(Duration::from_secs(1)));
         assert_eq!(
             next_restart_delay(&[100], 100),
-            Some(Duration::from_secs(1))
+            Some(Duration::from_millis(
+                1_000 + restart_jitter_ms(&[100], 100, 1_000)
+            ))
         );
         assert_eq!(
             next_restart_delay(&[100, 200], 200),
-            Some(Duration::from_secs(5))
+            Some(Duration::from_millis(
+                2_000 + restart_jitter_ms(&[100, 200], 200, 2_000)
+            ))
+        );
+        assert_eq!(
+            next_restart_delay(&[100, 200, 300], 300),
+            Some(Duration::from_millis(
+                4_000 + restart_jitter_ms(&[100, 200, 300], 300, 4_000)
+            ))
         );
         assert_eq!(
             next_restart_delay(&[100, 200, 300, 400, 500], 500),
-            Some(Duration::from_secs(30))
+            Some(Duration::from_millis(
+                8_000 + restart_jitter_ms(&[100, 200, 300, 400, 500], 500, 8_000)
+            ))
         );
         assert_eq!(
             next_restart_delay(&[100, 200, 300, 400, 500, 600], 600),
@@ -1446,7 +1690,9 @@ mod tests {
         let now = CRASH_WINDOW_MS + 10;
         assert_eq!(
             next_restart_delay(&[1, now - 2, now - 1], now),
-            Some(Duration::from_secs(5))
+            Some(Duration::from_millis(
+                2_000 + restart_jitter_ms(&[now - 2, now - 1], now, 2_000)
+            ))
         );
     }
 
@@ -1543,9 +1789,9 @@ mod tests {
             settings: ProjectSettings::default(),
         };
 
-        supervisor.notify_proxy_unreachable(entry, true).await;
+        supervisor.notify_proxy_unreachable(entry, true, None).await;
 
-        assert_eq!(supervisor.proxy_restart_tasks.lock().await.len(), 0);
+        assert_eq!(supervisor.proxy_restarts.lock().await.tasks.len(), 0);
     }
 
     fn test_entry(root: PathBuf) -> ProjectEntry {

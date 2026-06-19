@@ -53,6 +53,10 @@ impl EnvGuard {
                 "FAKE_WORKER_SKIP_LSP",
                 std::env::var("FAKE_WORKER_SKIP_LSP").ok(),
             ),
+            (
+                "FAKE_WORKER_DELAY_READY",
+                std::env::var("FAKE_WORKER_DELAY_READY").ok(),
+            ),
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
@@ -70,6 +74,7 @@ impl EnvGuard {
         }
         std::env::remove_var("FAKE_WORKER_PUSH_STATUS");
         std::env::remove_var("FAKE_WORKER_SKIP_LSP");
+        std::env::remove_var("FAKE_WORKER_DELAY_READY");
         Some(Self { keys: previous })
     }
 }
@@ -143,6 +148,17 @@ async fn wait_for_state_with_timeout(
     }
 }
 
+async fn wait_for_pid_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !pid_is_running(pid) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "pid {pid} did not exit in time");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
@@ -154,6 +170,25 @@ fn kill_pid(pid: u32) {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output();
+    }
+}
+
+fn pid_is_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
+
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output();
+        output
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|stdout| stdout.contains(&pid.to_string()))
+            .unwrap_or(false)
     }
 }
 
@@ -295,6 +330,36 @@ async fn crash_loop_reaches_crashed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn crashed_worker_recovers_on_subsequent_ensure() {
+    let Some(_env) = EnvGuard::set(true) else {
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "recover-crash-project");
+    let supervisor = supervisor(&dir);
+
+    let _ = supervisor.ensure_worker(&entry).await.unwrap();
+    let crashed = wait_for_state_with_timeout(
+        &supervisor,
+        &entry.id,
+        WorkerState::Crashed,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(crashed.state, WorkerState::Crashed);
+
+    std::env::remove_var("FAKE_WORKER_CRASH");
+    let recovered = supervisor.ensure_worker(&entry).await.unwrap();
+
+    assert_eq!(recovered.state, WorkerState::Ready);
+    assert!(recovered.pid.is_some());
+    supervisor.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn open_project_returns_bad_gateway_when_crash_loop_exhausts() {
     let Some(_env) = EnvGuard::set(true) else {
         return;
@@ -389,9 +454,86 @@ async fn stop_worker_gracefully_exits() {
 
     let info = supervisor.ensure_worker(&entry).await.unwrap();
     assert_eq!(info.state, WorkerState::Ready);
+    let pid = info.pid.unwrap();
     let stopped = supervisor.stop_worker(&entry.id).await.unwrap().unwrap();
     assert_eq!(stopped.state, WorkerState::Stopped);
     assert_eq!(supervisor.worker_count().await, 0);
+    wait_for_pid_exit(pid).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn forced_stop_reaps_starting_worker() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    std::env::set_var("FAKE_WORKER_DELAY_READY", "30");
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "forced-stop-project");
+    let supervisor = supervisor(&dir);
+    let start = tokio::spawn({
+        let supervisor = supervisor.clone();
+        let entry = entry.clone();
+        async move { supervisor.ensure_worker(&entry).await }
+    });
+
+    let starting = wait_for_state_with_timeout(
+        &supervisor,
+        &entry.id,
+        WorkerState::Starting,
+        Duration::from_secs(5),
+    )
+    .await;
+    let pid = starting.pid.unwrap();
+    let stopped = supervisor.stop_worker(&entry.id).await.unwrap().unwrap();
+    assert_eq!(stopped.state, WorkerState::Stopped);
+    let start_info = tokio::time::timeout(Duration::from_secs(10), start)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        start_info.state,
+        WorkerState::Stopping | WorkerState::Stopped
+    ));
+    assert_eq!(supervisor.worker_count().await, 0);
+    wait_for_pid_exit(pid).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn concurrent_proxy_failures_queue_one_restart_for_generation() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let entry = project_entry(root, "proxy-restart-project");
+    let events = EventBus::new(dir.path().join("events.jsonl"));
+    let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 8488);
+    let info = supervisor.ensure_worker(&entry).await.unwrap();
+    let pid = info.pid.unwrap();
+    std::env::set_var("FAKE_WORKER_DELAY_READY", "1");
+
+    for _ in 0..10 {
+        supervisor
+            .notify_proxy_unreachable(entry.clone(), false, Some(pid))
+            .await;
+    }
+
+    let restarted = wait_for_ready_with_new_pid(&supervisor, &entry.id, pid).await;
+    assert_eq!(restarted.state, WorkerState::Ready);
+    let starts = events
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|event| event.kind == "worker_starting")
+        .count();
+    assert_eq!(starts, 2);
+    supervisor.stop_all().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

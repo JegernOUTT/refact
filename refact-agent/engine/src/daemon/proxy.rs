@@ -107,7 +107,7 @@ async fn proxy_to_worker(
     let response = send_worker_request(request, use_stream_client).await;
 
     match response {
-        Ok(response) => worker_response(state, entry, response, guard).await,
+        Ok(response) => worker_response(state, entry, worker.pid, response, guard).await,
         Err(ProxySendError::StreamHeaderTimeout) => json_response(
             StatusCode::GATEWAY_TIMEOUT,
             json!({"error": "worker stream response headers timed out"}),
@@ -120,6 +120,7 @@ async fn proxy_to_worker(
             worker_unreachable(
                 state,
                 entry,
+                worker.pid,
                 crate::daemon::auth::redact_daemon_query_token(&error.to_string()),
             )
             .await
@@ -200,6 +201,7 @@ async fn limited_body_bytes(mut body: Body) -> Result<hyper::body::Bytes, Respon
 async fn worker_response(
     state: Arc<DaemonState>,
     entry: ProjectEntry,
+    worker_pid: Option<u32>,
     response: reqwest::Response,
     guard: ProxyStreamGuard,
 ) -> Response<Body> {
@@ -223,7 +225,11 @@ async fn worker_response(
                     ).await;
                     stream_state
                         .supervisor
-                        .notify_proxy_unreachable(stream_entry.clone(), stream_state.is_shutting_down())
+                        .notify_proxy_unreachable(
+                            stream_entry.clone(),
+                            stream_state.is_shutting_down(),
+                            worker_pid,
+                        )
                         .await;
                     yield Err(io::Error::new(io::ErrorKind::Other, message));
                     break;
@@ -240,6 +246,7 @@ async fn worker_response(
 async fn worker_unreachable(
     state: Arc<DaemonState>,
     entry: ProjectEntry,
+    worker_pid: Option<u32>,
     error: String,
 ) -> Response<Body> {
     let _ = state
@@ -252,7 +259,7 @@ async fn worker_unreachable(
         .await;
     state
         .supervisor
-        .notify_proxy_unreachable(entry.clone(), state.is_shutting_down())
+        .notify_proxy_unreachable(entry.clone(), state.is_shutting_down(), worker_pid)
         .await;
     json_response(
         StatusCode::BAD_GATEWAY,

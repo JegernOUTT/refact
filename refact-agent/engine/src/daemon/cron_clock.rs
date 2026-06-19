@@ -350,6 +350,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use serial_test::serial;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     use crate::daemon::config::DaemonConfig;
@@ -437,6 +438,32 @@ mod tests {
             pinned: false,
             last_active_ms: 0,
             settings: ProjectSettings::default(),
+        }
+    }
+
+    async fn wait_for_worker_state(
+        state: &DaemonState,
+        project_id: &str,
+        target: WorkerState,
+        timeout: Duration,
+    ) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if state
+                .supervisor
+                .worker_info(project_id)
+                .await
+                .map(|info| info.state == target.clone())
+                .unwrap_or(false)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker state {:?} was not reached in time",
+                target
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -655,6 +682,51 @@ mod tests {
             .iter()
             .any(|event| event.kind == "cron_wake"
                 && event.project_id.as_deref() == Some(&project_id)));
+        state.supervisor.stop_all().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn tick_recovers_crashed_worker_for_due_task() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let now = now_ms();
+        let mut due = task("due-now", "0 0 1 1 *", 0);
+        due.recurring = false;
+        due.auto_expire_after_ms = 0;
+        write_tasks(&root, &[due]).await;
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        state.load_projects(dir.path().join("projects.json")).await;
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(root.clone()).await.unwrap()
+        };
+        let project_id = entry.id.clone();
+        std::env::set_var("FAKE_WORKER_CRASH", "1");
+        let _ = state.supervisor.ensure_worker(&entry).await.unwrap();
+        wait_for_worker_state(
+            &state,
+            &project_id,
+            WorkerState::Crashed,
+            Duration::from_secs(20),
+        )
+        .await;
+        std::env::remove_var("FAKE_WORKER_CRASH");
+        let mut clock = CronClock::new(state.clone());
+
+        clock.tick_at(now).await;
+
+        let worker = state.supervisor.worker_info(&project_id).await.unwrap();
+        assert_eq!(worker.state, WorkerState::Ready);
+        assert_eq!(state.cron_pending(&project_id).await, Some(now));
         state.supervisor.stop_all().await;
     }
 
