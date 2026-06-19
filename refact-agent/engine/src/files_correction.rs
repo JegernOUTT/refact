@@ -483,6 +483,10 @@ mod tests {
         canonicalize_normalized_path(path.to_path_buf())
     }
 
+    fn normalized_path_string(path: &Path) -> String {
+        normalized_path(path).to_string_lossy().replace('\\', "/")
+    }
+
     fn worktree_root(cache_dir: &Path, source: &Path, id: &str) -> PathBuf {
         let source = normalized_path(source);
         cache_dir
@@ -574,10 +578,7 @@ mod tests {
 
         let candidates =
             correct_to_nearest_filename(gcx.clone(), &"src/lib.rs".to_string(), false, 10).await;
-        assert_eq!(
-            candidates,
-            vec![normalized_path(&source_file).to_string_lossy().to_string()]
-        );
+        assert_eq!(candidates, vec![normalized_path_string(&source_file)]);
     }
 
     #[tokio::test]
@@ -608,10 +609,7 @@ mod tests {
 
         let candidates =
             correct_to_nearest_filename(gcx, &"src/lib.rs".to_string(), false, 10).await;
-        assert_eq!(
-            candidates,
-            vec![normalized_path(&source_file).to_string_lossy().to_string()]
-        );
+        assert_eq!(candidates, vec![normalized_path_string(&source_file)]);
     }
 
     #[tokio::test]

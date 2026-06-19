@@ -6472,9 +6472,9 @@ mod tests {
         write_buddy_conversation_file(&buddy_path, chat_id, "Readable Buddy").await;
 
         assert!(find_trajectory_path(gcx.clone(), chat_id).await.is_none());
-        assert_eq!(
+        assert_same_optional_path(
             find_trajectory_or_buddy_path(gcx.clone(), chat_id).await,
-            Some(buddy_path.clone())
+            &buddy_path,
         );
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
 
