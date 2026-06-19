@@ -59,6 +59,13 @@ async fn proxy_to_worker(
         );
     }
 
+    if state.is_shutting_down() {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "daemon is shutting down"}),
+        );
+    }
+
     let entry = match project_entry(&state, &project_id).await {
         Some(entry) => entry,
         None => {

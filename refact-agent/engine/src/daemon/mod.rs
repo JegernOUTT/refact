@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -24,6 +25,15 @@ pub mod server;
 pub mod state;
 pub mod supervisor;
 pub mod web;
+
+#[cfg(not(test))]
+const DAEMON_SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const DAEMON_SHUTDOWN_DRAIN: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const DAEMON_PROXY_DRAIN: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const DAEMON_PROXY_DRAIN: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePaths {
@@ -164,7 +174,93 @@ pub(crate) async fn run_daemon_entry_with_paths(
 
     let cron_clock_task = cron_clock::spawn(state.clone());
     let idle_task = idle::spawn(state.clone());
-    let serve_result = server::serve(listener, state.clone(), actual_addr.port()).await;
+    let mut shutdown_rx = state.shutdown_receiver();
+    let mut server_task = tokio::spawn(server::serve(listener, state.clone(), actual_addr.port()));
+    let mut workers_stopped = false;
+    let mut exit_code = 0;
+    let mut stopped_payload = serde_json::json!({});
+    let mut failed_payload = None;
+
+    tokio::select! {
+        shutdown = shutdown_rx.recv() => {
+            let reason = shutdown.unwrap_or_else(|_| "shutdown".to_string());
+            let drain_timeout_ms = DAEMON_SHUTDOWN_DRAIN.as_millis() as u64;
+            let _ = state
+                .events
+                .emit(
+                    "daemon_draining",
+                    None,
+                    serde_json::json!({"reason": reason.clone(), "drain_timeout_ms": drain_timeout_ms}),
+                )
+                .await;
+            drain_proxy_streams(&state, DAEMON_PROXY_DRAIN).await;
+            state.supervisor.stop_all().await;
+            workers_stopped = true;
+            match tokio::time::timeout(DAEMON_SHUTDOWN_DRAIN, &mut server_task).await {
+                Ok(joined) => match joined {
+                    Ok(Ok(())) => {
+                        stopped_payload = serde_json::json!({"reason": reason.clone()});
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!("{error}");
+                        exit_code = 1;
+                        failed_payload = Some(serde_json::json!({"reason": reason.clone(), "error": error}));
+                    }
+                    Err(error) => {
+                        tracing::error!("daemon server task failed: {error}");
+                        exit_code = 1;
+                        failed_payload = Some(serde_json::json!({"reason": reason.clone(), "error": error.to_string()}));
+                    }
+                },
+                Err(_) => {
+                    server_task.abort();
+                    let _ = server_task.await;
+                    let _ = state
+                        .events
+                        .emit(
+                            "daemon_shutdown_forced",
+                            None,
+                            serde_json::json!({
+                                "reason": reason.clone(),
+                                "drain_timeout_ms": drain_timeout_ms,
+                            }),
+                        )
+                        .await;
+                    stopped_payload = serde_json::json!({
+                        "reason": reason.clone(),
+                        "forced": true,
+                        "drain_timeout_ms": drain_timeout_ms,
+                    });
+                }
+            }
+        }
+        joined = &mut server_task => {
+            match joined {
+                Ok(Ok(())) if state.is_shutting_down() => {
+                    stopped_payload = serde_json::json!({"reason": "shutdown"});
+                }
+                Ok(Ok(())) => {
+                    exit_code = 1;
+                    failed_payload = Some(serde_json::json!({
+                        "error": "daemon server exited unexpectedly",
+                    }));
+                    state.request_shutdown("server_exit".to_string());
+                }
+                Ok(Err(error)) => {
+                    tracing::error!("{error}");
+                    exit_code = 1;
+                    failed_payload = Some(serde_json::json!({"error": error}));
+                    state.request_shutdown("server_error".to_string());
+                }
+                Err(error) => {
+                    tracing::error!("daemon server task failed: {error}");
+                    exit_code = 1;
+                    failed_payload = Some(serde_json::json!({"error": error.to_string()}));
+                    state.request_shutdown("server_task_failed".to_string());
+                }
+            }
+        }
+    }
 
     if let Some(mdns) = mdns_advertisement {
         mdns.stop();
@@ -175,18 +271,21 @@ pub(crate) async fn run_daemon_entry_with_paths(
     }
     cron_clock_task.abort();
     idle_task.abort();
-    if let Err(error) = serve_result {
-        tracing::error!("{error}");
+    if !workers_stopped {
+        state.supervisor.stop_all().await;
     }
-    state.supervisor.stop_all().await;
-    let _ = state
-        .events
-        .emit("daemon_stopped", None, serde_json::json!({}))
-        .await;
+    if let Some(payload) = failed_payload {
+        let _ = state.events.emit("daemon_failed", None, payload).await;
+    } else {
+        let _ = state
+            .events
+            .emit("daemon_stopped", None, stopped_payload)
+            .await;
+    }
     if let Err(error) = state::remove_daemon_info(&paths.daemon_json_path).await {
         tracing::warn!("{error}");
     }
-    0
+    exit_code
 }
 
 fn setup_logging(path: &Path) -> tracing_appender::non_blocking::WorkerGuard {
@@ -216,14 +315,43 @@ async fn print_already_running(path: &Path) {
     }
 }
 
+async fn drain_proxy_streams(state: &state::DaemonState, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if state
+            .proxy_activity
+            .read()
+            .values()
+            .all(|activity| activity.live_proxy_streams == 0)
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn forward_signals(state: Arc<state::DaemonState>) {
+    wait_for_signal().await;
+    state.request_shutdown("signal".to_string());
+    wait_for_signal().await;
+    let _ = state
+        .events
+        .emit(
+            "daemon_shutdown_escalated",
+            None,
+            serde_json::json!({"reason": "second_signal"}),
+        )
+        .await;
+    std::process::exit(130);
+}
+
+async fn wait_for_signal() {
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            state.request_shutdown("signal".to_string());
-        }
-        _ = wait_for_sigterm() => {
-            state.request_shutdown("signal".to_string());
-        }
+        _ = tokio::signal::ctrl_c() => {}
+        _ = wait_for_sigterm() => {}
     }
 }
 
@@ -341,5 +469,22 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(shutdown_rx.recv().await.unwrap(), "test");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_proxy_streams_returns_after_timeout_with_live_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state::DaemonState::new(
+            config::DaemonConfig::default(),
+            events::EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+        state.increment_live_proxy_stream("project").await;
+        let start = tokio::time::Instant::now();
+
+        drain_proxy_streams(&state, Duration::from_secs(1)).await;
+
+        assert!(tokio::time::Instant::now().duration_since(start) >= Duration::from_secs(1));
+        assert_eq!(state.proxy_activity("project").await.live_proxy_streams, 1);
     }
 }

@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::stream::{self, StreamExt};
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,6 +29,7 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(120);
 const LSP_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_ALL_CONCURRENCY: usize = 8;
 const CRASH_WINDOW_MS: u64 = 10 * 60 * 1000;
 const MAX_PORT_BUSY_RETRIES: usize = 3;
 const MAX_RESTART_DELAY_MS: u64 = 8_000;
@@ -291,12 +293,17 @@ impl Supervisor {
         Ok(())
     }
 
-    pub async fn stop_all(&self) {
+    pub async fn stop_all(self: &Arc<Self>) {
         self.abort_proxy_restart_tasks().await;
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
-        for id in ids {
-            let _ = self.stop_worker(&id).await;
-        }
+        stream::iter(ids)
+            .for_each_concurrent(STOP_ALL_CONCURRENCY, |id| {
+                let supervisor = self.clone();
+                async move {
+                    let _ = supervisor.stop_worker(&id).await;
+                }
+            })
+            .await;
         self.drain_child_reap_tasks().await;
     }
 

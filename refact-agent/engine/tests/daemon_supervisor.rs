@@ -57,6 +57,10 @@ impl EnvGuard {
                 "FAKE_WORKER_DELAY_READY",
                 std::env::var("FAKE_WORKER_DELAY_READY").ok(),
             ),
+            (
+                "FAKE_WORKER_GRACEFUL_DELAY",
+                std::env::var("FAKE_WORKER_GRACEFUL_DELAY").ok(),
+            ),
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
@@ -75,6 +79,7 @@ impl EnvGuard {
         std::env::remove_var("FAKE_WORKER_PUSH_STATUS");
         std::env::remove_var("FAKE_WORKER_SKIP_LSP");
         std::env::remove_var("FAKE_WORKER_DELAY_READY");
+        std::env::remove_var("FAKE_WORKER_GRACEFUL_DELAY");
         Some(Self { keys: previous })
     }
 }
@@ -589,6 +594,44 @@ async fn stop_all_stops_children_for_daemon_shutdown() {
     let stopped = supervisor.worker_info(&entry.id).await.unwrap();
     assert_eq!(stopped.state, WorkerState::Stopped);
     assert_eq!(supervisor.worker_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+#[cfg_attr(
+    windows,
+    ignore = "Windows artifact runners can starve fake worker shutdown"
+)]
+async fn stop_all_stops_workers_in_parallel() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    std::env::set_var("FAKE_WORKER_GRACEFUL_DELAY", "2");
+    let dir = tempdir().unwrap();
+    let supervisor = supervisor(&dir);
+    let entries = ["parallel-a", "parallel-b", "parallel-c"]
+        .into_iter()
+        .map(|id| {
+            let root = dir.path().join(id);
+            std::fs::create_dir_all(&root).unwrap();
+            project_entry(root, id)
+        })
+        .collect::<Vec<_>>();
+
+    for entry in &entries {
+        let info = supervisor.ensure_worker(entry).await.unwrap();
+        assert_eq!(info.state, WorkerState::Ready);
+    }
+
+    let start = Instant::now();
+    supervisor.stop_all().await;
+
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(supervisor.worker_count().await, 0);
+    for entry in &entries {
+        let stopped = supervisor.worker_info(&entry.id).await.unwrap();
+        assert_eq!(stopped.state, WorkerState::Stopped);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

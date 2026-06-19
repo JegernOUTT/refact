@@ -55,13 +55,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/v1/graceful-shutdown":
+            graceful_delay = float(os.environ.get("FAKE_WORKER_GRACEFUL_DELAY", "0") or "0")
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"success":true}')
-            if self.server.lsp_server:
-                threading.Thread(target=self.server.lsp_server.shutdown, daemon=True).start()
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+            def shutdown():
+                if graceful_delay > 0:
+                    time.sleep(graceful_delay)
+                if self.server.lsp_server:
+                    self.server.lsp_server.shutdown()
+                self.server.shutdown()
+
+            threading.Thread(target=shutdown, daemon=True).start()
             return
         if self.path.startswith("/v1/echo"):
             length = int(self.headers.get("content-length", "0") or "0")
