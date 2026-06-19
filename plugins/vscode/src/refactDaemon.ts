@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as fetchH2 from "fetch-h2";
-import { spawn } from "child_process";
+import { spawn, type StdioOptions } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -9,6 +9,9 @@ export const DEFAULT_DAEMON_PORT = 8488;
 export const DAEMON_POLL_TIMEOUT_MS = 15000;
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10000;
 export const DAEMON_SHUTDOWN_POLL_MS = 200;
+export const DAEMON_OPEN_PROJECT_TIMEOUT_MS = 135000;
+
+const DAEMON_LOG_TAIL_BYTES = 12000;
 
 export type WorkerState =
     | "stopped"
@@ -67,8 +70,14 @@ export type DaemonEndpoint = {
 };
 
 type ReadDaemonInfo = (port: number, authToken?: string) => Promise<DaemonStatus | undefined>;
-type ShutdownDaemon = (port: number, reason: string, authToken?: string) => Promise<void>;
+type ShutdownDaemon = (
+    port: number,
+    reason: string,
+    authToken?: string,
+    options?: DaemonClientOptions,
+) => Promise<void>;
 type IsProcessRunning = (pid: number) => boolean;
+type SpawnDaemon = (binPath: string, options?: DaemonClientOptions) => void | Promise<void>;
 
 export type FindDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
@@ -77,7 +86,7 @@ export type FindDaemonOptions = DaemonClientOptions & {
 
 export type EnsureDaemonOptions = DaemonClientOptions & {
     pluginVersion?: string;
-    spawnDaemon?: (binPath: string) => void;
+    spawnDaemon?: SpawnDaemon;
     readDaemonInfo?: ReadDaemonInfo;
     shutdownDaemon?: ShutdownDaemon;
     isProcessRunning?: IsProcessRunning;
@@ -95,6 +104,15 @@ export type OpenProjectOptions = DaemonClientOptions & {
 
 type RequestOptions = Partial<fetchH2.RequestInit>;
 
+class DaemonRequestError extends Error {
+    readonly status: number;
+
+    constructor(status: number, url: string, body: string) {
+        super(`daemon request failed ${status} ${url}: ${body}`);
+        this.status = status;
+    }
+}
+
 type DaemonInfoWire = {
     port?: number | string;
     auth_token?: string | null;
@@ -108,6 +126,11 @@ function normalizeDaemonPort(port: number | undefined): number {
 
 function daemonBaseUrl(port: number | undefined): string {
     return `http://127.0.0.1:${normalizeDaemonPort(port)}`;
+}
+
+function daemonLogPath(options: DaemonClientOptions = {}): string {
+    const infoPath = options.daemonJsonPath ?? daemonJsonPath(options.homeDir);
+    return path.join(path.dirname(infoPath), "logs", "daemon.log");
 }
 
 export function daemonJsonPath(homeDir: string = os.homedir()): string {
@@ -157,6 +180,19 @@ function authTokenForPort(port: number, options: DaemonClientOptions): string | 
     return daemonEndpoints(options).find(endpoint => endpoint.port === port)?.authToken;
 }
 
+function freshAuthTokenForPort(port: number, options: DaemonClientOptions): string | undefined {
+    const diskInfo = readDaemonInfoFromDisk(options);
+    const diskPort = normalizeDiskDaemonPort(diskInfo?.port);
+    if (diskPort !== normalizeDaemonPort(port)) {
+        return undefined;
+    }
+    return normalizeAuthToken(diskInfo?.auth_token);
+}
+
+function refreshedEndpointForPort(port: number, options: DaemonClientOptions, fallback?: string | null): DaemonEndpoint {
+    return endpointWithToken(normalizeDaemonPort(port), freshAuthTokenForPort(port, options) ?? normalizeAuthToken(fallback ?? undefined));
+}
+
 function mergeDaemonEndpoints(primary: DaemonEndpoint[], secondary: DaemonEndpoint[]): DaemonEndpoint[] {
     const merged: DaemonEndpoint[] = [];
     for (const endpoint of [...primary, ...secondary]) {
@@ -204,6 +240,9 @@ export function browserProjectUrl(host: string, port: number, projectId: string)
 export function compareVersions(left: string | undefined, right: string | undefined): number {
     const leftParts = parseVersion(left);
     const rightParts = parseVersion(right);
+    if (!leftParts || !rightParts) {
+        return compareStrings(left ?? "", right ?? "");
+    }
     for (let i = 0; i < 3; i++) {
         const diff = leftParts.core[i] - rightParts.core[i];
         if (diff !== 0) {
@@ -222,34 +261,41 @@ export function isPluginNewerThanDaemon(pluginVersion: string | undefined, daemo
 
 type ParsedVersion = {
     core: [number, number, number];
-    prerelease: string[];
+    prerelease?: string[];
 };
 
-function parseVersion(version: string | undefined): ParsedVersion {
-    const match = (version ?? "")
-        .trim()
-        .match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?/);
-    if (!match) {
-        return { core: [0, 0, 0], prerelease: [] };
+function parseVersion(version: string | undefined): ParsedVersion | undefined {
+    const trimmed = (version ?? "").trim();
+    const withoutPrefix = trimmed.startsWith("v") ? trimmed.slice(1) : trimmed;
+    const withoutBuild = withoutPrefix.split("+", 1)[0];
+    const dashIndex = withoutBuild.indexOf("-");
+    const core = dashIndex >= 0 ? withoutBuild.slice(0, dashIndex) : withoutBuild;
+    const prerelease = dashIndex >= 0 ? withoutBuild.slice(dashIndex + 1) : undefined;
+    const coreParts = core.split(".");
+    if (coreParts.length !== 3 || coreParts.some(part => !/^\d+$/.test(part))) {
+        return undefined;
+    }
+    if (prerelease === "") {
+        return undefined;
     }
     return {
-        core: [toVersionNumber(match[1]), toVersionNumber(match[2]), toVersionNumber(match[3])],
-        prerelease: match[4]?.split(".").filter(part => part.length > 0) ?? [],
+        core: [toVersionNumber(coreParts[0]), toVersionNumber(coreParts[1]), toVersionNumber(coreParts[2])],
+        prerelease: prerelease?.split("."),
     };
 }
 
-function toVersionNumber(part: string | undefined): number {
-    return part ? Number.parseInt(part, 10) : 0;
+function toVersionNumber(part: string): number {
+    return Number.parseInt(part, 10);
 }
 
-function comparePrerelease(left: string[], right: string[]): number {
-    if (left.length === 0 && right.length === 0) {
+function comparePrerelease(left: string[] | undefined, right: string[] | undefined): number {
+    if (!left && !right) {
         return 0;
     }
-    if (left.length === 0) {
+    if (!left) {
         return 1;
     }
-    if (right.length === 0) {
+    if (!right) {
         return -1;
     }
     const length = Math.max(left.length, right.length);
@@ -286,6 +332,10 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
     return left === right ? 0 : left > right ? 1 : -1;
 }
 
+function compareStrings(left: string, right: string): number {
+    return left === right ? 0 : left > right ? 1 : -1;
+}
+
 export function missingBundledRefactError(assetPath: string): string {
     return `refact binary not found in ${assetPath} — reinstall the extension`;
 }
@@ -312,6 +362,21 @@ function ensureDaemonSpawnTarget(binPath: string): void {
         console.log(message);
         throw new Error(message);
     }
+    const stat = fs.statSync(binPath);
+    if (!stat.isFile()) {
+        const message = `refact binary is not a file at ${binPath}`;
+        console.log(message);
+        throw new Error(message);
+    }
+    if (process.platform !== "win32") {
+        try {
+            fs.accessSync(binPath, fs.constants.X_OK);
+        } catch (error) {
+            const message = `refact binary is not executable at ${binPath}: ${errorMessage(error)}`;
+            console.log(message);
+            throw new Error(message);
+        }
+    }
 }
 
 export async function readDaemonInfo(
@@ -325,7 +390,7 @@ export async function readDaemonInfo(
         const endpoint = endpointWithToken(normalizeDaemonPort(port), normalizeAuthToken(authToken));
         const status = await requestJson<DaemonStatus>(
             daemonStatusUrl(endpoint.port),
-            { method: "GET", headers: requestHeaders(endpoint.authToken) },
+            { method: "GET" },
             timeoutMs,
         );
         return daemonStatusForEndpoint(status, endpoint);
@@ -377,20 +442,34 @@ export async function ensureDaemon(binPath: string, options: EnsureDaemonOptions
     ensureDaemonSpawnTarget(binPath);
 
     if (current && currentEndpoint) {
-        await requestShutdown(currentEndpoint.port, "upgrade", currentEndpoint.authToken).catch(error => console.log(["shutdownDaemon", error]));
-        await waitForOldDaemonExit(currentEndpoint, current.pid, shutdownTimeoutMs, shutdownPollMs, sleep, now, readInfo, isProcessRunning);
+        const shutdownEndpoint = refreshedEndpointForPort(currentEndpoint.port, options, currentEndpoint.authToken);
+        try {
+            await requestShutdown(shutdownEndpoint.port, "upgrade", shutdownEndpoint.authToken, options);
+        } catch (error) {
+            throw new Error(`Refact daemon shutdown failed before upgrade on port ${shutdownEndpoint.port}: ${errorMessage(error)}`);
+        }
+        await waitForOldDaemonExit(shutdownEndpoint, current.pid, shutdownTimeoutMs, shutdownPollMs, sleep, now, readInfo, isProcessRunning);
+        currentEndpoint = shutdownEndpoint;
     }
 
-    spawnDaemon(binPath);
+    try {
+        await spawnDaemon(binPath, options);
+    } catch (error) {
+        throw new Error(daemonStartupFailureMessage(`Failed to start Refact daemon from ${binPath}: ${errorMessage(error)}`, options));
+    }
     const minimumVersion = current ? options.pluginVersion : undefined;
-    return pollDaemon(
-        () => mergeDaemonEndpoints(daemonEndpoints(options), [preferredEndpoint, ...(currentEndpoint ? [currentEndpoint] : [])]),
-        timeoutMs,
-        minimumVersion,
-        sleep,
-        now,
-        readInfo,
-    );
+    try {
+        return await pollDaemon(
+            () => mergeDaemonEndpoints(daemonEndpoints(options), [preferredEndpoint, ...(currentEndpoint ? [currentEndpoint] : [])]),
+            timeoutMs,
+            minimumVersion,
+            sleep,
+            now,
+            readInfo,
+        );
+    } catch (error) {
+        throw new Error(daemonStartupFailureMessage(errorMessage(error), options));
+    }
 }
 
 export async function openProject(root: string, options: OpenProjectOptions = {}): Promise<OpenProjectResponse> {
@@ -401,14 +480,17 @@ export async function openProject(root: string, options: OpenProjectOptions = {}
         client_kind: options.clientKind ?? "vscode",
         settings: options.settings,
     };
-    return requestJson<OpenProjectResponse>(
-        daemonOpenProjectUrl(port),
-        {
+    return requestJsonWithAuthRetry<OpenProjectResponse>(
+        port,
+        authToken,
+        options,
+        endpoint => daemonOpenProjectUrl(endpoint.port),
+        endpoint => ({
             method: "POST",
-            headers: requestHeaders(authToken, { "Content-Type": "application/json" }),
+            headers: requestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
             body: JSON.stringify(payload),
-        },
-        options.timeoutMs ?? 120000,
+        }),
+        options.timeoutMs ?? DAEMON_OPEN_PROJECT_TIMEOUT_MS,
     );
 }
 
@@ -416,14 +498,17 @@ export async function detach(): Promise<void> {
     return Promise.resolve();
 }
 
-async function shutdownDaemon(port: number, reason: string, authToken?: string): Promise<void> {
-    await requestJson<unknown>(
-        daemonShutdownUrl(port),
-        {
+async function shutdownDaemon(port: number, reason: string, authToken?: string, options: DaemonClientOptions = {}): Promise<void> {
+    await requestJsonWithAuthRetry<unknown>(
+        port,
+        authToken,
+        options,
+        endpoint => daemonShutdownUrl(endpoint.port),
+        endpoint => ({
             method: "POST",
-            headers: requestHeaders(authToken, { "Content-Type": "application/json" }),
+            headers: requestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
             body: JSON.stringify({ reason }),
-        },
+        }),
         2000,
     );
 }
@@ -481,13 +566,32 @@ async function pollDaemon(
     throw new Error(`Refact daemon did not become ready on port ${lastPort}`);
 }
 
-function defaultSpawnDaemon(binPath: string): void {
+function defaultSpawnDaemon(binPath: string, options: DaemonClientOptions = {}): Promise<void> {
     const command = daemonSpawnCommand(binPath);
-    const child = spawn(command.command, command.args, {
-        detached: true,
-        stdio: "ignore",
+    const spawnIo = daemonSpawnStdio(options);
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (callback: () => void) => {
+            if (!settled) {
+                settled = true;
+                spawnIo.close();
+                callback();
+            }
+        };
+        try {
+            const child = spawn(command.command, command.args, {
+                detached: true,
+                stdio: spawnIo.stdio,
+            });
+            child.once("error", error => settle(() => reject(error)));
+            child.once("spawn", () => {
+                child.unref();
+                settle(() => resolve());
+            });
+        } catch (error) {
+            settle(() => reject(error));
+        }
     });
-    child.unref();
 }
 
 export function daemonSpawnCommand(binPath: string): { command: string; args: string[] } {
@@ -511,12 +615,92 @@ function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function requestJsonWithAuthRetry<T>(
+    port: number,
+    authToken: string | undefined,
+    options: DaemonClientOptions,
+    urlForEndpoint: (endpoint: DaemonEndpoint) => string,
+    initForEndpoint: (endpoint: DaemonEndpoint) => RequestOptions,
+    timeout: number,
+): Promise<T> {
+    const initial = endpointWithToken(normalizeDaemonPort(port), normalizeAuthToken(authToken));
+    try {
+        return await requestJson<T>(urlForEndpoint(initial), initForEndpoint(initial), timeout);
+    } catch (error) {
+        if (!isUnauthorizedError(error)) {
+            throw error;
+        }
+        const refreshed = refreshedEndpointForPort(initial.port, options, initial.authToken);
+        return requestJson<T>(urlForEndpoint(refreshed), initForEndpoint(refreshed), timeout);
+    }
+}
+
 async function requestJson<T>(url: string, init: RequestOptions, timeout: number): Promise<T> {
     const request = new fetchH2.Request(url, init);
     const response = await fetchH2.fetch(request, { timeout });
     if (response.status < 200 || response.status >= 300) {
         const text = await response.text().catch(() => "");
-        throw new Error(`daemon request failed ${response.status} ${url}: ${text}`);
+        throw new DaemonRequestError(response.status, url, text);
     }
     return await response.json() as T;
+}
+
+function isUnauthorizedError(error: unknown): boolean {
+    return error instanceof DaemonRequestError && error.status === 401;
+}
+
+function daemonSpawnStdio(options: DaemonClientOptions = {}): { stdio: StdioOptions; close: () => void } {
+    try {
+        const logPath = daemonLogPath(options);
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        const fd = fs.openSync(logPath, "a");
+        return {
+            stdio: ["ignore", fd, fd],
+            close: () => closeFd(fd),
+        };
+    } catch {
+        return {
+            stdio: "ignore",
+            close: () => undefined,
+        };
+    }
+}
+
+function closeFd(fd: number): void {
+    try {
+        fs.closeSync(fd);
+    } catch {
+        return;
+    }
+}
+
+function daemonStartupFailureMessage(reason: string, options: DaemonClientOptions): string {
+    const logPath = daemonLogPath(options);
+    const logTail = readFileTail(logPath, DAEMON_LOG_TAIL_BYTES);
+    if (logTail.trim().length > 0) {
+        return `${reason}\nDaemon log (${logPath}):\n${logTail.trimEnd()}`;
+    }
+    return `${reason}\nNo daemon log output found at ${logPath}.`;
+}
+
+function readFileTail(filePath: string, maxBytes: number): string {
+    let fd: number | undefined;
+    try {
+        fd = fs.openSync(filePath, "r");
+        const stat = fs.fstatSync(fd);
+        const length = Math.min(stat.size, maxBytes);
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, stat.size - length);
+        return buffer.toString("utf8");
+    } catch {
+        return "";
+    } finally {
+        if (fd !== undefined) {
+            closeFd(fd);
+        }
+    }
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

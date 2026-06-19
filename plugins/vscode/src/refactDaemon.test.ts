@@ -6,6 +6,7 @@ import type { AddressInfo, Socket } from "net";
 import * as os from "os";
 import * as path from "path";
 import {
+    DAEMON_OPEN_PROJECT_TIMEOUT_MS,
     browserProjectUrl,
     compareVersions,
     daemonEndpoints,
@@ -57,9 +58,12 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(compareVersions("8.1.0-alpha.2", "8.1.0-alpha.10"), -1);
     assert.strictEqual(compareVersions("8.1.0-alpha.1", "8.1.0-beta.1"), -1);
     assert.strictEqual(compareVersions("8.1.0", "8.1.1"), -1);
+    assert.strictEqual(compareVersions("8.10", "8.2"), -1);
+    assert.strictEqual(compareVersions("v8.1.0+build.1", "8.1.0"), 0);
     assert.strictEqual(isPluginNewerThanDaemon("8.2.0", "8.1.9"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-alpha.1"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
+    assert.strictEqual(DAEMON_OPEN_PROJECT_TIMEOUT_MS >= 130000, true);
 
     runBackendStatusTests();
 
@@ -67,12 +71,17 @@ export async function runRefactDaemonTests() {
     await runStandaloneResolutionTests();
     await runArchiveTraversalRejectedTest();
     await runDaemonUpgradeWaitsForExitTest();
+    await runDaemonUpgradeShutdownFailureTest();
     await runDaemonUpgradeTimeoutTest();
     await runCompatibleDaemonSkipsMissingBinaryTest();
     await runDaemonJsonDiscoveryTest();
     await runDaemonReportedPortFallbackTest(0);
     await runDaemonReportedPortFallbackTest(-1);
     await runDaemonAuthHeaderTest();
+    await runOpenProjectStaleTokenRetryTest();
+    await runShutdownTokenRotationTest();
+    await runDiskPortTokenMismatchRecoveryTest();
+    await runSpawnFailureSurfacesLogTest();
 }
 
 function runBackendStatusTests() {
@@ -95,7 +104,7 @@ async function runBundledRefactSpawnTests() {
     const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-test-"));
     try {
         const refactPath = resolveBundledRefactPath(assetPath);
-        fs.writeFileSync(refactPath, "");
+        writeExecutable(refactPath, "");
 
         assert.strictEqual(ensureBundledRefactPath(assetPath), refactPath);
 
@@ -121,7 +130,7 @@ async function runBundledRefactSpawnTests() {
         try {
             await ensureDaemon(refactPath, {
                 timeoutMs: 1,
-                spawnDaemon: binPath => spawned.push(binPath),
+                spawnDaemon: binPath => { spawned.push(binPath); },
                 readDaemonInfo: async () => {
                     readAttempts++;
                     return undefined;
@@ -377,7 +386,7 @@ async function runDaemonUpgradeWaitsForExitTest() {
     const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-upgrade-wait-"));
     try {
         const refactPath = resolveBundledRefactPath(assetPath);
-        fs.writeFileSync(refactPath, "");
+        writeExecutable(refactPath, "");
 
         let shutdownRequested = false;
         let oldStatusReadsAfterShutdown = 0;
@@ -435,7 +444,7 @@ async function runDaemonUpgradeTimeoutTest() {
     const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-upgrade-timeout-"));
     try {
         const refactPath = resolveBundledRefactPath(assetPath);
-        fs.writeFileSync(refactPath, "");
+        writeExecutable(refactPath, "");
 
         let time = 0;
         let spawnCount = 0;
@@ -447,7 +456,7 @@ async function runDaemonUpgradeTimeoutTest() {
                 pluginVersion: "8.2.0",
                 shutdownTimeoutMs: 600,
                 shutdownPollMs: 200,
-                spawnDaemon: () => spawnCount++,
+                spawnDaemon: () => { spawnCount++; },
                 shutdownDaemon: async () => {
                     shutdownCount++;
                 },
@@ -472,6 +481,38 @@ async function runDaemonUpgradeTimeoutTest() {
         const command = daemonSpawnCommand(refactPath);
         assert.deepStrictEqual(command, { command: refactPath, args: ["daemon"] });
         assert.notStrictEqual(command.command, path.join(assetPath, process.platform === "win32" ? "refact-lsp.exe" : "refact-lsp"));
+    } finally {
+        fs.rmSync(assetPath, { recursive: true, force: true });
+    }
+}
+
+async function runDaemonUpgradeShutdownFailureTest() {
+    const assetPath = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-upgrade-shutdown-fail-"));
+    try {
+        const refactPath = resolveBundledRefactPath(assetPath);
+        writeExecutable(refactPath, "");
+        let spawnCount = 0;
+        let ensureError: Error | undefined;
+
+        try {
+            await ensureDaemon(refactPath, {
+                pluginVersion: "8.2.0",
+                spawnDaemon: () => { spawnCount++; },
+                shutdownDaemon: async () => {
+                    throw new Error("401 stale token");
+                },
+                readDaemonInfo: async () => daemonStatus("8.1.0"),
+                isProcessRunning: () => false,
+            });
+        } catch (error) {
+            ensureError = error instanceof Error ? error : new Error(String(error));
+        }
+
+        assert.strictEqual(spawnCount, 0);
+        assert.strictEqual(
+            ensureError?.message,
+            "Refact daemon shutdown failed before upgrade on port 8488: 401 stale token",
+        );
     } finally {
         fs.rmSync(assetPath, { recursive: true, force: true });
     }
@@ -503,7 +544,7 @@ async function runDaemonJsonDiscoveryTest() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-daemon-json-"));
     try {
         const daemonJsonPath = path.join(root, "daemon.json");
-        fs.writeFileSync(daemonJsonPath, JSON.stringify({ port: 9234, auth_token: "disk-token" }));
+        fs.writeFileSync(daemonJsonPath, daemonJson(9234, "disk-token"));
 
         assert.deepStrictEqual(daemonEndpoints({ port: 8488, daemonJsonPath }), [
             { port: 8488 },
@@ -543,23 +584,18 @@ async function runDaemonReportedPortFallbackTest(reportedPort: number) {
         });
         response.setHeader("Connection", "close");
         response.setHeader("Content-Type", "application/json");
-        if (request.headers.authorization !== `Bearer ${authToken}`) {
-            response.statusCode = 401;
-            response.end(JSON.stringify({ error: "missing auth" }));
-            return;
-        }
         if (request.url === "/daemon/v1/status") {
             const version = spawned ? "8.2.0" : "8.1.0";
             response.end(JSON.stringify(daemonStatus(version, reportedPort)));
             return;
         }
+        if (request.headers.authorization !== `Bearer ${authToken}`) {
+            response.statusCode = 401;
+            response.end(JSON.stringify({ error: "missing auth" }));
+            return;
+        }
         if (request.url === "/daemon/v1/projects/open") {
-            response.end(JSON.stringify({
-                project_id: `project-reported-port-${reportedPort}`,
-                slug: `project-reported-port-${reportedPort}`,
-                root,
-                pinned: false,
-            }));
+            response.end(openProjectResponse(`project-reported-port-${reportedPort}`, root));
             return;
         }
         if (request.url === "/daemon/v1/shutdown") {
@@ -579,16 +615,16 @@ async function runDaemonReportedPortFallbackTest(reportedPort: number) {
     try {
         const port = (server.address() as AddressInfo).port;
         const daemonJsonPath = path.join(root, "daemon.json");
-        fs.writeFileSync(daemonJsonPath, JSON.stringify({ port, auth_token: authToken }));
+        fs.writeFileSync(daemonJsonPath, daemonJson(port, authToken));
 
         const status = await findExistingDaemon({ port, pluginVersion: "8.1.0", daemonJsonPath });
         assert.strictEqual(status?.port, port);
         assert.strictEqual(status?.authToken, authToken);
 
         const opened = await openProject(root, { port: status?.port, authToken: status?.authToken, daemonJsonPath });
-        assert.strictEqual(opened.project_id, `project-reported-port-${reportedPort}`);
+        assert.strictEqual(opened["project_id"], `project-reported-port-${reportedPort}`);
         const refactPath = path.join(root, "refact");
-        fs.writeFileSync(refactPath, "");
+        writeExecutable(refactPath, "");
         const ensured = await ensureDaemon(refactPath, {
             port,
             pluginVersion: "8.1.0",
@@ -610,7 +646,15 @@ async function runDaemonReportedPortFallbackTest(reportedPort: number) {
         });
         assert.strictEqual(upgraded.port, port);
         assert.strictEqual(upgraded.version, "8.2.0");
-        assert.strictEqual(requests.every(request => request.authorization === `Bearer ${authToken}`), true);
+        assert.deepStrictEqual(requests.map(request => request.authorization), [
+            undefined,
+            `Bearer ${authToken}`,
+            undefined,
+            undefined,
+            `Bearer ${authToken}`,
+            undefined,
+            undefined,
+        ]);
         assert.deepStrictEqual(requests.map(request => [request.method, request.url]), [
             ["GET", "/daemon/v1/status"],
             ["POST", "/daemon/v1/projects/open"],
@@ -642,23 +686,18 @@ async function runDaemonAuthHeaderTest() {
         });
         response.setHeader("Connection", "close");
         response.setHeader("Content-Type", "application/json");
-        if (request.headers.authorization !== "Bearer secret-token") {
-            response.statusCode = 401;
-            response.end(JSON.stringify({ error: "missing auth" }));
-            return;
-        }
         if (request.url === "/daemon/v1/status") {
             const version = spawned ? "8.1.0" : "8.0.0";
             response.end(JSON.stringify(daemonStatus(version, (server.address() as AddressInfo).port)));
             return;
         }
+        if (request.headers.authorization !== "Bearer secret-token") {
+            response.statusCode = 401;
+            response.end(JSON.stringify({ error: "missing auth" }));
+            return;
+        }
         if (request.url === "/daemon/v1/projects/open") {
-            response.end(JSON.stringify({
-                project_id: "project-auth",
-                slug: "project-auth",
-                root,
-                pinned: false,
-            }));
+            response.end(openProjectResponse("project-auth", root));
             return;
         }
         if (request.url === "/daemon/v1/shutdown") {
@@ -678,9 +717,9 @@ async function runDaemonAuthHeaderTest() {
     try {
         const port = (server.address() as AddressInfo).port;
         const daemonJsonPath = path.join(root, "daemon.json");
-        fs.writeFileSync(daemonJsonPath, JSON.stringify({ port, auth_token: "secret-token" }));
+        fs.writeFileSync(daemonJsonPath, daemonJson(port, "secret-token"));
         const refactPath = path.join(root, "refact");
-        fs.writeFileSync(refactPath, "");
+        writeExecutable(refactPath, "");
 
         const status = await findExistingDaemon({ port, pluginVersion: "8.1.0", daemonJsonPath });
         assert.strictEqual(status, undefined);
@@ -698,7 +737,12 @@ async function runDaemonAuthHeaderTest() {
 
         assert.strictEqual(upgraded.version, "8.1.0");
         assert.strictEqual(spawned, true);
-        assert.strictEqual(requests.every(request => request.authorization === "Bearer secret-token"), true);
+        assert.deepStrictEqual(requests.slice(0, 4).map(request => request.authorization), [
+            undefined,
+            "Bearer secret-token",
+            undefined,
+            "Bearer secret-token",
+        ]);
         assert.deepStrictEqual(requests.slice(0, 4).map(request => [request.method, request.url]), [
             ["GET", "/daemon/v1/status"],
             ["POST", "/daemon/v1/projects/open"],
@@ -712,6 +756,244 @@ async function runDaemonAuthHeaderTest() {
         await new Promise<void>(resolve => server.close(() => resolve()));
         fs.rmSync(root, { recursive: true, force: true });
     }
+}
+
+async function runOpenProjectStaleTokenRetryTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-open-stale-token-"));
+    const daemonJsonPath = path.join(root, "daemon.json");
+    const sockets = new Set<Socket>();
+    const requests: Array<{ method: string; url: string; authorization?: string }> = [];
+    let openAttempts = 0;
+    fs.writeFileSync(daemonJsonPath, daemonJson(1, "stale-token"));
+    const server = http.createServer((request, response) => {
+        requests.push({
+            method: request.method ?? "",
+            url: request.url ?? "",
+            authorization: request.headers.authorization,
+        });
+        response.setHeader("Connection", "close");
+        response.setHeader("Content-Type", "application/json");
+        if (request.url === "/daemon/v1/status") {
+            response.end(JSON.stringify(daemonStatus("8.1.0", (server.address() as AddressInfo).port)));
+            return;
+        }
+        if (request.url === "/daemon/v1/projects/open") {
+            openAttempts++;
+            if (request.headers.authorization === "Bearer stale-token") {
+                fs.writeFileSync(daemonJsonPath, daemonJson((server.address() as AddressInfo).port, "fresh-token"));
+                response.statusCode = 401;
+                response.end(JSON.stringify({ error: "stale token" }));
+                return;
+            }
+            if (request.headers.authorization === "Bearer fresh-token") {
+                response.end(openProjectResponse("project-fresh", root));
+                return;
+            }
+        }
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: "missing auth" }));
+    });
+    server.on("connection", socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+        const port = (server.address() as AddressInfo).port;
+        fs.writeFileSync(daemonJsonPath, daemonJson(port, "stale-token"));
+        const status = await findExistingDaemon({ port, daemonJsonPath, pluginVersion: "8.1.0" });
+        assert.strictEqual(status?.authToken, "stale-token");
+
+        const opened = await openProject(root, { port, authToken: status?.authToken, daemonJsonPath, timeoutMs: 1000 });
+
+        assert.strictEqual(opened["project_id"], "project-fresh");
+        assert.strictEqual(openAttempts, 2);
+        assert.deepStrictEqual(requests.map(request => request.authorization), [
+            undefined,
+            "Bearer stale-token",
+            "Bearer fresh-token",
+        ]);
+    } finally {
+        for (const socket of sockets) {
+            socket.destroy();
+        }
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+async function runShutdownTokenRotationTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-shutdown-token-"));
+    const daemonJsonPath = path.join(root, "daemon.json");
+    const refactPath = path.join(root, "refact");
+    const sockets = new Set<Socket>();
+    const requests: Array<{ method: string; url: string; authorization?: string }> = [];
+    let spawned = false;
+    fs.writeFileSync(daemonJsonPath, daemonJson(1, "stale-token"));
+    writeExecutable(refactPath, "");
+    const server = http.createServer((request, response) => {
+        requests.push({
+            method: request.method ?? "",
+            url: request.url ?? "",
+            authorization: request.headers.authorization,
+        });
+        response.setHeader("Connection", "close");
+        response.setHeader("Content-Type", "application/json");
+        if (request.url === "/daemon/v1/status") {
+            response.end(JSON.stringify(daemonStatus(spawned ? "8.1.0" : "8.0.0", (server.address() as AddressInfo).port)));
+            return;
+        }
+        if (request.url === "/daemon/v1/shutdown") {
+            if (request.headers.authorization === "Bearer stale-token") {
+                fs.writeFileSync(daemonJsonPath, daemonJson((server.address() as AddressInfo).port, "fresh-token"));
+                response.statusCode = 401;
+                response.end(JSON.stringify({ error: "stale token" }));
+                return;
+            }
+            if (request.headers.authorization === "Bearer fresh-token") {
+                response.end(JSON.stringify({ ok: true }));
+                return;
+            }
+        }
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: "missing auth" }));
+    });
+    server.on("connection", socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+        const port = (server.address() as AddressInfo).port;
+        fs.writeFileSync(daemonJsonPath, daemonJson(port, "stale-token"));
+        const upgraded = await ensureDaemon(refactPath, {
+            port,
+            daemonJsonPath,
+            pluginVersion: "8.1.0",
+            timeoutMs: 1000,
+            shutdownTimeoutMs: 1000,
+            shutdownPollMs: 1,
+            spawnDaemon: () => { spawned = true; },
+            isProcessRunning: () => false,
+        });
+
+        assert.strictEqual(upgraded.version, "8.1.0");
+        assert.deepStrictEqual(
+            requests
+                .filter(request => request.url === "/daemon/v1/shutdown")
+                .map(request => request.authorization),
+            ["Bearer stale-token", "Bearer fresh-token"],
+        );
+    } finally {
+        for (const socket of sockets) {
+            socket.destroy();
+        }
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+async function runDiskPortTokenMismatchRecoveryTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-port-token-mismatch-"));
+    const daemonJsonPath = path.join(root, "daemon.json");
+    const sockets = new Set<Socket>();
+    const requests: Array<{ method: string; url: string; authorization?: string }> = [];
+    const server = http.createServer((request, response) => {
+        requests.push({
+            method: request.method ?? "",
+            url: request.url ?? "",
+            authorization: request.headers.authorization,
+        });
+        response.setHeader("Connection", "close");
+        response.setHeader("Content-Type", "application/json");
+        if (request.url === "/daemon/v1/status") {
+            response.end(JSON.stringify(daemonStatus("8.1.0", (server.address() as AddressInfo).port)));
+            return;
+        }
+        if (request.url === "/daemon/v1/projects/open") {
+            if (request.headers.authorization === undefined) {
+                fs.writeFileSync(daemonJsonPath, daemonJson((server.address() as AddressInfo).port, "active-token"));
+                response.statusCode = 401;
+                response.end(JSON.stringify({ error: "missing auth" }));
+                return;
+            }
+            if (request.headers.authorization === "Bearer active-token") {
+                response.end(openProjectResponse("project-active", root));
+                return;
+            }
+        }
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: "wrong token" }));
+    });
+    server.on("connection", socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+        const port = (server.address() as AddressInfo).port;
+        fs.writeFileSync(daemonJsonPath, daemonJson(port + 1, "wrong-port-token"));
+        const status = await findExistingDaemon({ port, daemonJsonPath, pluginVersion: "8.1.0" });
+        assert.strictEqual(status?.port, port);
+        assert.strictEqual(status?.authToken, null);
+
+        const opened = await openProject(root, { port, authToken: status?.authToken, daemonJsonPath, timeoutMs: 1000 });
+
+        assert.strictEqual(opened["project_id"], "project-active");
+        assert.deepStrictEqual(requests.map(request => request.authorization), [undefined, undefined, "Bearer active-token"]);
+    } finally {
+        for (const socket of sockets) {
+            socket.destroy();
+        }
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+async function runSpawnFailureSurfacesLogTest() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-spawn-error-"));
+    try {
+        const daemonJsonPath = path.join(root, "daemon.json");
+        const refactPath = path.join(root, "refact");
+        writeExecutable(refactPath, "#!/definitely/missing/refact-interpreter\n");
+        const logPath = path.join(root, "logs", "daemon.log");
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        fs.writeFileSync(logPath, "startup explosion from daemon.log\n");
+        let ensureError: Error | undefined;
+
+        try {
+            await ensureDaemon(refactPath, {
+                daemonJsonPath,
+                timeoutMs: 1000,
+                readDaemonInfo: async () => undefined,
+            });
+        } catch (error) {
+            ensureError = error instanceof Error ? error : new Error(String(error));
+        }
+
+        assert.strictEqual(ensureError instanceof Error, true);
+        assert.strictEqual(ensureError?.message.includes("Failed to start Refact daemon"), true);
+        assert.strictEqual(ensureError?.message.includes(refactPath), true);
+        assert.strictEqual(ensureError?.message.includes(logPath), true);
+        assert.strictEqual(ensureError?.message.includes("startup explosion from daemon.log"), true);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
+function writeExecutable(filePath: string, contents: string): void {
+    fs.writeFileSync(filePath, contents, { mode: 0o755 });
+    if (process.platform !== "win32") {
+        fs.chmodSync(filePath, 0o755);
+    }
+}
+
+function daemonJson(port: number, authToken: string): string {
+    return JSON.stringify({ port, ["auth_token"]: authToken });
+}
+
+function openProjectResponse(projectId: string, root: string): string {
+    return JSON.stringify({ ["project_id"]: projectId, slug: projectId, root, pinned: false });
 }
 
 function daemonStatus(version = "8.1.0", port = 8488, authToken?: string): DaemonStatus {
