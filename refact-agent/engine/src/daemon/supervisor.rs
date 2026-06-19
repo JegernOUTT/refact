@@ -970,13 +970,19 @@ impl Supervisor {
                 }),
             )
             .await;
-        if matches!(info.state.clone(), WorkerState::Crashed) {
+        if will_restart || matches!(info.state.clone(), WorkerState::Crashed) {
             let _ = self
                 .events
                 .emit(
                     "worker_crashed",
                     Some(info.project_id.clone()),
-                    json!({"last_error": info.last_error}),
+                    json!({
+                        "last_error": info.last_error,
+                        "exit_code": exit_code,
+                        "during_startup": during_startup,
+                        "restarting": will_restart,
+                        "restart_delay_ms": delay.map(|d| d.as_millis() as u64),
+                    }),
                 )
                 .await;
         }

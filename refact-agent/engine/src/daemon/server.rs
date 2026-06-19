@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -39,6 +40,8 @@ struct ShutdownRequest {
 struct EventsQuery {
     #[serde(default)]
     follow: bool,
+    after_seq: Option<u64>,
+    last_event_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,21 +225,55 @@ async fn worker_status(
 
 async fn events(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let snapshot = state.events.snapshot().await;
-    let mut rx = state.events.subscribe();
+    let rx = query.follow.then(|| state.events.subscribe());
+    let cursor = event_cursor(&headers, &query).unwrap_or(0);
+    let initial = state.events.replay_after(cursor).await;
+    let events = state.events.clone();
     let mut shutdown_rx = state.shutdown_receiver();
     let stream = async_stream::stream! {
-        for event in snapshot {
-            yield Ok(sse_event(&event));
+        let mut last_seq = cursor;
+        if let Some(gap) = initial.gap {
+            let event = resync_event(&gap);
+            if event.seq > last_seq {
+                last_seq = event.seq;
+                yield Ok(sse_event(&event));
+            }
         }
-        if query.follow {
+        for event in initial.events {
+            if event.seq > last_seq {
+                last_seq = event.seq;
+                yield Ok(sse_event(&event));
+            }
+        }
+        if let Some(mut rx) = rx {
             loop {
                 tokio::select! {
                     result = rx.recv() => match result {
-                        Ok(event) => yield Ok(sse_event(&event)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(event) => {
+                            if event.seq > last_seq {
+                                last_seq = event.seq;
+                                yield Ok(sse_event(&event));
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let replay = events.replay_after(last_seq).await;
+                            if let Some(gap) = replay.gap {
+                                let event = resync_event(&gap);
+                                if event.seq > last_seq {
+                                    last_seq = event.seq;
+                                    yield Ok(sse_event(&event));
+                                }
+                            }
+                            for event in replay.events {
+                                if event.seq > last_seq {
+                                    last_seq = event.seq;
+                                    yield Ok(sse_event(&event));
+                                }
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     _ = shutdown_rx.recv() => break,
@@ -245,6 +282,34 @@ async fn events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn event_cursor(headers: &HeaderMap, query: &EventsQuery) -> Option<u64> {
+    query
+        .after_seq
+        .or(query.last_event_id)
+        .or_else(|| header_seq(headers, "last-event-id"))
+}
+
+fn header_seq(headers: &HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn resync_event(gap: &crate::daemon::events::EventReplayGap) -> crate::daemon::events::DaemonEvent {
+    crate::daemon::events::DaemonEvent {
+        seq: gap.oldest_seq.saturating_sub(1),
+        ts_ms: crate::daemon::state::now_ms(),
+        kind: "daemon_events_resync_required".to_string(),
+        project_id: None,
+        payload: json!({
+            "requested_after_seq": gap.requested_after_seq,
+            "oldest_seq": gap.oldest_seq,
+            "latest_seq": gap.latest_seq,
+        }),
+    }
 }
 
 async fn log_path(state: &Arc<DaemonState>, project_id: Option<&str>) -> Result<PathBuf, Response> {
@@ -294,6 +359,7 @@ async fn tail_file(path: &std::path::Path, tail: usize) -> Result<String, String
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {
     Event::default()
+        .id(event.seq.to_string())
         .event("daemon")
         .data(serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()))
 }
