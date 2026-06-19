@@ -13,7 +13,14 @@ use crate::daemon::state::DaemonInfo;
 
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_READINESS_TIMEOUT: Duration = Duration::from_secs(125);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlRequestTimeout {
+    Short,
+    Readiness,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonInfoReadError {
@@ -177,26 +184,18 @@ pub async fn get_json<T: DeserializeOwned>(
     info: &DaemonInfo,
     path: &str,
 ) -> Result<T, DaemonClientError> {
-    let response = daemon_request(info, reqwest::Method::GET, path)
-        .send()
-        .await
-        .map_err(|error| {
-            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
-                "failed to contact daemon: {error}"
-            )))
-        })?;
+    let response = send_auth_required(info, |attempt| {
+        daemon_request(attempt, reqwest::Method::GET, path)
+    })
+    .await?;
     decode_json_response(response).await
 }
 
 pub async fn get_text(info: &DaemonInfo, path: &str) -> Result<String, DaemonClientError> {
-    let response = daemon_request(info, reqwest::Method::GET, path)
-        .send()
-        .await
-        .map_err(|error| {
-            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
-                "failed to contact daemon: {error}"
-            )))
-        })?;
+    let response = send_auth_required(info, |attempt| {
+        daemon_request(attempt, reqwest::Method::GET, path)
+    })
+    .await?;
     decode_text_response(response).await
 }
 
@@ -205,15 +204,10 @@ pub async fn post_json<B: Serialize + ?Sized, T: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<T, DaemonClientError> {
-    let response = daemon_request(info, reqwest::Method::POST, path)
-        .json(body)
-        .send()
-        .await
-        .map_err(|error| {
-            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
-                "failed to contact daemon: {error}"
-            )))
-        })?;
+    let response = send_auth_required(info, |attempt| {
+        daemon_request(attempt, reqwest::Method::POST, path).json(body)
+    })
+    .await?;
     decode_json_response(response).await
 }
 
@@ -229,15 +223,10 @@ pub async fn patch_json<B: Serialize + ?Sized, T: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<T, DaemonClientError> {
-    let response = daemon_request(info, reqwest::Method::PATCH, path)
-        .json(body)
-        .send()
-        .await
-        .map_err(|error| {
-            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
-                "failed to contact daemon: {error}"
-            )))
-        })?;
+    let response = send_auth_required(info, |attempt| {
+        daemon_request(attempt, reqwest::Method::PATCH, path).json(body)
+    })
+    .await?;
     decode_json_response(response).await
 }
 
@@ -245,14 +234,10 @@ pub async fn delete_json<T: DeserializeOwned>(
     info: &DaemonInfo,
     path: &str,
 ) -> Result<T, DaemonClientError> {
-    let response = daemon_request(info, reqwest::Method::DELETE, path)
-        .send()
-        .await
-        .map_err(|error| {
-            DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
-                "failed to contact daemon: {error}"
-            )))
-        })?;
+    let response = send_auth_required(info, |attempt| {
+        daemon_request(attempt, reqwest::Method::DELETE, path)
+    })
+    .await?;
     decode_json_response(response).await
 }
 
@@ -269,15 +254,43 @@ fn daemon_request(
     method: reqwest::Method,
     path: &str,
 ) -> reqwest::RequestBuilder {
+    let timeout = control_timeout_for_path(&method, path);
+    daemon_request_with_timeout(info, method, path, timeout)
+}
+
+fn daemon_request_with_timeout(
+    info: &DaemonInfo,
+    method: reqwest::Method,
+    path: &str,
+    timeout: ControlRequestTimeout,
+) -> reqwest::RequestBuilder {
     let url = format!(
         "{}{}",
         crate::daemon::chat_client::daemon_base_url(info),
         path
     );
-    let request = control_client().request(method, url);
+    let request = control_client_for(timeout).request(method, url);
     match &info.auth_token {
         Some(token) => request.bearer_auth(token),
         None => request,
+    }
+}
+
+fn control_timeout_for_path(method: &reqwest::Method, path: &str) -> ControlRequestTimeout {
+    if method.as_str() == reqwest::Method::POST.as_str()
+        && (path == "/daemon/v1/projects/open"
+            || (path.starts_with("/daemon/v1/projects/") && path.ends_with("/restart")))
+    {
+        ControlRequestTimeout::Readiness
+    } else {
+        ControlRequestTimeout::Short
+    }
+}
+
+fn control_client_for(timeout: ControlRequestTimeout) -> &'static reqwest::Client {
+    match timeout {
+        ControlRequestTimeout::Short => control_client(),
+        ControlRequestTimeout::Readiness => readiness_control_client(),
     }
 }
 
@@ -286,12 +299,65 @@ fn control_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| build_control_client().expect("failed to build daemon control client"))
 }
 
+fn readiness_control_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        build_readiness_control_client().expect("failed to build daemon readiness control client")
+    })
+}
+
 fn build_control_client() -> Result<reqwest::Client, reqwest::Error> {
+    build_control_client_with_timeout(CONTROL_TOTAL_TIMEOUT)
+}
+
+fn build_readiness_control_client() -> Result<reqwest::Client, reqwest::Error> {
+    build_control_client_with_timeout(CONTROL_READINESS_TIMEOUT)
+}
+
+fn build_control_client_with_timeout(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .connect_timeout(CONTROL_CONNECT_TIMEOUT)
-        .timeout(CONTROL_TOTAL_TIMEOUT)
+        .timeout(timeout)
         .no_proxy()
         .build()
+}
+
+async fn send_auth_required<F>(
+    info: &DaemonInfo,
+    build: F,
+) -> Result<reqwest::Response, DaemonClientError>
+where
+    F: Fn(&DaemonInfo) -> reqwest::RequestBuilder,
+{
+    let response = send_control_request(build(info)).await?;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+    let Some(refreshed) = refresh_info_for_auth_retry(info).await? else {
+        return Ok(response);
+    };
+    send_control_request(build(&refreshed)).await
+}
+
+async fn send_control_request(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, DaemonClientError> {
+    request.send().await.map_err(|error| {
+        DaemonClientError::Http(crate::daemon::auth::redact_daemon_token(&format!(
+            "failed to contact daemon: {error}"
+        )))
+    })
+}
+
+async fn refresh_info_for_auth_retry(
+    current: &DaemonInfo,
+) -> Result<Option<DaemonInfo>, DaemonClientError> {
+    let refreshed = read_daemon_json().await.map_err(|error| {
+        DaemonClientError::Http(format!(
+            "failed to refresh daemon auth token after 401 Unauthorized: {error}"
+        ))
+    })?;
+    Ok(refreshed.filter(|info| info.port == current.port))
 }
 
 async fn decode_json_response<T: DeserializeOwned>(
@@ -323,10 +389,18 @@ async fn response_status_error(response: reqwest::Response) -> DaemonClientError
         .text()
         .await
         .unwrap_or_else(|error| error.to_string());
-    DaemonClientError::Status {
-        status,
-        body: crate::daemon::auth::redact_daemon_token(&body),
-    }
+    let body = crate::daemon::auth::redact_daemon_token(&body);
+    let body = if status == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
+        let body = body.trim();
+        if body.is_empty() {
+            "Unauthorized: daemon auth token is missing, stale, or invalid".to_string()
+        } else {
+            format!("Unauthorized: daemon auth token is missing, stale, or invalid ({body})")
+        }
+    } else {
+        body
+    };
+    DaemonClientError::Status { status, body }
 }
 
 async fn ensure_daemon_running_with_starter<F>(starter: F) -> Result<DaemonInfo, String>
@@ -434,8 +508,8 @@ async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
     .map(|_| ())
     .map_err(|error| match error {
         DaemonClientError::Http(message) => format!("failed to request daemon shutdown: {message}"),
-        DaemonClientError::Status { status, .. } => {
-            format!("daemon shutdown failed with status {status}")
+        DaemonClientError::Status { status, body } => {
+            format!("daemon shutdown failed with status {status}: {body}")
         }
         DaemonClientError::Json(message) => message,
     })
@@ -626,8 +700,26 @@ mod tests {
     fn control_client_builds_with_bounded_timeouts() {
         assert_eq!(CONTROL_CONNECT_TIMEOUT, Duration::from_secs(2));
         assert_eq!(CONTROL_TOTAL_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(CONTROL_READINESS_TIMEOUT, Duration::from_secs(125));
+        assert_eq!(
+            control_timeout_for_path(&reqwest::Method::GET, "/daemon/v1/projects/open"),
+            ControlRequestTimeout::Short
+        );
+        assert_eq!(
+            control_timeout_for_path(&reqwest::Method::POST, "/daemon/v1/projects/open"),
+            ControlRequestTimeout::Readiness
+        );
+        assert_eq!(
+            control_timeout_for_path(&reqwest::Method::POST, "/daemon/v1/projects/p/restart"),
+            ControlRequestTimeout::Readiness
+        );
         let _ = build_control_client().unwrap();
+        let _ = build_readiness_control_client().unwrap();
         assert!(std::ptr::eq(control_client(), control_client()));
+        assert!(std::ptr::eq(
+            readiness_control_client(),
+            readiness_control_client()
+        ));
     }
 
     #[tokio::test]
@@ -662,6 +754,277 @@ mod tests {
                 mdns: String::new(),
             },
         }
+    }
+
+    fn auth_header(headers: &axum::http::HeaderMap) -> Option<String> {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_required_request_retries_once_after_daemon_json_token_refresh() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(cache_dir.path(), config_dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let route_seen = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/daemon/v1/status",
+                axum::routing::get(|| async move {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({"ok": true})),
+                    )
+                }),
+            )
+            .route(
+                "/daemon/v1/projects/open",
+                axum::routing::post(move |headers: axum::http::HeaderMap| {
+                    let route_seen = route_seen.clone();
+                    async move {
+                        let auth = auth_header(&headers);
+                        route_seen.lock().unwrap().push(auth.clone());
+                        if auth.as_deref() == Some("Bearer new") {
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({"project_id": "p"})),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                            )
+                        }
+                    }
+                }),
+            );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let old_info = daemon_info(port, Some("old"));
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(port, Some("new")),
+        )
+        .await
+        .unwrap();
+
+        assert!(ping_daemon(&old_info).await.is_alive());
+        let value: Value = post_json(
+            &old_info,
+            "/daemon/v1/projects/open",
+            &serde_json::json!({"root": "/tmp/project"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value["project_id"], "p");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![
+                Some("Bearer old".to_string()),
+                Some("Bearer new".to_string())
+            ]
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn shutdown_retries_once_after_daemon_json_token_refresh() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(cache_dir.path(), config_dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let route_seen = seen.clone();
+        let app = axum::Router::new().route(
+            "/daemon/v1/shutdown",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let route_seen = route_seen.clone();
+                async move {
+                    let auth = auth_header(&headers);
+                    route_seen.lock().unwrap().push(auth.clone());
+                    if auth.as_deref() == Some("Bearer new") {
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"ok": true})),
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                        )
+                    }
+                }
+            }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let old_info = daemon_info(port, Some("old"));
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(port, Some("new")),
+        )
+        .await
+        .unwrap();
+
+        shutdown_daemon(&old_info, "upgrade").await.unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![
+                Some("Bearer old".to_string()),
+                Some("Bearer new".to_string())
+            ]
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_required_request_retries_at_most_once() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(cache_dir.path(), config_dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let route_seen = seen.clone();
+        let app = axum::Router::new().route(
+            "/daemon/v1/projects",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let route_seen = route_seen.clone();
+                async move {
+                    route_seen.lock().unwrap().push(auth_header(&headers));
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                    )
+                }
+            }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let old_info = daemon_info(port, Some("old"));
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(port, Some("new")),
+        )
+        .await
+        .unwrap();
+
+        let error = get_json::<Value>(&old_info, "/daemon/v1/projects")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            DaemonClientError::Status { status: 401, .. }
+        ));
+        assert!(error.to_string().contains("stale, or invalid"));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_required_request_does_not_retry_port_mismatch() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(cache_dir.path(), config_dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(0usize));
+        let route_seen = seen.clone();
+        let app = axum::Router::new().route(
+            "/daemon/v1/projects",
+            axum::routing::get(move || {
+                let route_seen = route_seen.clone();
+                async move {
+                    *route_seen.lock().unwrap() += 1;
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                    )
+                }
+            }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let old_info = daemon_info(port, Some("old"));
+        crate::daemon::state::write_daemon_info_atomic(
+            &crate::daemon::paths::daemon_json_path(),
+            &daemon_info(port.wrapping_add(1), Some("new")),
+        )
+        .await
+        .unwrap();
+
+        let error = get_json::<Value>(&old_info, "/daemon/v1/projects")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            DaemonClientError::Status { status: 401, .. }
+        ));
+        assert_eq!(*seen.lock().unwrap(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn auth_required_request_does_not_retry_missing_daemon_json() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(cache_dir.path(), config_dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(0usize));
+        let route_seen = seen.clone();
+        let app = axum::Router::new().route(
+            "/daemon/v1/projects",
+            axum::routing::get(move || {
+                let route_seen = route_seen.clone();
+                async move {
+                    *route_seen.lock().unwrap() += 1;
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({"error": "Unauthorized"})),
+                    )
+                }
+            }),
+        );
+        let server = axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service());
+        let task = tokio::spawn(server);
+        let old_info = daemon_info(port, Some("old"));
+
+        let error = get_json::<Value>(&old_info, "/daemon/v1/projects")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            DaemonClientError::Status { status: 401, .. }
+        ));
+        assert_eq!(*seen.lock().unwrap(), 1);
+        task.abort();
     }
 
     #[tokio::test]
