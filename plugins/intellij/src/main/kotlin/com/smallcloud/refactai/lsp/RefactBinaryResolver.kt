@@ -7,6 +7,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -397,17 +398,35 @@ private fun promoteSharedBinary(extractedBin: Path, sharedBinPath: Path, options
         if (!isWindowsOs(options.osName)) {
             options.chmod(tmpTarget)
         }
-        Files.move(
-            tmpTarget,
-            sharedBinPath,
-            StandardCopyOption.REPLACE_EXISTING,
-            StandardCopyOption.ATOMIC_MOVE,
-        )
+        moveReplacingWithAtomicFallback(tmpTarget, sharedBinPath)
         if (!isWindowsOs(options.osName)) {
             options.chmod(sharedBinPath)
         }
     } finally {
         Files.deleteIfExists(tmpTarget)
+    }
+}
+
+internal fun moveReplacingWithAtomicFallback(
+    source: Path,
+    target: Path,
+    move: (Path, Path, Boolean) -> Path = { from, to, atomic ->
+        if (atomic) {
+            Files.move(
+                from,
+                to,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        } else {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING)
+        }
+    },
+) {
+    try {
+        move(source, target, true)
+    } catch (_: AtomicMoveNotSupportedException) {
+        move(source, target, false)
     }
 }
 
