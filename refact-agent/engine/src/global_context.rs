@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -283,6 +283,7 @@ pub struct GlobalContext {
     pub caps_state: Arc<ARwLock<CapsState>>,
     pub tokenizer_state: Arc<StdRwLock<TokenizerState>>,
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
+    pub completion_cache_generation: Arc<AtomicU64>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn refact_core::vecdb_types::VecdbSearch>>>>,
     pub vec_db_error: Arc<StdMutex<String>>,
     pub ast_service: Arc<StdMutex<Option<Arc<AMutex<AstIndexService>>>>>,
@@ -576,7 +577,6 @@ pub async fn try_load_caps_quickly_if_not_present(
             if caps_state.last_attempted_ts + max_age < now
                 || latest_provider_mtime >= caps_state.last_attempted_ts
             {
-                caps_state.caps = None;
                 caps_state.last_attempted_ts = 0;
                 caps_last_attempted_ts = 0;
             } else {
@@ -588,6 +588,9 @@ pub async fn try_load_caps_quickly_if_not_present(
         }
         if caps_last_attempted_ts + CAPS_RELOAD_BACKOFF > now {
             let caps_state = caps_state.read().await;
+            if let Some(caps_arc) = caps_state.caps.clone() {
+                return Ok(caps_arc);
+            }
             return Err(ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 caps_state.last_error.clone(),
@@ -608,6 +611,9 @@ pub async fn try_load_caps_quickly_if_not_present(
                 Err(e) => {
                     error!("caps fetch failed: {:?}", e);
                     caps_state.last_error = format!("caps fetch failed: {}", e);
+                    if let Some(caps) = caps_state.caps.clone() {
+                        return Ok(caps);
+                    }
                     return Err(ScratchError::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         caps_state.last_error.clone(),
@@ -758,6 +764,7 @@ pub async fn create_global_context(
             download_lock: Arc::new(AMutex::<bool>::new(false)),
         })),
         completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
+        completion_cache_generation: Arc::new(AtomicU64::new(0)),
         vec_db: Arc::new(AMutex::new(None)),
         vec_db_error: Arc::new(StdMutex::new(String::new())),
         ast_service: Arc::new(StdMutex::new(None)),
@@ -880,6 +887,28 @@ pub mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stale_caps_remain_available_during_reload_backoff() {
+        let gcx = make_test_gcx().await;
+        let old_caps = Arc::new(CodeAssistantCaps::default());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(old_caps.clone());
+            state.last_attempted_ts = now;
+            state.last_error = "previous reload failed".to_string();
+        }
+
+        let loaded = try_load_caps_quickly_if_not_present(gcx, CAPS_BACKGROUND_RELOAD)
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&loaded, &old_caps));
+    }
+
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
         let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
         let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
@@ -962,6 +991,7 @@ pub mod tests {
                 download_lock: Arc::new(AMutex::<bool>::new(false)),
             })),
             completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
+            completion_cache_generation: Arc::new(AtomicU64::new(0)),
             vec_db: Arc::new(AMutex::new(None)),
             vec_db_error: Arc::new(StdMutex::new(String::new())),
             ast_service: Arc::new(StdMutex::new(None)),

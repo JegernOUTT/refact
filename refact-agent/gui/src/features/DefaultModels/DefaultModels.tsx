@@ -3,7 +3,9 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bot,
+  Boxes,
   Brain,
+  Code,
   Info,
   MessageCircle,
   MessagesSquare,
@@ -46,6 +48,18 @@ type DefaultModelsProps = {
 };
 
 type ModelTypeKey =
+  | "chat"
+  | "chat_model_2"
+  | "task_planner_agent_model"
+  | "chat_light"
+  | "chat_thinking"
+  | "chat_buddy"
+  | "completion_model"
+  | "embedding_model";
+
+type ModelTypeCapability = "chat" | "completion" | "embedding";
+
+type ChatModelTypeKey =
   | "chat"
   | "chat_model_2"
   | "task_planner_agent_model"
@@ -94,9 +108,47 @@ const MODEL_TYPE_LABELS: Record<
       "Model used by your companion for background tasks and suggestions.",
     icon: Rabbit,
   },
+  completion_model: {
+    title: "Completion Model",
+    shortLabel: "Completion",
+    description: "Model used for code completion and fill-in-middle requests.",
+    icon: Code,
+  },
+  embedding_model: {
+    title: "Embedding Model",
+    shortLabel: "Embedding",
+    description: "Model used for semantic search and VecDB embeddings.",
+    icon: Boxes,
+  },
 };
 
 const MODEL_TYPE_KEYS = Object.keys(MODEL_TYPE_LABELS) as ModelTypeKey[];
+
+function getModelCapability(typeKey: ModelTypeKey): ModelTypeCapability {
+  if (typeKey === "completion_model") return "completion";
+  if (typeKey === "embedding_model") return "embedding";
+  return "chat";
+}
+
+function getDefaultConfig(
+  defaults: ProviderDefaults,
+  key: ModelTypeKey,
+): ModelTypeDefaults {
+  const value = defaults[key];
+  if (typeof value === "string") return { model: value };
+  return (value as ModelTypeDefaults | undefined) ?? {};
+}
+
+function updateDefaultConfig(
+  defaults: ProviderDefaults,
+  key: ModelTypeKey,
+  config: ModelTypeDefaults,
+): ProviderDefaults {
+  if (key === "completion_model" || key === "embedding_model") {
+    return { ...defaults, [key]: config.model };
+  }
+  return { ...defaults, [key]: config };
+}
 
 const ModelTypeSection: React.FC<{
   typeKey: ModelTypeKey;
@@ -105,6 +157,7 @@ const ModelTypeSection: React.FC<{
   onChange: (key: ModelTypeKey, config: ModelTypeDefaults) => void;
 }> = ({ typeKey, config, capsDefault, onChange }) => {
   const { title, description } = MODEL_TYPE_LABELS[typeKey];
+  const capability = getModelCapability(typeKey);
 
   const handleModelChange = useCallback(
     (model: string) => {
@@ -145,13 +198,14 @@ const ModelTypeSection: React.FC<{
                 compact={false}
                 allowUnset
                 unsetLabel="None"
+                capability={capability}
               />
             </div>
           }
         />
       </SettingsGroup>
 
-      {effectiveModel ? (
+      {effectiveModel && capability === "chat" ? (
         <SettingsGroup title="Sampling">
           <SettingItem
             className="rf-enter"
@@ -164,11 +218,12 @@ const ModelTypeSection: React.FC<{
                 model={effectiveModel}
                 values={config}
                 onChange={handleSamplingChange}
+                capability={capability}
               />
             </div>
           </SettingItem>
         </SettingsGroup>
-      ) : (
+      ) : !effectiveModel ? (
         <div className={`${styles.notice} rf-enter`}>
           <Icon icon={Info} size="sm" tone="muted" />
           <span>
@@ -176,7 +231,7 @@ const ModelTypeSection: React.FC<{
             you to configure it.
           </span>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };
@@ -211,6 +266,9 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
       chat_light: capsData?.chat_light_model ?? "",
       chat_thinking: capsData?.chat_thinking_model ?? "",
       chat_buddy: capsData?.chat_buddy_model ?? "",
+      completion_model: capsData?.completion_default_model ?? "",
+      embedding_model:
+        capsData?.embedding_model?.id ?? capsData?.embedding_model?.name ?? "",
     }),
     [capsData],
   );
@@ -259,9 +317,10 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
             "chat_light",
             "chat_thinking",
             "chat_buddy",
-          ] as ModelTypeKey[]) {
-            if (patch[key]) {
-              merged[key] = { ...(base[key] ?? {}), ...patch[key] };
+          ] as ChatModelTypeKey[]) {
+            const patchValue = patch[key];
+            if (patchValue) {
+              merged[key] = { ...getDefaultConfig(base, key), ...patchValue };
               appliedDraft = true;
             }
           }
@@ -278,10 +337,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
 
   const handleModelTypeChange = useCallback(
     (key: ModelTypeKey, config: ModelTypeDefaults) => {
-      setLocalDefaults((prev) => ({
-        ...prev,
-        [key]: config,
-      }));
+      setLocalDefaults((prev) => updateDefaultConfig(prev, key, config));
       setHasChanges(true);
       setSaveError(null);
     },
@@ -380,7 +436,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     <Tabs.Content key={key} value={key} className={styles.roleTabContent}>
       <ModelTypeSection
         typeKey={key}
-        config={localDefaults[key] ?? {}}
+        config={getDefaultConfig(localDefaults, key)}
         capsDefault={capsDefaults[key]}
         onChange={handleModelTypeChange}
       />

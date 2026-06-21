@@ -4823,6 +4823,7 @@ fn provider_health_default_missing() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -4846,6 +4847,7 @@ fn provider_health_broken_ref() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -4871,6 +4873,7 @@ fn provider_health_surfaces_same_missing_model_per_field() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -4918,6 +4921,7 @@ fn provider_health_no_emit_when_ok() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: "openai/gpt-4o-mini".to_string(),
         task_planner_agent_model: "openai/gpt-4o-mini".to_string(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -4954,6 +4958,7 @@ fn provider_health_checks_completion_default() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "missing-completion".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -4981,6 +4986,7 @@ fn provider_health_chat_default_uses_chat_namespace() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "shared/model".to_string(),
@@ -6785,6 +6791,7 @@ fn provider_health_payload_keys_match_detector() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -6803,6 +6810,7 @@ fn provider_health_payload_keys_match_detector() {
     }
     let defaults2 = DefaultModels {
         completion_default_model: String::new(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -10453,6 +10461,7 @@ fn provider_health_checks_chat_light_and_completion_defaults() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "missing-completion".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
@@ -10488,6 +10497,7 @@ fn broken_ref_per_field_distinct_opportunities() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: String::new(),
         chat_default_model: "missing-default".to_string(),
@@ -10528,6 +10538,7 @@ fn broken_ref_surfaces_each_field_when_slots_share_model() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: String::new(),
         task_planner_agent_model: "missing-shared".to_string(),
         chat_default_model: "missing-shared".to_string(),
@@ -10568,6 +10579,7 @@ fn multiple_missing_defaults_surface_separately() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        embedding_default_model: String::new(),
         chat_model_2: "openai/gpt-4o-mini".to_string(),
         task_planner_agent_model: "openai/gpt-4o-mini".to_string(),
         chat_default_model: String::new(),

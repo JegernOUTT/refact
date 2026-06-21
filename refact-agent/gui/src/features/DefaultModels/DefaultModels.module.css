@@ -141,3 +141,12 @@
     grid-column: 1;
   }
 }
+
+.pageWrapper {
+  padding: 0;
+  margin-top: 0;
+}
+
+.pageContent {
+  height: 100%;
+}

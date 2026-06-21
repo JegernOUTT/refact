@@ -118,6 +118,8 @@ available:
             chat_endpoint: "https://api.openai.com/v1/responses".to_string(),
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

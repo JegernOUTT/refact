@@ -106,6 +106,8 @@ available:
             chat_endpoint: "https://api.deepseek.com/chat/completions".to_string(),
             completion_endpoint: "https://api.deepseek.com/completions".to_string(),
             embedding_endpoint: String::new(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

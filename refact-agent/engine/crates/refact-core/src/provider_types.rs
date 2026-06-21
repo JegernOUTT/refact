@@ -31,6 +31,25 @@ pub struct ProviderModel {
     pub removable: bool,
 }
 
+impl ProviderModel {
+    pub fn custom_role(model_id: &str, enabled: bool, n_ctx: usize) -> Self {
+        Self {
+            id: model_id.to_string(),
+            base_name: model_id.to_string(),
+            enabled,
+            n_ctx,
+            supports_tools: false,
+            supports_multimodality: false,
+            supports_reasoning: None,
+            supports_agent: false,
+            wire_format_override: None,
+            endpoint_override: None,
+            user_configured: true,
+            removable: true,
+        }
+    }
+}
+
 fn default_true_runtime() -> bool {
     true
 }
@@ -45,6 +64,10 @@ pub struct ProviderRuntime {
     pub chat_endpoint: String,
     pub completion_endpoint: String,
     pub embedding_endpoint: String,
+    #[serde(default)]
+    pub completion_endpoint_style: String,
+    #[serde(default)]
+    pub embedding_endpoint_style: String,
     #[serde(skip_serializing)]
     pub api_key: String,
     #[serde(skip_serializing)]
@@ -707,6 +730,7 @@ mod tests {
                 ..Default::default()
             },
             completion_model: Some("refact/qwen2.5-coder".to_string()),
+            embedding_model: Some("refact/text-embedding-3-small".to_string()),
             ..Default::default()
         };
 
@@ -718,6 +742,34 @@ mod tests {
         assert_eq!(defaults.chat_light.model.as_deref(), Some(""));
         assert_eq!(defaults.chat_thinking.model.as_deref(), Some(""));
         assert_eq!(defaults.completion_model.as_deref(), Some(""));
+        assert_eq!(defaults.embedding_model.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn provider_defaults_save_load_roundtrips_completion_and_embedding_models() {
+        let temp = std::env::temp_dir().join(format!(
+            "refact-core-provider-defaults-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        let defaults = ProviderDefaults {
+            completion_model: Some("custom/qwen-coder".to_string()),
+            embedding_model: Some("custom/text-embedding-3-small".to_string()),
+            ..Default::default()
+        };
+
+        defaults.save(&temp).await.unwrap();
+        let loaded = ProviderDefaults::load(&temp).await.unwrap();
+
+        assert_eq!(
+            loaded.completion_model.as_deref(),
+            Some("custom/qwen-coder")
+        );
+        assert_eq!(
+            loaded.embedding_model.as_deref(),
+            Some("custom/text-embedding-3-small")
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

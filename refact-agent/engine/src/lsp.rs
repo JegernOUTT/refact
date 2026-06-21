@@ -58,6 +58,16 @@ impl Drop for LspTcpClientGuard {
 pub struct RequestParams {
     pub max_new_tokens: u32,
     pub temperature: f32,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub no_cache: bool,
+    #[serde(default)]
+    pub use_ast: bool,
+    #[serde(default)]
+    pub use_vecdb: bool,
+    #[serde(default)]
+    pub rag_tokens_n: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -235,12 +245,14 @@ impl LspBackend {
                 temperature: Option::from(params.parameters.temperature),
                 ..Default::default()
             },
-            model: "".to_string(),
+            model: params.parameters.model.clone(),
             stream: false,
-            no_cache: false,
-            use_ast: false,
-            use_vecdb: false,
-            rag_tokens_n: 0,
+            no_cache: params.parameters.no_cache,
+            use_ast: params.parameters.use_ast,
+            use_vecdb: params.parameters.use_vecdb,
+            rag_tokens_n: params.parameters.rag_tokens_n,
+            cache_salt: String::new(),
+            cache_generation: 0,
         })
     }
 
@@ -884,6 +896,41 @@ mod tests {
             std::slice::from_ref(&first),
             &[first.clone(), second]
         ));
+    }
+
+    #[test]
+    fn lsp_request_params_default_completion_flags() {
+        let params: RequestParams = serde_json::from_value(serde_json::json!({
+            "max_new_tokens": 12,
+            "temperature": 0.4
+        }))
+        .unwrap();
+
+        assert_eq!(params.model, "");
+        assert!(!params.no_cache);
+        assert!(!params.use_ast);
+        assert!(!params.use_vecdb);
+        assert_eq!(params.rag_tokens_n, 0);
+    }
+
+    #[test]
+    fn lsp_request_params_accept_completion_overrides() {
+        let params: RequestParams = serde_json::from_value(serde_json::json!({
+            "max_new_tokens": 12,
+            "temperature": 0.4,
+            "model": "provider/model",
+            "no_cache": true,
+            "use_ast": true,
+            "use_vecdb": true,
+            "rag_tokens_n": 256
+        }))
+        .unwrap();
+
+        assert_eq!(params.model, "provider/model");
+        assert!(params.no_cache);
+        assert!(params.use_ast);
+        assert!(params.use_vecdb);
+        assert_eq!(params.rag_tokens_n, 256);
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub struct CapsProvider {
         alias = "completion_model"
     )]
     pub completion_default_model: String,
+    #[serde(default)]
+    pub embedding_default_model: String,
     #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
     pub chat_default_model: String,
     #[serde(default)]
@@ -92,6 +94,7 @@ impl CapsProvider {
     pub fn defaults(&self) -> DefaultModels {
         DefaultModels {
             completion_default_model: self.completion_default_model.clone(),
+            embedding_default_model: self.embedding_default_model.clone(),
             chat_default_model: self.chat_default_model.clone(),
             chat_model_2: self.chat_model_2.clone(),
             task_planner_agent_model: self.task_planner_agent_model.clone(),
@@ -178,6 +181,9 @@ impl CapsProvider {
                 if !dm.completion_default_model.is_empty() {
                     self.completion_default_model = dm.completion_default_model;
                 }
+                if !dm.embedding_default_model.is_empty() {
+                    self.embedding_default_model = dm.embedding_default_model;
+                }
                 if !dm.chat_default_model.is_empty() {
                     self.chat_default_model = dm.chat_default_model;
                 }
@@ -244,6 +250,7 @@ impl Default for CapsProvider {
             embedding_model: EmbeddingModelRecord::default(),
             models_dict_patch: IndexMap::new(),
             completion_default_model: String::new(),
+            embedding_default_model: String::new(),
             chat_default_model: String::new(),
             chat_model_2: String::new(),
             task_planner_agent_model: String::new(),
@@ -285,6 +292,7 @@ impl fmt::Debug for CapsProvider {
             .field("embedding_model", &self.embedding_model)
             .field("models_dict_patch", &self.models_dict_patch)
             .field("completion_default_model", &self.completion_default_model)
+            .field("embedding_default_model", &self.embedding_default_model)
             .field("chat_default_model", &self.chat_default_model)
             .field("chat_model_2", &self.chat_model_2)
             .field("task_planner_agent_model", &self.task_planner_agent_model)
@@ -381,6 +389,7 @@ mod tests {
     fn provider_defaults_returns_inline_model_selection() {
         let provider = CapsProvider {
             completion_default_model: "coder".to_string(),
+            embedding_default_model: "embed".to_string(),
             chat_default_model: "chat".to_string(),
             chat_model_2: "chat-2".to_string(),
             task_planner_agent_model: "task-agent".to_string(),
@@ -393,6 +402,7 @@ mod tests {
         let defaults = provider.defaults();
 
         assert_eq!(defaults.completion_default_model, "coder");
+        assert_eq!(defaults.embedding_default_model, "embed");
         assert_eq!(defaults.chat_default_model, "chat");
         assert_eq!(defaults.chat_model_2, "chat-2");
         assert_eq!(defaults.task_planner_agent_model, "task-agent");
@@ -422,6 +432,7 @@ mod tests {
                 serde_json::json!({"n_ctx": 10}),
             )]),
             completion_default_model: "old-completion-model".to_string(),
+            embedding_default_model: String::new(),
             chat_default_model: "old-chat-model".to_string(),
             ..Default::default()
         };
@@ -447,6 +458,7 @@ extra_headers:
 embedding_model:
   name: embed
   n_ctx: 8192
+embedding_default_model: embed
 enabled_models:
   - enabled-one
 running_models:
@@ -511,6 +523,7 @@ chat_buddy_model: buddy-default
             serde_json::json!({"supports_tools": true})
         );
         assert_eq!(provider.completion_default_model, "completion-default");
+        assert_eq!(provider.embedding_default_model, "embed");
         assert_eq!(provider.chat_default_model, "chat-default");
         assert_eq!(provider.chat_model_2, "chat-2-default");
         assert_eq!(provider.task_planner_agent_model, "task-agent-default");
