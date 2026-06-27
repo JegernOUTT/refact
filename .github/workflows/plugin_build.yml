@@ -26,6 +26,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check resolver target parity
+        shell: bash
+        run: bash tools/dev/check_resolver_target_parity.sh
+
       - name: Compute build version
         id: version
         shell: bash
