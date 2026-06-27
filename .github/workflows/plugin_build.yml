@@ -134,12 +134,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Download engine artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ matrix.target }}
-          path: plugins/vscode/assets
-
       - name: Download GUI package
         uses: actions/download-artifact@v4
         with:
@@ -167,11 +161,7 @@ jobs:
 
       - name: Package VS Code extension
         shell: bash
-        run: |
-          if [[ -f ./assets/refact-lsp && ! -f ./assets/refact ]]; then mv ./assets/refact-lsp ./assets/refact; fi
-          if [[ -f ./assets/refact-lsp.exe && ! -f ./assets/refact.exe ]]; then mv ./assets/refact-lsp.exe ./assets/refact.exe; fi
-          chmod +x ./assets/refact*
-          vsce package --target ${{ matrix.code-target }}
+        run: vsce package --target ${{ matrix.code-target }}
 
       - name: Upload VS Code package
         uses: actions/upload-artifact@v4
@@ -218,17 +208,6 @@ jobs:
           rm -rf ./src/main/resources/webview/dist
           mv ./chat_package_fixed/package/dist ./src/main/resources/webview/dist
           rm -rf ./chat_package ./chat_package_fixed
-
-      - name: Download engine artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dist-*
-          path: plugins/intellij/src/main/resources/bin
-
-      - name: Make engine artifacts executable
-        shell: bash
-        working-directory: plugins/intellij
-        run: chmod +x ./src/main/resources/bin/dist-*/refact || true
 
       - name: Setup Java
         uses: actions/setup-java@v4

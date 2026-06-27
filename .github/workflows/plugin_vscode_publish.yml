@@ -121,12 +121,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Download engine artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ matrix.target }}
-          path: plugins/vscode/assets
-
       - name: Download GUI package
         uses: actions/download-artifact@v4
         with:
@@ -165,9 +159,6 @@ jobs:
       - name: Package VS Code extension
         shell: bash
         run: |
-          if [[ -f ./assets/refact-lsp && ! -f ./assets/refact ]]; then mv ./assets/refact-lsp ./assets/refact; fi
-          if [[ -f ./assets/refact-lsp.exe && ! -f ./assets/refact.exe ]]; then mv ./assets/refact-lsp.exe ./assets/refact.exe; fi
-          chmod +x ./assets/refact*
           if [[ "${{ github.event_name }}" != "push" && "${{ inputs.stable_release }}" != "true" ]]; then
             export PRERELEASE=--pre-release
           fi
