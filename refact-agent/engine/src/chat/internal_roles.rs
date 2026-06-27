@@ -314,12 +314,12 @@ mod tests {
     #[test]
     fn test_goal_helper_produces_correct_role_and_extra() {
         let budget = GoalBudget {
-            max_turns: 3,
-            max_minutes: 4,
-            max_tokens: 5,
+            max_turns: Some(3),
+            max_minutes: Some(4),
+            max_tokens: Some(5),
             cooldown_ms: 6,
             no_progress_token_threshold: 7,
-            no_progress_turns: 8,
+            no_progress_turns: Some(8),
         };
         let msg = goal(
             "agent",

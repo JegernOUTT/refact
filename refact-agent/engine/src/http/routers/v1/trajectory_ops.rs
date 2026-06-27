@@ -962,12 +962,12 @@ mod tests {
             "Please pursue this goal".to_string(),
         ));
         let budget = GoalBudget {
-            max_turns: 7,
-            max_minutes: 11,
-            max_tokens: 13_000,
+            max_turns: Some(7),
+            max_minutes: Some(11),
+            max_tokens: Some(13_000),
             cooldown_ms: 1_234,
             no_progress_token_threshold: 55,
-            no_progress_turns: 3,
+            no_progress_turns: Some(3),
         };
         session.install_goal("agent", "Ship the HTTP goal transfer", true, budget.clone());
         let goal = session.goal.as_mut().expect("goal installed");

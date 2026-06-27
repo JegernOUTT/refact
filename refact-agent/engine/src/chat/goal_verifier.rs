@@ -586,6 +586,23 @@ mod tests {
         session
     }
 
+    fn finite_goal_budget() -> GoalBudget {
+        GoalBudget {
+            max_turns: Some(3),
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: Some(2),
+        }
+    }
+
+    fn use_finite_goal_budget(session: &mut ChatSession) -> GoalBudget {
+        let budget = finite_goal_budget();
+        session.goal.as_mut().unwrap().budget = budget.clone();
+        budget
+    }
+
     fn tool_desc(name: &str) -> ToolDesc {
         ToolDesc {
             name: name.to_string(),
@@ -701,7 +718,8 @@ mod tests {
         );
 
         let mut exhausted = session_with_goal();
-        exhausted.goal.as_mut().unwrap().progress.turns_used = GoalBudget::default().max_turns;
+        let budget = use_finite_goal_budget(&mut exhausted);
+        exhausted.goal.as_mut().unwrap().progress.turns_used = budget.max_turns.unwrap();
         assert_eq!(
             begin_goal_verification_if_needed(&mut exhausted),
             GoalVerificationBegin::BudgetExhausted
@@ -712,7 +730,8 @@ mod tests {
     async fn budget_exhausted_finish_records_terminal_status() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let mut session = session_with_goal();
-        session.goal.as_mut().unwrap().progress.turns_used = GoalBudget::default().max_turns;
+        let budget = use_finite_goal_budget(&mut session);
+        session.goal.as_mut().unwrap().progress.turns_used = budget.max_turns.unwrap();
         assert!(should_verify_goal_on_done(&session));
         let session_arc = Arc::new(AMutex::new(session));
 
@@ -744,8 +763,9 @@ mod tests {
     async fn no_progress_exhausted_finish_records_terminal_status() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let mut session = session_with_goal();
+        let budget = use_finite_goal_budget(&mut session);
         session.goal.as_mut().unwrap().progress.no_progress_turns =
-            GoalBudget::default().no_progress_turns;
+            budget.no_progress_turns.unwrap();
         assert!(should_verify_goal_on_done(&session));
         let session_arc = Arc::new(AMutex::new(session));
 

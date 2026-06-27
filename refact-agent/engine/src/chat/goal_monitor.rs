@@ -465,12 +465,12 @@ mod tests {
             "ship the thing",
             true,
             GoalBudget {
-                max_turns: 10,
-                max_minutes: 60,
-                max_tokens: 10_000,
+                max_turns: Some(10),
+                max_minutes: Some(60),
+                max_tokens: Some(10_000),
                 cooldown_ms: 1_000,
                 no_progress_token_threshold: 50,
-                no_progress_turns: 2,
+                no_progress_turns: Some(2),
             },
         );
         session

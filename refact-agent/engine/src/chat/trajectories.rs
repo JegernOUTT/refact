@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
 use axum::extract::State;
@@ -24,7 +24,7 @@ use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
-use refact_chat_api::GoalSnapshot;
+use refact_chat_api::{GoalSnapshot, GoalStatus};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -88,8 +88,8 @@ async fn atomic_write_json_with_tmp_path(
 }
 
 use super::types::{
-    ChatSession, ExternalReloadPending, SessionState, TaskMeta, ThreadParams,
-    TrajectorySourceIdentity,
+    ChatSession, ExternalReloadPending, GoalSnapshotBudgetExt, SessionState, TaskMeta,
+    ThreadParams, TrajectorySourceIdentity,
 };
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
@@ -386,13 +386,37 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
 }
 
 fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
-    goal.progress.turns_used = goal.progress.turns_used.min(goal.budget.max_turns);
-    goal.progress.tokens_used = goal.progress.tokens_used.min(goal.budget.max_tokens);
-    goal.progress.no_progress_turns = goal
-        .progress
-        .no_progress_turns
-        .min(goal.budget.no_progress_turns);
+    goal.budget = goal.budget.migrate_legacy_default_hard_limits();
+    if let Some(max_turns) = goal.budget.max_turns.filter(|limit| *limit > 0) {
+        goal.progress.turns_used = goal.progress.turns_used.min(max_turns);
+    }
+    if let Some(max_tokens) = goal.budget.max_tokens.filter(|limit| *limit > 0) {
+        goal.progress.tokens_used = goal.progress.tokens_used.min(max_tokens);
+    }
+    if let Some(no_progress_turns) = goal.budget.no_progress_turns.filter(|limit| *limit > 0) {
+        goal.progress.no_progress_turns = goal.progress.no_progress_turns.min(no_progress_turns);
+    }
+    if matches!(
+        goal.status,
+        GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+    ) && goal
+        .goal_budget_exhaustion_status_at(epoch_ms_now())
+        .is_none()
+    {
+        goal.status = if goal.active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        };
+    }
     goal
+}
+
+fn epoch_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub async fn apply_mode_defaults_to_thread(

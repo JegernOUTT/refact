@@ -149,23 +149,66 @@ pub enum GoalStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalBudget {
-    pub max_turns: u32,
-    pub max_minutes: u32,
-    pub max_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default = "default_goal_budget_cooldown_ms")]
     pub cooldown_ms: u64,
+    #[serde(default = "default_goal_no_progress_token_threshold")]
     pub no_progress_token_threshold: u64,
-    pub no_progress_turns: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_turns: Option<u32>,
+}
+
+fn default_goal_budget_cooldown_ms() -> u64 {
+    1_500
+}
+
+fn default_goal_no_progress_token_threshold() -> u64 {
+    50
 }
 
 impl Default for GoalBudget {
     fn default() -> Self {
         Self {
-            max_turns: 10,
-            max_minutes: 15,
-            max_tokens: 200_000,
-            cooldown_ms: 1_500,
-            no_progress_token_threshold: 50,
-            no_progress_turns: 2,
+            max_turns: None,
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: default_goal_budget_cooldown_ms(),
+            no_progress_token_threshold: default_goal_no_progress_token_threshold(),
+            no_progress_turns: None,
+        }
+    }
+}
+
+impl GoalBudget {
+    pub fn legacy_default_hard_limits() -> Self {
+        Self {
+            max_turns: Some(10),
+            max_minutes: Some(15),
+            max_tokens: Some(200_000),
+            cooldown_ms: default_goal_budget_cooldown_ms(),
+            no_progress_token_threshold: default_goal_no_progress_token_threshold(),
+            no_progress_turns: Some(2),
+        }
+    }
+
+    pub fn migrate_legacy_default_hard_limits(self) -> Self {
+        if self.max_turns == Some(10)
+            && self.max_minutes == Some(15)
+            && self.max_tokens == Some(200_000)
+            && self.no_progress_turns == Some(2)
+        {
+            Self {
+                cooldown_ms: self.cooldown_ms,
+                no_progress_token_threshold: self.no_progress_token_threshold,
+                ..Default::default()
+            }
+        } else {
+            self
         }
     }
 }
@@ -959,6 +1002,17 @@ mod tests {
         }
     }
 
+    fn finite_goal_budget() -> GoalBudget {
+        GoalBudget {
+            max_turns: Some(10),
+            max_minutes: Some(15),
+            max_tokens: Some(200_000),
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: Some(2),
+        }
+    }
+
     fn goal_snapshot() -> GoalSnapshot {
         GoalSnapshot {
             content: "Ship the frog pond".to_string(),
@@ -1029,18 +1083,60 @@ mod tests {
 
         assert_eq!(json["content"], "Ship the frog pond");
         assert_eq!(json["status"], "verifying");
-        assert_eq!(json["budget"]["max_turns"], 10);
-        assert_eq!(json["budget"]["max_minutes"], 15);
-        assert_eq!(json["budget"]["max_tokens"], 200000);
+        assert!(json["budget"].get("max_turns").is_none());
+        assert!(json["budget"].get("max_minutes").is_none());
+        assert!(json["budget"].get("max_tokens").is_none());
         assert_eq!(json["budget"]["cooldown_ms"], 1500);
         assert_eq!(json["budget"]["no_progress_token_threshold"], 50);
-        assert_eq!(json["budget"]["no_progress_turns"], 2);
+        assert!(json["budget"].get("no_progress_turns").is_none());
         assert_eq!(json["progress"]["turns_used"], 3);
         assert_eq!(json["attempts"][0]["gaps"][0], "tests");
         assert_eq!(json["events"][0]["text"], "Added verification");
 
         let roundtrip: GoalSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip, snapshot);
+    }
+
+    #[test]
+    fn test_goal_budget_default_omits_hard_limits_and_roundtrips_unlimited() {
+        let budget = GoalBudget::default();
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert!(json.get("max_turns").is_none());
+        assert!(json.get("max_minutes").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert_eq!(json["cooldown_ms"], 1_500);
+        assert_eq!(json["no_progress_token_threshold"], 50);
+        assert!(json.get("no_progress_turns").is_none());
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
+    }
+
+    #[test]
+    fn test_goal_budget_finite_roundtrips_unchanged() {
+        let budget = finite_goal_budget();
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert_eq!(json["max_turns"], 10);
+        assert_eq!(json["max_minutes"], 15);
+        assert_eq!(json["max_tokens"], 200_000);
+        assert_eq!(json["cooldown_ms"], 1_500);
+        assert_eq!(json["no_progress_token_threshold"], 50);
+        assert_eq!(json["no_progress_turns"], 2);
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
+    }
+
+    #[test]
+    fn test_goal_budget_legacy_default_migrates_to_unlimited() {
+        let budget = GoalBudget::legacy_default_hard_limits();
+
+        assert_eq!(
+            budget.migrate_legacy_default_hard_limits(),
+            GoalBudget::default()
+        );
     }
 
     #[test]

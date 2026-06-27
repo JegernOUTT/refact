@@ -115,20 +115,29 @@ pub trait GoalSnapshotBudgetExt {
 
 impl GoalSnapshotBudgetExt for GoalSnapshot {
     fn goal_budget_exhaustion_status_at(&self, now_ms: u64) -> Option<GoalStatus> {
-        if self.progress.no_progress_turns >= self.budget.no_progress_turns {
-            return Some(GoalStatus::NoProgress);
+        if let Some(no_progress_turns) = self.budget.no_progress_turns {
+            if no_progress_turns > 0 && self.progress.no_progress_turns >= no_progress_turns {
+                return Some(GoalStatus::NoProgress);
+            }
         }
-        if self.progress.turns_used >= self.budget.max_turns {
-            return Some(GoalStatus::BudgetExhausted);
+        if let Some(max_turns) = self.budget.max_turns {
+            if max_turns > 0 && self.progress.turns_used >= max_turns {
+                return Some(GoalStatus::BudgetExhausted);
+            }
         }
-        if self.progress.tokens_used >= self.budget.max_tokens {
-            return Some(GoalStatus::BudgetExhausted);
+        if let Some(max_tokens) = self.budget.max_tokens {
+            if max_tokens > 0 && self.progress.tokens_used >= max_tokens {
+                return Some(GoalStatus::BudgetExhausted);
+            }
         }
-        let max_ms = u64::from(self.budget.max_minutes).saturating_mul(60_000);
-        if self.progress.started_at_ms > 0
-            && now_ms.saturating_sub(self.progress.started_at_ms) >= max_ms
-        {
-            return Some(GoalStatus::BudgetExhausted);
+        if let Some(max_minutes) = self.budget.max_minutes {
+            let max_ms = u64::from(max_minutes).saturating_mul(60_000);
+            if max_minutes > 0
+                && self.progress.started_at_ms > 0
+                && now_ms.saturating_sub(self.progress.started_at_ms) >= max_ms
+            {
+                return Some(GoalStatus::BudgetExhausted);
+            }
         }
         None
     }
@@ -188,8 +197,16 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
         }
         self.progress.turns_used = self.progress.turns_used.saturating_add(1);
         self.progress.tokens_used = self.progress.tokens_used.saturating_add(tokens);
-        if let Some(status) = self.goal_budget_exhaustion_status_at(epoch_ms_now()) {
-            self.status = status;
+        match self.goal_budget_exhaustion_status_at(epoch_ms_now()) {
+            Some(status) => self.status = status,
+            None if matches!(
+                self.status,
+                GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+            ) =>
+            {
+                self.status = GoalStatus::Active;
+            }
+            None => {}
         }
     }
 
@@ -199,7 +216,10 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
 
     fn goal_reset_no_progress(&mut self) {
         self.progress.no_progress_turns = 0;
-        if self.status == GoalStatus::NoProgress {
+        if matches!(
+            self.status,
+            GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+        ) {
             self.status = self
                 .goal_budget_exhaustion_status_at(epoch_ms_now())
                 .unwrap_or(GoalStatus::Active);

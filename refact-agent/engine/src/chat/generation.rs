@@ -2999,12 +2999,12 @@ mod tests {
             "ship it",
             true,
             GoalBudget {
-                max_turns: 10,
-                max_minutes: 1,
-                max_tokens: 1_000,
+                max_turns: Some(10),
+                max_minutes: Some(1),
+                max_tokens: Some(1_000),
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 10,
-                no_progress_turns: 2,
+                no_progress_turns: Some(2),
             },
         );
         session.goal.as_mut().unwrap().progress.started_at_ms = 1;

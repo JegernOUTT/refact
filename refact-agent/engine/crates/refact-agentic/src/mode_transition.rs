@@ -1013,20 +1013,11 @@ fn goal_snapshot_for_transfer(
         });
     let budget = goal_meta_value::<GoalBudget>(meta, "budget")
         .or_else(|| existing.map(|goal| goal.budget.clone()))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .migrate_legacy_default_hard_limits();
     let progress = goal_meta_value::<GoalProgress>(meta, "progress")
         .or_else(|| existing.map(|goal| goal.progress.clone()))
-        .unwrap_or_else(|| {
-            let started_at_ms = if active {
-                goal_meta_u64(meta, "created_at_ms").unwrap_or_else(now_ms)
-            } else {
-                0
-            };
-            GoalProgress {
-                started_at_ms,
-                ..Default::default()
-            }
-        });
+        .unwrap_or_default();
     let attempts = goal_meta_value(meta, "attempts")
         .or_else(|| existing.map(|goal| goal.attempts.clone()))
         .unwrap_or_default();
