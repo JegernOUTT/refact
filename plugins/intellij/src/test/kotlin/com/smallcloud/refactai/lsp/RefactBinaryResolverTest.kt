@@ -2,14 +2,157 @@ package com.smallcloud.refactai.lsp
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.URI
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.Comparator
 
 class RefactBinaryResolverTest {
+    @Test
+    fun explicitBinaryWinsOverBundledSystemAndDownload() {
+        val root = Files.createTempDirectory("refact-binary-resolver-explicit-precedence")
+        val explicit = root.resolve("explicit").resolve("refact")
+        val bundled = root.resolve("plugin").resolve("bin").resolve("dist-x86_64-unknown-linux-gnu").resolve("refact")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        try {
+            writeBinary(bundled)
+            writeBinary(shared)
+
+            val resolved = RefactBinaryResolver.resolve(
+                options(
+                    root = root,
+                    explicitPath = explicit.toString(),
+                    bundledDir = root.resolve("plugin"),
+                    downloader = { _, _ -> throw AssertionError("download should not run") },
+                )
+            )
+
+            assertEquals(explicit.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun bundledBinaryWinsOverSystemAndDownload() {
+        val root = Files.createTempDirectory("refact-binary-resolver-bundled-precedence")
+        val bundled = root.resolve("plugin").resolve("bin").resolve("dist-x86_64-unknown-linux-gnu").resolve("refact")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val pathDir = root.resolve("path-bin")
+        try {
+            writeBinary(bundled)
+            writeBinary(shared)
+            writeBinary(pathDir.resolve("refact"))
+
+            val resolved = RefactBinaryResolver.resolve(
+                options(
+                    root = root,
+                    bundledDir = root.resolve("plugin"),
+                    pathEnv = pathDir.toString(),
+                    downloader = { _, _ -> throw AssertionError("download should not run") },
+                )
+            )
+
+            assertEquals(bundled.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun absentBundledBinaryFallsThroughToSystemBinary() {
+        val root = Files.createTempDirectory("refact-binary-resolver-absent-bundle")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        try {
+            writeBinary(shared)
+
+            val resolved = RefactBinaryResolver.resolve(
+                options(
+                    root = root,
+                    bundledDir = root.resolve("plugin"),
+                    downloader = { _, _ -> throw AssertionError("download should not run") },
+                )
+            )
+
+            assertEquals(shared.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pathBinaryWinsOverDownloadWhenSharedIsOld() {
+        val root = Files.createTempDirectory("refact-binary-resolver-path-precedence")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val pathBinary = root.resolve("path-bin").resolve("refact")
+        try {
+            writeBinary(shared, "old-binary")
+            writeBinary(pathBinary, "path-binary")
+
+            val resolved = RefactBinaryResolver.resolve(
+                options(
+                    root = root,
+                    pathEnv = pathBinary.parent.toString(),
+                    versionReader = { path -> if (path == pathBinary) "refact 8.1.0" else "refact 8.0.0" },
+                    downloader = { _, _ -> throw AssertionError("download should not run") },
+                )
+            )
+
+            assertEquals(pathBinary.toAbsolutePath().normalize().toString(), resolved)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun downloadsOnlyWhenNoLocalCompatibleBinaryExists() {
+        val root = Files.createTempDirectory("refact-binary-resolver-download-only")
+        val shared = sharedRefactBinaryPath(root.resolve("home"), "Linux")
+        val downloads = mutableListOf<String>()
+        try {
+            writeBinary(shared, "old-binary")
+
+            val resolved = RefactBinaryResolver.resolve(
+                options(
+                    root = root,
+                    bundledDir = root.resolve("plugin"),
+                    versionReader = { path ->
+                        if (Files.isRegularFile(path) && Files.readString(path) == "new-binary") {
+                            "refact 8.1.0"
+                        } else {
+                            "refact 8.0.0"
+                        }
+                    },
+                    downloader = { uri, dest ->
+                        downloads.add(uri.toString())
+                        Files.createDirectories(dest.parent)
+                        if (uri.toString().endsWith(".sha256")) {
+                            val archive = dest.parent.resolve("refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz")
+                            Files.writeString(dest, "${sha256(archive)}  archive\n")
+                        } else {
+                            Files.writeString(dest, "archive")
+                        }
+                    },
+                    extractor = { _, dest, _ -> Files.writeString(dest.resolve("refact"), "new-binary") },
+                    chmod = {},
+                )
+            )
+
+            assertEquals(shared.toAbsolutePath().normalize().toString(), resolved)
+            assertEquals("new-binary", Files.readString(shared))
+            assertEquals(2, downloads.size)
+            assertTrue(downloads.first().endsWith("refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz"))
+            assertTrue(downloads.last().endsWith("refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun binaryPromotionFallsBackWhenAtomicMoveIsUnsupported() {
         val root = Files.createTempDirectory("refact-binary-resolver-atomic-fallback")
@@ -35,6 +178,51 @@ class RefactBinaryResolverTest {
             root.deleteRecursively()
         }
     }
+}
+
+private fun options(
+    root: Path,
+    explicitPath: String? = null,
+    bundledDir: Path? = null,
+    pathEnv: String = "",
+    versionReader: (Path) -> String? = { "refact 8.1.0" },
+    downloader: (URI, Path) -> Unit = { _, _ -> throw AssertionError("download should not run") },
+    extractor: (Path, Path, Boolean) -> Unit = { _, _, _ -> },
+    chmod: (Path) -> Unit = {},
+): RefactBinaryResolverOptions {
+    return RefactBinaryResolverOptions(
+        explicitPath = explicitPath,
+        bundledDir = bundledDir,
+        minVersion = "8.1.0",
+        pinnedVersion = "8.1.0",
+        cacheDir = root.resolve("cache"),
+        pathEnv = pathEnv,
+        homeDir = root.resolve("home"),
+        osName = "Linux",
+        arch = "amd64",
+        versionReader = versionReader,
+        downloader = downloader,
+        extractor = extractor,
+        chmod = chmod,
+    )
+}
+
+private fun writeBinary(path: Path, content: String = "binary") {
+    Files.createDirectories(path.parent)
+    Files.writeString(path, content)
+}
+
+private fun sha256(filePath: Path): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    Files.newInputStream(filePath).use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun Path.deleteRecursively() {

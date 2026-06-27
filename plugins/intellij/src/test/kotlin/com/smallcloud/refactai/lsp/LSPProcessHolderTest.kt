@@ -101,11 +101,15 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val releaseInitialize = CountDownLatch(1)
         val ensureStartedBlockingEntered = CountDownLatch(1)
         val releaseEnsureStartedBlocking = CountDownLatch(1)
+        val binaryResolutionCalls = AtomicInteger(0)
         private val healthClockMs = AtomicLong(0)
+        private val binaryResolutionResults = mutableListOf<String?>()
+        private val binaryResolutionResultIndex = AtomicInteger(0)
         var blockEnsureStartedBlocking = false
         var blockInitialize = false
         var initializeError: RuntimeException? = null
         var probeResult = true
+        var binaryFailureMessage = "Refact engine binary could not be found or downloaded for version 8.1.0"
 
         override val daemonClient: RefactDaemonClient
             get() = fakeDaemonClient
@@ -137,6 +141,20 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         override fun healthNowMs(): Long {
             return healthClockMs.get()
+        }
+
+        override fun resolveBinaryPathForDaemon(): String? {
+            binaryResolutionCalls.incrementAndGet()
+            val index = binaryResolutionResultIndex.getAndIncrement()
+            return if (index < binaryResolutionResults.size) {
+                binaryResolutionResults[index]
+            } else {
+                LSPProcessHolder.BIN_PATH
+            }
+        }
+
+        override fun binaryResolutionFailureMessage(): String {
+            return binaryFailureMessage
         }
 
         fun simulateRaceConditionWithScheduledTask(makeProjectDisposed: () -> Unit): AlreadyDisposedException? {
@@ -176,6 +194,19 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
         fun advanceHealthClock(ms: Long) {
             healthClockMs.addAndGet(ms)
+        }
+
+        fun setBinaryResolutionResults(vararg results: String?) {
+            binaryResolutionResults.clear()
+            binaryResolutionResults.addAll(results.toList())
+            binaryResolutionResultIndex.set(0)
+            binaryResolutionCalls.set(0)
+        }
+
+        fun hasBinaryResolutionFailureForTest(): Boolean {
+            val field = LSPProcessHolder::class.java.getDeclaredField("binaryResolutionFailure")
+            field.isAccessible = true
+            return field.get(this) != null
         }
     }
 
@@ -592,6 +623,74 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
             assertTrue(holder.backendReady())
             assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBinaryResolutionFailureBacksOffAndSettingsResetAllowsRetry() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            setBinaryResolutionResults(null, "/tmp/refact-after-reset")
+        }
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("binary-missing") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(1, holder.binaryResolutionCalls.get())
+            assertEquals(0, fake.ensureDaemonCalls.get())
+
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+            runOffEdt { holder.ensureStartedBlockingForTest("suppressed-manual-retry") }
+
+            assertEquals(1, holder.binaryResolutionCalls.get())
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            holder.settingsChanged("binary-path-changed")
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(2, holder.binaryResolutionCalls.get())
+            assertEquals(listOf("/tmp/refact-after-reset"), fake.ensureDaemonPaths)
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBinaryResolutionFailureRetriesAfterBackoffAndSuccessClearsCache() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            setBinaryResolutionResults(null, "/tmp/refact-after-backoff")
+        }
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("binary-missing") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(1, holder.binaryResolutionCalls.get())
+
+            holder.advanceHealthClock(999)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+            assertEquals(1, holder.binaryResolutionCalls.get())
+
+            holder.advanceHealthClock(1)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(2, holder.binaryResolutionCalls.get())
+            assertEquals(listOf("/tmp/refact-after-backoff"), fake.ensureDaemonPaths)
         } finally {
             holder.dispose()
         }

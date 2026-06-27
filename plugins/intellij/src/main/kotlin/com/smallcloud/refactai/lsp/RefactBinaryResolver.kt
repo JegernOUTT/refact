@@ -36,6 +36,7 @@ internal data class RefactReleaseAsset(
 
 internal data class RefactBinaryResolverOptions(
     val explicitPath: String? = null,
+    val bundledDir: Path? = null,
     val minVersion: String,
     val pinnedVersion: String,
     val cacheDir: Path,
@@ -58,6 +59,12 @@ internal object RefactBinaryResolver {
         val explicit = options.explicitPath?.trim()?.takeIf { it.isNotEmpty() }
         if (explicit != null) {
             return Path.of(explicit).toAbsolutePath().normalize().toString()
+        }
+
+        for (candidate in bundledRefactCandidates(options.bundledDir, options.osName, options.arch)) {
+            if (isCompatibleRefactBinary(candidate, options.minVersion, options.versionReader)) {
+                return candidate.toString()
+            }
         }
 
         for (candidate in systemRefactCandidates(options.pathEnv, options.homeDir, options.osName)) {
@@ -196,6 +203,19 @@ private fun systemRefactCandidates(pathEnv: String, homeDir: Path, osName: Strin
         .map { Path.of(it, binaryName).toAbsolutePath().normalize() }
         .toList())
     return candidates.distinctBy { it.toString() }
+}
+
+private fun bundledRefactCandidates(bundledDir: Path?, osName: String, arch: String): List<Path> {
+    val root = bundledDir?.toAbsolutePath()?.normalize() ?: return emptyList()
+    val target = runCatching { refactReleaseTarget(osName, arch) }.getOrNull() ?: return emptyList()
+    val binaryName = refactBinaryName(osName)
+    val distName = "dist-$target"
+    return listOf(
+        root.resolve("bin").resolve(distName).resolve(binaryName),
+        root.resolve("src").resolve("main").resolve("resources").resolve("bin").resolve(distName).resolve(binaryName),
+        root.resolve("src").resolve("main").resolve("resources").resolve("bin").resolve(target).resolve(binaryName),
+    ).map { it.toAbsolutePath().normalize() }
+        .distinctBy { it.toString() }
 }
 
 private fun pathSeparator(osName: String): String {
