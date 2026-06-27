@@ -650,12 +650,12 @@ export type GoalStatus =
   | "transferred";
 
 export type GoalBudget = {
-  max_turns: number;
-  max_minutes: number;
-  max_tokens: number;
+  max_turns?: number | null;
+  max_minutes?: number | null;
+  max_tokens?: number | null;
   cooldown_ms: number;
   no_progress_token_threshold: number;
-  no_progress_turns: number;
+  no_progress_turns?: number | null;
 };
 
 export type GoalProgress = {
@@ -710,15 +710,23 @@ export type GoalMessage = Omit<MessageEnvelope, "extra"> & {
   extra?: Record<string, unknown> & { goal?: unknown };
 };
 
+function hasOptionalNumberOrNullField(
+  record: Record<string, unknown>,
+  key: "max_turns" | "max_minutes" | "max_tokens" | "no_progress_turns",
+): boolean {
+  const value = record[key];
+  return value === undefined || value === null || typeof value === "number";
+}
+
 function isGoalBudget(value: unknown): value is GoalBudget {
   if (!isRecord(value)) return false;
   return (
-    typeof value.max_turns === "number" &&
-    typeof value.max_minutes === "number" &&
-    typeof value.max_tokens === "number" &&
+    hasOptionalNumberOrNullField(value, "max_turns") &&
+    hasOptionalNumberOrNullField(value, "max_minutes") &&
+    hasOptionalNumberOrNullField(value, "max_tokens") &&
     typeof value.cooldown_ms === "number" &&
     typeof value.no_progress_token_threshold === "number" &&
-    typeof value.no_progress_turns === "number"
+    hasOptionalNumberOrNullField(value, "no_progress_turns")
   );
 }
 

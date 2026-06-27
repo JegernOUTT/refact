@@ -231,7 +231,7 @@ PlanBanner renders synthesized plan text from the latest hidden base `plan` role
 
 ### TaskProgressWidget goal pattern (src/components/TaskProgressWidget/)
 
-TaskProgressWidget is the GUI owner for goal display and controls. It reads `thread.goal` with `selectGoalById` and never scans hidden `goal`, `goal_delta`, or `goal_pursuit` messages directly. The widget shows the goal content, status, turn/token/no-progress counters, verifier attempts, pursuit events, and ownership transfer hints from `GoalSnapshot`.
+TaskProgressWidget is the GUI owner for goal display and controls. It reads `thread.goal` with `selectGoalById` and never scans hidden `goal`, `goal_delta`, or `goal_pursuit` messages directly. The widget shows the goal content, status, turn/token/no-progress counters, verifier attempts, pursuit events, and ownership transfer hints from `GoalSnapshot`. Goal budget hard limits are optional and unlimited by default; absent, `null`, or `0` limits render as plain usage plus `No budget limits` rather than a ratio.
 
 Goal controls dispatch chat commands through `useChatActions`: `setGoal(content)` sends `set_goal`, `updateGoal(note)` sends `update_goal`, and `controlGoal(action)` sends `goal_control` with `pause`, `resume`, or `stop`. The reducer updates `thread.goal` from `Snapshot.goal`; `runtime_updated` mirrors only mutate the runtime fields on an existing projection (`goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, `goal_no_progress_turns`). Hidden `event(goal_delta)` and `event(goal_pursuit)` remain out of EventLog and the normal transcript.
 

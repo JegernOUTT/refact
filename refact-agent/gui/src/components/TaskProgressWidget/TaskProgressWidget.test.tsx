@@ -216,17 +216,70 @@ describe("TaskProgressWidget goal projection", () => {
     expect(screen.getByText("Active")).toBeInTheDocument();
   });
 
-  test("expanded goal block renders verifier attempts and events", () => {
+  test("expanded goal block renders verifier attempts, events, and finite budget ratios", () => {
     renderWidget(
       makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
     );
 
+    expect(
+      screen.getByText("2/5 turns · 1200/5000 tokens"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No budget limits")).not.toBeInTheDocument();
     expect(screen.getByText("Verifier attempts")).toBeInTheDocument();
     expect(screen.getByText("needs_work")).toBeInTheDocument();
     expect(screen.getByText("missing verifier coverage")).toBeInTheDocument();
     expect(screen.getByText("Add one more verifier test.")).toBeInTheDocument();
     expect(screen.getByText("Goal events")).toBeInTheDocument();
     expect(screen.getByText("Asked for progress")).toBeInTheDocument();
+  });
+
+  test("expanded goal block renders omitted budget limits as unlimited", () => {
+    const { container } = renderWidget(
+      makeRuntime({
+        goal: makeGoal({
+          budget: {
+            cooldown_ms: 1500,
+            no_progress_token_threshold: 50,
+          },
+        }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+
+    expect(
+      screen.getByText("2 turns · 1200 tokens · No budget limits"),
+    ).toBeInTheDocument();
+    expect(container.textContent).not.toContain("/0");
+    expect(container.textContent).not.toContain("/undefined");
+    expect(container.textContent).not.toContain("/null");
+    expect(container.textContent).not.toContain("NaN");
+    expect(container.textContent).not.toContain("undefined");
+  });
+
+  test("expanded goal block treats zero budget limits as unlimited", () => {
+    const { container } = renderWidget(
+      makeRuntime({
+        goal: makeGoal({
+          budget: {
+            max_turns: 0,
+            max_minutes: 0,
+            max_tokens: 0,
+            cooldown_ms: 1500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: 0,
+          },
+        }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+
+    expect(
+      screen.getByText("2 turns · 1200 tokens · No budget limits"),
+    ).toBeInTheDocument();
+    expect(container.textContent).not.toContain("0/0");
+    expect(container.textContent).not.toContain("/0");
   });
 
   test("editing an existing goal dispatches update_goal", async () => {

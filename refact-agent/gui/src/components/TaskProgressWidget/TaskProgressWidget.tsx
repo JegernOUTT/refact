@@ -97,6 +97,45 @@ function hasGoalWork(goal: GoalSnapshot | null): boolean {
   return goal !== null && goal.content.trim().length > 0;
 }
 
+function isPositiveGoalLimit(
+  value: number | null | undefined,
+): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function formatGoalUsageValue(value: number): string {
+  return Number.isFinite(value) ? String(value) : "0";
+}
+
+function formatGoalBudgetPart(
+  used: number,
+  limit: number | null | undefined,
+  label: string,
+): string {
+  const usage = formatGoalUsageValue(used);
+  return isPositiveGoalLimit(limit)
+    ? `${usage}/${limit} ${label}`
+    : `${usage} ${label}`;
+}
+
+function formatGoalBudgetLine(goal: GoalSnapshot): string {
+  const { budget, progress } = goal;
+  const parts = [
+    formatGoalBudgetPart(progress.turns_used, budget.max_turns, "turns"),
+    formatGoalBudgetPart(progress.tokens_used, budget.max_tokens, "tokens"),
+  ];
+  const hasBudgetLimit = [
+    budget.max_turns,
+    budget.max_minutes,
+    budget.max_tokens,
+    budget.no_progress_turns,
+  ].some(isPositiveGoalLimit);
+
+  return hasBudgetLimit
+    ? parts.join(" · ")
+    : [...parts, "No budget limits"].join(" · ");
+}
+
 const GOAL_SUPPORTED_MODES = new Set([
   "agent",
   "openai_agent",
@@ -248,7 +287,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
               <Flex align="center" justify="between" gap="2" wrap="wrap">
                 <Text size="1" color="gray" className={styles.goalProgress}>
                   {goal
-                    ? `${goal.progress.turns_used}/${goal.budget.max_turns} turns · ${goal.progress.tokens_used}/${goal.budget.max_tokens} tokens`
+                    ? formatGoalBudgetLine(goal)
                     : "Save to start tracking a goal"}
                 </Text>
                 <Button
