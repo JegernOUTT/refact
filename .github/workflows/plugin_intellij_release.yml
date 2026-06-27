@@ -76,8 +76,7 @@ jobs:
 
   release:
     name: release
-    needs: [engine, engine-release, gui]
-    if: always() && needs.engine.result == 'success' && needs.gui.result == 'success' && (needs.engine-release.result == 'success' || needs.engine-release.result == 'skipped')
+    needs: [engine, gui]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.setupvars.outputs.plugin_version }}

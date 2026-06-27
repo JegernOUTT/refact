@@ -54,7 +54,11 @@ compute_version() {
     return
   fi
 
-  branch="$(git_output rev-parse --abbrev-ref HEAD)"
+  if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
+    branch="$GITHUB_REF_NAME"
+  else
+    branch="$(git_output rev-parse --abbrev-ref HEAD)"
+  fi
   if [[ -z "$branch" ]]; then
     branch="unknown"
   fi

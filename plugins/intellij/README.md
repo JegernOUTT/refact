@@ -9,7 +9,7 @@ cd plugins/intellij
 ./gradlew check
 ```
 
-The CI-built plugin bundles the `refact-chat-js` UI webview, while the `refact-lsp` engine is downloaded on first run from GitHub Releases by the runtime resolver. For local development, `update-dependencies.sh` can still stage a debug engine binary for `runIde`.
+The CI-built plugin bundles the `refact-chat-js` UI webview, while the `refact` engine is downloaded on first run from GitHub Releases by the runtime resolver. For local development, `update-dependencies.sh` can still stage a debug engine binary for `runIde`.
 
 ## Repository history
 
