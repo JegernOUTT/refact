@@ -10,6 +10,10 @@ concurrency:
   group: plugin-build-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   build_version:
     name: Build version
@@ -38,6 +42,48 @@ jobs:
 
   gui:
     uses: ./.github/workflows/agent_gui_build.yml
+
+  engine-prerelease:
+    name: Engine prerelease
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build_version, engine]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download engine artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: engine-dist
+
+      - name: Package engine release assets
+        shell: bash
+        run: |
+          bash tools/dev/package_engine_release_assets.sh \
+            --version "${{ needs.build_version.outputs.build_version }}" \
+            --input-dir engine-dist \
+            --output-dir engine-release-assets
+
+      - name: Publish engine prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: engine/v${{ needs.build_version.outputs.build_version }}
+          name: Refact Engine v${{ needs.build_version.outputs.build_version }}
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            engine-release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   vscode-package:
     name: VS Code package (${{ matrix.target }})

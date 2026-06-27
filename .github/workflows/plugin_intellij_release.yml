@@ -29,9 +29,55 @@ jobs:
   gui:
     uses: ./.github/workflows/agent_gui_build.yml
 
+  engine-release:
+    name: Engine release
+    if: startsWith(github.ref, 'refs/tags/release/v')
+    needs: [engine]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download engine artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: engine-dist
+
+      - name: Package engine release assets
+        id: engine-assets
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#release/v}"
+          bash tools/dev/package_engine_release_assets.sh \
+            --version "$version" \
+            --input-dir engine-dist \
+            --output-dir engine-release-assets
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish engine release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: engine/v${{ steps.engine-assets.outputs.version }}
+          name: Refact Engine v${{ steps.engine-assets.outputs.version }}
+          prerelease: false
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            engine-release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   release:
     name: release
-    needs: [engine, gui]
+    needs: [engine, engine-release, gui]
+    if: always() && needs.engine.result == 'success' && needs.gui.result == 'success' && (needs.engine-release.result == 'success' || needs.engine-release.result == 'skipped')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.setupvars.outputs.plugin_version }}
