@@ -11,6 +11,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build_version:
+    name: Build version
+    runs-on: ubuntu-latest
+    outputs:
+      build_version: ${{ steps.version.outputs.build_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute build version
+        id: version
+        shell: bash
+        run: |
+          version="$(bash tools/dev/compute_build_version.sh)"
+          if [[ "${PUBLISH_EAP:-}" != "1" && ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid build version: $version" >&2
+            exit 1
+          fi
+          echo "build_version=$version" >> "$GITHUB_OUTPUT"
+
   engine:
     uses: ./.github/workflows/agent_engine_build.yml
 
@@ -19,7 +41,7 @@ jobs:
 
   vscode-package:
     name: VS Code package (${{ matrix.target }})
-    needs: [engine, gui]
+    needs: [build_version, engine, gui]
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +69,9 @@ jobs:
             code-target: darwin-arm64
 
     runs-on: ${{ matrix.os }}
+
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.build_version.outputs.build_version }}
 
     defaults:
       run:
@@ -92,6 +117,7 @@ jobs:
           npm pkg set "dependencies.refact-chat-js=${REFACT_CHAT_JS_VERSION}"
           npm install -g @vscode/vsce
           rm -rf ./chat_package ./chat_package_fixed
+          npm version "$REFACT_BUILD_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Package VS Code extension
         shell: bash
@@ -109,11 +135,14 @@ jobs:
 
   intellij-package:
     name: JetBrains package
-    needs: [engine, gui]
+    needs: [build_version, engine, gui]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.properties.outputs.version }}
       changelog: ${{ steps.properties.outputs.changelog }}
+
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.build_version.outputs.build_version }}
 
     steps:
       - name: Maximize build space

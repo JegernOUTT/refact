@@ -12,7 +12,9 @@ plugins {
 }
 
 group = providers.gradleProperty("pluginGroup").get()
-version = getVersionString(providers.gradleProperty("pluginVersion").get())
+version = providers.environmentVariable("REFACT_BUILD_VERSION").orNull
+    ?.takeIf { it.isNotBlank() }
+    ?: getVersionString(providers.gradleProperty("pluginVersion").get())
 
 val javaCompilerVersion = "17"
 kotlin {
