@@ -276,6 +276,7 @@ export class RustBinaryBlob {
             const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
             const binPath = await refactBinary.resolveRefactBinary({
                 explicitPath: configuredBinary,
+                bundledDir: this.asset_path,
                 minVersion: pluginVersion,
                 pinnedVersion: pluginVersion,
                 cacheDir: this.binary_cache_path,

@@ -227,26 +227,58 @@ async function runStandaloneResolutionTests() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-binary-resolver-test-"));
     try {
         const explicit = path.join(root, "custom", process.platform === "win32" ? "refact.exe" : "refact");
+        const explicitBundleDir = path.join(root, "explicit-assets");
+        const explicitBundledRefact = resolveBundledRefactPath(explicitBundleDir);
+        fs.mkdirSync(path.dirname(explicitBundledRefact), { recursive: true });
+        fs.writeFileSync(explicitBundledRefact, "refact 9.0.0");
         assert.strictEqual(await resolveRefactBinary({
             explicitPath: explicit,
+            bundledDir: explicitBundleDir,
             minVersion: "9.0.0",
             pinnedVersion: "9.0.0",
             cacheDir: path.join(root, "cache"),
             pathEnv: "",
             homeDir: path.join(root, "home"),
-            runVersion: async () => undefined,
+            runVersion: async () => {
+                throw new Error("explicit path should skip bundled version checks");
+            },
         }), path.resolve(explicit));
 
         const binaryName = "refact";
         const pathDir = path.join(root, "path-bin");
         const homeDir = path.join(root, "home");
         const cacheDir = path.join(root, "cache");
+        const bundledDir = path.join(root, "assets");
         const pathRefact = path.join(pathDir, binaryName);
         const homeRefact = path.join(homeDir, ".refact", "bin", binaryName);
+        const bundledRefact = resolveBundledRefactPath(bundledDir);
         fs.mkdirSync(path.dirname(pathRefact), { recursive: true });
         fs.mkdirSync(path.dirname(homeRefact), { recursive: true });
+        fs.mkdirSync(path.dirname(bundledRefact), { recursive: true });
         fs.writeFileSync(pathRefact, "refact 8.1.0");
         fs.writeFileSync(homeRefact, "refact 8.1.0");
+        fs.writeFileSync(bundledRefact, "refact 8.1.0");
+
+        const bundledVersionChecks: string[] = [];
+        const bundledPreferred = await resolveRefactBinary({
+            bundledDir,
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir,
+            pathEnv: pathDir,
+            homeDir,
+            platform: "linux",
+            arch: "x64",
+            runVersion: async binPath => {
+                bundledVersionChecks.push(binPath);
+                return fs.readFileSync(binPath, "utf8");
+            },
+            downloadFile: async () => {
+                throw new Error("download should be skipped when bundled refact is compatible");
+            },
+        });
+        assert.strictEqual(bundledPreferred, path.resolve(bundledRefact));
+        assert.deepStrictEqual(bundledVersionChecks, [bundledRefact]);
 
         const versionChecks: string[] = [];
         const sharedPreferred = await resolveRefactBinary({
@@ -260,6 +292,9 @@ async function runStandaloneResolutionTests() {
             runVersion: async binPath => {
                 versionChecks.push(binPath);
                 return "refact 8.1.0";
+            },
+            downloadFile: async () => {
+                throw new Error("download should be skipped when shared refact is compatible");
             },
         });
         assert.strictEqual(sharedPreferred, homeRefact);
@@ -275,6 +310,9 @@ async function runStandaloneResolutionTests() {
             platform: "linux",
             arch: "x64",
             runVersion: async binPath => fs.readFileSync(binPath, "utf8"),
+            downloadFile: async () => {
+                throw new Error("download should be skipped when PATH refact is compatible");
+            },
         });
         assert.strictEqual(incompatibleSharedSkipped, pathRefact);
 
@@ -284,6 +322,7 @@ async function runStandaloneResolutionTests() {
             minVersion: "8.1.0",
             pinnedVersion: "8.1.0",
             cacheDir,
+            bundledDir: path.join(root, "missing-assets"),
             pathEnv: pathDir,
             homeDir,
             platform: "linux",
@@ -309,6 +348,34 @@ async function runStandaloneResolutionTests() {
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
         ]);
+
+        const failedHomeDir = path.join(root, "failed-home");
+        const failedCacheDir = path.join(root, "failed-cache");
+        let failedDownloads = 0;
+        let failedResolutionError: Error | undefined;
+        try {
+            await resolveRefactBinary({
+                minVersion: "8.2.0",
+                pinnedVersion: "8.2.0",
+                cacheDir: failedCacheDir,
+                bundledDir: path.join(root, "failed-missing-assets"),
+                pathEnv: "",
+                homeDir: failedHomeDir,
+                platform: "linux",
+                arch: "x64",
+                runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+                downloadFile: async url => {
+                    failedDownloads++;
+                    throw new Error(`download offline: ${url}`);
+                },
+            });
+        } catch (error) {
+            failedResolutionError = error instanceof Error ? error : new Error(String(error));
+        }
+        assert.strictEqual(failedDownloads, 1);
+        assert.strictEqual(failedResolutionError?.message.includes("Refact engine release 8.2.0 is unavailable or failed to download"), true);
+        assert.strictEqual(failedResolutionError?.message.includes("refactai.binaryPath"), true);
+        assert.strictEqual(failedResolutionError?.message.includes("download offline"), true);
 
         const lockHomeDir = path.join(root, "lock-home");
         const lockCacheDir = path.join(root, "lock-cache");

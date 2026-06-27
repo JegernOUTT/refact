@@ -6,7 +6,7 @@ import * as https from "https";
 import * as os from "os";
 import * as path from "path";
 import * as zlib from "zlib";
-import { compareVersions } from "./refactDaemon";
+import { compareVersions, resolveBundledRefactPath } from "./refactDaemon";
 
 export const REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download";
 const USER_AGENT_HEADER = "User-Agent";
@@ -23,6 +23,7 @@ export type RefactReleaseAsset = {
 
 export type RefactBinaryResolverOptions = {
     explicitPath?: string;
+    bundledDir?: string;
     minVersion: string;
     pinnedVersion: string;
     cacheDir: string;
@@ -93,13 +94,32 @@ export async function resolveRefactBinary(options: RefactBinaryResolverOptions):
     const arch = options.arch ?? process.arch;
     const homeDir = options.homeDir ?? os.homedir();
     const runVersion = options.runVersion ?? readRefactVersion;
+    const bundledDir = options.bundledDir?.trim();
+    if (bundledDir) {
+        const bundledPath = resolveBundledRefactPath(bundledDir);
+        if (await isCompatibleRefactBinary(bundledPath, minVersion, runVersion)) {
+            return path.resolve(bundledPath);
+        }
+    }
     for (const candidate of systemRefactCandidates(options.pathEnv ?? process.env.PATH ?? "", homeDir, platform)) {
         if (await isCompatibleRefactBinary(candidate, minVersion, runVersion)) {
             return candidate;
         }
     }
 
-    return downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
+    try {
+        return await downloadPinnedRefactBinary({ ...options, platform, arch, homeDir, runVersion });
+    } catch (error) {
+        throw new Error(refactBinaryResolutionFailureMessage(options.pinnedVersion, error));
+    }
+}
+
+function refactBinaryResolutionFailureMessage(version: string, error: unknown): string {
+    return `Refact engine release ${version} is unavailable or failed to download. Set refactai.binaryPath to a compatible local refact binary. ${errorMessage(error)}`;
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 function systemRefactCandidates(pathEnv: string, homeDir: string, platform: string): string[] {
