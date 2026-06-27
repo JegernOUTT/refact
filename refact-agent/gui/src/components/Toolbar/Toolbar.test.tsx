@@ -243,6 +243,36 @@ describe("Toolbar single workspace tab row", () => {
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
+  it("renders a flex spacer instead of the tab bar when no tabs are open", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(
+      view.container.querySelector('[data-element="ToolbarSpacer"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the spacer when the workspace tab bar takes over the row", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+    const chatA = makeSurfaceKey("chat", "chat-a");
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+    });
+    rerenderToolbar(view, { type: "dashboard" });
+
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+    expect(
+      view.container.querySelector('[data-element="ToolbarSpacer"]'),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps Home, New Chat, New Task, theme, and menu actions functional", async () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
@@ -400,5 +430,16 @@ describe("Toolbar chrome containment", () => {
     const block = match?.[0] ?? "";
     expect(block).toContain("flex-shrink: 0");
     expect(block).toContain("height: 36px");
+  });
+
+  it("toolbar_spacer_grows_to_keep_right_controls_pinned_to_the_edge", async () => {
+    const css = await readFile(
+      resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
+      "utf8",
+    );
+    const match = /\.toolbarSpacer \{[^}]*\}/.exec(css);
+    expect(match).not.toBeNull();
+    const block = match?.[0] ?? "";
+    expect(block).toContain("flex: 1 1 auto");
   });
 });

@@ -269,11 +269,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         />
       </div>
 
-      {showTabBar && (
+      {showTabBar ? (
         <>
           <div className={styles.toolbarDivider} />
           <TabBar placement="toolbar" />
         </>
+      ) : (
+        <div className={styles.toolbarSpacer} data-element="ToolbarSpacer" />
       )}
 
       <div

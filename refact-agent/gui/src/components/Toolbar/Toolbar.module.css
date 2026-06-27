@@ -28,6 +28,12 @@
   gap: var(--rf-space-1);
 }
 
+.toolbarSpacer {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
 .engineUrl {
   display: inline-block;
   max-width: 180px;
