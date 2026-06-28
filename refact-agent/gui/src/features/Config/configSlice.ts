@@ -51,7 +51,12 @@ const initialState: Config = {
   shiftEnterToSubmit: false,
 };
 
-export const updateConfig = createAction<Partial<Config>>("config/update");
+export type ConfigUpdate = Omit<Partial<Config>, "lspUrl" | "browserUrl"> & {
+  lspUrl?: string | null;
+  browserUrl?: string | null;
+};
+
+export const updateConfig = createAction<ConfigUpdate>("config/update");
 
 export const setThemeMode = createAction<"light" | "dark" | "inherit">(
   "config/setThemeMode",
@@ -64,7 +69,7 @@ export const changeFeature = createAction<{
 }>("config/feature/change");
 
 function hasConfigProperty(
-  config: Partial<Config>,
+  config: Partial<Record<keyof Config, unknown>>,
   key: keyof Config,
 ): boolean {
   return Object.prototype.hasOwnProperty.call(config, key);
@@ -95,8 +100,26 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
       : state.features;
 
     state.host = action.payload.host ?? state.host;
-    state.lspUrl = action.payload.lspUrl ?? state.lspUrl;
-    state.browserUrl = action.payload.browserUrl ?? state.browserUrl;
+    if (hasConfigProperty(action.payload, "lspUrl")) {
+      if (
+        action.payload.lspUrl === undefined ||
+        action.payload.lspUrl === null
+      ) {
+        delete state.lspUrl;
+      } else {
+        state.lspUrl = action.payload.lspUrl;
+      }
+    }
+    if (hasConfigProperty(action.payload, "browserUrl")) {
+      if (
+        action.payload.browserUrl === undefined ||
+        action.payload.browserUrl === null
+      ) {
+        delete state.browserUrl;
+      } else {
+        state.browserUrl = action.payload.browserUrl;
+      }
+    }
     state.tabbed = action.payload.tabbed ?? state.tabbed;
     state.themeProps = action.payload.themeProps
       ? { ...state.themeProps, ...action.payload.themeProps }

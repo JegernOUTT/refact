@@ -91,7 +91,7 @@ jobs:
 
   vscode-package:
     name: VS Code package
-    needs: [build_version, gui]
+    needs: [build_version, engine, gui]
     runs-on: ubuntu-latest
 
     env:

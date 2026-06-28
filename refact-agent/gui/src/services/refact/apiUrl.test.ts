@@ -104,6 +104,16 @@ describe("resolveEngineBaseUrl", () => {
       }),
     ).toBe("https://remote.example.com/refact");
   });
+
+  test("prefers JetBrains lspUrl over browserUrl for API base", () => {
+    expect(
+      resolveEngineBaseUrl({
+        host: "jetbrains",
+        lspUrl: "http://127.0.0.1:8488/p/x",
+        browserUrl: "http://myhost.local:8488/p/x",
+      }),
+    ).toBe("http://127.0.0.1:8488/p/x");
+  });
 });
 
 describe("hasUsableEngineEndpoint", () => {

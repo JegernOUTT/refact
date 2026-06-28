@@ -52,4 +52,37 @@ describe("configSlice", () => {
     expect(clearedState.backendReady).toBeUndefined();
     expect(clearedState.connectionStatus).toBeUndefined();
   });
+
+  it("updates plugin backend URLs by property presence", () => {
+    const readyState = reducer(
+      undefined,
+      updateConfig({
+        lspUrl: "http://127.0.0.1:8488/p/project",
+        browserUrl: "http://workstation.local:8488/p/project",
+      }),
+    );
+
+    expect(readyState.lspUrl).toBe("http://127.0.0.1:8488/p/project");
+    expect(readyState.browserUrl).toBe(
+      "http://workstation.local:8488/p/project",
+    );
+
+    const partialState = reducer(
+      readyState,
+      updateConfig({ themeProps: { appearance: "light" } }),
+    );
+
+    expect(partialState.lspUrl).toBe("http://127.0.0.1:8488/p/project");
+    expect(partialState.browserUrl).toBe(
+      "http://workstation.local:8488/p/project",
+    );
+
+    const clearedState = reducer(
+      partialState,
+      updateConfig({ lspUrl: null, browserUrl: null }),
+    );
+
+    expect(clearedState.lspUrl).toBeUndefined();
+    expect(clearedState.browserUrl).toBeUndefined();
+  });
 });
