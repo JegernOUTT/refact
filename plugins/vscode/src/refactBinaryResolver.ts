@@ -32,6 +32,7 @@ export type RefactBinaryResolverOptions = {
     platform?: string;
     arch?: string;
     runVersion?: (binPath: string) => Promise<string | undefined>;
+    onDownloadStart?: () => void;
     downloadFile?: (url: string, destPath: string) => Promise<void>;
     extractArchive?: (archivePath: string, destDir: string, platform: string) => Promise<void>;
     chmod?: (binPath: string) => Promise<void>;
@@ -170,6 +171,7 @@ async function downloadPinnedRefactBinary(options: DownloadRefactOptions): Promi
         const extractDir = path.join(tmpDir, "extract");
         await fs.promises.mkdir(extractDir, { recursive: true });
         try {
+            options.onDownloadStart?.();
             await downloadFile(asset.archiveUrl, archivePath);
             await downloadFile(asset.sha256Url, shaPath);
             await verifySha256(archivePath, shaPath);

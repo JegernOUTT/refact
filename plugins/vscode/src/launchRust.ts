@@ -280,6 +280,11 @@ export class RustBinaryBlob {
                 minVersion: pluginVersion,
                 pinnedVersion: pluginVersion,
                 cacheDir: this.binary_cache_path,
+                onDownloadStart: () => {
+                    if (this.is_current_generation(generation)) {
+                        this.set_attach_state("installing");
+                    }
+                },
             });
             if (!this.is_current_generation(generation)) {
                 return;

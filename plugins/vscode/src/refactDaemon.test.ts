@@ -231,6 +231,7 @@ async function runStandaloneResolutionTests() {
         const explicitBundledRefact = resolveBundledRefactPath(explicitBundleDir);
         fs.mkdirSync(path.dirname(explicitBundledRefact), { recursive: true });
         fs.writeFileSync(explicitBundledRefact, "refact 9.0.0");
+        let shortcutDownloadStarts = 0;
         assert.strictEqual(await resolveRefactBinary({
             explicitPath: explicit,
             bundledDir: explicitBundleDir,
@@ -242,7 +243,9 @@ async function runStandaloneResolutionTests() {
             runVersion: async () => {
                 throw new Error("explicit path should skip bundled version checks");
             },
+            onDownloadStart: () => { shortcutDownloadStarts++; },
         }), path.resolve(explicit));
+        assert.strictEqual(shortcutDownloadStarts, 0);
 
         const binaryName = "refact";
         const pathDir = path.join(root, "path-bin");
@@ -276,9 +279,11 @@ async function runStandaloneResolutionTests() {
             downloadFile: async () => {
                 throw new Error("download should be skipped when bundled refact is compatible");
             },
+            onDownloadStart: () => { shortcutDownloadStarts++; },
         });
         assert.strictEqual(bundledPreferred, path.resolve(bundledRefact));
         assert.deepStrictEqual(bundledVersionChecks, [bundledRefact]);
+        assert.strictEqual(shortcutDownloadStarts, 0);
 
         const versionChecks: string[] = [];
         const sharedPreferred = await resolveRefactBinary({
@@ -296,9 +301,11 @@ async function runStandaloneResolutionTests() {
             downloadFile: async () => {
                 throw new Error("download should be skipped when shared refact is compatible");
             },
+            onDownloadStart: () => { shortcutDownloadStarts++; },
         });
         assert.strictEqual(sharedPreferred, homeRefact);
         assert.deepStrictEqual(versionChecks, [homeRefact]);
+        assert.strictEqual(shortcutDownloadStarts, 0);
 
         fs.writeFileSync(homeRefact, "refact 7.9.0");
         const incompatibleSharedSkipped = await resolveRefactBinary({
@@ -313,11 +320,15 @@ async function runStandaloneResolutionTests() {
             downloadFile: async () => {
                 throw new Error("download should be skipped when PATH refact is compatible");
             },
+            onDownloadStart: () => { shortcutDownloadStarts++; },
         });
         assert.strictEqual(incompatibleSharedSkipped, pathRefact);
+        assert.strictEqual(shortcutDownloadStarts, 0);
 
         const downloads: string[] = [];
+        const downloadEvents: string[] = [];
         fs.writeFileSync(pathRefact, "refact 7.9.0");
+        let downloadStarts = 0;
         const extracted = await resolveRefactBinary({
             minVersion: "8.1.0",
             pinnedVersion: "8.1.0",
@@ -328,7 +339,12 @@ async function runStandaloneResolutionTests() {
             platform: "linux",
             arch: "x64",
             runVersion: async binPath => fs.readFileSync(binPath, "utf8"),
+            onDownloadStart: () => {
+                downloadStarts++;
+                downloadEvents.push("start");
+            },
             downloadFile: async (url, destPath) => {
+                downloadEvents.push(url);
                 downloads.push(url);
                 fs.mkdirSync(path.dirname(destPath), { recursive: true });
                 if (url.endsWith(".sha256")) {
@@ -344,7 +360,13 @@ async function runStandaloneResolutionTests() {
         });
         assert.strictEqual(extracted, homeRefact);
         assert.notStrictEqual(extracted, path.join(cacheDir, "8.1.0", "x86_64-unknown-linux-gnu", "refact"));
+        assert.strictEqual(downloadStarts, 1);
         assert.deepStrictEqual(downloads, [
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
+        ]);
+        assert.deepStrictEqual(downloadEvents, [
+            "start",
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz",
             "https://github.com/JegernOUTT/refact/releases/download/engine/v8.1.0/refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256",
         ]);
