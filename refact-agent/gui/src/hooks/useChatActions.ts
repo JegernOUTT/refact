@@ -23,6 +23,7 @@ import {
   regenerate as regenerateApi,
   updateChatParams,
   setGoal as setGoalApi,
+  setGoalBudget as setGoalBudgetApi,
   updateGoal as updateGoalApi,
   goalControl as goalControlApi,
   abortGeneration,
@@ -32,6 +33,7 @@ import {
   removeMessage as removeMessageApi,
   cancelQueuedItem,
   type GoalControlAction,
+  type GoalBudgetCommand,
   type MessageContent,
 } from "../services/refact/chatCommands";
 import type { UserMessage } from "../services/refact/types";
@@ -211,9 +213,17 @@ export function useChatActions(explicitChatId?: string) {
   );
 
   const setGoal = useCallback(
-    async (content: string) => {
+    async (content: string, budget?: GoalBudgetCommand) => {
       if (!chatId) return;
-      await setGoalApi(chatId, content, config, apiKey ?? undefined);
+      await setGoalApi(chatId, content, config, apiKey ?? undefined, budget);
+    },
+    [chatId, config, apiKey],
+  );
+
+  const setGoalBudget = useCallback(
+    async (budget: GoalBudgetCommand) => {
+      if (!chatId) return;
+      await setGoalBudgetApi(chatId, budget, config, apiKey ?? undefined);
     },
     [chatId, config, apiKey],
   );
@@ -344,6 +354,7 @@ export function useChatActions(explicitChatId?: string) {
     abort,
     setParams,
     setGoal,
+    setGoalBudget,
     updateGoal,
     controlGoal,
     respondToTool,

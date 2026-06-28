@@ -18,6 +18,15 @@ export type MessageContent =
       | { type: "image_url"; image_url: { url: string } }
     )[];
 
+export type GoalBudgetCommand = {
+  max_turns?: number;
+  max_minutes?: number;
+  max_tokens?: number;
+  cooldown_ms?: number;
+  no_progress_token_threshold?: number;
+  no_progress_turns?: number;
+};
+
 export type ChatCommandBase =
   | {
       type: "user_message";
@@ -37,6 +46,11 @@ export type ChatCommandBase =
   | {
       type: "set_goal";
       content: string;
+      budget?: GoalBudgetCommand;
+    }
+  | {
+      type: "set_goal_budget";
+      budget: GoalBudgetCommand;
     }
   | {
       type: "update_goal";
@@ -225,10 +239,25 @@ export async function setGoal(
   content: string,
   connection: PortOrConnection,
   apiKey?: string,
+  budget?: GoalBudgetCommand,
 ): Promise<void> {
-  await sendChatCommand(chatId, connection, apiKey, {
+  const command: ChatCommandBase = {
     type: "set_goal",
     content,
+    ...(budget === undefined ? {} : { budget }),
+  };
+  await sendChatCommand(chatId, connection, apiKey, command);
+}
+
+export async function setGoalBudget(
+  chatId: string,
+  budget: GoalBudgetCommand,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "set_goal_budget",
+    budget,
   });
 }
 

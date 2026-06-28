@@ -21,7 +21,8 @@
 
 .header:focus-visible,
 .goalHeader:focus-visible,
-.goalInput:focus-visible {
+.goalInput:focus-visible,
+.goalBudgetInput:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-hairline);
 }
@@ -107,6 +108,61 @@
 
 .goalInput::placeholder {
   color: var(--rf-color-faint);
+}
+
+.goalBudgetGroup {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.goalBudgetLegend {
+  padding: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.goalBudgetGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--rf-control-h-lg) * 3)), 1fr)
+  );
+}
+
+.goalBudgetField {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.goalBudgetLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.goalBudgetInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font: inherit;
+  padding: 0 var(--rf-space-2);
+}
+
+.goalBudgetActions {
+  min-width: 0;
 }
 
 .goalProgress {

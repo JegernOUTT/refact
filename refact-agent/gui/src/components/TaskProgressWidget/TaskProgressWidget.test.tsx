@@ -319,6 +319,66 @@ describe("TaskProgressWidget goal projection", () => {
       type: "set_goal",
       content: "Start a fresh goal",
     });
+    expect(commands[0]).not.toHaveProperty("budget");
+  });
+
+  test("fresh goal dispatches set_goal with a positive max turns budget", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(
+      makeRuntime({
+        goal: null,
+        expanded: true,
+        goalExpanded: true,
+        messages: taskMessages([]),
+      }),
+    );
+
+    await user.type(
+      screen.getByLabelText("Goal text"),
+      "Start a budgeted goal",
+    );
+    await user.type(screen.getByLabelText("Max turns"), "5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({
+      type: "set_goal",
+      content: "Start a budgeted goal",
+    });
+    expect(commands[0].budget).toEqual({ max_turns: 5 });
+  });
+
+  test("existing goal dispatches set_goal_budget from budget inputs", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+    );
+
+    await user.clear(screen.getByLabelText("Max turns"));
+    await user.type(screen.getByLabelText("Max turns"), "7");
+    await user.clear(screen.getByLabelText("Max minutes"));
+    await user.clear(screen.getByLabelText("Max tokens"));
+    await user.click(screen.getByRole("button", { name: "Apply budget" }));
+
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
+    expect(commands[0].budget).toEqual({ max_turns: 7 });
+  });
+
+  test("clearing existing goal budget inputs dispatches unlimited budget", async () => {
+    const commands = captureCommands();
+    const { user } = renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+    );
+
+    await user.clear(screen.getByLabelText("Max turns"));
+    await user.clear(screen.getByLabelText("Max minutes"));
+    await user.clear(screen.getByLabelText("Max tokens"));
+    await user.click(screen.getByRole("button", { name: "Apply budget" }));
+
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
+    expect(commands[0].budget).toEqual({});
   });
 
   test("goal controls dispatch pause, resume, and stop", async () => {

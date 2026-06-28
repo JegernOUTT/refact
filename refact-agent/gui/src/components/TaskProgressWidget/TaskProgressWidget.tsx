@@ -26,6 +26,7 @@ import type {
   GoalSnapshot,
   GoalStatus,
 } from "../../services/refact/types";
+import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
 import { Box, Flex, Separator, Text } from "../LongTailPrimitives";
 import { Badge, Button, Icon } from "../ui";
 import { Chevron } from "../Collapsible";
@@ -70,6 +71,15 @@ const GOAL_STATUS_LABELS: Record<GoalStatus, string> = {
   budget_exhausted: "Budget exhausted",
   no_progress: "No progress",
   transferred: "Transferred",
+};
+
+const GOAL_BUDGET_INPUT_MIN = 0;
+const GOAL_BUDGET_INPUT_STEP = 1;
+
+type GoalBudgetDraft = {
+  maxTurns: string;
+  maxMinutes: string;
+  maxTokens: string;
 };
 
 function goalStatusTone(
@@ -134,6 +144,42 @@ function formatGoalBudgetLine(goal: GoalSnapshot): string {
   return hasBudgetLimit
     ? parts.join(" · ")
     : [...parts, "No budget limits"].join(" · ");
+}
+
+function goalLimitDraftValue(value: number | null | undefined): string {
+  return isPositiveGoalLimit(value) ? String(value) : "";
+}
+
+function budgetDraftFromGoal(goal: GoalSnapshot | null): GoalBudgetDraft {
+  return {
+    maxTurns: goalLimitDraftValue(goal?.budget.max_turns),
+    maxMinutes: goalLimitDraftValue(goal?.budget.max_minutes),
+    maxTokens: goalLimitDraftValue(goal?.budget.max_tokens),
+  };
+}
+
+function parseBudgetDraftValue(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function budgetCommandFromDraft(draft: GoalBudgetDraft): GoalBudgetCommand {
+  const budget: GoalBudgetCommand = {};
+  const maxTurns = parseBudgetDraftValue(draft.maxTurns);
+  const maxMinutes = parseBudgetDraftValue(draft.maxMinutes);
+  const maxTokens = parseBudgetDraftValue(draft.maxTokens);
+
+  if (maxTurns !== undefined) budget.max_turns = maxTurns;
+  if (maxMinutes !== undefined) budget.max_minutes = maxMinutes;
+  if (maxTokens !== undefined) budget.max_tokens = maxTokens;
+
+  return budget;
+}
+
+function hasBudgetCommandLimits(budget: GoalBudgetCommand): boolean {
+  return Object.keys(budget).length > 0;
 }
 
 const GOAL_SUPPORTED_MODES = new Set([
@@ -216,7 +262,9 @@ type GoalSectionProps = {
   goal: GoalSnapshot | null;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
-  onSave: (content: string, hasGoal: boolean) => void;
+  onCreate: (content: string, budget?: GoalBudgetCommand) => void;
+  onUpdateText: (content: string) => void;
+  onApplyBudget: (budget: GoalBudgetCommand) => void;
   onControl: (action: "pause" | "resume" | "stop") => void;
 };
 
@@ -224,24 +272,63 @@ const GoalSection: React.FC<GoalSectionProps> = ({
   goal,
   expanded,
   onExpandedChange,
-  onSave,
+  onCreate,
+  onUpdateText,
+  onApplyBudget,
   onControl,
 }) => {
   const [draft, setDraft] = useState(goal?.content ?? "");
+  const [budgetDraft, setBudgetDraft] = useState<GoalBudgetDraft>(() =>
+    budgetDraftFromGoal(goal),
+  );
 
   useEffect(() => {
     setDraft(goal?.content ?? "");
   }, [goal?.content]);
 
+  const goalMaxTurns = goal?.budget.max_turns;
+  const goalMaxMinutes = goal?.budget.max_minutes;
+  const goalMaxTokens = goal?.budget.max_tokens;
+
+  useEffect(() => {
+    setBudgetDraft({
+      maxTurns: goalLimitDraftValue(goalMaxTurns),
+      maxMinutes: goalLimitDraftValue(goalMaxMinutes),
+      maxTokens: goalLimitDraftValue(goalMaxTokens),
+    });
+  }, [goalMaxMinutes, goalMaxTokens, goalMaxTurns]);
+
   const trimmedDraft = draft.trim();
   const hasGoal = goal !== null;
   const canSave =
     trimmedDraft.length > 0 && trimmedDraft !== (goal?.content ?? "");
+  const budgetCommand = useMemo(
+    () => budgetCommandFromDraft(budgetDraft),
+    [budgetDraft],
+  );
 
   const handleSave = useCallback(() => {
     if (!canSave) return;
-    onSave(trimmedDraft, hasGoal);
-  }, [canSave, hasGoal, onSave, trimmedDraft]);
+    if (hasGoal) {
+      onUpdateText(trimmedDraft);
+      return;
+    }
+    onCreate(
+      trimmedDraft,
+      hasBudgetCommandLimits(budgetCommand) ? budgetCommand : undefined,
+    );
+  }, [budgetCommand, canSave, hasGoal, onCreate, onUpdateText, trimmedDraft]);
+
+  const handleBudgetChange = useCallback(
+    (field: keyof GoalBudgetDraft, value: string) => {
+      setBudgetDraft((current) => ({ ...current, [field]: value }));
+    },
+    [],
+  );
+
+  const handleApplyBudget = useCallback(() => {
+    onApplyBudget(budgetCommand);
+  }, [budgetCommand, onApplyBudget]);
 
   return (
     <Collapsible.Root open={expanded} onOpenChange={onExpandedChange}>
@@ -284,6 +371,12 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                 onChange={(event) => setDraft(event.currentTarget.value)}
                 placeholder="Set a goal for this thread"
               />
+              <GoalBudgetEditor
+                draft={budgetDraft}
+                showApply={hasGoal}
+                onApply={handleApplyBudget}
+                onChange={handleBudgetChange}
+              />
               <Flex align="center" justify="between" gap="2" wrap="wrap">
                 <Text size="1" color="gray" className={styles.goalProgress}>
                   {goal
@@ -314,6 +407,73 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     </Collapsible.Root>
   );
 };
+
+type GoalBudgetEditorProps = {
+  draft: GoalBudgetDraft;
+  showApply: boolean;
+  onApply: () => void;
+  onChange: (field: keyof GoalBudgetDraft, value: string) => void;
+};
+
+const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
+  draft,
+  showApply,
+  onApply,
+  onChange,
+}) => (
+  <fieldset className={styles.goalBudgetGroup}>
+    <legend className={styles.goalBudgetLegend}>
+      Budget limits (optional — leave blank for unlimited)
+    </legend>
+    <div className={styles.goalBudgetGrid}>
+      <label className={styles.goalBudgetField}>
+        <span className={styles.goalBudgetLabel}>Max turns</span>
+        <input
+          className={styles.goalBudgetInput}
+          inputMode="numeric"
+          min={GOAL_BUDGET_INPUT_MIN}
+          step={GOAL_BUDGET_INPUT_STEP}
+          type="number"
+          value={draft.maxTurns}
+          onChange={(event) => onChange("maxTurns", event.currentTarget.value)}
+        />
+      </label>
+      <label className={styles.goalBudgetField}>
+        <span className={styles.goalBudgetLabel}>Max minutes</span>
+        <input
+          className={styles.goalBudgetInput}
+          inputMode="numeric"
+          min={GOAL_BUDGET_INPUT_MIN}
+          step={GOAL_BUDGET_INPUT_STEP}
+          type="number"
+          value={draft.maxMinutes}
+          onChange={(event) =>
+            onChange("maxMinutes", event.currentTarget.value)
+          }
+        />
+      </label>
+      <label className={styles.goalBudgetField}>
+        <span className={styles.goalBudgetLabel}>Max tokens</span>
+        <input
+          className={styles.goalBudgetInput}
+          inputMode="numeric"
+          min={GOAL_BUDGET_INPUT_MIN}
+          step={GOAL_BUDGET_INPUT_STEP}
+          type="number"
+          value={draft.maxTokens}
+          onChange={(event) => onChange("maxTokens", event.currentTarget.value)}
+        />
+      </label>
+    </div>
+    {showApply ? (
+      <Flex justify="end" className={styles.goalBudgetActions}>
+        <Button size="sm" variant="soft" onClick={onApply}>
+          Apply budget
+        </Button>
+      </Flex>
+    ) : null}
+  </fieldset>
+);
 
 type GoalControlsProps = {
   goal: GoalSnapshot;
@@ -473,7 +633,8 @@ export const TaskProgressWidget: React.FC = () => {
   const { done, total, activeTitle } = useAppSelector((state) =>
     selectTaskProgressById(state, chatId),
   );
-  const { setGoal, updateGoal, controlGoal } = useChatActions(chatId);
+  const { setGoal, setGoalBudget, updateGoal, controlGoal } =
+    useChatActions(chatId);
   const hasGoal = hasGoalWork(goal);
   const goalSupported = isGoalSupported(threadMode, threadToolUse);
   const isFreshGoalOpportunity =
@@ -513,11 +674,25 @@ export const TaskProgressWidget: React.FC = () => {
     [dispatch, chatId],
   );
 
-  const handleGoalSave = useCallback(
-    (content: string, goalExists: boolean) => {
-      void (goalExists ? updateGoal(content) : setGoal(content));
+  const handleGoalCreate = useCallback(
+    (content: string, budget?: GoalBudgetCommand) => {
+      void setGoal(content, budget);
     },
-    [setGoal, updateGoal],
+    [setGoal],
+  );
+
+  const handleGoalTextUpdate = useCallback(
+    (content: string) => {
+      void updateGoal(content);
+    },
+    [updateGoal],
+  );
+
+  const handleGoalBudgetApply = useCallback(
+    (budget: GoalBudgetCommand) => {
+      void setGoalBudget(budget);
+    },
+    [setGoalBudget],
   );
 
   const handleGoalControl = useCallback(
@@ -605,7 +780,9 @@ export const TaskProgressWidget: React.FC = () => {
               goal={goal}
               expanded={goalExpanded}
               onExpandedChange={handleGoalOpenChange}
-              onSave={handleGoalSave}
+              onCreate={handleGoalCreate}
+              onUpdateText={handleGoalTextUpdate}
+              onApplyBudget={handleGoalBudgetApply}
               onControl={handleGoalControl}
             />
 
