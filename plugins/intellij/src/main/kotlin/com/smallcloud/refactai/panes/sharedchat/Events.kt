@@ -446,6 +446,7 @@ class Events {
             val lspUrl: String? = null,
             val backendReady: Boolean = lspPort > 0,
             val connectionStatus: String = if (backendReady) "ready" else "connecting",
+            val browserUrl: String? = null,
             val tabbed: Boolean? = false,
             val host: String? = "jetbrains"
         ) : Payload()

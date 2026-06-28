@@ -16,6 +16,7 @@ import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
 import com.smallcloud.refactai.panes.sharedchat.browser.getActionKeybinding
 import com.smallcloud.refactai.settings.AppSettingsState
 import java.io.File
+import java.net.URI
 import java.nio.file.Paths
 
 
@@ -30,6 +31,17 @@ internal fun ensureBackendStartedForConfig(
     if (shouldStart) {
         ensureStarted()
     }
+}
+
+internal data class BackendConfigUrls(val lspUrl: String?, val browserUrl: String?)
+
+internal fun backendConfigUrls(
+    backendReady: Boolean,
+    baseUrl: URI?,
+    browserUrl: URI?,
+): BackendConfigUrls {
+    if (!backendReady) return BackendConfigUrls(null, null)
+    return BackendConfigUrls(baseUrl?.toString(), browserUrl?.toString())
 }
 
 
@@ -129,17 +141,18 @@ class Editor (val project: Project) {
             lspHolder?.ensureStartedAsync("editor-config-request")
         }
         val lspPort = if (rawPort > 0) rawPort else 0
-        val lspUrl = if (backendReady) lspHolder?.browserUrlOrNull()?.toString() else null
+        val urls = backendConfigUrls(backendReady, lspHolder?.baseUrlOrNull(), lspHolder?.browserUrlOrNull())
         val keyBindings = Events.Config.KeyBindings(getActionKeybinding("ForceCompletionAction"))
 
         return Events.Config.UpdatePayload(
-            features,
-            themeProps,
-            lspPort,
-            keyBindings,
-            lspUrl,
-            backendReady,
-            connectionStatus.wireName
+            features = features,
+            themeProps = themeProps,
+            lspPort = lspPort,
+            keyBindings = keyBindings,
+            lspUrl = urls.lspUrl,
+            backendReady = backendReady,
+            connectionStatus = connectionStatus.wireName,
+            browserUrl = urls.browserUrl,
         )
     }
 

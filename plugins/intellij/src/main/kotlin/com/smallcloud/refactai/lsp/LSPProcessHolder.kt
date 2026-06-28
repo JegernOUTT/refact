@@ -41,6 +41,7 @@ interface LSPProcessHolderChangedNotifier {
 enum class LSPBackendConnectionStatus(val wireName: String) {
     CONNECTING("connecting"),
     STARTING("starting"),
+    INSTALLING("installing"),
     READY("ready"),
     FAILED("failed")
 }
@@ -449,6 +450,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
             val daemonStatus = compatibleDaemonStatusOrNull()
             if (daemonStatus == null) {
+                setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
                 val bin = resolveBinaryPathForDaemon() ?: run {
                     recordBinaryResolutionFailure(binaryResolutionFailureMessage())
                     return
@@ -553,6 +555,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             logger.debug("LSP daemon wake retry: $reason")
             setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
             if (compatibleDaemonStatusOrNull() == null) {
+                setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
                 val bin = resolveBinaryPathForDaemon() ?: run {
                     clearAttachedProjectState(preserveConfig = true, detach = false)
                     recordBinaryResolutionFailure(binaryResolutionFailureMessage())
@@ -833,7 +836,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
         fun lastBinaryResolutionErrorMessage(): String {
             return LAST_BINARY_RESOLUTION_ERROR
-                ?: "Refact engine binary could not be resolved for version ${Resources.version}"
+                ?: "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases. " +
+                    "Check network/proxy settings or set refactai.binaryPath to a compatible refact executable."
         }
 
         @Synchronized
@@ -853,8 +857,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     )
                 )
             } catch (e: Exception) {
-                val message = "Refact engine binary could not be found or downloaded for version ${Resources.version}. " +
-                    "Set refactai.binaryPath to a compatible refact executable or check network connectivity. ${e.message}"
+                val message = "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases. " +
+                    "Check network/proxy settings or set refactai.binaryPath to a compatible refact executable. ${e.message}"
                 LAST_BINARY_RESOLUTION_ERROR = message
                 emitError(message)
                 logger.warn("LSP binary resolution failed: ${e.message}", e)
@@ -868,10 +872,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
         @Synchronized
         fun initialize() {
-            logger.warn("LSP initialize start")
-            if (initialized.get()) return
-            initialized.set(true)
-            logger.warn("LSP initialize finished")
+            if (!initialized.compareAndSet(false, true)) return
+            logger.info("LSP initialize")
         }
 
         fun cleanup() {

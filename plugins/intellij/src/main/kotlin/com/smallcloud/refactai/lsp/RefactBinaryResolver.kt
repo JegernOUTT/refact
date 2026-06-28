@@ -26,6 +26,8 @@ private const val INSTALL_LOCK_NAME = ".install.lock"
 private const val INSTALL_LOCK_RETRY_MS = 100L
 private const val INSTALL_LOCK_TIMEOUT_MS = 120_000L
 private const val INSTALL_LOCK_STALE_MS = 15 * 60_000L
+private const val DOWNLOAD_CONNECT_TIMEOUT_MS = 15_000
+private const val DOWNLOAD_READ_TIMEOUT_MS = 60_000
 
 internal data class RefactReleaseAsset(
     val target: String,
@@ -475,23 +477,29 @@ private fun downloadFile(url: URI, destPath: Path) {
     var current = url
     repeat(5) {
         val connection = current.toURL().openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "refact-jetbrains")
-        val status = connection.responseCode
-        if (status in 300..399) {
-            val location = connection.getHeaderField("Location")
-            if (!location.isNullOrBlank()) {
-                current = current.resolve(location)
-                return@repeat
+        try {
+            connection.instanceFollowRedirects = true
+            connection.connectTimeout = DOWNLOAD_CONNECT_TIMEOUT_MS
+            connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+            connection.setRequestProperty("User-Agent", "refact-jetbrains")
+            val status = connection.responseCode
+            if (status in 300..399) {
+                val location = connection.getHeaderField("Location")
+                if (!location.isNullOrBlank()) {
+                    current = current.resolve(location)
+                    return@repeat
+                }
             }
+            if (status != 200) {
+                throw IOException("download failed $status $current")
+            }
+            connection.inputStream.use { input ->
+                Files.copy(input, destPath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            return
+        } finally {
+            connection.disconnect()
         }
-        if (status != 200) {
-            throw IOException("download failed $status $current")
-        }
-        connection.inputStream.use { input ->
-            Files.copy(input, destPath, StandardCopyOption.REPLACE_EXISTING)
-        }
-        return
     }
     throw IOException("too many redirects for $url")
 }

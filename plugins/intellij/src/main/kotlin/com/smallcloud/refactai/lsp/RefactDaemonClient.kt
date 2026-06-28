@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 const val DEFAULT_REFACT_DAEMON_PORT = 8488
-private const val DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS = 10L
+private const val DAEMON_STARTUP_HEALTH_TIMEOUT_SECONDS = 30L
 private const val DAEMON_SHUTDOWN_TIMEOUT_SECONDS = 15L
 private const val DAEMON_CONNECT_TIMEOUT_MS = 2_000
 private const val DAEMON_READ_TIMEOUT_MS = 5_000
