@@ -1,7 +1,11 @@
 .page {
+  box-sizing: border-box;
   display: flex;
   width: min(960px, 100%);
   min-width: 0;
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-4);
   margin: 0 auto;
@@ -13,6 +17,7 @@
   flex-direction: column;
   align-items: center;
   gap: var(--rf-space-2);
+  margin-top: auto;
   text-align: center;
 }
 
@@ -83,7 +88,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: var(--rf-space-3);
-  margin-top: var(--rf-space-2);
+  margin-top: auto;
 }
 
 .status {
