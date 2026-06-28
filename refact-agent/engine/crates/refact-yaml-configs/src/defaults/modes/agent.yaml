@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -299,6 +299,7 @@ tools:
   - set_goal
   - update_goal
   - get_goal
+  - validate_goal
   - process_start
   - process_list
   - process_read
@@ -369,6 +370,8 @@ tool_confirm:
     - match: "update_goal"
       action: auto
     - match: "get_goal"
+      action: auto
+    - match: "validate_goal"
       action: auto
     - match: "process_list"
       action: auto

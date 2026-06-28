@@ -269,6 +269,10 @@ Schema:
 
 Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`. `content` is synthesized from the base `goal` plus append-only `goal_delta` notes; the base goal bytes are not rewritten.
 
+#### `validate_goal`
+
+Agent-facing completion check: validates the active goal against its success criteria, marks it `completed` and disables pursuit when met, or re-arms the active goal with returned gaps when unmet.
+
 ### Goal pursuit contract
 
 `GoalSnapshot` fields are `content`, `version`, `active`, `status`, `budget`, `progress`, `attempts`, `events`, `transferred_from`, and `transferred_to`. `active=true` means ownership, not current execution; pursuit is allowed only when `active && status == Active`. `GoalStatus` serializes as `active`, `verifying`, `paused`, `completed`, `stopped`, `budget_exhausted`, `no_progress`, or `transferred`.

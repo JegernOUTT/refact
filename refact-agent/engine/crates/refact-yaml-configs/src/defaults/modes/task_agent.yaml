@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -240,6 +240,7 @@ tools:
   - set_goal
   - update_goal
   - get_goal
+  - validate_goal
   - process_start
   - process_list
   - process_read

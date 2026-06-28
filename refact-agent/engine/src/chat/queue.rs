@@ -24,7 +24,7 @@ use super::generation::{start_generation, prepare_session_preamble_and_knowledge
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
-use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
+use super::tools::{execute_tools_with_session, resolve_tool_call_aliases, validate_goal_result_state};
 use super::trajectories::{maybe_save_trajectory, maybe_save_trajectory_background};
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
@@ -2218,6 +2218,8 @@ async fn handle_tool_decisions(
         // normal operation to stop further LLM generation.
         let mut final_state = SessionState::Idle;
         let mut completion_trigger: Option<String> = None;
+        let validate_goal_state = validate_goal_result_state(&tool_calls_to_execute, &tool_results);
+        let validate_goal_stop = validate_goal_state.is_some();
         for tool_call in &tool_calls_to_execute {
             let tool_name =
                 crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
@@ -2236,10 +2238,15 @@ async fn handle_tool_decisions(
                 _ => {}
             }
         }
-        let tool_initiated_stop = matches!(
-            final_state,
-            SessionState::Completed | SessionState::WaitingUserInput
-        );
+        if let Some(state) = validate_goal_state {
+            final_state = state;
+        }
+
+        let tool_initiated_stop = validate_goal_stop
+            || matches!(
+                final_state,
+                SessionState::Completed | SessionState::WaitingUserInput
+            );
 
         // Check if we were aborted during tool execution
         let was_aborted = {

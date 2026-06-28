@@ -541,13 +541,23 @@ pub fn apply_goal_verdict(
         gaps: gaps.clone(),
         verifier_reply: reply.verifier_reply,
     });
-    session.add_message(internal_roles::event(
+    let event = internal_roles::event(
         EventSubkind::GoalPursuit,
         GOAL_VERIFIER_SOURCE,
         json!({"kind": event_kind, "at_ms": at_ms, "gaps": gaps}),
         event_text,
-    ));
-
+    );
+    if trigger == "validate_goal" {
+        let text = event.content.content_text_only();
+        session.goal_push_event(GoalEvent {
+            at_ms,
+            kind: "goal_pursuit".to_string(),
+            text,
+        });
+        session.queue_post_tool_side_effect(event);
+    } else {
+        session.add_message(event);
+    }
     match reply.verdict {
         GoalVerdict::Met => {
             session.goal_set_status(GoalStatus::Completed);

@@ -70,6 +70,37 @@ pub enum ToolStepOutcome {
     Stop,
 }
 
+pub(super) fn validate_goal_result_state(
+    tool_calls: &[ChatToolCall],
+    tool_results: &[ChatMessage],
+) -> Option<SessionState> {
+    tool_calls.iter().find_map(|tool_call| {
+        if crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
+            &tool_call.function.name,
+        ) != "validate_goal"
+        {
+            return None;
+        }
+        tool_results.iter().find_map(|message| {
+            if message.tool_call_id == tool_call.id && message.tool_failed != Some(true) {
+                validate_goal_state_from_text(&message.content.content_text_only())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn validate_goal_state_from_text(text: &str) -> Option<SessionState> {
+    if text.starts_with("GOAL MET") {
+        Some(SessionState::Completed)
+    } else if text.starts_with("GOAL NOT YET MET") {
+        Some(SessionState::Idle)
+    } else {
+        None
+    }
+}
+
 use super::types::*;
 use super::trajectories::maybe_save_trajectory;
 use super::goal_verifier::{
@@ -815,6 +846,79 @@ source:
         );
     }
 
+    fn tool_call(id: &str, name: &str) -> ChatToolCall {
+        ChatToolCall {
+            id: id.to_string(),
+            index: Some(0),
+            function: crate::call_validation::ChatToolFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        }
+    }
+
+    fn tool_result(id: &str, content: &str, failed: Option<bool>) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            tool_call_id: id.to_string(),
+            tool_failed: failed,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_goal_result_state_detects_terminal_outputs() {
+        let calls = vec![tool_call("tc", "validate_goal")];
+
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "GOAL MET — goal marked complete; pursuit disabled.",
+                    Some(false),
+                )],
+            ),
+            Some(SessionState::Completed)
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "GOAL NOT YET MET — remaining gaps:\n- missing tests",
+                    Some(false),
+                )],
+            ),
+            Some(SessionState::Idle)
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "No active goal to validate.",
+                    Some(false)
+                )],
+            ),
+            None
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "GOAL MET — goal marked complete; pursuit disabled.",
+                    Some(true),
+                )],
+            ),
+            None
+        );
+    }
+
     #[test]
     fn test_corrections_aggregation() {
         // Test that corrections from multiple tools are properly aggregated
@@ -1331,6 +1435,8 @@ pub async fn process_tool_calls_once(
     // let the loop continue so the LLM can see the error and retry with correct arguments.
     let mut final_state = SessionState::Idle;
     let mut completion_trigger: Option<String> = None;
+    let validate_goal_state = validate_goal_result_state(&tools_to_execute, &tool_results);
+    let validate_goal_stop = validate_goal_state.is_some();
     for tool_call in &tools_to_execute {
         let failed = tool_results
             .iter()
@@ -1355,10 +1461,15 @@ pub async fn process_tool_calls_once(
             }
         }
     }
-    let tool_initiated_stop = matches!(
-        final_state,
-        SessionState::Completed | SessionState::WaitingUserInput
-    );
+    if let Some(state) = validate_goal_state {
+        final_state = state;
+    }
+
+    let tool_initiated_stop = validate_goal_stop
+        || matches!(
+            final_state,
+            SessionState::Completed | SessionState::WaitingUserInput
+        );
 
     let was_interrupted = {
         let session = session_arc.lock().await;
