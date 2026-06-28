@@ -164,7 +164,7 @@ fun getVersionString(baseVersion: String): String {
         .ifEmpty { "unknown" }
         .replace("/", "-")
     val numberOfCommits = if (branch == "main") {
-        val lastTag = runCommandOrNull("git describe --tags --abbrev=0 @^")
+        val lastTag = runCommandOrNull("git describe --tags --abbrev=0 --match v* @^")
         if (lastTag != null) {
             runCommand("git rev-list ${lastTag}..HEAD --count")
         } else {

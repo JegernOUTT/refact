@@ -66,7 +66,7 @@ compute_version() {
 
   if [[ "$branch" == "main" ]]; then
     local last_tag
-    if last_tag="$(git_output_or_null describe --tags --abbrev=0 @^)"; then
+    if last_tag="$(git_output_or_null describe --tags --abbrev=0 --match 'v*' @^)"; then
       number_of_commits="$(git_output rev-list "${last_tag}..HEAD" --count)"
     else
       number_of_commits="$(git_output rev-list --count HEAD)"
@@ -103,16 +103,27 @@ self_test() {
   git add file.txt
   git commit -q -m initial
   git tag release/v1.2.3
+  git tag v1.2.3
 
   release_version="$(PUBLISH_EAP=0 compute_version 1.2.3)"
   [[ "$release_version" == "1.2.3" ]] || fail "release tag self-test failed: $release_version"
 
   printf 'two\n' >> file.txt
   git commit -q -am second
+  git tag engine/v1.2.3-main-1-deadbeef
+
+  printf 'three\n' >> file.txt
+  git commit -q -am third
+  git tag release/v1.2.4
+
+  printf 'four\n' >> file.txt
+  git commit -q -am fourth
   non_release_version="$(PUBLISH_EAP=0 compute_version 1.2.3)"
-  [[ "$non_release_version" =~ $NON_EAP_VERSION_RE ]] || fail "non-release self-test failed: $non_release_version"
+  [[ "$non_release_version" == 1.2.3-main-3-* ]] || fail "non-release self-test failed: $non_release_version"
+  [[ "$non_release_version" =~ $NON_EAP_VERSION_RE ]] || fail "non-release format self-test failed: $non_release_version"
 
   eap_version="$(PUBLISH_EAP=1 compute_version 1.2.3)"
+  [[ "$eap_version" == 1.2.3.3-eap-* ]] || fail "EAP count self-test failed: $eap_version"
   [[ "$eap_version" =~ ^1\.2\.3\.[0-9]+-eap-[0-9a-f]{8}$ ]] || fail "EAP self-test failed: $eap_version"
 }
 
