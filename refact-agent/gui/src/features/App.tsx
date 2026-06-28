@@ -284,6 +284,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
   const hasEndpoint = hasUsableEngineEndpoint(config);
+  const isBackendInstalling = providerBootstrap.status === "backend_installing";
 
   useEffect(() => {
     setStartupDeadlineReached(false);
@@ -300,7 +301,11 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   ]);
 
   useEffect(() => {
-    if (backendStatus !== "online") {
+    if (
+      backendStatus !== "online" ||
+      providerBootstrap.status === "backend_connecting" ||
+      providerBootstrap.status === "backend_installing"
+    ) {
       setStartupResolved(false);
       return;
     }
@@ -312,7 +317,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const showStartupSplash =
     !startupDeadlineReached &&
-    hasEndpoint &&
+    (hasEndpoint || isBackendInstalling) &&
     !startupResolved &&
     backendLastOkAt === null &&
     providerBootstrap.status !== "ready" &&
@@ -534,6 +539,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     openTasks,
   ]);
 
+  const startupSplashMessage =
+    providerBootstrap.status === "backend_installing"
+      ? "Downloading Refact engine…"
+      : backendStatus === "online"
+        ? "Loading your providers…"
+        : "Starting local Refact engine…";
+
   return (
     <Flex
       ref={rootRef}
@@ -544,13 +556,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       data-element="app-root"
     >
       {showStartupSplash ? (
-        <SplashScreen
-          message={
-            backendStatus === "online"
-              ? "Loading your providers…"
-              : "Starting local Refact engine…"
-          }
-        />
+        <SplashScreen message={startupSplashMessage} />
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}

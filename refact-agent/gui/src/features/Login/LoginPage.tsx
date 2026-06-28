@@ -44,6 +44,12 @@ export const LoginPage: React.FC = () => {
             "Waiting for the local Refact engine before loading providers.",
           status: "Connecting to backend…",
         };
+      case "backend_installing":
+        return {
+          title: "Setting up Refact",
+          subtitle: "Downloading the local engine (first run only)…",
+          status: "Downloading engine…",
+        };
       case "backend_offline":
         return {
           title: "Connection Problem",

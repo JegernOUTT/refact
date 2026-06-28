@@ -209,6 +209,45 @@ describe("provider bootstrap gate", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows setup copy instead of connection problem while plugin backend is installing", async () => {
+    const store = createStore();
+
+    store.dispatch(
+      updateConfig({
+        lspUrl: "http://127.0.0.1:8001",
+        browserUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "installing",
+      }),
+    );
+    store.dispatch(setBackendStatus({ status: "online" }));
+    void store.dispatch(
+      providersApi.util.upsertQueryData("getConfiguredProviders", undefined, {
+        providers: [inactiveProvider],
+        error_log: [],
+      }),
+    );
+    mockCapsReady(store);
+
+    render(<LoginPage />, { store });
+
+    expect(
+      await screen.findByRole("heading", { name: "Setting up Refact" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Downloading engine…").length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.queryByRole("heading", { name: "Connection Problem" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Set Up Providers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /OpenAI/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows connection problem from stale provider data when plugin backend failed", async () => {
     const store = createStore();
 

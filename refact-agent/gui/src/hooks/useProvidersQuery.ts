@@ -13,6 +13,7 @@ import {
 
 export type ProviderBootstrapStatus =
   | "backend_connecting"
+  | "backend_installing"
   | "backend_offline"
   | "provider_loading"
   | "provider_error"
@@ -52,10 +53,13 @@ export function useProviderBootstrapState() {
 
   let status: ProviderBootstrapStatus = "provider_loading";
   if (!hasReadyPluginBackend(config)) {
-    status =
-      config.connectionStatus === "failed"
-        ? "backend_offline"
-        : "backend_connecting";
+    if (config.connectionStatus === "failed") {
+      status = "backend_offline";
+    } else if (config.connectionStatus === "installing") {
+      status = "backend_installing";
+    } else {
+      status = "backend_connecting";
+    }
   } else if (backendStatus === "unknown") {
     status = "backend_connecting";
   } else if (backendStatus === "offline") {
