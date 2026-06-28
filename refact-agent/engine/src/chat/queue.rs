@@ -662,6 +662,7 @@ fn update_goal_result(
 fn handle_set_goal_command(
     session: &mut ChatSession,
     content: String,
+    budget: Option<GoalBudget>,
 ) -> Result<serde_json::Value, String> {
     if content.trim().is_empty() {
         return Err("argument `content` must be non-empty".to_string());
@@ -672,7 +673,7 @@ fn handle_set_goal_command(
     let current_mode =
         crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&session.thread.mode)
             .to_string();
-    let report = session.install_goal(&current_mode, &content, true, GoalBudget::default());
+    let report = session.install_goal(&current_mode, &content, true, budget.unwrap_or_default());
     session.add_message(internal_roles::event(
         EventSubkind::SystemNotice,
         "chat.command.set_goal",
@@ -683,6 +684,59 @@ fn handle_set_goal_command(
         "version": report.version,
         "supersedes": report.supersedes,
     }))
+}
+
+fn handle_set_goal_budget_command(
+    session: &mut ChatSession,
+    budget: GoalBudget,
+) -> Result<serde_json::Value, String> {
+    if session.goal.is_none() {
+        return Err("no goal to set budget for; call set_goal first".to_string());
+    }
+
+    let Some((base_index, _, _)) = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            crate::chat::goal_role::goal_version(message).map(|version| (index, version, message))
+        })
+        .max_by_key(|(index, version, _)| (*version, *index))
+    else {
+        return Err("no goal to set budget for; call set_goal first".to_string());
+    };
+
+    let serialized_budget = serde_json::to_value(&budget)
+        .map_err(|error| format!("failed to serialize goal budget: {error}"))?;
+    let goal_meta = session.messages[base_index]
+        .extra
+        .get_mut("goal")
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| "no goal to set budget for; call set_goal first".to_string())?;
+    goal_meta.insert("budget".to_string(), serialized_budget.clone());
+
+    session.rebuild_goal_projection_from_messages();
+    if let Some(goal) = session.goal.as_mut() {
+        match goal.goal_budget_exhaustion_status_at(epoch_ms_now()) {
+            Some(status) if goal.active => goal.status = status,
+            None if matches!(
+                goal.status,
+                GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+            ) =>
+            {
+                goal.status = if goal.active {
+                    GoalStatus::Active
+                } else {
+                    GoalStatus::Paused
+                };
+            }
+            _ => {}
+        }
+    }
+    session.mark_persisted_runtime_changed();
+    session.emit_goal_status();
+
+    Ok(serde_json::json!({ "budget": serialized_budget }))
 }
 
 fn handle_update_goal_command(
@@ -993,15 +1047,29 @@ pub async fn process_command_queue(
         };
 
         match request.command {
-            ChatCommand::SetGoal { content } => {
+            ChatCommand::SetGoal { content, budget } => {
                 let result = {
                     let mut session = session_arc.lock().await;
-                    handle_set_goal_command(&mut session, content)
+                    handle_set_goal_command(&mut session, content, budget)
                 };
                 match result {
                     Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
                     Err(error) => {
                         warn!("SetGoal command rejected: {}", error);
+                        let mut session = session_arc.lock().await;
+                        emit_goal_command_error(&mut session, error);
+                    }
+                }
+            }
+            ChatCommand::SetGoalBudget { budget } => {
+                let result = {
+                    let mut session = session_arc.lock().await;
+                    handle_set_goal_budget_command(&mut session, budget)
+                };
+                match result {
+                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Err(error) => {
+                        warn!("SetGoalBudget command rejected: {}", error);
                         let mut session = session_arc.lock().await;
                         emit_goal_command_error(&mut session, error);
                     }
@@ -3378,13 +3446,18 @@ mod tests {
         let mut session = ChatSession::new("goal-command".to_string());
         let mut rx = session.subscribe();
 
-        let result = handle_set_goal_command(&mut session, "Ship the pond".to_string()).unwrap();
+        let result =
+            handle_set_goal_command(&mut session, "Ship the pond".to_string(), None).unwrap();
 
         assert_eq!(result, json!({"version": 1, "supersedes": null}));
         let goal = session.goal.as_ref().unwrap();
         assert_eq!(goal.content, "Ship the pond");
         assert!(goal.active);
         assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.budget, GoalBudget::default());
+        assert!(session.messages[0].extra["goal"]["budget"]
+            .get("max_turns")
+            .is_none());
         assert_eq!(goal.progress.turns_used, 0);
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
         assert!(drain_events(&mut rx).into_iter().any(|event| matches!(
@@ -3398,20 +3471,134 @@ mod tests {
     }
 
     #[test]
+    fn goal_budget_set_goal_command_installs_explicit_budget() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        let budget = GoalBudget {
+            max_turns: Some(3),
+            max_minutes: Some(4),
+            max_tokens: Some(5),
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: Some(6),
+        };
+
+        handle_set_goal_command(
+            &mut session,
+            "Ship the pond".to_string(),
+            Some(budget.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(session.goal.as_ref().unwrap().budget, budget);
+        assert_eq!(
+            session.messages[0].extra["goal"]["budget"]["max_turns"],
+            json!(3)
+        );
+    }
+
+    #[test]
     fn goal_budget_set_goal_command_rejects_when_exists() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "First".to_string()).unwrap();
+        handle_set_goal_command(&mut session, "First".to_string(), None).unwrap();
 
-        let error = handle_set_goal_command(&mut session, "Second".to_string()).unwrap_err();
+        let error = handle_set_goal_command(&mut session, "Second".to_string(), None).unwrap_err();
 
         assert_eq!(error, "goal already exists; use update_goal");
         assert_eq!(session.goal.as_ref().unwrap().content, "First");
     }
 
     #[test]
+    fn goal_budget_set_goal_budget_command_replaces_budget_and_projection() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        let budget = GoalBudget {
+            max_turns: Some(2),
+            max_minutes: None,
+            max_tokens: Some(1_000),
+            cooldown_ms: 2_000,
+            no_progress_token_threshold: 25,
+            no_progress_turns: None,
+        };
+
+        let result = handle_set_goal_budget_command(&mut session, budget.clone()).unwrap();
+
+        assert_eq!(result, json!({"budget": budget}));
+        assert_eq!(session.goal.as_ref().unwrap().budget, budget);
+        assert_eq!(session.messages[0].extra["goal"]["budget"], json!(budget));
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn goal_budget_set_goal_budget_command_exhausts_when_already_over_limit() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+        session.goal.as_mut().unwrap().progress.turns_used = 3;
+        session.refresh_goal_runtime_mirror();
+
+        handle_set_goal_budget_command(
+            &mut session,
+            GoalBudget {
+                max_turns: Some(2),
+                max_minutes: None,
+                max_tokens: None,
+                cooldown_ms: 1_500,
+                no_progress_token_threshold: 50,
+                no_progress_turns: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.goal.as_ref().unwrap().status,
+            GoalStatus::BudgetExhausted
+        );
+        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
+    }
+
+    #[test]
+    fn goal_budget_set_goal_budget_command_clears_limits_and_heals_terminal_status() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        let budget = GoalBudget {
+            max_turns: Some(1),
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: None,
+        };
+        handle_set_goal_command(&mut session, "Base".to_string(), Some(budget)).unwrap();
+        session.goal.as_mut().unwrap().progress.turns_used = 1;
+        session.goal_set_status(GoalStatus::BudgetExhausted);
+        session.messages[0].extra["goal"]["progress"] =
+            json!(session.goal.as_ref().unwrap().progress);
+        session.messages[0].extra["goal"]["status"] = json!(GoalStatus::BudgetExhausted);
+
+        handle_set_goal_budget_command(&mut session, GoalBudget::default()).unwrap();
+
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.budget, GoalBudget::default());
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert!(session.messages[0].extra["goal"]["budget"]
+            .get("max_turns")
+            .is_none());
+    }
+
+    #[test]
+    fn goal_budget_set_goal_budget_command_rejects_without_goal() {
+        let mut session = ChatSession::new("goal-command".to_string());
+
+        let error =
+            handle_set_goal_budget_command(&mut session, GoalBudget::default()).unwrap_err();
+
+        assert_eq!(error, "no goal to set budget for; call set_goal first");
+        assert!(session.goal.is_none());
+    }
+
+    #[test]
     fn goal_budget_update_goal_command_appends_delta_and_emits_runtime() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string()).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
         let mut rx = session.subscribe();
 
         let result = handle_update_goal_command(&mut session, "Add tests".to_string()).unwrap();
@@ -3435,7 +3622,7 @@ mod tests {
     #[test]
     fn goal_budget_goal_control_command_transitions_status() {
         let mut session = ChatSession::new("goal-command".to_string());
-        handle_set_goal_command(&mut session, "Base".to_string()).unwrap();
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
 
         let paused = handle_goal_control_command(&mut session, "pause".to_string()).unwrap();
         assert_eq!(paused, json!({"action": "pause", "status": "paused"}));

@@ -99,7 +99,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### Command Types (POST /v1/chats/{chatId}/commands)
 
-`user_message` · `abort` · `regenerate` · `update_message` · `remove_message` · `tool_decision` · `tool_decisions` · `ide_tool_result` · `set_params` · `set_goal` · `update_goal` · `goal_control` · `retry_from_index` · `branch_from_chat`
+`user_message` · `abort` · `regenerate` · `update_message` · `remove_message` · `tool_decision` · `tool_decisions` · `ide_tool_result` · `set_params` · `set_goal` (optional user-set `budget`; omitted/absent = unlimited) · `set_goal_budget` (user-set/clear budget) · `update_goal` · `goal_control` · `retry_from_index` · `branch_from_chat`
 
 ### Sequence Validation
 

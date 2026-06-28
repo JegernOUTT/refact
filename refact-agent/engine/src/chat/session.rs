@@ -184,14 +184,16 @@ pub(crate) fn goal_snapshot_from_messages(
     let _ = base_index;
     let meta = base.extra.get("goal");
     let prior = existing.filter(|goal| goal.version == version);
+    let has_prior = prior.is_some();
     let active = meta
         .and_then(|meta| meta.get("active"))
         .and_then(|value| value.as_bool())
         .or_else(|| prior.map(|goal| goal.active))
         .unwrap_or(true);
-    let status = meta
+    let meta_status = meta
         .and_then(|meta| meta.get("status"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let status = meta_status
         .or_else(|| prior.map(|goal| goal.status))
         .unwrap_or(if active {
             GoalStatus::Active
@@ -240,12 +242,14 @@ pub(crate) fn goal_snapshot_from_messages(
             .map(str::to_string)
             .or_else(|| prior.and_then(|goal| goal.transferred_to.clone())),
     };
-    if matches!(
-        snapshot.status,
-        GoalStatus::BudgetExhausted | GoalStatus::NoProgress
-    ) && snapshot
-        .goal_budget_exhaustion_status_at(epoch_ms_now())
-        .is_none()
+    if (meta_status.is_some() || !has_prior)
+        && matches!(
+            snapshot.status,
+            GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+        )
+        && snapshot
+            .goal_budget_exhaustion_status_at(epoch_ms_now())
+            .is_none()
     {
         snapshot.status = if snapshot.active {
             GoalStatus::Active

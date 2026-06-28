@@ -717,6 +717,11 @@ pub enum ChatCommand {
     },
     SetGoal {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<GoalBudget>,
+    },
+    SetGoalBudget {
+        budget: GoalBudget,
     },
     UpdateGoal {
         note: String,
@@ -827,8 +832,11 @@ impl CommandRequest {
                     String::new(),
                 )
             }
-            ChatCommand::SetGoal { content } => {
+            ChatCommand::SetGoal { content, .. } => {
                 ("set_goal".to_string(), content.clone(), content.clone())
+            }
+            ChatCommand::SetGoalBudget { .. } => {
+                ("set_goal_budget".to_string(), String::new(), String::new())
             }
             ChatCommand::UpdateGoal { note } => {
                 ("update_goal".to_string(), note.clone(), note.clone())
@@ -1374,6 +1382,7 @@ mod tests {
             json!({"type":"retry_from_index","index":2,"content":"retry","attachments":[]}),
             json!({"type":"set_params","patch":{"title":"New"}}),
             json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"set_goal_budget","budget":{"max_turns":3,"cooldown_ms":1500,"no_progress_token_threshold":50}}),
             json!({"type":"update_goal","note":"verify the reeds"}),
             json!({"type":"goal_control","action":"pause"}),
             json!({"type":"abort"}),
@@ -1394,6 +1403,7 @@ mod tests {
     fn test_chat_command_goal_variants_roundtrip() {
         let commands = vec![
             json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"set_goal_budget","budget":{"max_turns":3,"cooldown_ms":1500,"no_progress_token_threshold":50}}),
             json!({"type":"update_goal","note":"verify the reeds"}),
             json!({"type":"goal_control","action":"resume"}),
         ];
@@ -1687,6 +1697,61 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["client_request_id"], "req-1");
         assert_eq!(json["type"], "abort");
+    }
+
+    #[test]
+    fn test_set_goal_command_budget_is_optional() {
+        let cmd: ChatCommand =
+            serde_json::from_str(r#"{"type":"set_goal","content":"ship"}"#).unwrap();
+        match cmd {
+            ChatCommand::SetGoal { content, budget } => {
+                assert_eq!(content, "ship");
+                assert_eq!(budget, None);
+            }
+            other => panic!("expected SetGoal, got {other:?}"),
+        }
+
+        let budget = finite_goal_budget();
+        let cmd = ChatCommand::SetGoal {
+            content: "ship".to_string(),
+            budget: Some(budget.clone()),
+        };
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(json["type"], "set_goal");
+        assert_eq!(json["budget"], json!(budget));
+    }
+
+    #[test]
+    fn test_set_goal_budget_command_serde_and_queue_preview() {
+        let budget = GoalBudget {
+            max_turns: Some(4),
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: None,
+        };
+        let req = CommandRequest {
+            client_request_id: "req-budget".into(),
+            priority: false,
+            command: ChatCommand::SetGoalBudget {
+                budget: budget.clone(),
+            },
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["type"], "set_goal_budget");
+        assert_eq!(json["budget"], json!(budget));
+
+        let roundtrip: CommandRequest = serde_json::from_value(json).unwrap();
+        match roundtrip.command {
+            ChatCommand::SetGoalBudget { budget: parsed } => assert_eq!(parsed, budget),
+            other => panic!("expected SetGoalBudget, got {other:?}"),
+        }
+
+        let queued = req.to_queued_item();
+        assert_eq!(queued.command_type, "set_goal_budget");
+        assert!(queued.preview.is_empty());
+        assert!(queued.content.is_empty());
     }
 
     #[test]
