@@ -683,6 +683,7 @@ mod tests {
     use super::*;
     use refact_runtime_api::{ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate};
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct MockChatFacade {
@@ -847,6 +848,26 @@ mod tests {
             }
             ContextEnum::ContextFile(_) => panic!("expected tool chat message"),
         }
+    }
+
+    async fn wait_for_saved_snapshot(
+        facade: &MockChatFacade,
+        predicate: impl Fn(&TrajectorySnapshot) -> bool,
+    ) -> TrajectorySnapshot {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let found = {
+                    let saved = facade.saved.lock().unwrap();
+                    saved.iter().find(|snapshot| predicate(snapshot)).cloned()
+                };
+                if let Some(snapshot) = found {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for saved handoff snapshot")
     }
 
     #[tokio::test]
@@ -1146,7 +1167,7 @@ mod tests {
             TrajectorySnapshot {
                 goal: None,
                 chat_id: planner_chat_id.clone(),
-                title: String::new(),
+                title: "Persisted planner controller".to_string(),
                 model: "model".to_string(),
                 mode: "task_planner".to_string(),
                 tool_use: "agent".to_string(),
@@ -1159,7 +1180,7 @@ mod tests {
                 checkpoints_enabled: true,
                 context_tokens_cap: None,
                 include_project_info: true,
-                is_title_generated: false,
+                is_title_generated: true,
                 auto_approve_editing_tools: false,
                 auto_approve_dangerous_commands: false,
                 autonomous_no_confirm: false,
@@ -1221,13 +1242,25 @@ mod tests {
         .await
         .unwrap();
 
-        let saved = facade.saved.lock().unwrap().clone();
-        assert_eq!(saved[0].chat_id, planner_chat_id);
-        assert!(saved[0]
+        let saved = wait_for_saved_snapshot(&facade, |snapshot| {
+            snapshot.chat_id == planner_chat_id
+                && snapshot.messages.iter().any(|message| {
+                    message.content.content_text_only() == "Persisted planner history"
+                })
+                && snapshot.messages.iter().any(|message| {
+                    message
+                        .content
+                        .content_text_only()
+                        .contains("Disk lineage plan")
+                })
+        })
+        .await;
+        assert_eq!(saved.chat_id, planner_chat_id);
+        assert!(saved
             .messages
             .iter()
             .any(|message| message.content.content_text_only() == "Persisted planner history"));
-        assert!(saved[0].messages.iter().any(|message| message
+        assert!(saved.messages.iter().any(|message| message
             .content
             .content_text_only()
             .contains("Disk lineage plan")));
