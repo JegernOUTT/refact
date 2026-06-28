@@ -450,8 +450,9 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
             val daemonStatus = compatibleDaemonStatusOrNull()
             if (daemonStatus == null) {
-                setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
-                val bin = resolveBinaryPathForDaemon() ?: run {
+                val bin = resolveBinaryPathForDaemon {
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
+                } ?: run {
                     recordBinaryResolutionFailure(binaryResolutionFailureMessage())
                     return
                 }
@@ -555,8 +556,9 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             logger.debug("LSP daemon wake retry: $reason")
             setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
             if (compatibleDaemonStatusOrNull() == null) {
-                setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
-                val bin = resolveBinaryPathForDaemon() ?: run {
+                val bin = resolveBinaryPathForDaemon {
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
+                } ?: run {
                     clearAttachedProjectState(preserveConfig = true, detach = false)
                     recordBinaryResolutionFailure(binaryResolutionFailureMessage())
                     return false
@@ -691,8 +693,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         return System.currentTimeMillis()
     }
 
-    protected open fun resolveBinaryPathForDaemon(): String? {
-        return binaryPathForDaemon(getThisPlugin()?.pluginPath)
+    protected open fun resolveBinaryPathForDaemon(onDownloadStart: () -> Unit): String? {
+        return binaryPathForDaemon(getThisPlugin()?.pluginPath, onDownloadStart)
     }
 
     protected open fun binaryResolutionFailureMessage(): String {
@@ -841,7 +843,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
 
         @Synchronized
-        fun binaryPathForDaemon(bundledDir: Path? = null): String? {
+        fun binaryPathForDaemon(bundledDir: Path? = null, onDownloadStart: () -> Unit = {}): String? {
             if (ApplicationManager.getApplication().isUnitTestMode && BIN_PATH != null) {
                 return BIN_PATH
             }
@@ -854,6 +856,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                         minVersion = Resources.version,
                         pinnedVersion = Resources.version,
                         cacheDir = BIN_CACHE_DIR,
+                        onDownloadStart = onDownloadStart,
                     )
                 )
             } catch (e: Exception) {

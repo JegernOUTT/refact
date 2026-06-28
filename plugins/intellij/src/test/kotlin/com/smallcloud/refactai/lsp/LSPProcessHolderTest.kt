@@ -110,6 +110,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         var blockEnsureStartedBlocking = false
         var blockInitialize = false
         var blockBinaryResolution = false
+        var signalDownloadStartDuringResolution = false
         var initializeError: RuntimeException? = null
         var probeResult = true
         var binaryFailureMessage = "Failed to download the Refact engine (version 8.1.0) from GitHub releases"
@@ -146,8 +147,11 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             return healthClockMs.get()
         }
 
-        override fun resolveBinaryPathForDaemon(): String? {
+        override fun resolveBinaryPathForDaemon(onDownloadStart: () -> Unit): String? {
             binaryResolutionCalls.incrementAndGet()
+            if (signalDownloadStartDuringResolution) {
+                onDownloadStart()
+            }
             if (blockBinaryResolution) {
                 binaryResolutionEntered.countDown()
                 releaseBinaryResolution.await(2, TimeUnit.SECONDS)
@@ -564,6 +568,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
         val holder = TestLspProcessHolder(mockProject(root, publisher), fake).apply {
             blockBinaryResolution = true
+            signalDownloadStartDuringResolution = true
             setBinaryResolutionResults(null, "/tmp/refact-after-reset")
         }
         LSPProcessHolder.BIN_PATH = null
@@ -808,7 +813,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
-    fun testWakeRetryPublishesInstallingWhenDaemonNeedsResolution() {
+    fun testWakeRetryDoesNotPublishInstallingWhenCachedBinaryResolves() {
         val root = createTempDir().canonicalPath
         val publisher = RecordingStatusPublisher()
         val fake = FakeDaemonClient()
@@ -824,7 +829,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
             assertTrue(recovered)
             assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
-            assertTrue(publisher.statuses.contains(LSPBackendConnectionStatus.INSTALLING))
+            assertFalse(publisher.statuses.contains(LSPBackendConnectionStatus.INSTALLING))
         } finally {
             holder.dispose()
         }

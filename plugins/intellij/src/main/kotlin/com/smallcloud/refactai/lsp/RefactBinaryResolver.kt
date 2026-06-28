@@ -47,6 +47,7 @@ internal data class RefactBinaryResolverOptions(
     val osName: String = System.getProperty("os.name"),
     val arch: String = System.getProperty("os.arch"),
     val versionReader: (Path) -> String? = ::readRefactVersion,
+    val onDownloadStart: () -> Unit = {},
     val downloader: (URI, Path) -> Unit = ::downloadFile,
     val extractor: (Path, Path, Boolean) -> Unit = ::extractArchive,
     val chmod: (Path) -> Unit = ::makeExecutable,
@@ -262,6 +263,7 @@ private fun downloadPinnedRefactBinaryToSharedPath(
     val extractDir = tmpDir.resolve("extract")
     Files.createDirectories(extractDir)
     try {
+        options.onDownloadStart()
         options.downloader(URI(asset.archiveUrl), archivePath)
         options.downloader(URI(asset.sha256Url), shaPath)
         verifySha256(archivePath, shaPath)
