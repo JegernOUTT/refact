@@ -9,6 +9,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffBox {
     pub x: u32,
@@ -161,6 +165,8 @@ pub struct GoalBudget {
     pub no_progress_token_threshold: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_progress_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit: bool,
 }
 
 fn default_goal_budget_cooldown_ms() -> u64 {
@@ -180,6 +186,7 @@ impl Default for GoalBudget {
             cooldown_ms: default_goal_budget_cooldown_ms(),
             no_progress_token_threshold: default_goal_no_progress_token_threshold(),
             no_progress_turns: None,
+            explicit: false,
         }
     }
 }
@@ -193,10 +200,14 @@ impl GoalBudget {
             cooldown_ms: default_goal_budget_cooldown_ms(),
             no_progress_token_threshold: default_goal_no_progress_token_threshold(),
             no_progress_turns: Some(2),
+            explicit: false,
         }
     }
 
     pub fn migrate_legacy_default_hard_limits(self) -> Self {
+        if self.explicit {
+            return self;
+        }
         if self.max_turns == Some(10)
             && self.max_minutes == Some(15)
             && self.max_tokens == Some(200_000)
@@ -1018,6 +1029,7 @@ mod tests {
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(2),
+            explicit: false,
         }
     }
 
@@ -1116,6 +1128,7 @@ mod tests {
         assert_eq!(json["cooldown_ms"], 1_500);
         assert_eq!(json["no_progress_token_threshold"], 50);
         assert!(json.get("no_progress_turns").is_none());
+        assert!(json.get("explicit").is_none());
 
         let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip, budget);
@@ -1132,6 +1145,7 @@ mod tests {
         assert_eq!(json["cooldown_ms"], 1_500);
         assert_eq!(json["no_progress_token_threshold"], 50);
         assert_eq!(json["no_progress_turns"], 2);
+        assert!(json.get("explicit").is_none());
 
         let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip, budget);
@@ -1145,6 +1159,26 @@ mod tests {
             budget.migrate_legacy_default_hard_limits(),
             GoalBudget::default()
         );
+    }
+
+    #[test]
+    fn test_goal_budget_explicit_legacy_default_does_not_migrate() {
+        let mut budget = GoalBudget::legacy_default_hard_limits();
+        budget.explicit = true;
+
+        assert_eq!(budget.clone().migrate_legacy_default_hard_limits(), budget);
+    }
+
+    #[test]
+    fn test_goal_budget_explicit_serializes_and_roundtrips() {
+        let mut budget = GoalBudget::default();
+        budget.explicit = true;
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert_eq!(json["explicit"], true);
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
     }
 
     #[test]
@@ -1730,6 +1764,7 @@ mod tests {
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: None,
+            explicit: false,
         };
         let req = CommandRequest {
             client_request_id: "req-budget".into(),

@@ -3005,6 +3005,7 @@ mod tests {
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 10,
                 no_progress_turns: Some(2),
+                explicit: false,
             },
         );
         session.goal.as_mut().unwrap().progress.started_at_ms = 1;

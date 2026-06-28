@@ -12997,6 +12997,63 @@ mod tests {
         assert_eq!(goal.progress.no_progress_turns, 1);
     }
 
+    #[test]
+    fn clamp_goal_snapshot_for_load_migrates_implicit_legacy_budget() {
+        let goal = GoalSnapshot {
+            content: "ship legacy".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::BudgetExhausted,
+            budget: GoalBudget::legacy_default_hard_limits(),
+            progress: GoalProgress {
+                turns_used: 10,
+                ..Default::default()
+            },
+            attempts: Vec::new(),
+            events: Vec::new(),
+            transferred_from: None,
+            transferred_to: None,
+        };
+
+        let loaded = clamp_goal_snapshot_for_load(goal);
+
+        assert_eq!(loaded.budget, GoalBudget::default());
+        assert_eq!(loaded.status, GoalStatus::Active);
+    }
+
+    #[test]
+    fn clamp_goal_snapshot_for_load_preserves_explicit_legacy_budget() {
+        let budget = GoalBudget {
+            explicit: true,
+            ..GoalBudget::legacy_default_hard_limits()
+        };
+        let goal = GoalSnapshot {
+            content: "ship explicit".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::BudgetExhausted,
+            budget,
+            progress: GoalProgress {
+                turns_used: 12,
+                ..Default::default()
+            },
+            attempts: Vec::new(),
+            events: Vec::new(),
+            transferred_from: None,
+            transferred_to: None,
+        };
+
+        let loaded = clamp_goal_snapshot_for_load(goal);
+
+        assert_eq!(loaded.budget.max_turns, Some(10));
+        assert_eq!(loaded.budget.max_minutes, Some(15));
+        assert_eq!(loaded.budget.max_tokens, Some(200_000));
+        assert_eq!(loaded.budget.no_progress_turns, Some(2));
+        assert!(loaded.budget.explicit);
+        assert_eq!(loaded.progress.turns_used, 10);
+        assert_eq!(loaded.status, GoalStatus::BudgetExhausted);
+    }
+
     #[tokio::test]
     async fn goal_round_trips_through_trajectory_save_and_load() {
         let dir = tempfile::tempdir().unwrap();

@@ -594,6 +594,7 @@ mod tests {
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(2),
+            explicit: false,
         }
     }
 

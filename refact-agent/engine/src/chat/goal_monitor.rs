@@ -471,6 +471,7 @@ mod tests {
                 cooldown_ms: 1_000,
                 no_progress_token_threshold: 50,
                 no_progress_turns: Some(2),
+                explicit: false,
             },
         );
         session

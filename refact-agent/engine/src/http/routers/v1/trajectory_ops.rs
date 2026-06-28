@@ -968,6 +968,7 @@ mod tests {
             cooldown_ms: 1_234,
             no_progress_token_threshold: 55,
             no_progress_turns: Some(3),
+            explicit: false,
         };
         session.install_goal("agent", "Ship the HTTP goal transfer", true, budget.clone());
         let goal = session.goal.as_mut().expect("goal installed");

@@ -673,7 +673,14 @@ fn handle_set_goal_command(
     let current_mode =
         crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&session.thread.mode)
             .to_string();
-    let report = session.install_goal(&current_mode, &content, true, budget.unwrap_or_default());
+    let budget = match budget {
+        Some(mut budget) => {
+            budget.explicit = true;
+            budget
+        }
+        None => GoalBudget::default(),
+    };
+    let report = session.install_goal(&current_mode, &content, true, budget);
     session.add_message(internal_roles::event(
         EventSubkind::SystemNotice,
         "chat.command.set_goal",
@@ -688,7 +695,7 @@ fn handle_set_goal_command(
 
 fn handle_set_goal_budget_command(
     session: &mut ChatSession,
-    budget: GoalBudget,
+    mut budget: GoalBudget,
 ) -> Result<serde_json::Value, String> {
     if session.goal.is_none() {
         return Err("no goal to set budget for; call set_goal first".to_string());
@@ -706,6 +713,7 @@ fn handle_set_goal_budget_command(
         return Err("no goal to set budget for; call set_goal first".to_string());
     };
 
+    budget.explicit = true;
     let serialized_budget = serde_json::to_value(&budget)
         .map_err(|error| format!("failed to serialize goal budget: {error}"))?;
     let goal_meta = session.messages[base_index]
@@ -3480,6 +3488,7 @@ mod tests {
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: Some(6),
+            explicit: false,
         };
 
         handle_set_goal_command(
@@ -3489,10 +3498,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.goal.as_ref().unwrap().budget, budget);
+        let expected = GoalBudget {
+            explicit: true,
+            ..budget
+        };
+        assert_eq!(session.goal.as_ref().unwrap().budget, expected);
         assert_eq!(
             session.messages[0].extra["goal"]["budget"]["max_turns"],
             json!(3)
+        );
+        assert_eq!(
+            session.messages[0].extra["goal"]["budget"]["explicit"],
+            json!(true)
         );
     }
 
@@ -3518,14 +3535,54 @@ mod tests {
             cooldown_ms: 2_000,
             no_progress_token_threshold: 25,
             no_progress_turns: None,
+            explicit: false,
         };
 
         let result = handle_set_goal_budget_command(&mut session, budget.clone()).unwrap();
 
-        assert_eq!(result, json!({"budget": budget}));
-        assert_eq!(session.goal.as_ref().unwrap().budget, budget);
-        assert_eq!(session.messages[0].extra["goal"]["budget"], json!(budget));
+        let expected = GoalBudget {
+            explicit: true,
+            ..budget
+        };
+        assert_eq!(result, json!({"budget": expected.clone()}));
+        assert_eq!(session.goal.as_ref().unwrap().budget, expected);
+        assert_eq!(session.messages[0].extra["goal"]["budget"], json!(expected));
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn goal_budget_set_goal_budget_legacy_quad_is_stamped_explicit() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+
+        handle_set_goal_budget_command(&mut session, GoalBudget::legacy_default_hard_limits())
+            .unwrap();
+
+        let goal_meta = session.messages[0].extra.get_mut("goal").unwrap();
+        assert_eq!(goal_meta["budget"]["explicit"], json!(true));
+        goal_meta["status"] = json!(GoalStatus::BudgetExhausted);
+        goal_meta["progress"] = json!(GoalProgress {
+            turns_used: 10,
+            ..Default::default()
+        });
+
+        let reloaded = ChatSession::new_with_trajectory(
+            "goal-command".to_string(),
+            session.messages.clone(),
+            ThreadParams::default(),
+            "2024-01-01T00:00:00Z".to_string(),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let goal = reloaded.goal.expect("goal projection");
+        assert_eq!(goal.budget.max_turns, Some(10));
+        assert_eq!(goal.budget.max_minutes, Some(15));
+        assert_eq!(goal.budget.max_tokens, Some(200_000));
+        assert_eq!(goal.budget.no_progress_turns, Some(2));
+        assert!(goal.budget.explicit);
+        assert_eq!(goal.status, GoalStatus::BudgetExhausted);
     }
 
     #[test]
@@ -3544,6 +3601,7 @@ mod tests {
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 50,
                 no_progress_turns: None,
+                explicit: false,
             },
         )
         .unwrap();
@@ -3565,6 +3623,7 @@ mod tests {
             cooldown_ms: 1_500,
             no_progress_token_threshold: 50,
             no_progress_turns: None,
+            explicit: false,
         };
         handle_set_goal_command(&mut session, "Base".to_string(), Some(budget)).unwrap();
         session.goal.as_mut().unwrap().progress.turns_used = 1;
@@ -3576,12 +3635,20 @@ mod tests {
         handle_set_goal_budget_command(&mut session, GoalBudget::default()).unwrap();
 
         let goal = session.goal.as_ref().unwrap();
-        assert_eq!(goal.budget, GoalBudget::default());
+        let expected_budget = GoalBudget {
+            explicit: true,
+            ..GoalBudget::default()
+        };
+        assert_eq!(goal.budget, expected_budget);
         assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
         assert!(session.messages[0].extra["goal"]["budget"]
             .get("max_turns")
             .is_none());
+        assert_eq!(
+            session.messages[0].extra["goal"]["budget"]["explicit"],
+            json!(true)
+        );
     }
 
     #[test]

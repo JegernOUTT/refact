@@ -2519,6 +2519,7 @@ mod tests {
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 10,
                 no_progress_turns: Some(2),
+                explicit: false,
             }
         }
 
@@ -2817,6 +2818,7 @@ mod tests {
             cooldown_ms: 10,
             no_progress_token_threshold: 11,
             no_progress_turns: Some(12),
+            explicit: false,
         };
 
         session.install_goal("agent", "ship the card", true, budget.clone());
@@ -2965,6 +2967,7 @@ mod tests {
                 cooldown_ms: 1_500,
                 no_progress_token_threshold: 50,
                 no_progress_turns: None,
+                explicit: true,
             },
         );
         let goal_meta = goal_message.extra.get_mut("goal").unwrap();

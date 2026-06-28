@@ -175,6 +175,7 @@ mod tests {
             cooldown_ms: 6,
             no_progress_token_threshold: 7,
             no_progress_turns: Some(8),
+            explicit: false,
         };
 
         install_goal(&mut session, "agent", "base", false, budget.clone());
