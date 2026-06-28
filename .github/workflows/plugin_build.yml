@@ -90,35 +90,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   vscode-package:
-    name: VS Code package (${{ matrix.target }})
-    needs: [build_version, engine, gui]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            code-target: win32-x64
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            code-target: win32-arm64
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            code-target: linux-x64
-          - os: ubuntu-22.04
-            target: aarch64-unknown-linux-gnu
-            code-target: linux-arm64
-          # x86_64-apple-darwin (macOS Intel) is disabled — GitHub-hosted macOS runners
-          # incur significant costs and Intel Mac support is being phased out. Re-enable only if
-          # explicitly needed and billing is confirmed.
-          #- os: macos-15
-          #  target: x86_64-apple-darwin
-          #  code-target: darwin-x64
-          - os: macos-15
-            target: aarch64-apple-darwin
-            code-target: darwin-arm64
-
-    runs-on: ${{ matrix.os }}
+    name: VS Code package
+    needs: [build_version, gui]
+    runs-on: ubuntu-latest
 
     env:
       REFACT_BUILD_VERSION: ${{ needs.build_version.outputs.build_version }}
@@ -165,12 +139,12 @@ jobs:
 
       - name: Package VS Code extension
         shell: bash
-        run: vsce package --target ${{ matrix.code-target }}
+        run: vsce package
 
       - name: Upload VS Code package
         uses: actions/upload-artifact@v4
         with:
-          name: vscode-plugin-${{ matrix.target }}
+          name: vscode-plugin
           path: plugins/vscode/*.vsix
 
   intellij-package:
