@@ -23,6 +23,7 @@ pub mod style;
 pub mod table_detect;
 pub mod terminal;
 pub mod terminal_palette;
+mod terminal_probe;
 pub mod text_formatting;
 pub mod text_safety;
 pub mod theme;

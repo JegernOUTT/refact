@@ -12,13 +12,91 @@ use crossterm::terminal::{
     disable_raw_mode as crossterm_disable_raw_mode, enable_raw_mode as crossterm_enable_raw_mode,
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-pub type RefactTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+pub type RefactTerminal = Terminal<StdoutBackend>;
+
+pub struct StdoutBackend {
+    inner: CrosstermBackend<io::Stdout>,
+    injected_cursor: Option<Position>,
+}
+
+impl StdoutBackend {
+    fn new(injected_cursor: Option<Position>) -> Self {
+        Self {
+            inner: CrosstermBackend::new(io::stdout()),
+            injected_cursor,
+        }
+    }
+}
+
+impl Write for StdoutBackend {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.inner)
+    }
+}
+
+impl Backend for StdoutBackend {
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        match self.injected_cursor.take() {
+            Some(position) => Ok(position),
+            None => self.inner.get_cursor_position(),
+        }
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.inner.append_lines(n)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.inner)
+    }
+}
 
 pub const TARGET_FRAME_INTERVAL: Duration = MIN_FRAME_INTERVAL;
 
@@ -300,16 +378,7 @@ impl TerminalSession {
         );
         guard.initialize()?;
         install_panic_restore_hook(mode, title_config);
-        let backend = CrosstermBackend::new(io::stdout());
-        let terminal = match mode {
-            TerminalMode::Inline => Terminal::with_options(
-                backend,
-                TerminalOptions {
-                    viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-                },
-            )?,
-            TerminalMode::AlternateScreen => Terminal::new(backend)?,
-        };
+        let terminal = build_terminal(mode)?;
         Ok(Self {
             terminal,
             guard,
@@ -335,7 +404,7 @@ impl TerminalSession {
     pub fn write_notification(&mut self, bytes: &[u8]) -> io::Result<()> {
         let writer = self.terminal.backend_mut();
         writer.write_all(bytes)?;
-        writer.flush()
+        Write::flush(writer)
     }
 
     pub fn mode(&self) -> TerminalMode {
@@ -367,15 +436,14 @@ impl TerminalSession {
 
     pub fn clear_for_resize_reflow(&mut self) -> io::Result<()> {
         execute!(self.terminal.backend_mut(), Clear(ClearType::Purge))?;
-        let backend = CrosstermBackend::new(io::stdout());
         self.terminal = match self.guard.mode {
             TerminalMode::Inline => Terminal::with_options(
-                backend,
+                StdoutBackend::new(None),
                 TerminalOptions {
                     viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
                 },
             )?,
-            TerminalMode::AlternateScreen => Terminal::new(backend)?,
+            TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None))?,
         };
         Ok(())
     }
@@ -620,6 +688,35 @@ pub fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
     )
 }
 
+fn build_terminal(mode: TerminalMode) -> io::Result<RefactTerminal> {
+    match mode {
+        TerminalMode::Inline => Terminal::with_options(
+            StdoutBackend::new(Some(probe_startup_cursor_position())),
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+            },
+        ),
+        TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None)),
+    }
+}
+
+fn probe_startup_cursor_position() -> Position {
+    match crate::terminal_probe::cursor_position(crate::terminal_probe::DEFAULT_TIMEOUT) {
+        Ok(Some(position)) => position,
+        Ok(None) => {
+            tracing::warn!(
+                "initial cursor position probe timed out after {}ms; defaulting to origin",
+                crate::terminal_probe::DEFAULT_TIMEOUT.as_millis()
+            );
+            Position { x: 0, y: 0 }
+        }
+        Err(err) => {
+            tracing::warn!("initial cursor position probe failed ({err}); defaulting to origin");
+            Position { x: 0, y: 0 }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,6 +872,16 @@ mod tests {
         assert!(is_truthy("true"));
         assert!(!is_truthy("0"));
         assert!(!is_truthy("false"));
+    }
+
+    #[test]
+    fn stdout_backend_returns_injected_cursor_once() {
+        let mut backend = StdoutBackend::new(Some(Position { x: 4, y: 9 }));
+        assert_eq!(
+            Backend::get_cursor_position(&mut backend).unwrap(),
+            Position { x: 4, y: 9 }
+        );
+        assert!(backend.injected_cursor.is_none());
     }
 
     #[test]

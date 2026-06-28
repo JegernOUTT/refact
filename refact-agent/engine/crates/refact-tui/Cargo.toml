@@ -10,6 +10,7 @@ chrono = { version = "0.4.31", features = ["serde"] }
 crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
 dirs = "5.0"
 futures = "0.3"
+libc = "0.2"
 pulldown-cmark = "0.10"
 ratatui = { version = "0.29.0", features = ["unstable-widget-ref", "unstable-rendered-line-info"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
