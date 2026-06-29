@@ -11,7 +11,7 @@ use crate::chat::goal_verifier::{
     apply_goal_verdict, begin_goal_verification_if_needed, run_goal_verifier,
     GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
 };
-use crate::chat::types::{ChatSession, GoalStatus, SessionState};
+use crate::chat::types::{ChatSession, GoalStatus};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolValidateGoal {
@@ -62,8 +62,14 @@ impl Tool for ToolValidateGoal {
             let mut session = session_arc.lock().await;
             begin_validate_goal(&mut session)
         };
-        if begin != GoalVerificationBegin::Started {
-            return tool_message(tool_call_id, "No active goal to validate.".to_string());
+        match begin {
+            GoalVerificationBegin::Started => {}
+            GoalVerificationBegin::NoActiveGoal => {
+                return tool_message(tool_call_id, "No active goal to validate.".to_string());
+            }
+            GoalVerificationBegin::BudgetExhausted => {
+                return tool_message(tool_call_id, budget_exhausted_message());
+            }
         }
 
         let reply = match run_goal_verifier(app, session_arc.clone()).await {
@@ -89,18 +95,12 @@ impl Tool for ToolValidateGoal {
     }
 }
 
-fn has_active_goal(session: &ChatSession) -> bool {
-    session
-        .goal
-        .as_ref()
-        .is_some_and(|goal| goal.active && goal.status == GoalStatus::Active)
+fn begin_validate_goal(session: &mut ChatSession) -> GoalVerificationBegin {
+    begin_goal_verification_if_needed(session)
 }
 
-fn begin_validate_goal(session: &mut ChatSession) -> GoalVerificationBegin {
-    if !has_active_goal(session) {
-        return GoalVerificationBegin::NoActiveGoal;
-    }
-    begin_goal_verification_if_needed(session)
+fn budget_exhausted_message() -> String {
+    "Goal budget exhausted — cannot validate; the goal has hit its configured budget. Adjust the budget (set_goal_budget) or stop the goal.".to_string()
 }
 
 async fn reset_after_verifier_error(session_arc: Arc<AMutex<ChatSession>>) {
@@ -108,7 +108,6 @@ async fn reset_after_verifier_error(session_arc: Arc<AMutex<ChatSession>>) {
     if session.goal_status == Some(GoalStatus::Verifying) {
         session.goal_set_status(GoalStatus::Active);
     }
-    session.set_runtime_state(SessionState::Idle, None);
 }
 
 fn validation_content(
@@ -190,6 +189,7 @@ mod tests {
 
     use crate::app_state::AppState;
     use crate::chat::goal_verifier::GoalVerifierReply;
+    use crate::chat::types::SessionState;
     use crate::tools::tools_list::get_tools_for_mode;
 
     const CHAT_ID: &str = "validate-goal-chat";
@@ -249,6 +249,26 @@ mod tests {
             true,
             GoalBudget::default(),
         );
+        session
+    }
+
+    fn finite_budget() -> GoalBudget {
+        GoalBudget {
+            max_turns: Some(1),
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: Some(1),
+            explicit: true,
+        }
+    }
+
+    fn session_with_exhausted_goal() -> ChatSession {
+        let mut session = ChatSession::new(CHAT_ID.to_string());
+        session.install_goal("agent", "ship feature\n- tests pass", true, finite_budget());
+        session.goal.as_mut().unwrap().progress.turns_used = 1;
+        session.refresh_goal_runtime_mirror();
         session
     }
 
@@ -359,6 +379,49 @@ mod tests {
         assert_eq!(goal.status, GoalStatus::Paused);
         assert!(goal.attempts.is_empty());
         assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn budget_exhausted_goal_returns_distinct_message_without_verifier_call() {
+        let (gcx, ccx) = ccx_for_session(session_with_exhausted_goal()).await;
+        let mut tool = ToolValidateGoal {
+            config_path: String::new(),
+        };
+
+        let content = tool_content(
+            tool.tool_execute(ccx, &"call".to_string(), &HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(content, budget_exhausted_message());
+        assert_ne!(content, "No active goal to validate.");
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert!(goal.attempts.is_empty());
+        assert!(session.post_tool_side_effects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verifier_error_cleanup_restores_goal_status_without_forcing_idle() {
+        let mut session = session_with_goal();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.goal_set_status(GoalStatus::Verifying);
+        let session_arc = Arc::new(AMutex::new(session));
+
+        reset_after_verifier_error(session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.runtime.state, SessionState::ExecutingTools);
     }
 
     #[test]

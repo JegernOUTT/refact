@@ -665,6 +665,31 @@ mod tests {
         states
     }
 
+    fn goal_pursuit_event_count(session: &ChatSession) -> usize {
+        session
+            .goal
+            .as_ref()
+            .map(|goal| {
+                goal.events
+                    .iter()
+                    .filter(|event| event.kind == "goal_pursuit")
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
+    fn reloaded_session_from_messages(session: &ChatSession) -> ChatSession {
+        ChatSession::new_with_trajectory(
+            "goal-verifier-reloaded".to_string(),
+            session.messages.clone(),
+            session.thread.clone(),
+            session.created_at.clone(),
+            None,
+            vec![],
+            None,
+        )
+    }
+
     #[test]
     fn goal_verification_message_contains_required_contract() {
         let message = goal_verification_message("Do the thing");
@@ -992,6 +1017,56 @@ mod tests {
             session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
             json!("verification_gaps")
         );
+    }
+
+    #[test]
+    fn validate_goal_unmet_records_single_goal_pursuit_event_after_rebuild() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "validate_goal",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                tokens: 13,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        session.drain_post_tool_side_effects();
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        session.rebuild_goal_projection_from_messages();
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        let reloaded = reloaded_session_from_messages(&session);
+        assert_eq!(goal_pursuit_event_count(&reloaded), 1);
+    }
+
+    #[test]
+    fn validate_goal_met_records_single_goal_pursuit_event_after_rebuild() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "validate_goal",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Met,
+                verifier_reply: "GOAL: MET".to_string(),
+                tokens: 11,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        session.drain_post_tool_side_effects();
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        session.rebuild_goal_projection_from_messages();
+        assert_eq!(goal_pursuit_event_count(&session), 1);
+        let reloaded = reloaded_session_from_messages(&session);
+        assert_eq!(goal_pursuit_event_count(&reloaded), 1);
     }
 
     #[test]
