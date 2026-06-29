@@ -25,7 +25,40 @@
 }
 
 .rangeControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
   justify-self: end;
+}
+
+.customRange {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.customRangeSep {
+  color: var(--rf-color-muted);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.dateInput {
+  min-width: 0;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  color-scheme: dark light;
+}
+
+.dateInput:focus-visible {
+  outline: 2px solid var(--rf-focus-ring);
+  outline-offset: 1px;
 }
 
 .tabsRoot {

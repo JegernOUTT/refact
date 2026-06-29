@@ -22,6 +22,16 @@
   --rf-color-danger: #d8736d;
   --rf-color-info: var(--rf-color-accent);
   --rf-focus-ring: rgba(127, 147, 216, 0.55);
+  --rf-chart-1: #7f93d8;
+  --rf-chart-2: #5fae8b;
+  --rf-chart-3: #cda04e;
+  --rf-chart-4: #d8736d;
+  --rf-chart-5: #6cb6c9;
+  --rf-chart-6: #b08ad1;
+  --rf-chart-7: #d39a6a;
+  --rf-chart-8: #8fa3b8;
+  --rf-chart-grid: rgba(255, 255, 255, 0.08);
+  --rf-chart-axis: rgba(255, 255, 255, 0.32);
   --rf-radius-chip: 6px;
   --rf-radius-ctl: 8px;
   --rf-radius-card: 10px;
@@ -204,6 +214,16 @@
   --rf-color-accent: var(--accent-9, #006adc);
   --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
   --rf-focus-ring: rgba(0, 106, 220, 0.5);
+  --rf-chart-1: #5566c4;
+  --rf-chart-2: #2f9e74;
+  --rf-chart-3: #b8862f;
+  --rf-chart-4: #cc5b54;
+  --rf-chart-5: #3f93a8;
+  --rf-chart-6: #8f63b8;
+  --rf-chart-7: #c07a3f;
+  --rf-chart-8: #5e7490;
+  --rf-chart-grid: rgba(0, 0, 0, 0.09);
+  --rf-chart-axis: rgba(0, 0, 0, 0.45);
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.16);
   --rf-elev-panel: 0 1px 2px rgba(0, 0, 0, 0.08);
 }

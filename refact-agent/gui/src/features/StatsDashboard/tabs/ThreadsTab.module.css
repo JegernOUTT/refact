@@ -31,7 +31,7 @@
 
 .table {
   width: 100%;
-  min-width: 900px;
+  min-width: 1200px;
   border-collapse: collapse;
 }
 
@@ -68,6 +68,22 @@
   margin: 0;
   color: var(--rf-color-muted);
   font: var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+}
+
+.mutedText {
+  color: var(--rf-color-muted);
+}
+
+.linesCell {
+  white-space: nowrap;
+}
+
+.linesAdded {
+  color: var(--rf-color-success);
+}
+
+.linesRemoved {
+  color: var(--rf-color-danger);
 }
 
 .sortButton {

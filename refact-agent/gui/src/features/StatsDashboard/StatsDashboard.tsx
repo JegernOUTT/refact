@@ -4,6 +4,7 @@ import { Button, Tabs, SegmentedControl } from "../../components/ui";
 import { PageWrapper } from "../../components/PageWrapper";
 import type { Config } from "../Config/configSlice";
 import type { DateRange, DateRangePreset } from "./types";
+import { daysAgoIsoDate, todayIsoDate } from "./utils/dateRange";
 import { OverviewTab } from "./tabs/OverviewTab";
 import { UsageTab } from "./tabs/UsageTab";
 import { ThreadsTab } from "./tabs/ThreadsTab";
@@ -19,8 +20,12 @@ export type StatsDashboardProps = {
 const rangeOptions = [
   { value: "7d", label: "7 days" },
   { value: "30d", label: "30 days" },
+  { value: "90d", label: "90 days" },
   { value: "all", label: "All time" },
+  { value: "custom", label: "Custom" },
 ];
+
+const TAB_ORDER = ["overview", "usage", "threads", "tasks"];
 
 export const StatsDashboard: React.FC<StatsDashboardProps> = ({
   host,
@@ -30,8 +35,35 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
   const [activeTab, setActiveTab] = useState("overview");
 
   const handlePresetChange = useCallback((preset: string) => {
-    setDateRange({ preset: preset as DateRangePreset });
+    const next = preset as DateRangePreset;
+    if (next === "custom") {
+      setDateRange((prev) => ({
+        preset: "custom",
+        from: prev.from ?? daysAgoIsoDate(30),
+        to: prev.to ?? todayIsoDate(),
+      }));
+      return;
+    }
+    setDateRange({ preset: next });
   }, []);
+
+  const handleFromChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = event.target.value || undefined;
+      setDateRange((prev) => ({ ...prev, preset: "custom", from: value }));
+    },
+    [],
+  );
+
+  const handleToChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = event.target.value || undefined;
+      setDateRange((prev) => ({ ...prev, preset: "custom", to: value }));
+    },
+    [],
+  );
+
+  const today = todayIsoDate();
 
   return (
     <PageWrapper host={host}>
@@ -46,14 +78,37 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
             Back
           </Button>
           <h2 className={styles.title}>Usage Dashboard</h2>
-          <SegmentedControl
-            aria-label="Usage date range"
-            className={styles.rangeControls}
-            onValueChange={handlePresetChange}
-            options={rangeOptions}
-            size="sm"
-            value={dateRange.preset}
-          />
+          <div className={styles.rangeControls}>
+            <SegmentedControl
+              aria-label="Usage date range"
+              onValueChange={handlePresetChange}
+              options={rangeOptions}
+              size="sm"
+              value={dateRange.preset}
+            />
+            {dateRange.preset === "custom" && (
+              <div className={styles.customRange}>
+                <input
+                  aria-label="From date"
+                  className={styles.dateInput}
+                  type="date"
+                  max={dateRange.to ?? today}
+                  value={dateRange.from ?? ""}
+                  onChange={handleFromChange}
+                />
+                <span className={styles.customRangeSep}>→</span>
+                <input
+                  aria-label="To date"
+                  className={styles.dateInput}
+                  type="date"
+                  min={dateRange.from ?? undefined}
+                  max={today}
+                  value={dateRange.to ?? ""}
+                  onChange={handleToChange}
+                />
+              </div>
+            )}
+          </div>
         </header>
 
         <Tabs
@@ -62,9 +117,7 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
           className={styles.tabsRoot}
         >
           <Tabs.List
-            activeIndex={["overview", "usage", "threads", "tasks"].indexOf(
-              activeTab,
-            )}
+            activeIndex={TAB_ORDER.indexOf(activeTab)}
             className={styles.tabsList}
           >
             <Tabs.Trigger value="overview">Overview</Tabs.Trigger>

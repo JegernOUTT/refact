@@ -1,8 +1,24 @@
 .root {
   display: flex;
   flex-direction: column;
+  gap: var(--rf-space-5);
+  min-width: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
   gap: var(--rf-space-3);
   min-width: 0;
+}
+
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .tableWrapper {
@@ -11,7 +27,7 @@
 
 .table {
   width: 100%;
-  min-width: 480px;
+  min-width: 720px;
   border-collapse: collapse;
 }
 
@@ -32,8 +48,136 @@
   white-space: nowrap;
 }
 
+.mono {
+  font-family: var(--rf-font-mono);
+}
+
 .emptyText {
   margin: 0;
   color: var(--rf-color-muted);
   font: var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+}
+
+.reliabilityGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+  min-width: 0;
+}
+
+.panelTitle {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.barList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.barRow {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.8fr) minmax(0, 2fr) auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.barLabel {
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barTrack {
+  height: var(--rf-space-3);
+  overflow: hidden;
+  background: var(--rf-surface-3);
+  border-radius: var(--rf-radius-pill);
+}
+
+.barFill {
+  height: 100%;
+  width: var(--bar-pct);
+  background: var(--bar-color);
+  border-radius: inherit;
+  transition: width var(--rf-dur-slow) var(--rf-ease-standard);
+}
+
+.barValue {
+  color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  white-space: nowrap;
+}
+
+.barPct {
+  color: var(--rf-color-faint);
+}
+
+.hourGrid {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  align-items: end;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  height: 140px;
+}
+
+.hourCol {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  height: 100%;
+}
+
+.hourBarTrack {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 100%;
+}
+
+.hourBarFill {
+  width: 100%;
+  height: var(--hour-pct);
+  min-height: 2px;
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-chip) var(--rf-radius-chip) 0 0;
+  transition: height var(--rf-dur-slow) var(--rf-ease-standard);
+}
+
+.hourLabel {
+  color: var(--rf-color-faint);
+  font: var(--rf-text-1) / 1 var(--rf-font-mono);
+}
+
+.hourCaption {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .barFill,
+  .hourBarFill {
+    transition: none;
+  }
 }
