@@ -1399,6 +1399,7 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
+                    session.goal_reset_no_progress();
                     if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
                         let chat_id = session.chat_id.clone();
                         let first_user_text_preview = parsed_content

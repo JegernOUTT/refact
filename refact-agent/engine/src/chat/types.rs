@@ -98,6 +98,12 @@ fn epoch_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Escalating goal-nudge backoff: each consecutive no-progress turn doubles the
+/// effective cooldown (`cooldown_ms << min(no_progress_turns, BACKOFF_SHIFT_CAP)`),
+/// capped at `MAX_BACKOFF_MS`. With `no_progress_turns == 0` it is the plain cooldown.
+pub const GOAL_NUDGE_BACKOFF_SHIFT_CAP: u32 = 8;
+pub const GOAL_NUDGE_MAX_BACKOFF_MS: u64 = 300_000;
+
 pub trait GoalSnapshotBudgetExt {
     fn goal_budget_exhaustion_status_at(&self, now_ms: u64) -> Option<GoalStatus>;
     fn goal_budget_exhausted_at(&self, now_ms: u64) -> bool;
@@ -105,6 +111,7 @@ pub trait GoalSnapshotBudgetExt {
     fn goal_can_pursue_at(&self, now_ms: u64) -> bool;
     fn goal_can_pursue(&self) -> bool;
     fn goal_nudge_ready_at(&self, now_ms: u64) -> bool;
+    fn goal_nudge_ready_at_with_backoff(&self, now_ms: u64) -> bool;
     fn goal_record_progress(&mut self, tokens: u64, made_progress: bool);
     fn goal_record_verifier_attempt(&mut self, tokens: u64);
     fn goal_record_nudge(&mut self, at_ms: u64);
@@ -165,6 +172,22 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
                     .progress
                     .last_nudge_at_ms
                     .saturating_add(self.budget.cooldown_ms)
+    }
+
+    fn goal_nudge_ready_at_with_backoff(&self, now_ms: u64) -> bool {
+        if self.progress.last_nudge_at_ms == 0 {
+            return true;
+        }
+        let shift = self
+            .progress
+            .no_progress_turns
+            .min(GOAL_NUDGE_BACKOFF_SHIFT_CAP);
+        let effective_cooldown_ms = self
+            .budget
+            .cooldown_ms
+            .saturating_mul(1u64 << shift)
+            .min(GOAL_NUDGE_MAX_BACKOFF_MS);
+        now_ms >= self.progress.last_nudge_at_ms.saturating_add(effective_cooldown_ms)
     }
 
     fn goal_record_progress(&mut self, tokens: u64, made_progress: bool) {

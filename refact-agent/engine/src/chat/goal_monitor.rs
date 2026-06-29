@@ -17,6 +17,10 @@ pub const GOAL_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 const GOAL_MONITOR_STALL_GRACE: Duration = Duration::from_secs(30);
 const GOAL_MONITOR_NO_TOKEN_GRACE: Duration = Duration::from_secs(30);
 const GOAL_MONITOR_SOURCE: &str = "chat.goal_monitor";
+/// After this many consecutive no-progress nudges an active goal whose no-progress
+/// budget is unlimited stops being nudged (goes quiescent) and resumes on the next
+/// user message instead of looping forever.
+const QUIESCENCE_NUDGES: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalNudgeTrigger {
@@ -68,6 +72,7 @@ pub enum GoalNudgeSkip {
     PendingCommand,
     NotStalled,
     QueueRejected,
+    Quiescent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +92,10 @@ impl GoalNudgeOutcome {
 
     fn nudged(self) -> bool {
         matches!(self, GoalNudgeOutcome::Nudged(_))
+    }
+
+    fn should_persist(self) -> bool {
+        self.changed() || matches!(self, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent))
     }
 }
 
@@ -204,7 +213,7 @@ pub async fn dispatch_goal_nudge(
         (outcome, processor_flag)
     };
 
-    if outcome.changed() {
+    if outcome.should_persist() {
         maybe_save_trajectory_background(app.clone(), session_arc.clone());
     }
 
@@ -246,7 +255,7 @@ pub fn try_apply_goal_nudge(
         apply_goal_terminal_status(session, status, trigger, now_ms);
         return GoalNudgeOutcome::BudgetExhausted(status);
     }
-    if !goal.goal_nudge_ready_at(now_ms) {
+    if !goal.goal_nudge_ready_at_with_backoff(now_ms) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown);
     }
     if waiting_for_user_or_ide(session) {
@@ -265,6 +274,11 @@ pub fn try_apply_goal_nudge(
     let Some(reason) = nudge_reason(session, trigger, now_instant, config) else {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::NotStalled);
     };
+
+    if goal_is_quiescent(session) {
+        record_quiescent_event_if_needed(session, trigger, now_ms);
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent);
+    }
 
     let request = CommandRequest {
         client_request_id: format!("goal-nudge-{}", Uuid::new_v4()),
@@ -389,6 +403,65 @@ fn goal_nudge_event(
     )
 }
 
+fn goal_is_quiescent(session: &ChatSession) -> bool {
+    session.goal.as_ref().is_some_and(|goal| {
+        goal.budget.no_progress_turns.is_none_or(|limit| limit == 0)
+            && goal.progress.no_progress_turns >= QUIESCENCE_NUDGES
+    })
+}
+
+fn goal_pursuit_kind(message: &crate::call_validation::ChatMessage) -> Option<&str> {
+    if message.role != internal_roles::EVENT_ROLE {
+        return None;
+    }
+    let event = message.extra.get("event")?;
+    if event.get("subkind").and_then(|value| value.as_str()) != Some("goal_pursuit") {
+        return None;
+    }
+    event
+        .get("payload")
+        .and_then(|payload| payload.get("kind"))
+        .and_then(|value| value.as_str())
+}
+
+fn quiescent_event_already_recorded(session: &ChatSession) -> bool {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find_map(goal_pursuit_kind)
+        .is_some_and(|kind| kind == "pursuit_quiescent")
+}
+
+fn record_quiescent_event_if_needed(
+    session: &mut ChatSession,
+    trigger: GoalNudgeTrigger,
+    at_ms: u64,
+) -> bool {
+    if quiescent_event_already_recorded(session) {
+        return false;
+    }
+    session.add_message(goal_quiescent_event(trigger, at_ms));
+    true
+}
+
+fn goal_quiescent_event(
+    trigger: GoalNudgeTrigger,
+    at_ms: u64,
+) -> crate::call_validation::ChatMessage {
+    internal_roles::event(
+        EventSubkind::GoalPursuit,
+        GOAL_MONITOR_SOURCE,
+        json!({
+            "kind": "pursuit_quiescent",
+            "trigger": trigger.as_str(),
+            "at_ms": at_ms,
+        }),
+        "Goal pursuit paused: agent idle with no progress; will resume on your next message."
+            .to_string(),
+    )
+}
+
 fn record_terminal_goal_event_if_needed(
     session: &mut ChatSession,
     trigger: GoalNudgeTrigger,
@@ -482,6 +555,25 @@ mod tests {
         let now = Instant::now();
         session.last_activity = now - Duration::from_secs(10);
         (session, now)
+    }
+
+    fn unlimited_no_progress_session() -> ChatSession {
+        let mut session = ChatSession::new("goal-monitor-quiescent-test".to_string());
+        session.install_goal(
+            "agent",
+            "ship the thing",
+            true,
+            GoalBudget {
+                max_turns: None,
+                max_minutes: None,
+                max_tokens: None,
+                cooldown_ms: 1_000,
+                no_progress_token_threshold: 50,
+                no_progress_turns: None,
+                explicit: false,
+            },
+        );
+        session
     }
 
     fn apply_monitor(session: &mut ChatSession, now_ms: u64, now: Instant) -> GoalNudgeOutcome {
@@ -645,6 +737,126 @@ mod tests {
         assert_eq!(session.goal_status, Some(GoalStatus::NoProgress));
         let payload = event_payload(session.messages.last().unwrap());
         assert_eq!(payload["kind"], json!("no_progress"));
+    }
+
+    #[test]
+    fn goal_monitor_goes_quiescent_after_threshold_without_terminal_status() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.last_activity = now - Duration::from_secs(10);
+        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES;
+
+        let first = apply_monitor(&mut session, 10_000, now);
+        assert_eq!(first, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+
+        let second = apply_monitor(&mut session, 20_000, now + Duration::from_secs(20));
+        assert_eq!(second, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+
+        let quiescent_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "event"
+                    && event_payload(message).get("kind") == Some(&json!("pursuit_quiescent"))
+            })
+            .count();
+        assert_eq!(quiescent_events, 1);
+    }
+
+    #[test]
+    fn goal_monitor_backoff_extends_cooldown_with_no_progress_turns() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.last_activity = now - Duration::from_secs(10);
+        {
+            let goal = session.goal.as_mut().unwrap();
+            goal.progress.no_progress_turns = 1;
+            goal.progress.last_nudge_at_ms = 5_000;
+        }
+
+        assert_eq!(
+            apply_monitor(&mut session, 6_500, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
+        );
+        assert!(session.command_queue.is_empty());
+
+        assert_eq!(
+            apply_monitor(&mut session, 7_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+        assert_eq!(session.command_queue.len(), 1);
+    }
+
+    #[test]
+    fn goal_monitor_fresh_no_progress_uses_base_cooldown() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.last_activity = now - Duration::from_secs(10);
+        {
+            let goal = session.goal.as_mut().unwrap();
+            goal.progress.no_progress_turns = 0;
+            goal.progress.last_nudge_at_ms = 5_000;
+        }
+
+        assert_eq!(
+            apply_monitor(&mut session, 5_999, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
+        );
+        assert_eq!(
+            apply_monitor(&mut session, 6_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+    }
+
+    #[test]
+    fn goal_monitor_resume_after_quiescence_nudges_again() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.last_activity = now - Duration::from_secs(10);
+        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES;
+
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent)
+        );
+
+        assert!(session.goal_reset_no_progress());
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+
+        assert_eq!(
+            apply_monitor(&mut session, 20_000, now + Duration::from_secs(20)),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+        assert_eq!(session.command_queue.len(), 1);
+    }
+
+    #[test]
+    fn goal_monitor_progress_resets_no_progress_and_prevents_quiescence() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        session.goal.as_mut().unwrap().progress.no_progress_turns = QUIESCENCE_NUDGES - 1;
+
+        assert!(session.goal_record_progress_from_usage(&ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 100,
+            total_tokens: 110,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        }));
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+
+        // Recording progress touches `last_activity`; mark the session stalled afterwards
+        // so the monitor still sees an idle stall and nudges (no quiescence at np == 0).
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
     }
 
     #[test]
