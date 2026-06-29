@@ -17,6 +17,7 @@ import {
     lspSocketConnectTimeoutMs,
     shouldRunLifecycleGeneration,
 } from './launchRustLifecycle';
+import { WorkerHealthProbe } from './launchRustHealth';
 
 const DEBUG_HTTP_PORT = 8001;
 const DEBUG_LSP_PORT = 8002;
@@ -48,10 +49,15 @@ export class RustBinaryBlob {
     private reconnectAttempts: number = 0;
     private openedProjects: Map<string, refactDaemon.OpenProjectResponse> = new Map();
     private attachState: RefactBackendConnectionStatus = "connecting";
+    private workerHealthProbe: WorkerHealthProbe;
 
     constructor(asset_path: string, binary_cache_path?: string) {
         this.asset_path = asset_path;
         this.binary_cache_path = binary_cache_path ?? path.join(asset_path, "refact-bin");
+        this.workerHealthProbe = new WorkerHealthProbe({
+            probe: () => this.probe_attached_worker(),
+            recover: () => this.recover_unhealthy_worker(),
+        });
         this.lsp_client_options = {
             documentSelector: [{ scheme: 'file', language: '*' }],
             diagnosticCollectionName: 'RUST LSP',
@@ -143,8 +149,55 @@ export class RustBinaryBlob {
     }
 
     private mark_lsp_disconnected(): void {
+        this.workerHealthProbe.stop();
         global.have_caps = false;
         this.set_attach_state("connecting");
+    }
+
+    private mark_lsp_ready(): void {
+        this.set_attach_state("ready");
+        this.reconnectAttempts = 0;
+        if (!this.x_debug()) {
+            this.workerHealthProbe.start();
+        }
+    }
+
+    private mark_worker_unhealthy(): void {
+        this.lsp_dispose();
+        global.have_caps = false;
+        this.set_attach_state("failed");
+    }
+
+    private async probe_attached_worker(): Promise<boolean> {
+        if (this.x_debug() || this.attachState !== "ready" || !this.port || !this.project_id) {
+            return true;
+        }
+        try {
+            const resp = await this.fetch_project_proxy_once("/v1/build_info", {
+                method: "GET",
+                redirect: "follow",
+                cache: "no-cache",
+                referrer: "no-referrer",
+            }, { timeout: 5000 });
+            if (resp.status !== 200) {
+                console.log(["worker health http status", resp.status]);
+                return false;
+            }
+            return true;
+        } catch (error) {
+            console.log(["worker health error", error]);
+            return false;
+        }
+    }
+
+    private recover_unhealthy_worker(): void {
+        if (this.x_debug() || !this.is_current_generation(this.lifecycleGeneration)) {
+            return;
+        }
+        console.log("RUST worker health failed repeatedly; scheduling daemon reconnect");
+        this.mark_worker_unhealthy();
+        this.reconnectGeneration = this.lifecycleGeneration;
+        this.schedule_lsp_reconnect(this.lifecycleGeneration);
     }
 
     public browser_url(): string {
@@ -196,6 +249,7 @@ export class RustBinaryBlob {
     }
 
     private async settings_changed_serialized(generation: number) {
+        this.workerHealthProbe.stop();
         this.set_attach_state("connecting");
         global.status_bar?.set_socket_error(false, "");
         try {
@@ -310,6 +364,7 @@ export class RustBinaryBlob {
 
     public async stop_lsp(generation: number = this.lifecycleGeneration) {
         if (this.is_current_generation(generation)) {
+            this.workerHealthProbe.stop();
             this.reconnectGeneration = undefined;
             this.clearReconnectTimer();
         }
@@ -335,6 +390,7 @@ export class RustBinaryBlob {
     }
 
     public lsp_dispose() {
+        this.workerHealthProbe.stop();
         if (this.lsp_disposable) {
             this.lsp_disposable.dispose();
             this.lsp_disposable = undefined;
@@ -348,6 +404,7 @@ export class RustBinaryBlob {
     }
 
     public async terminate() {
+        this.workerHealthProbe.dispose();
         this.lifecycleGeneration++;
         this.reconnectGeneration = undefined;
         this.clearReconnectTimer();
@@ -653,8 +710,7 @@ export class RustBinaryBlob {
                         finish();
                         return;
                     }
-                    this.set_attach_state("ready");
-                    this.reconnectAttempts = 0;
+                    this.mark_lsp_ready();
                     console.log(`RUST /START`);
                     await this.read_caps();
                     if (!this.is_current_generation(generation)) {
