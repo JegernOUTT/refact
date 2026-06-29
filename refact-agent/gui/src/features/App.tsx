@@ -85,6 +85,7 @@ import { isPointerDragHost } from "./ChatPanes/pointerDrag";
 import { PointerDragGhost } from "./ChatPanes/PointerDragGhost";
 
 const STARTUP_SPLASH_DEADLINE_MS = 12_000;
+const APP_ACCESS_LOSS_GRACE_MS = 3_000;
 
 export interface AppProps {
   style?: React.CSSProperties;
@@ -283,7 +284,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     isPageInHistory("task agent");
 
   const canAccessApp = providerBootstrap.canAccessApp;
-  const canShowProviderSetup = providerBootstrap.canShowProviderSetup;
+  const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
   const hasEndpoint = hasUsableEngineEndpoint(config);
@@ -326,22 +327,34 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     providerBootstrap.status !== "ready" &&
     providerBootstrap.status !== "setup_required" &&
     providerBootstrap.status !== "provider_error";
-
   useEffect(() => {
-    if (canAccessApp && !isLoggedIn) {
-      dispatch(push({ name: "history" }));
+    if (canAccessApp) {
+      hadAppAccessRef.current = true;
+      if (!isLoggedIn) {
+        dispatch(push({ name: "history" }));
+      }
+      return;
     }
 
-    if (
-      !canAccessApp &&
-      canShowProviderSetup &&
-      desiredPage.name !== "login page"
-    ) {
+    const shouldShowLoginPage =
+      providerBootstrap.status !== "backend_connecting" &&
+      providerBootstrap.status !== "backend_installing" &&
+      providerBootstrap.status !== "provider_loading";
+    if (!shouldShowLoginPage || desiredPage.name === "login page") return;
+
+    if (!hadAppAccessRef.current) {
       dispatch(popBackTo({ name: "login page" }));
+      return;
     }
+
+    const timeoutId = setTimeout(() => {
+      dispatch(popBackTo({ name: "login page" }));
+    }, APP_ACCESS_LOSS_GRACE_MS);
+
+    return () => clearTimeout(timeoutId);
   }, [
     canAccessApp,
-    canShowProviderSetup,
+    providerBootstrap.status,
     desiredPage.name,
     isLoggedIn,
     dispatch,
