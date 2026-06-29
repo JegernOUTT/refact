@@ -13,6 +13,7 @@ const USER_AGENT_HEADER = "User-Agent";
 const INSTALL_LOCK_NAME = ".install.lock";
 const INSTALL_LOCK_RETRY_MS = 100;
 const INSTALL_LOCK_TIMEOUT_MS = 120000;
+export const INSTALL_LOCK_STALE_MS = 15 * 60000;
 
 export type RefactReleaseAsset = {
     target: string;
@@ -38,6 +39,8 @@ export type RefactBinaryResolverOptions = {
     chmod?: (binPath: string) => Promise<void>;
     installLockRetryMs?: number;
     installLockTimeoutMs?: number;
+    installLockStaleMs?: number;
+    installLockNowMs?: () => number;
 };
 
 type DownloadRefactOptions = RefactBinaryResolverOptions & Required<Pick<RefactBinaryResolverOptions, "platform" | "arch" | "homeDir" | "runVersion">>;
@@ -156,62 +159,77 @@ async function downloadPinnedRefactBinary(options: DownloadRefactOptions): Promi
     }
 
     const lockPath = path.join(path.dirname(binPath), INSTALL_LOCK_NAME);
-    return withInstallLock(lockPath, options.installLockRetryMs ?? INSTALL_LOCK_RETRY_MS, options.installLockTimeoutMs ?? INSTALL_LOCK_TIMEOUT_MS, async () => {
-        if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-            return binPath;
-        }
+    return withInstallLock(
+        lockPath,
+        options.installLockRetryMs ?? INSTALL_LOCK_RETRY_MS,
+        options.installLockTimeoutMs ?? INSTALL_LOCK_TIMEOUT_MS,
+        options.installLockStaleMs ?? INSTALL_LOCK_STALE_MS,
+        options.installLockNowMs ?? Date.now,
+        async () => {
+            if (await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
+                return binPath;
+            }
 
-        const downloadFile = options.downloadFile ?? defaultDownloadFile;
-        const extractArchive = options.extractArchive ?? defaultExtractArchive;
-        const chmod = options.chmod ?? (candidate => defaultChmod(candidate, options.platform));
-        const asset = refactReleaseAsset(options.pinnedVersion, target, options.platform);
-        const tmpDir = path.join(options.cacheDir, options.pinnedVersion, target, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        const archivePath = path.join(tmpDir, asset.archiveName);
-        const shaPath = `${archivePath}.sha256`;
-        const extractDir = path.join(tmpDir, "extract");
-        await fs.promises.mkdir(extractDir, { recursive: true });
-        try {
-            options.onDownloadStart?.();
-            await downloadFile(asset.archiveUrl, archivePath);
-            await downloadFile(asset.sha256Url, shaPath);
-            await verifySha256(archivePath, shaPath);
-            await extractArchive(archivePath, extractDir, options.platform);
-            const extractedBin = path.join(extractDir, binaryName);
-            if (!fileExists(extractedBin)) {
-                throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
+            const downloadFile = options.downloadFile ?? defaultDownloadFile;
+            const extractArchive = options.extractArchive ?? defaultExtractArchive;
+            const chmod = options.chmod ?? (candidate => defaultChmod(candidate, options.platform));
+            const asset = refactReleaseAsset(options.pinnedVersion, target, options.platform);
+            const tmpDir = path.join(options.cacheDir, options.pinnedVersion, target, `tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+            const archivePath = path.join(tmpDir, asset.archiveName);
+            const shaPath = `${archivePath}.sha256`;
+            const extractDir = path.join(tmpDir, "extract");
+            await fs.promises.mkdir(extractDir, { recursive: true });
+            try {
+                options.onDownloadStart?.();
+                await downloadFile(asset.archiveUrl, archivePath);
+                await downloadFile(asset.sha256Url, shaPath);
+                await verifySha256(archivePath, shaPath);
+                await extractArchive(archivePath, extractDir, options.platform);
+                const extractedBin = path.join(extractDir, binaryName);
+                if (!fileExists(extractedBin)) {
+                    throw new Error(`downloaded Refact archive did not contain ${binaryName}`);
+                }
+                await chmod(extractedBin);
+                await promoteBinaryToSharedInstall(extractedBin, binPath, chmod);
+                await chmod(binPath);
+                if (!await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
+                    throw new Error(`downloaded Refact binary is older than ${options.minVersion}`);
+                }
+                return binPath;
+            } finally {
+                await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
             }
-            await chmod(extractedBin);
-            await promoteBinaryToSharedInstall(extractedBin, binPath, chmod);
-            await chmod(binPath);
-            if (!await isCompatibleRefactBinary(binPath, options.minVersion, options.runVersion)) {
-                throw new Error(`downloaded Refact binary is older than ${options.minVersion}`);
-            }
-            return binPath;
-        } finally {
-            await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-        }
-    });
+        },
+    );
 }
 
 async function withInstallLock<T>(
     lockPath: string,
     retryMs: number,
     timeoutMs: number,
+    staleMs: number,
+    nowMs: () => number,
     body: () => Promise<T>,
 ): Promise<T> {
     await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
-    const handle = await acquireInstallLock(lockPath, Math.max(10, retryMs), Math.max(10, timeoutMs));
+    const handle = await acquireInstallLock(lockPath, Math.max(10, retryMs), Math.max(10, timeoutMs), Math.max(10, staleMs), nowMs);
+    const lockText = await writeInstallLockMetadata(handle, nowMs());
     try {
-        await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`);
         return await body();
     } finally {
         await handle.close().catch(() => undefined);
-        await fs.promises.rm(lockPath, { force: true }).catch(() => undefined);
+        await releaseInstallLock(lockPath, lockText);
     }
 }
 
-async function acquireInstallLock(lockPath: string, retryMs: number, timeoutMs: number): Promise<fs.promises.FileHandle> {
-    const startedAt = Date.now();
+async function acquireInstallLock(
+    lockPath: string,
+    retryMs: number,
+    timeoutMs: number,
+    staleMs: number,
+    nowMs: () => number,
+): Promise<fs.promises.FileHandle> {
+    const startedAt = nowMs();
     while (true) {
         try {
             return await fs.promises.open(lockPath, "wx");
@@ -219,12 +237,139 @@ async function acquireInstallLock(lockPath: string, retryMs: number, timeoutMs: 
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
                 throw error;
             }
-            if (Date.now() - startedAt >= timeoutMs) {
+            if (await breakStaleInstallLock(lockPath, staleMs, nowMs())) {
+                continue;
+            }
+            const elapsedMs = nowMs() - startedAt;
+            if (elapsedMs >= timeoutMs) {
                 throw new Error(`timed out waiting for Refact install lock at ${lockPath}`);
             }
-            await sleep(Math.min(retryMs, Math.max(10, timeoutMs - (Date.now() - startedAt))));
+            await sleep(Math.min(retryMs, Math.max(10, timeoutMs - elapsedMs)));
         }
     }
+}
+
+type InstallLockMetadata = {
+    pid?: number;
+    timestampMs?: number;
+};
+
+async function writeInstallLockMetadata(handle: fs.promises.FileHandle, nowMs: number): Promise<string> {
+    const lockText = `pid=${process.pid}\ntimestamp_ms=${nowMs}\n`;
+    await handle.writeFile(lockText, "utf8");
+    await handle.sync();
+    return lockText;
+}
+
+async function releaseInstallLock(lockPath: string, lockText: string): Promise<void> {
+    try {
+        if (await fileTextEquals(lockPath, lockText)) {
+            await fs.promises.rm(lockPath, { force: true });
+        }
+    } catch {
+        return;
+    }
+}
+
+async function breakStaleInstallLock(lockPath: string, staleMs: number, nowMs: number): Promise<boolean> {
+    const lockText = await readFileIfExists(lockPath);
+    const metadata = lockText ? parseInstallLockMetadata(lockText) : undefined;
+    const stale = metadata
+        ? metadataIsStale(metadata, staleMs, nowMs, lockPath)
+        : lockFileIsOlderThan(lockPath, nowMs, staleMs);
+    if (!stale) {
+        return false;
+    }
+    if (lockText !== undefined && !await fileTextEquals(lockPath, lockText)) {
+        return false;
+    }
+    return fs.promises.rm(lockPath, { force: true })
+        .then(() => true)
+        .catch(() => false);
+}
+
+function metadataIsStale(metadata: InstallLockMetadata, staleMs: number, nowMs: number, lockPath: string): boolean {
+    if (metadata.timestampMs !== undefined && nowMs - metadata.timestampMs >= staleMs) {
+        return true;
+    }
+    if (metadata.pid !== undefined && !lockProcessIsAlive(metadata.pid)) {
+        return true;
+    }
+    return metadata.timestampMs === undefined && lockFileIsOlderThan(lockPath, nowMs, staleMs);
+}
+
+function parseInstallLockMetadata(text: string): InstallLockMetadata | undefined {
+    const lines = text.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+    if (lines.length === 0) {
+        return undefined;
+    }
+    let pid: number | undefined;
+    let timestampMs: number | undefined;
+    for (const line of lines) {
+        const separator = line.indexOf("=");
+        if (separator <= 0) {
+            continue;
+        }
+        const key = line.slice(0, separator).trim().toLowerCase();
+        const value = line.slice(separator + 1).trim();
+        if (key === "pid" || key === "owner_pid") {
+            pid = parseLockNumber(value);
+        } else if (key === "timestamp" || key === "timestamp_ms" || key === "created_at" || key === "created_at_ms") {
+            timestampMs = parseLockTimestampMs(value);
+        }
+    }
+    pid = pid ?? parseLockNumber(lines[0]);
+    timestampMs = timestampMs ?? parseLockTimestampMs(lines[1]);
+    return pid !== undefined || timestampMs !== undefined ? { pid, timestampMs } : undefined;
+}
+
+function parseLockNumber(value: string | undefined): number | undefined {
+    if (!value || !/^-?\d+$/.test(value)) {
+        return undefined;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseLockTimestampMs(value: string | undefined): number | undefined {
+    const numeric = parseLockNumber(value);
+    if (numeric !== undefined) {
+        return numeric;
+    }
+    const parsed = Date.parse(value ?? "");
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function lockProcessIsAlive(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) {
+        return false;
+    }
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+}
+
+function lockFileIsOlderThan(lockPath: string, nowMs: number, staleMs: number): boolean {
+    try {
+        return nowMs - fs.statSync(lockPath).mtimeMs >= staleMs;
+    } catch {
+        return false;
+    }
+}
+
+async function readFileIfExists(filePath: string): Promise<string | undefined> {
+    try {
+        return await fs.promises.readFile(filePath, "utf8");
+    } catch {
+        return undefined;
+    }
+}
+
+async function fileTextEquals(filePath: string, expected: string): Promise<boolean> {
+    return await readFileIfExists(filePath) === expected;
 }
 
 function sleep(ms: number): Promise<void> {

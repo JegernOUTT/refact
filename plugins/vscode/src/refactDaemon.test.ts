@@ -7,6 +7,8 @@ import * as os from "os";
 import * as path from "path";
 import {
     DAEMON_OPEN_PROJECT_TIMEOUT_MS,
+    DAEMON_POLL_TIMEOUT_MS,
+    DAEMON_SHUTDOWN_TIMEOUT_MS,
     DEFAULT_BROWSER_HOST,
     browserProjectUrl,
     browserProjectUrlForConfiguredHost,
@@ -31,6 +33,7 @@ import {
     type DaemonStatus,
 } from "./refactDaemon";
 import {
+    INSTALL_LOCK_STALE_MS,
     extractRefactArchive,
     extractRefactVersion,
     refactReleaseAsset,
@@ -114,12 +117,24 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(compareVersions("8.1.0-alpha.2", "8.1.0-alpha.10"), -1);
     assert.strictEqual(compareVersions("8.1.0-alpha.1", "8.1.0-beta.1"), -1);
     assert.strictEqual(compareVersions("8.1.0", "8.1.1"), -1);
-    assert.strictEqual(compareVersions("8.10", "8.2"), -1);
+    assert.strictEqual(compareVersions("8.10", "8.2"), 1);
+    assert.strictEqual(compareVersions("8", "8.0.0"), 0);
+    assert.strictEqual(compareVersions("8.1", "8.1.0"), 0);
+    assert.strictEqual(compareVersions("8.1.1", "8.1"), 1);
+    assert.strictEqual(compareVersions("8.1.0-main-4053-d8e6abb9", "8.1.0"), -1);
+    assert.strictEqual(compareVersions("8.1.0", "8.1.0-main-4053-d8e6abb9"), 1);
+    assert.strictEqual(compareVersions("refact 8.1.0", "8.1.0"), 0);
+    assert.strictEqual(compareVersions("8.1.x", "8.1"), 0);
+    assert.strictEqual(compareVersions("unparseable", "0.0.0"), 0);
     assert.strictEqual(compareVersions("v8.1.0+build.1", "8.1.0"), 0);
     assert.strictEqual(isPluginNewerThanDaemon("8.2.0", "8.1.9"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-alpha.1"), true);
+    assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0-main-4053-d8e6abb9"), true);
     assert.strictEqual(isPluginNewerThanDaemon("8.1.0", "8.1.0"), false);
-    assert.strictEqual(DAEMON_OPEN_PROJECT_TIMEOUT_MS >= 130000, true);
+    assert.strictEqual(DAEMON_POLL_TIMEOUT_MS, 30000);
+    assert.strictEqual(DAEMON_SHUTDOWN_TIMEOUT_MS, 15000);
+    assert.strictEqual(DAEMON_OPEN_PROJECT_TIMEOUT_MS, 130000);
+    assert.strictEqual(INSTALL_LOCK_STALE_MS, 900000);
 
     runBackendStatusTests();
     runLaunchRustLifecycleTests();
@@ -502,6 +517,48 @@ async function runStandaloneResolutionTests() {
         assert.strictEqual(await lockedResolve, lockRefact);
         assert.strictEqual(lockDownloads, 0);
         assert.strictEqual(lockVersionReads >= 3, true);
+
+        const staleLockHomeDir = path.join(root, "stale-lock-home");
+        const staleLockCacheDir = path.join(root, "stale-lock-cache");
+        const staleLockRefact = path.join(staleLockHomeDir, ".refact", "bin", binaryName);
+        const staleLockPath = path.join(path.dirname(staleLockRefact), ".install.lock");
+        const staleLockSnapshots: string[] = [];
+        const staleDownloads: string[] = [];
+        fs.mkdirSync(path.dirname(staleLockRefact), { recursive: true });
+        fs.writeFileSync(staleLockPath, "pid=9223372036854775807\ntimestamp_ms=1000\n");
+        const staleResolved = await resolveRefactBinary({
+            minVersion: "8.1.0",
+            pinnedVersion: "8.1.0",
+            cacheDir: staleLockCacheDir,
+            pathEnv: "",
+            homeDir: staleLockHomeDir,
+            platform: "linux",
+            arch: "x64",
+            installLockRetryMs: 5,
+            installLockTimeoutMs: 500,
+            installLockStaleMs: 100,
+            installLockNowMs: () => 10000,
+            runVersion: async binPath => fs.existsSync(binPath) ? fs.readFileSync(binPath, "utf8") : undefined,
+            downloadFile: async (url, destPath) => {
+                staleDownloads.push(url);
+                staleLockSnapshots.push(fs.readFileSync(staleLockPath, "utf8"));
+                fs.mkdirSync(path.dirname(destPath), { recursive: true });
+                if (url.endsWith(".sha256")) {
+                    fs.writeFileSync(destPath, `${sha256FileSync(path.join(path.dirname(destPath), "refact-8.1.0-x86_64-unknown-linux-gnu.tar.gz"))}  archive\n`);
+                } else {
+                    fs.writeFileSync(destPath, "archive");
+                }
+            },
+            extractArchive: async (_archivePath, destDir) => {
+                fs.writeFileSync(path.join(destDir, "refact"), "refact 8.1.0");
+            },
+            chmod: async () => undefined,
+        });
+        assert.strictEqual(staleResolved, staleLockRefact);
+        assert.strictEqual(fs.readFileSync(staleLockRefact, "utf8"), "refact 8.1.0");
+        assert.strictEqual(staleDownloads.length, 2);
+        assert.strictEqual(staleLockSnapshots.some(text => text.includes(`pid=${process.pid}`) && text.includes("timestamp_ms=10000")), true);
+        assert.strictEqual(fs.existsSync(staleLockPath), false);
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }

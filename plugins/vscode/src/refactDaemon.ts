@@ -7,10 +7,10 @@ import * as path from "path";
 
 export const DEFAULT_DAEMON_PORT = 8488;
 export const DEFAULT_BROWSER_HOST = "127.0.0.1";
-export const DAEMON_POLL_TIMEOUT_MS = 15000;
-export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10000;
+export const DAEMON_POLL_TIMEOUT_MS = 30000;
+export const DAEMON_SHUTDOWN_TIMEOUT_MS = 15000;
 export const DAEMON_SHUTDOWN_POLL_MS = 200;
-export const DAEMON_OPEN_PROJECT_TIMEOUT_MS = 135000;
+export const DAEMON_OPEN_PROJECT_TIMEOUT_MS = 130000;
 
 const DAEMON_LOG_TAIL_BYTES = 12000;
 
@@ -294,9 +294,6 @@ export async function projectProxyFetchWithRetry<T>(
 export function compareVersions(left: string | undefined, right: string | undefined): number {
     const leftParts = parseVersion(left);
     const rightParts = parseVersion(right);
-    if (!leftParts || !rightParts) {
-        return compareStrings(left ?? "", right ?? "");
-    }
     for (let i = 0; i < 3; i++) {
         const diff = leftParts.core[i] - rightParts.core[i];
         if (diff !== 0) {
@@ -318,28 +315,26 @@ type ParsedVersion = {
     prerelease?: string[];
 };
 
-function parseVersion(version: string | undefined): ParsedVersion | undefined {
+function parseVersion(version: string | undefined): ParsedVersion {
     const trimmed = (version ?? "").trim();
     const withoutPrefix = trimmed.startsWith("v") ? trimmed.slice(1) : trimmed;
-    const withoutBuild = withoutPrefix.split("+", 1)[0];
-    const dashIndex = withoutBuild.indexOf("-");
-    const core = dashIndex >= 0 ? withoutBuild.slice(0, dashIndex) : withoutBuild;
-    const prerelease = dashIndex >= 0 ? withoutBuild.slice(dashIndex + 1) : undefined;
-    const coreParts = core.split(".");
-    if (coreParts.length !== 3 || coreParts.some(part => !/^\d+$/.test(part))) {
-        return undefined;
-    }
-    if (prerelease === "") {
-        return undefined;
+    const match = /(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?/.exec(withoutPrefix);
+    if (!match) {
+        return { core: [0, 0, 0] };
     }
     return {
-        core: [toVersionNumber(coreParts[0]), toVersionNumber(coreParts[1]), toVersionNumber(coreParts[2])],
-        prerelease: prerelease?.split("."),
+        core: [toVersionNumber(match[1]), toVersionNumber(match[2]), toVersionNumber(match[3])],
+        prerelease: parsePrerelease(match[4]),
     };
 }
 
-function toVersionNumber(part: string): number {
-    return Number.parseInt(part, 10);
+function toVersionNumber(part: string | undefined): number {
+    return Number.parseInt(part ?? "0", 10) || 0;
+}
+
+function parsePrerelease(prerelease: string | undefined): string[] | undefined {
+    const parts = prerelease?.split(".").filter(part => part.length > 0);
+    return parts && parts.length > 0 ? parts : undefined;
 }
 
 function comparePrerelease(left: string[] | undefined, right: string[] | undefined): number {
@@ -383,10 +378,6 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
     if (rightNumeric) {
         return 1;
     }
-    return left === right ? 0 : left > right ? 1 : -1;
-}
-
-function compareStrings(left: string, right: string): number {
     return left === right ? 0 : left > right ? 1 : -1;
 }
 
