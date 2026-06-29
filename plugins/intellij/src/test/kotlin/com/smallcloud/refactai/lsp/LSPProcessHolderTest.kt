@@ -806,6 +806,102 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
+    fun testSingleFailedHealthProbeKeepsBackendReady() {
+        val root = createTempDir().canonicalPath
+        val publisher = RecordingStatusPublisher()
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root, publisher), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+            publisher.statuses.clear()
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(0, fake.detachProjectCalls.get())
+            assertFalse(publisher.statuses.contains(LSPBackendConnectionStatus.FAILED))
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(1, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testSuccessfulHealthProbeResetsFailedProbeCounter() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(0, fake.detachProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testSettingsChangeResetsFailedProbeCounter() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.settingsChanged("health-counter-reset")
+            waitForLifecycle(holder)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(0, fake.detachProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
     fun testFailedHealthProbeClearsStateAndBacksOff() {
         val root = createTempDir().canonicalPath
         val fake = FakeDaemonClient()
@@ -817,6 +913,13 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
 
             holder.blockEnsureStartedBlocking = true
             holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+
             holder.runHealthCheckOnceForTest()
             assertTrue(holder.ensureStartedBlockingEntered.await(2, TimeUnit.SECONDS))
 

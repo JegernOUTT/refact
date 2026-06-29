@@ -54,6 +54,8 @@ private data class BinaryResolutionFailure(
     val retryAfterMs: Long,
 )
 
+private const val WORKER_HEALTH_FAILURE_THRESHOLD = 3
+
 open class LSPProcessHolder(val project: Project) : Disposable {
     @Volatile
     private var isDisposed = false
@@ -85,6 +87,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     private var healthBackoffMs = 1_000L
     @Volatile
     private var binaryResolutionFailure: BinaryResolutionFailure? = null
+    @Volatile
+    private var consecutiveWorkerHealthFailures = 0
     @Volatile
     private var backendConnectionStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING
     @Volatile
@@ -175,6 +179,15 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         binaryResolutionFailure = null
     }
 
+    private fun resetWorkerHealthFailures() {
+        consecutiveWorkerHealthFailures = 0
+    }
+
+    private fun workerHealthFailureThresholdReached(): Boolean {
+        consecutiveWorkerHealthFailures += 1
+        return consecutiveWorkerHealthFailures >= WORKER_HEALTH_FAILURE_THRESHOLD
+    }
+
     private fun requestLifecycleWork(reason: String, restart: Boolean) {
         try {
             if (isDisposed || project.isDisposed) {
@@ -184,6 +197,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
             if (restart) {
                 clearBinaryResolutionFailure()
+                resetWorkerHealthFailures()
                 setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
             } else if (retrySuppressedByBinaryResolutionFailure()) {
                 return
@@ -376,13 +390,18 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             return
         }
         if (!probeAttachedWorker()) {
-            logger.warn("LSP health probe failed; restarting attached worker")
+            if (!workerHealthFailureThresholdReached()) {
+                logger.warn("LSP health probe failed; waiting for consecutive failure threshold")
+                return
+            }
+            logger.warn("LSP health probe failed repeatedly; restarting attached worker")
             clearAttachedProjectState(preserveConfig = true, detach = true)
             setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
             ensureStartedAsync("health-check-worker-unreachable")
             deferHealthRetry()
             return
         }
+        resetWorkerHealthFailures()
         resetHealthBackoff()
     }
 
@@ -472,6 +491,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             initializeAttachedProject()
             setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
             clearBinaryResolutionFailure()
+            resetWorkerHealthFailures()
             resetHealthBackoff()
             logger.info("LSP daemon attach finished in ${System.currentTimeMillis() - startedAt}ms (working=$isWorking)")
         } catch (e: Exception) {
@@ -570,6 +590,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             initializeAttachedProject()
             setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
             clearBinaryResolutionFailure()
+            resetWorkerHealthFailures()
             resetHealthBackoff()
             true
         } catch (e: Exception) {
@@ -710,6 +731,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
     protected fun resetBinaryResolutionFailureForSettingsChange() {
         clearBinaryResolutionFailure()
+        resetWorkerHealthFailures()
         nextHealthCheckAtMs = 0L
         healthBackoffMs = 1_000L
     }
