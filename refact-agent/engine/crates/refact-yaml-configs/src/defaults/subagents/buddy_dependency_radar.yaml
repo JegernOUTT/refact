@@ -27,7 +27,12 @@ messages:
     Steps:
     1. Review the dependency evidence and relevant manifests.
     2. Search current package context only for likely important findings.
-    3. Open an issue for clear dependency work that should not be forgotten.
+    3. For clear dependency work that should not be forgotten, call buddy_open_issue with a
+       `title`, a `body`, the `source_file` (the manifest or lockfile path), and a short
+       `error` summary — the `source_file` is required so the issue gate has reproduction
+       context. Issue filing also needs a configured tracker and the user's auto issue
+       creation setting; if it is blocked, fall back to a runtime event or memory instead
+       of retrying.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |

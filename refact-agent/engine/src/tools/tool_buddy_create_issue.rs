@@ -61,6 +61,14 @@ impl Tool for ToolBuddyCreateIssue {
                         "type": "string",
                         "description": "Optional diagnostic error text when no diagnostic index is available."
                     },
+                    "source_file": {
+                        "type": "string",
+                        "description": "Optional source file the finding/error relates to. Provides reproduction context when no stored diagnostic is referenced."
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Optional tool name the finding/error relates to. Provides reproduction context when no stored diagnostic is referenced."
+                    },
                     "labels": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -125,6 +133,18 @@ impl Tool for ToolBuddyCreateIssue {
             .get("collected_at")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let source_file = args
+            .get("source_file")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|s| s.to_string());
+        let tool_name = args
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|s| s.to_string());
         let labels = args
             .get("labels")
             .and_then(|v| v.as_array())
@@ -138,35 +158,26 @@ impl Tool for ToolBuddyCreateIssue {
         let gcx = ccx.lock().await.app.gcx.clone();
         let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
-        let has_mcp = crate::buddy::issues::has_github_mcp(app.clone()).await;
-        let result = if has_mcp {
-            let context = crate::buddy::issues::resolve_issue_context(
-                app.clone(),
-                diagnostic_index,
-                diagnostic_id,
-                collected_at,
-                error,
-            )
-            .await?;
-            crate::buddy::issues::create_issue_via_mcp(
-                app.clone(),
-                &context,
-                title,
-                body,
-                labels,
-                false,
-            )
-            .await
-        } else {
-            crate::buddy::issues::create_issue_via_native(
-                app.clone(),
-                diagnostic_index,
-                diagnostic_id,
-                collected_at,
-                error,
-            )
-            .await
-        }?;
+        let context = crate::buddy::issues::resolve_or_synthesize_context(
+            app.clone(),
+            diagnostic_index,
+            diagnostic_id,
+            collected_at,
+            error,
+            source_file,
+            tool_name,
+            title,
+            body,
+        )
+        .await?;
+        let result = crate::buddy::issues::create_confirmed_issue(
+            app.clone(),
+            &context,
+            title,
+            body,
+            labels,
+        )
+        .await?;
 
         let output = json!({
             "url": result.url,

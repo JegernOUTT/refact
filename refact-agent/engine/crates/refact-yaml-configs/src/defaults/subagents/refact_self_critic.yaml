@@ -1,16 +1,16 @@
 schema_version: 2
 id: refact_self_critic
-title: Refact Self-Critic
-description: Periodic critique of Refact engine prompts and recent trajectories
+title: Self-Critic
+description: Periodic critique of engine prompts and recent trajectories
 expose_as_tool: false
 has_code: false
 subchat:
   context_mode: default
   stateful: false
-  max_steps: 8
+  max_steps: 10
   model_type: buddy
   n_ctx: 32000
-  max_new_tokens: 1500
+  max_new_tokens: 1800
   temperature: 0.4
   tokens_for_rag: 0
   autonomous_no_confirm: true
@@ -18,13 +18,33 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You are running a self-critique pass on Refact itself. Use refact_engine_clone (if needed) then refact_engine_cat to read system prompts under yaml_configs/defaults/, and search_pattern across .refact/trajectories/ for failure patterns.
-    1. Identify 1-3 concrete improvements (prompt tightening, tool clarification, edge-case missing).
-    2. Use buddy_memory_create with kind=insight, source_id=refact_self_critic:<topic> to persist each finding.
-    3. Optionally buddy_speak with intent=insight to surface the most useful one.
-    4. End with buddy_runtime_event summarizing what you noticed.
+    You run a self-critique pass over the engine's own subagent and mode prompts.
+    The engine mirror is the whole monorepo; every refact_engine_* path is RELATIVE to
+    the monorepo root, never absolute. The prompt YAMLs live under
+    refact-agent/engine/crates/refact-yaml-configs/src/defaults/ (subagents/, modes/,
+    code_lens/, toolbox_commands/). There is no .refact/trajectories/ directory — do not
+    search for one.
+
+    Follow this exact recipe; do not improvise paths or scopes:
+    1. refact_engine_clone (only if a later read fails with "mirror not found").
+    2. refact_engine_search with scope
+       "refact-agent/engine/crates/refact-yaml-configs/src/defaults" to list prompt files,
+       e.g. pattern "^id:|^system_prompt:|^tools:".
+    3. refact_engine_cat on a specific prompt file using its mirror-relative path, e.g.
+       "refact-agent/engine/crates/refact-yaml-configs/src/defaults/subagents/refact_self_critic.yaml".
+       The local workspace also contains this source, so cat/tree/regex_search on the same
+       relative path work too and are a fine fallback.
+    4. Identify 1-3 concrete improvements (prompt tightening, tool clarification, missing
+       edge case). For each finding name: file:line | observation | proposed change |
+       expected impact.
+    5. buddy_memory_create with kind=insight, source_id=refact_self_critic:<topic> for each
+       finding. Before creating, buddy_memory_search the same topic; if an equivalent
+       insight already exists and nothing changed, skip it instead of duplicating.
+    6. Optionally buddy_speak with intent=insight to surface the single most useful finding.
+    7. End with buddy_runtime_event summarizing what you noticed. If there is nothing new to
+       add, call buddy_runtime_event with "noted: nothing new today" and exit.
   user_template: |
-    Recent trajectories root: .refact/trajectories/
-    Engine source mirror: clone via refact_engine_clone first if needed
+    Engine source mirror: clone via refact_engine_clone only if a read fails.
+    Prompt files root (mirror-relative): refact-agent/engine/crates/refact-yaml-configs/src/defaults/
     Workflow: {{workflow_id}}
-tools: [refact_engine_clone, refact_engine_cat, refact_engine_search, search_pattern, buddy_memory_create, buddy_runtime_event, buddy_speak]
+tools: [refact_engine_clone, refact_engine_cat, refact_engine_search, cat, tree, regex_search, buddy_memory_search, buddy_memory_create, buddy_runtime_event, buddy_speak]

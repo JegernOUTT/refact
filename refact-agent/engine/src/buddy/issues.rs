@@ -542,27 +542,69 @@ async fn issue_control_snapshot(
     ))
 }
 
-pub async fn create_issue_via_native(
+/// Resolve a stored diagnostic by reference, or synthesize a `DiagnosticContext` from an
+/// agent-supplied finding. A diagnostic reference (`diagnostic_index`/`diagnostic_id`/
+/// `collected_at`) takes precedence. Otherwise the finding must carry an `error` and/or a
+/// `source_file`/`tool_name` so the synthesized context can satisfy the reproduction-context
+/// gate; `title`/`body` are used as the message fallback when no `error` is given.
+pub async fn resolve_or_synthesize_context(
     gcx: AppState,
     diagnostic_index: Option<usize>,
     diagnostic_id: Option<String>,
     collected_at: Option<String>,
     error: Option<String>,
+    source_file: Option<String>,
+    tool_name: Option<String>,
+    title: &str,
+    body: &str,
+) -> Result<DiagnosticContext, String> {
+    if diagnostic_index.is_some() || diagnostic_id.is_some() || collected_at.is_some() {
+        return resolve_issue_context(gcx, diagnostic_index, diagnostic_id, collected_at, error)
+            .await;
+    }
+
+    let has_error = error
+        .as_deref()
+        .map(|e| !e.trim().is_empty())
+        .unwrap_or(false);
+    if !has_error && source_file.is_none() && tool_name.is_none() {
+        return Err(
+            "provide a diagnostic reference (diagnostic_id, diagnostic_index, or collected_at), \
+             or an `error` with a `source_file` or `tool_name`"
+                .to_string(),
+        );
+    }
+
+    let message = match error {
+        Some(err) if !err.trim().is_empty() => err,
+        _ => format!("{title}\n\n{body}"),
+    };
+    let mut ctx = crate::buddy::diagnostics::collect_diagnostics_from_error(&message);
+    ctx.source_file = source_file;
+    ctx.tool_name = tool_name;
+    Ok(ctx)
+}
+
+/// File a confirmed agent issue from a resolved/synthesized context, preferring GitHub MCP
+/// and falling back to the native gh/glab path. The standard integration, auto-creation,
+/// rate-limit, dedup, and redaction gates still apply.
+pub async fn create_confirmed_issue(
+    gcx: AppState,
+    context: &DiagnosticContext,
+    title: &str,
+    body: &str,
+    labels: Vec<String>,
 ) -> Result<BuddyIssueCreateResult, String> {
-    let ctx = resolve_issue_context(
-        gcx.clone(),
-        diagnostic_index,
-        diagnostic_id,
-        collected_at,
-        error,
-    )
-    .await?;
+    if has_github_mcp(gcx.clone()).await {
+        return create_issue_via_mcp(gcx, context, title, body, labels, false).await;
+    }
 
     let (auto_enabled, last_issue_at, recent_errors) = issue_control_snapshot(gcx.clone()).await?;
-
     let (url, _activity) = create_issue(
         gcx.clone(),
-        &ctx,
+        context,
+        Some(title),
+        Some(body),
         auto_enabled,
         false,
         last_issue_at,
@@ -752,6 +794,8 @@ pub(crate) async fn record_issue_success(
 pub async fn create_issue(
     gcx: AppState,
     context: &DiagnosticContext,
+    raw_title: Option<&str>,
+    raw_body: Option<&str>,
     auto_creation_enabled: bool,
     manual: bool,
     last_issue_at: Option<std::time::Instant>,
@@ -770,8 +814,8 @@ pub async fn create_issue(
 
     let prepared = prepare_issue_content(
         context,
-        None,
-        None,
+        raw_title,
+        raw_body,
         provider.is_some(),
         auto_creation_enabled,
         manual,

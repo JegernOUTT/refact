@@ -1133,6 +1133,8 @@ pub async fn handle_v1_buddy_issues_create(
     let result = crate::buddy::issues::create_issue(
         app.clone(),
         &ctx,
+        None,
+        None,
         auto_enabled,
         manual,
         last_issue_at,

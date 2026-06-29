@@ -434,8 +434,8 @@ impl Tool for ToolBuddyUserPrefUpsert {
             json!({
                 "type": "object",
                 "properties": {
-                    "statement": {"type": "string", "maxLength": 240},
-                    "evidence": {"type": "string", "maxLength": 240},
+                    "statement": {"type": "string", "maxLength": 600},
+                    "evidence": {"type": "string", "maxLength": 600},
                     "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
                 },
                 "required": ["statement", "evidence", "confidence"],
@@ -450,8 +450,8 @@ impl Tool for ToolBuddyUserPrefUpsert {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let statement = limited_text_arg(args, "statement", 240)?;
-        let evidence = limited_text_arg(args, "evidence", 240)?;
+        let statement = limited_text_arg(args, "statement", 600)?;
+        let evidence = limited_text_arg(args, "evidence", 600)?;
         let confidence = confidence_arg(args)?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);

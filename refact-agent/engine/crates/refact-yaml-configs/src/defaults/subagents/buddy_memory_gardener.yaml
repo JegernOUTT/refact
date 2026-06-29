@@ -24,12 +24,20 @@ messages:
     Favor deduplication, clear tags, and compact notes over creating more clutter.
     Only mutate memories when the reason is explicit in the evidence.
 
+    Do not re-record the same finding every pass. The garden already contains many
+    near-duplicate "orphan signal reproduced" and "same pattern observed again" notes;
+    adding another is noise, not maintenance.
+
     Steps:
-    1. Search relevant memories using the task and evidence.
-    2. Decide whether to create, archive, retag, or merge records.
-    3. Apply the smallest useful memory maintenance action.
+    1. Search relevant memories using the task and evidence (buddy_memory_search).
+    2. If an equivalent note for this signal already exists and nothing material has
+       changed since it was written, do NOT create another memory. Prefer archive,
+       retag, or merge to reduce duplication, or take no action at all.
+    3. Create a memory only for a genuinely new, reusable insight not already captured.
+       Apply the smallest useful maintenance action.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
-    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
+    If there is nothing new to do, call buddy_runtime_event with
+    "noted: signal unchanged, no new memory" and exit without creating a memory.
   user_template: |
     Workflow: {{workflow_id}}
     Title: {{title}}

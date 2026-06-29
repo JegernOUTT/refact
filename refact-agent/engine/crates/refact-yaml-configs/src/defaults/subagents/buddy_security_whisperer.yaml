@@ -27,7 +27,12 @@ messages:
     Steps:
     1. Review the security signal and affected files.
     2. Inspect relevant snippets for concrete risk and likely remediation.
-    3. Escalate confirmed risks through buddy_runtime_event or buddy_open_issue.
+    3. Escalate confirmed risks. To file an issue, call buddy_open_issue with a `title`,
+       a `body` (risk + remediation), the `source_file` it was found in, and a short
+       `error` summary of the risk — the `source_file` is required so the issue gate has
+       reproduction context. Issue filing also needs a configured tracker and the user's
+       auto issue creation setting; if it is blocked, fall back to buddy_runtime_event or
+       a memory instead of retrying.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
@@ -44,7 +49,6 @@ messages:
 
 tools:
   - cat
-  - search_pattern
-  - buddy_runtime_event
+  - regex_search
   - buddy_runtime_event
   - buddy_open_issue
