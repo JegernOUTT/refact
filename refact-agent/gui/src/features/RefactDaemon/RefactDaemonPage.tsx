@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { ArrowLeft, RefreshCw, Server } from "lucide-react";
+import type { ReactNode } from "react";
+import { ArrowLeft, Lock, RefreshCw, Server } from "lucide-react";
 
 import {
   Badge,
@@ -36,6 +37,19 @@ function isFiniteNumber(value: number | null | undefined): value is number {
 
 function formatNullableNumber(value: number | null | undefined): string {
   return isFiniteNumber(value) ? String(value) : "—";
+}
+
+function cronPendingEntries(
+  cronPending: Record<string, number>,
+): [string, number][] {
+  return Object.entries(cronPending).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+}
+
+function formatCronPendingCount(cronPending: Record<string, number>): string {
+  const count = cronPendingEntries(cronPending).length;
+  return `${count} pending`;
 }
 
 function formatUptime(totalSeconds: number): string {
@@ -122,12 +136,35 @@ function ErrorValue({ value }: { value: string | null }) {
   );
 }
 
-function StatItem({ label, value }: { label: string; value: string }) {
+function StatItem({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className={styles.statItem}>
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>
+  );
+}
+
+function CronPendingValue({
+  cronPending,
+}: {
+  cronPending: Record<string, number>;
+}) {
+  const entries = cronPendingEntries(cronPending);
+  if (entries.length === 0) return "0 pending";
+
+  return (
+    <span className={styles.cronPendingValue}>
+      <span>{formatCronPendingCount(cronPending)}</span>
+      <span className={styles.cronPendingList}>
+        {entries.map(([slug, pendingMs]) => (
+          <span className={styles.cronPendingItem} key={slug}>
+            <span>{slug}</span>
+            <span>{pendingMs} ms</span>
+          </span>
+        ))}
+      </span>
+    </span>
   );
 }
 
@@ -220,6 +257,16 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
 
   const status = data?.status;
   const workers = data?.workers ?? [];
+  const workersHiddenByAuth = data?.workersAccess === "auth_hidden";
+  const workersEmptyMessage = workersHiddenByAuth ? (
+    <EmptyState
+      icon={Lock}
+      title="Workers hidden — daemon auth enabled"
+      description="The daemon status endpoint is public, but this daemon requires its auth token before it exposes worker details."
+    />
+  ) : (
+    "No workers reported by daemon."
+  );
 
   return (
     <main className={styles.page}>
@@ -303,7 +350,7 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
               />
               <StatItem
                 label="Cron pending"
-                value={formatNullableNumber(status.cron_pending)}
+                value={<CronPendingValue cronPending={status.cron_pending} />}
               />
               <StatItem label="Base URL" value={daemonBaseUrl} />
             </dl>
@@ -315,8 +362,13 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
                 <h2>Workers</h2>
                 <p>Per-project daemon workers currently known to the daemon.</p>
               </div>
-              <Badge tone="muted" variant="soft">
-                {workers.length} shown
+              <Badge
+                tone={workersHiddenByAuth ? "warning" : "muted"}
+                variant="soft"
+              >
+                {workersHiddenByAuth
+                  ? "Hidden by auth"
+                  : `${workers.length} shown`}
               </Badge>
             </div>
             <DataTable
@@ -326,7 +378,7 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
                 `${worker.project_id || worker.slug || "worker"}-${index}`
               }
               caption="Daemon workers"
-              emptyMessage="No workers reported by daemon."
+              emptyMessage={workersEmptyMessage}
               enableSorting
               wide
             />

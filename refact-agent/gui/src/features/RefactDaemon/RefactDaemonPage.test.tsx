@@ -12,7 +12,10 @@ const status = {
   started_at_ms: 1_700_000_000_000,
   uptime_secs: 3_906,
   workers: 1,
-  cron_pending: 2,
+  cron_pending: {
+    hourly: 250,
+    nightly: 1_000,
+  },
 };
 
 const workers = [
@@ -48,7 +51,7 @@ const PRELOADED_STATE = {
 };
 
 describe("RefactDaemonPage", () => {
-  it("renders daemon status and workers from the daemon API", async () => {
+  it("renders daemon status, cron pending entries, and workers from the daemon API", async () => {
     server.use(
       http.get("https://daemon.example.test/daemon/v1/status", () =>
         HttpResponse.json(status),
@@ -71,6 +74,11 @@ describe("RefactDaemonPage", () => {
     expect(
       screen.getAllByText("https://daemon.example.test")[0],
     ).toBeInTheDocument();
+    expect(screen.getByText("2 pending")).toBeInTheDocument();
+    expect(screen.getByText("hourly")).toBeInTheDocument();
+    expect(screen.getByText("250 ms")).toBeInTheDocument();
+    expect(screen.getByText("nightly")).toBeInTheDocument();
+    expect(screen.getByText("1000 ms")).toBeInTheDocument();
     expect(screen.getAllByText("refact-main")[0]).toBeInTheDocument();
     expect(screen.getAllByText("/workspace/refact")[0]).toBeInTheDocument();
     expect(screen.getAllByText("running")[0]).toBeInTheDocument();
@@ -78,5 +86,29 @@ describe("RefactDaemonPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows auth-hidden workers separately from an empty worker list", async () => {
+    server.use(
+      http.get("https://daemon.example.test/daemon/v1/status", () =>
+        HttpResponse.json({ ...status, cron_pending: {} }),
+      ),
+      http.get("https://daemon.example.test/daemon/v1/workers", () =>
+        HttpResponse.json({ detail: "unauthorized" }, { status: 401 }),
+      ),
+    );
+
+    render(<RefactDaemonPage backFromDaemon={vi.fn()} />, {
+      preloadedState: PRELOADED_STATE,
+    });
+
+    expect(
+      await screen.findAllByText("Workers hidden — daemon auth enabled"),
+    ).not.toHaveLength(0);
+    expect(screen.getByText("Hidden by auth")).toBeInTheDocument();
+    expect(screen.getByText("0 pending")).toBeInTheDocument();
+    expect(
+      screen.queryByText("No workers reported by daemon."),
+    ).not.toBeInTheDocument();
   });
 });

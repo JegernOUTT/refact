@@ -12,7 +12,9 @@ const status = {
   started_at_ms: 1_700_000_000_000,
   uptime_secs: 120,
   workers: 1,
-  cron_pending: 0,
+  cron_pending: {
+    nightly: 1_000,
+  },
 };
 
 const workers = [
@@ -38,7 +40,7 @@ const workers = [
 ];
 
 describe("daemonApi", () => {
-  it("derives daemon root from lspUrl origin and sends apiKey", async () => {
+  it("derives daemon root from lspUrl origin and omits the model apiKey", async () => {
     const requested: { url: string; authorization: string | null }[] = [];
     server.use(
       http.get(
@@ -78,17 +80,16 @@ describe("daemonApi", () => {
     );
 
     expect(result.data?.workers).toHaveLength(1);
+    expect(result.data?.workersAccess).toBe("visible");
+    expect(result.data?.status.cron_pending).toEqual({ nightly: 1_000 });
     expect(requested.map((entry) => entry.url)).toEqual([
       "https://daemon.example.test/daemon/v1/status",
       "https://daemon.example.test/daemon/v1/workers",
     ]);
-    expect(requested.map((entry) => entry.authorization)).toEqual([
-      "Bearer secret-token",
-      "Bearer secret-token",
-    ]);
+    expect(requested.map((entry) => entry.authorization)).toEqual([null, null]);
   });
 
-  it("falls back to lspPort and tolerates workers authorization failure", async () => {
+  it("falls back to lspPort and reports auth-hidden workers", async () => {
     const requested: string[] = [];
     server.use(
       http.get("http://127.0.0.1:9494/daemon/v1/status", ({ request }) => {
@@ -114,11 +115,45 @@ describe("daemonApi", () => {
       daemonApi.endpoints.getDaemonInfo.initiate(undefined),
     );
 
-    expect(result.data).toEqual({ status, workers: [] });
+    expect(result.data).toEqual({
+      status,
+      workers: [],
+      workersAccess: "auth_hidden",
+    });
     expect(requested).toEqual([
       "http://127.0.0.1:9494/daemon/v1/status",
       "http://127.0.0.1:9494/daemon/v1/workers",
     ]);
+  });
+
+  it("distinguishes a genuine empty worker list from auth-hidden workers", async () => {
+    server.use(
+      http.get("http://127.0.0.1:9494/daemon/v1/status", () =>
+        HttpResponse.json({ ...status, workers: 0 }),
+      ),
+      http.get("http://127.0.0.1:9494/daemon/v1/workers", () =>
+        HttpResponse.json([]),
+      ),
+    );
+
+    const store = setUpStore({
+      config: {
+        apiKey: null,
+        host: "vscode",
+        lspPort: 9494,
+        themeProps: {},
+      },
+    });
+
+    const result = await store.dispatch(
+      daemonApi.endpoints.getDaemonInfo.initiate(undefined),
+    );
+
+    expect(result.data).toEqual({
+      status: { ...status, workers: 0 },
+      workers: [],
+      workersAccess: "visible",
+    });
   });
 });
 

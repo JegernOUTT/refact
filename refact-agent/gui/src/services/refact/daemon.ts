@@ -1,7 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 
-import type { RootState } from "../../app/store";
 import type { EngineApiConfig } from "./apiUrl";
 
 const DEFAULT_DAEMON_PORT = 8488;
@@ -13,7 +12,7 @@ export type DaemonStatus = {
   started_at_ms: number;
   uptime_secs: number;
   workers: number;
-  cron_pending: number;
+  cron_pending: Record<string, number>;
 };
 
 export type DaemonWorker = {
@@ -36,9 +35,12 @@ export type DaemonWorker = {
   last_error: string | null;
 };
 
+export type DaemonWorkersAccess = "visible" | "auth_hidden";
+
 export type DaemonInfo = {
   status: DaemonStatus;
   workers: DaemonWorker[];
+  workersAccess: DaemonWorkersAccess;
 };
 
 function validPort(port: number | undefined): port is number {
@@ -66,8 +68,7 @@ export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
   return `http://127.0.0.1:${port}`;
 }
 
-function isWorkersOptionalError(error: FetchBaseQueryError): boolean {
-  if (error.status === 401) return true;
+function isWorkersEmptyBody(error: FetchBaseQueryError): boolean {
   if (error.status !== "PARSING_ERROR") return false;
   return error.originalStatus === 200 || error.originalStatus === 204;
 }
@@ -75,22 +76,13 @@ function isWorkersOptionalError(error: FetchBaseQueryError): boolean {
 export const daemonApi = createApi({
   reducerPath: "daemon",
   tagTypes: ["Daemon"],
-  baseQuery: fetchBaseQuery({
-    prepareHeaders: (headers, { getState }) => {
-      const state = getState() as RootState;
-      const apiKey = state.config.apiKey;
-      if (apiKey) {
-        headers.set("Authorization", `Bearer ${apiKey}`);
-      }
-      return headers;
-    },
-  }),
+  baseQuery: fetchBaseQuery(),
   endpoints: (builder) => ({
     getDaemonInfo: builder.query<DaemonInfo, undefined>({
       keepUnusedDataFor: 10,
       providesTags: ["Daemon"],
       queryFn: async (_args, api, _opts, baseQuery) => {
-        const state = api.getState() as RootState;
+        const state = api.getState() as { config: EngineApiConfig };
         const root = resolveDaemonBaseUrl(state.config);
         const statusResult = await baseQuery({
           url: `${root}/daemon/v1/status`,
@@ -104,12 +96,25 @@ export const daemonApi = createApi({
           url: `${root}/daemon/v1/workers`,
         });
 
+        const status = statusResult.data as DaemonStatus;
+
         if (workersResult.error) {
-          if (isWorkersOptionalError(workersResult.error)) {
+          if (workersResult.error.status === 401) {
             return {
               data: {
-                status: statusResult.data as DaemonStatus,
+                status,
                 workers: [],
+                workersAccess: "auth_hidden",
+              },
+            };
+          }
+
+          if (isWorkersEmptyBody(workersResult.error)) {
+            return {
+              data: {
+                status,
+                workers: [],
+                workersAccess: "visible",
               },
             };
           }
@@ -119,10 +124,11 @@ export const daemonApi = createApi({
 
         return {
           data: {
-            status: statusResult.data as DaemonStatus,
+            status,
             workers: Array.isArray(workersResult.data)
               ? (workersResult.data as DaemonWorker[])
               : [],
+            workersAccess: "visible",
           },
         };
       },
