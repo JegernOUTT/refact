@@ -32,6 +32,7 @@ import {
   browserApi,
   worktreesApi,
 } from "../services/refact";
+import { daemonApi } from "../services/refact/daemon";
 import { chatModesApi } from "../services/refact/chatModes";
 import { customizationApi } from "../services/refact/customization";
 import { projectInformationApi } from "../services/refact/projectInformation";
@@ -119,6 +120,7 @@ const rootReducer = combineSlices(
     [taskDocumentsApi.reducerPath]: taskDocumentsApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
     [worktreesApi.reducerPath]: worktreesApi.reducer,
+    [daemonApi.reducerPath]: daemonApi.reducer,
     [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
     [mcpServerInfoApi.reducerPath]: mcpServerInfoApi.reducer,
     [chatModesApi.reducerPath]: chatModesApi.reducer,
@@ -243,6 +245,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           taskDocumentsApi.middleware,
           browserApi.middleware,
           worktreesApi.middleware,
+          daemonApi.middleware,
           skillsStatusApi.middleware,
           chatModesApi.middleware,
           customizationApi.middleware,

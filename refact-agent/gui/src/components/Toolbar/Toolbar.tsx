@@ -1,5 +1,5 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
-import { CheckSquare, Home, Moon, Plus, Sun } from "lucide-react";
+import { CheckSquare, Home, Moon, Plus, Server, Sun } from "lucide-react";
 import classNames from "classnames";
 import { ComponentProps, useCallback, useMemo } from "react";
 
@@ -207,6 +207,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, openSettings],
   );
 
+  const onOpenRefactDaemon = useCallback(() => {
+    dispatch(push({ name: "refact daemon" }));
+  }, [dispatch]);
+
   const onCreateNewChat = useCallback(() => {
     const currentThread = shouldCleanToolbarChat
       ? (allThreads[toolbarChatId] as
@@ -298,6 +302,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         >
           {engineUrl}
         </a>
+        <ToolbarIconButton
+          label="Refact Daemon"
+          icon={Server}
+          onClick={onOpenRefactDaemon}
+        />
       </div>
 
       <div className={styles.toolbarDivider} />

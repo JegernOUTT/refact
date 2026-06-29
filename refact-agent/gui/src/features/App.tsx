@@ -51,6 +51,7 @@ import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 
 import { StatsDashboard } from "./StatsDashboard";
+import { RefactDaemonPage } from "./RefactDaemon";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
 import { BuddyHome } from "./Buddy/BuddyHome";
@@ -423,7 +424,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         type: "buddy",
       };
     }
-    if (desiredPage.name === "knowledge graph") {
+    if (
+      desiredPage.name === "knowledge graph" ||
+      desiredPage.name === "refact daemon"
+    ) {
       return {
         type: "dashboard",
       };
@@ -605,6 +609,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 tabbed={config.tabbed}
                 host={config.host}
               />
+            )}
+
+            {!pageSwitching && renderedPage.name === "refact daemon" && (
+              <RefactDaemonPage backFromDaemon={goBack} />
             )}
 
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}

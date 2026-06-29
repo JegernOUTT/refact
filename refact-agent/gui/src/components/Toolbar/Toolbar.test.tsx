@@ -243,6 +243,19 @@ describe("Toolbar single workspace tab row", () => {
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
+  it("opens the Refact Daemon page from the connection area", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Refact Daemon" }),
+    );
+
+    expect(view.store.getState().pages.at(-1)).toEqual({
+      name: "refact daemon",
+    });
+  });
+
   it("renders a flex spacer instead of the tab bar when no tabs are open", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
