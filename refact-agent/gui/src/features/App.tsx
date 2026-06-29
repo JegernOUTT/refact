@@ -81,6 +81,8 @@ import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
+import { isPointerDragHost } from "./ChatPanes/pointerDrag";
+import { PointerDragGhost } from "./ChatPanes/PointerDragGhost";
 
 const STARTUP_SPLASH_DEADLINE_MS = 12_000;
 
@@ -618,6 +620,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
           </PageWrapper>
           <ProcessCompletedToasts />
+          {isPointerDragHost(config.host) && <PointerDragGhost />}
         </>
       )}
     </Flex>

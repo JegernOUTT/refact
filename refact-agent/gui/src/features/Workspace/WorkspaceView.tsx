@@ -10,7 +10,15 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
-import { hasTabDragType, readTabDragSurfaceKey } from "../ChatPanes/tabDrag";
+import {
+  hasTabDragType,
+  readTabDragSurfaceKey,
+  surfaceKeyFromTabDragPayload,
+} from "../ChatPanes/tabDrag";
+import {
+  usePointerDragHost,
+  usePointerDropZone,
+} from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
 import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
@@ -149,6 +157,39 @@ export function WorkspaceView() {
     setUnsplitDragActive(false);
   }, []);
 
+  const pointerDragEnabled = usePointerDragHost();
+  const unsplitPointerDrop = usePointerDropZone({
+    enabled: pointerDragEnabled && activeTabCanSplit && Boolean(activeTabId),
+    accepts: useCallback(
+      (payload) => {
+        const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+        return (
+          Boolean(activeTabId) &&
+          draggedSurfaceKey !== null &&
+          isChatSurface(draggedSurfaceKey) &&
+          draggedSurfaceKey !== activeTabId
+        );
+      },
+      [activeTabId],
+    ),
+    onDrop: useCallback(
+      (payload) => {
+        const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+        if (!activeTabId || !draggedSurfaceKey) return;
+        dispatch(
+          splitTab({
+            tabId: activeTabId,
+            dir: "row",
+            surfaceKey: draggedSurfaceKey,
+          }),
+        );
+      },
+      [activeTabId, dispatch],
+    ),
+  });
+
+  const unsplitDropActive = unsplitDragActive || unsplitPointerDrop.isOver;
+
   return (
     <div className={styles.workspaceView}>
       <div
@@ -163,9 +204,10 @@ export function WorkspaceView() {
           <GroupSplitView tabId={activeTabId} />
         ) : (
           <div
+            ref={unsplitPointerDrop.ref}
             className={classNames(
               styles.unsplitSurfaceWrap,
-              unsplitDragActive && styles.unsplitSurfaceDragActive,
+              unsplitDropActive && styles.unsplitSurfaceDragActive,
             )}
             onDragEnter={handleUnsplitDragEnter}
             onDragOver={handleUnsplitDragOver}
@@ -177,7 +219,7 @@ export function WorkspaceView() {
             }
           >
             <SurfacePane surfaceKey={activeTabId} />
-            {unsplitDragActive ? (
+            {unsplitDropActive ? (
               <div
                 className={classNames(styles.unsplitDropOverlay, "rf-enter")}
                 aria-hidden="true"

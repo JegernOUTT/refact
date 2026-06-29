@@ -7,7 +7,9 @@ import {
   PointerEvent,
   WheelEvent,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -34,7 +36,14 @@ import {
   readTabDragData,
   setTabDragData,
   surfaceKeyFromTabDragPayload,
+  type TabDragPayload,
 } from "../ChatPanes/tabDrag";
+import {
+  beginPointerDragGesture,
+  pointerDragController,
+  rectFromElement,
+} from "../ChatPanes/pointerDrag";
+import { usePointerDragHost } from "../ChatPanes/usePointerDrag";
 import {
   closeTask,
   reorderOpenTasks,
@@ -221,6 +230,11 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     null,
   );
   const toolbarPlacement = placement === "toolbar";
+  const pointerDragEnabled = usePointerDragHost();
+  const [pointerDropTargetId, setPointerDropTargetId] =
+    useState<SurfaceKey | null>(null);
+  const tabWrapEls = useRef(new Map<SurfaceKey, HTMLElement>());
+  const gestureCleanupRef = useRef<(() => void) | null>(null);
 
   const tabsById = useMemo(
     () => new Map(tabDisplayData.map((tab) => [tab.id, tab])),
@@ -351,9 +365,13 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         }
         return;
       }
+      const wasLastWorkspaceTab = tabs.includes(tabId) && tabs.length <= 1;
       dispatch(closeTab(tabId));
+      if (wasLastWorkspaceTab && currentPage?.name === "chat") {
+        dispatch(popBackTo({ name: "history" }));
+      }
     },
-    [currentPage, dispatch],
+    [currentPage, dispatch, tabs],
   );
 
   const stopClosePointerEvent = useCallback(
@@ -425,14 +443,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     [],
   );
 
-  const handleTabDrop = useCallback(
-    (event: DragEvent, targetKey: SurfaceKey) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const sourceKey = surfaceKeyFromTabDragPayload(
-        readTabDragData(event.dataTransfer),
-      );
-      setDragTargetTabId(null);
+  const reorderFromKeys = useCallback(
+    (sourceKey: SurfaceKey | null, targetKey: SurfaceKey) => {
       if (!sourceKey || sourceKey === targetKey) return;
       if (tabs.includes(sourceKey) && tabs.includes(targetKey)) {
         dispatch(reorderTabs({ sourceKey, targetKey }));
@@ -453,6 +465,98 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     },
     [dispatch, tabs, taskSurfaceKeys],
   );
+
+  const handleTabDrop = useCallback(
+    (event: DragEvent, targetKey: SurfaceKey) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const sourceKey = surfaceKeyFromTabDragPayload(
+        readTabDragData(event.dataTransfer),
+      );
+      setDragTargetTabId(null);
+      reorderFromKeys(sourceKey, targetKey);
+    },
+    [reorderFromKeys],
+  );
+
+  const acceptsReorder = useCallback(
+    (payload: TabDragPayload, targetKey: SurfaceKey) => {
+      const sourceKey = surfaceKeyFromTabDragPayload(payload);
+      if (!sourceKey || sourceKey === targetKey) return false;
+      if (payload.type === "chat") {
+        return tabs.includes(sourceKey) && tabs.includes(targetKey);
+      }
+      if (payload.type === "task") {
+        return (
+          taskSurfaceKeys.includes(sourceKey) &&
+          taskSurfaceKeys.includes(targetKey)
+        );
+      }
+      return false;
+    },
+    [tabs, taskSurfaceKeys],
+  );
+
+  const handleTabPointerDown = useCallback(
+    (
+      event: PointerEvent<HTMLButtonElement>,
+      tab: { id: SurfaceKey; title: string; draggable: boolean },
+    ) => {
+      if (!pointerDragEnabled || !tab.draggable) return;
+      gestureCleanupRef.current?.();
+      const payload = tabDragPayloadForSurface(tab.id);
+      gestureCleanupRef.current = beginPointerDragGesture(
+        {
+          button: event.button,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          pointerId: event.pointerId,
+        },
+        () => ({
+          payload: { type: payload.type, id: payload.id, surfaceKey: tab.id },
+          label: tab.title,
+        }),
+      );
+    },
+    [pointerDragEnabled],
+  );
+
+  useEffect(() => () => gestureCleanupRef.current?.(), []);
+
+  useEffect(() => {
+    if (!pointerDragEnabled) {
+      setPointerDropTargetId(null);
+      return;
+    }
+
+    const reorderableKeys = Array.from(
+      new Set<SurfaceKey>([...tabs, ...taskSurfaceKeys]),
+    );
+    const unregisters = reorderableKeys.map((targetKey) =>
+      pointerDragController.registerZone({
+        id: `tabbar:${targetKey}`,
+        getRect: () =>
+          rectFromElement(tabWrapEls.current.get(targetKey) ?? null),
+        accepts: (payload) => acceptsReorder(payload, targetKey),
+        onDrop: (payload) =>
+          reorderFromKeys(surfaceKeyFromTabDragPayload(payload), targetKey),
+        setHover: (over) =>
+          setPointerDropTargetId((current) =>
+            over ? targetKey : current === targetKey ? null : current,
+          ),
+      }),
+    );
+
+    return () => {
+      for (const unregister of unregisters) unregister();
+    };
+  }, [
+    pointerDragEnabled,
+    tabs,
+    taskSurfaceKeys,
+    acceptsReorder,
+    reorderFromKeys,
+  ]);
 
   const handleBarDragOver = useCallback((event: DragEvent) => {
     if (!readTabDragData(event.dataTransfer)) return;
@@ -505,13 +609,19 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
             return (
               <div
                 key={tab.id}
+                ref={(node) => {
+                  if (node) tabWrapEls.current.set(tab.id, node);
+                  else tabWrapEls.current.delete(tab.id);
+                }}
                 className={classNames(
                   styles.tabWrap,
                   "rf-enter-scale",
                   isActive && styles.tabWrapActive,
                   tab.isGroup && styles.tabWrapGroup,
                   draggingTabId === tab.id && styles.tabWrapDragging,
-                  dragTargetTabId === tab.id && styles.tabWrapDropTarget,
+                  (dragTargetTabId === tab.id ||
+                    pointerDropTargetId === tab.id) &&
+                    styles.tabWrapDropTarget,
                 )}
                 onDragOver={(event) => handleTabDragOver(event, tab.id)}
                 onDragLeave={(event) => handleTabDragLeave(event, tab.id)}
@@ -522,8 +632,9 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   role="tab"
                   aria-selected={isActive}
                   className={styles.tabButton}
-                  draggable={tab.draggable}
+                  draggable={tab.draggable && !pointerDragEnabled}
                   onClick={() => handleTabClick(tab.id)}
+                  onPointerDown={(event) => handleTabPointerDown(event, tab)}
                   onDragStart={(event) => handleDragStart(event, tab.id)}
                   onDragEnd={handleDragEnd}
                   title={tabTitle}

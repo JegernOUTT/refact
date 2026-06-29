@@ -195,6 +195,66 @@ describe("TabBar", () => {
     ]);
   });
 
+  it("navigates home when the last workspace tab is closed from the chat page", async () => {
+    const store = setUpStore();
+    store.dispatch(
+      createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+    );
+    store.dispatch(openTab(chat("chat-a")));
+    store.dispatch(setActiveTab(chat("chat-a")));
+    store.dispatch(push({ name: "history" }));
+    store.dispatch(push({ name: "chat" }));
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      within(getTabWrap(/Chat Alpha/)).getByLabelText("Close Chat Alpha"),
+    );
+
+    expect(store.getState().workspace.tabs).toEqual([]);
+    expect(store.getState().workspace.activeTabId).toBeNull();
+    expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
+  });
+
+  it("stays on the chat page when a non-last workspace tab is closed", async () => {
+    const store = createStoreWithChatTabs();
+    store.dispatch(push({ name: "history" }));
+    store.dispatch(push({ name: "chat" }));
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      within(getTabWrap(/Chat Beta/)).getByLabelText("Close Chat Beta"),
+    );
+
+    expect(store.getState().workspace.tabs).toEqual([
+      chat("chat-a"),
+      chat("chat-c"),
+    ]);
+    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+  });
+
+  it("does not redirect home when the last chat tab is closed from a non-chat page", async () => {
+    const store = setUpStore();
+    store.dispatch(
+      createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
+    );
+    store.dispatch(openTab(chat("chat-a")));
+    store.dispatch(setActiveTab(chat("chat-a")));
+    store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+    store.dispatch(push({ name: "history" }));
+    store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
+    const view = renderTabBar(store);
+
+    await view.user.click(
+      within(getTabWrap(/Chat Alpha/)).getByLabelText("Close Chat Alpha"),
+    );
+
+    expect(store.getState().workspace.tabs).toEqual([]);
+    expect(store.getState().pages.at(-1)).toEqual({
+      name: "task workspace",
+      taskId: "task-a",
+    });
+  });
+
   it("renders task and buddy navigation tabs without split controls", async () => {
     const store = createStoreWithChatTabs();
     store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));

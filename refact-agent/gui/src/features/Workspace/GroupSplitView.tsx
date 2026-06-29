@@ -23,7 +23,16 @@ import {
   splitTab,
 } from "./workspaceSlice";
 import { isChatSurface, type SurfaceKey } from "./surfaceKey";
-import { hasTabDragType, readTabDragSurfaceKey } from "../ChatPanes/tabDrag";
+import {
+  hasTabDragType,
+  readTabDragSurfaceKey,
+  surfaceKeyFromTabDragPayload,
+  type TabDragPayload,
+} from "../ChatPanes/tabDrag";
+import {
+  usePointerDragHost,
+  usePointerDropZone,
+} from "../ChatPanes/usePointerDrag";
 import { SurfacePane } from "./SurfacePane";
 import styles from "./GroupSplitView.module.css";
 
@@ -200,6 +209,105 @@ function PaneHeader({ leaf, tabId }: { leaf: LeafPane; tabId: SurfaceKey }) {
   );
 }
 
+function PaneEdgeDropZone({
+  edge,
+  tabId,
+  leafId,
+  surfaceKey,
+  pointerEnabled,
+  onDropSettled,
+}: {
+  edge: PaneDropEdge;
+  tabId: SurfaceKey;
+  leafId: string;
+  surfaceKey: SurfaceKey | null;
+  pointerEnabled: boolean;
+  onDropSettled: () => void;
+}) {
+  const dispatch = useAppDispatch();
+
+  const performSplit = useCallback(
+    (draggedSurfaceKey: SurfaceKey) => {
+      dispatch(
+        splitPaneWithSurface({
+          tabId,
+          leafId,
+          surfaceKey: draggedSurfaceKey,
+          dir: paneDropDirections[edge],
+          placement: paneDropPlacements[edge],
+        }),
+      );
+    },
+    [dispatch, edge, leafId, tabId],
+  );
+
+  const accepts = useCallback(
+    (payload: TabDragPayload) => {
+      const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+      return (
+        draggedSurfaceKey !== null &&
+        isChatSurface(draggedSurfaceKey) &&
+        draggedSurfaceKey !== surfaceKey
+      );
+    },
+    [surfaceKey],
+  );
+
+  const pointerDrop = usePointerDropZone({
+    enabled: pointerEnabled,
+    accepts,
+    onDrop: useCallback(
+      (payload: TabDragPayload) => {
+        const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+        if (draggedSurfaceKey && accepts(payload)) {
+          performSplit(draggedSurfaceKey);
+        }
+        onDropSettled();
+      },
+      [accepts, onDropSettled, performSplit],
+    ),
+  });
+
+  const handleNativeDragOver = useCallback((event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleNativeDrop = useCallback(
+    (event: DragEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onDropSettled();
+      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
+      if (
+        !draggedSurfaceKey ||
+        !isChatSurface(draggedSurfaceKey) ||
+        draggedSurfaceKey === surfaceKey
+      ) {
+        return;
+      }
+      performSplit(draggedSurfaceKey);
+    },
+    [onDropSettled, performSplit, surfaceKey],
+  );
+
+  return (
+    <div
+      ref={pointerDrop.ref}
+      className={classNames(
+        styles.edgeDropZone,
+        paneDropEdgeClasses[edge],
+        pointerDrop.isOver && styles.edgeDropActive,
+      )}
+      data-testid={`workspace-pane-edge-drop-${leafId}-${edge}`}
+      data-pointer-over={pointerDrop.isOver || undefined}
+      onDragOver={handleNativeDragOver}
+      onDrop={handleNativeDrop}
+    />
+  );
+}
+
 function LeafView({
   leaf,
   tabId,
@@ -210,6 +318,7 @@ function LeafView({
   focused: boolean;
 }) {
   const dispatch = useAppDispatch();
+  const pointerDragEnabled = usePointerDragHost();
   const [surfaceDragActive, setSurfaceDragActive] = useState(false);
   const surfaceKey =
     leaf.activeTabId ?? (leaf.tabIds.length > 0 ? leaf.tabIds[0] : null);
@@ -241,21 +350,8 @@ function LeafView({
     setSurfaceDragActive(false);
   }, []);
 
-  const handlePaneDrop = useCallback(
-    (event: DragEvent) => {
-      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
-      if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) {
-        setSurfaceDragActive(false);
-        return;
-      }
-      if (draggedSurfaceKey === surfaceKey) {
-        setSurfaceDragActive(false);
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      setSurfaceDragActive(false);
+  const performSurfaceDrop = useCallback(
+    (draggedSurfaceKey: SurfaceKey) => {
       if (surfaceKey === null) {
         dispatch(
           addSurfaceToPane({
@@ -280,35 +376,62 @@ function LeafView({
     [dispatch, leaf.id, surfaceKey, tabId],
   );
 
-  const handleEdgeDragOver = useCallback((event: DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
+  const handlePaneDrop = useCallback(
+    (event: DragEvent) => {
+      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
+      if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) {
+        setSurfaceDragActive(false);
+        return;
+      }
+      if (draggedSurfaceKey === surfaceKey) {
+        setSurfaceDragActive(false);
+        return;
+      }
 
-  const handleEdgeDrop = useCallback(
-    (edge: PaneDropEdge, event: DragEvent) => {
       event.preventDefault();
       event.stopPropagation();
       setSurfaceDragActive(false);
-      const draggedSurfaceKey = readTabDragSurfaceKey(event.dataTransfer);
-      if (!draggedSurfaceKey || !isChatSurface(draggedSurfaceKey)) return;
-      if (draggedSurfaceKey === surfaceKey) return;
-      dispatch(
-        splitPaneWithSurface({
-          tabId,
-          leafId: leaf.id,
-          surfaceKey: draggedSurfaceKey,
-          dir: paneDropDirections[edge],
-          placement: paneDropPlacements[edge],
-        }),
+      performSurfaceDrop(draggedSurfaceKey);
+    },
+    [performSurfaceDrop, surfaceKey],
+  );
+
+  const paneAccepts = useCallback(
+    (payload: TabDragPayload) => {
+      const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+      return (
+        draggedSurfaceKey !== null &&
+        isChatSurface(draggedSurfaceKey) &&
+        draggedSurfaceKey !== surfaceKey
       );
     },
-    [dispatch, leaf.id, surfaceKey, tabId],
+    [surfaceKey],
   );
+
+  const panePointerDrop = usePointerDropZone({
+    enabled: pointerDragEnabled,
+    accepts: paneAccepts,
+    onDrop: useCallback(
+      (payload: TabDragPayload) => {
+        const draggedSurfaceKey = surfaceKeyFromTabDragPayload(payload);
+        if (draggedSurfaceKey && paneAccepts(payload)) {
+          performSurfaceDrop(draggedSurfaceKey);
+        }
+        setSurfaceDragActive(false);
+      },
+      [paneAccepts, performSurfaceDrop],
+    ),
+  });
+
+  const settlePointerDrop = useCallback(() => {
+    setSurfaceDragActive(false);
+  }, []);
+
+  const dropZonesVisible = surfaceDragActive || panePointerDrop.isOver;
 
   return (
     <section
+      ref={panePointerDrop.ref}
       className={classNames(styles.pane, focused && styles.focused)}
       aria-label={`Workspace pane ${leaf.id}`}
       data-focused={focused || undefined}
@@ -323,21 +446,20 @@ function LeafView({
       onDrop={handlePaneDrop}
     >
       <PaneHeader leaf={leaf} tabId={tabId} />
-      {surfaceDragActive ? (
+      {dropZonesVisible ? (
         <div
           className={classNames(styles.edgeDropZones, "rf-enter")}
           aria-hidden="true"
         >
           {paneDropEdges.map((edge) => (
-            <div
+            <PaneEdgeDropZone
               key={edge}
-              className={classNames(
-                styles.edgeDropZone,
-                paneDropEdgeClasses[edge],
-              )}
-              data-testid={`workspace-pane-edge-drop-${leaf.id}-${edge}`}
-              onDragOver={handleEdgeDragOver}
-              onDrop={(event) => handleEdgeDrop(edge, event)}
+              edge={edge}
+              tabId={tabId}
+              leafId={leaf.id}
+              surfaceKey={surfaceKey}
+              pointerEnabled={pointerDragEnabled}
+              onDropSettled={settlePointerDrop}
             />
           ))}
         </div>
