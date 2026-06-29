@@ -539,29 +539,19 @@ class RefactDaemonClientTest {
                 MockResponse.Builder()
                     .code(200)
                     .addHeader("Content-Type", "application/json")
-                    .body("{\"pid\":77,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":2}")
-                    .build()
-            )
-            server.enqueue(
-                MockResponse.Builder()
-                    .code(200)
-                    .addHeader("Content-Type", "application/json")
                     .body("{\"project_id\":\"project-token\"}")
                     .build()
             )
 
             val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
             val status = client.status()
-            val project = client.openProject(root.toString(), LSPConfig())
+            val project = client.openProject(root.toString(), LSPConfig(), status)
 
             assertEquals("secret-token", status.authToken)
             assertEquals("project-token", project.projectId)
             val statusRequest = server.takeRequest()
             assertEquals("/daemon/v1/status", statusRequest.path)
             assertEquals("Bearer secret-token", statusRequest.headers["Authorization"])
-            val openStatusRequest = server.takeRequest()
-            assertEquals("/daemon/v1/status", openStatusRequest.path)
-            assertEquals("Bearer secret-token", openStatusRequest.headers["Authorization"])
             val openRequest = server.takeRequest()
             assertEquals("/daemon/v1/projects/open", openRequest.path)
             assertEquals("Bearer secret-token", openRequest.headers["Authorization"])
@@ -593,20 +583,13 @@ class RefactDaemonClientTest {
                 MockResponse.Builder()
                     .code(200)
                     .addHeader("Content-Type", "application/json")
-                    .body("{\"pid\":88,\"version\":\"8.1.0\",\"port\":0,\"workers\":3}")
-                    .build()
-            )
-            server.enqueue(
-                MockResponse.Builder()
-                    .code(200)
-                    .addHeader("Content-Type", "application/json")
                     .body("{\"project_id\":\"project-zero\"}")
                     .build()
             )
 
             val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
             val status = client.status()
-            val project = client.openProject(root.toString(), LSPConfig())
+            val project = client.openProject(root.toString(), LSPConfig(), status)
 
             assertEquals(88, status.pid)
             assertEquals(server.port, status.port)
@@ -617,9 +600,6 @@ class RefactDaemonClientTest {
             val statusRequest = server.takeRequest()
             assertEquals("/daemon/v1/status", statusRequest.path)
             assertEquals("Bearer zero-token", statusRequest.headers["Authorization"])
-            val openStatusRequest = server.takeRequest()
-            assertEquals("/daemon/v1/status", openStatusRequest.path)
-            assertEquals("Bearer zero-token", openStatusRequest.headers["Authorization"])
             val openRequest = server.takeRequest()
             assertEquals("/daemon/v1/projects/open", openRequest.path)
             assertEquals("Bearer zero-token", openRequest.headers["Authorization"])
@@ -678,6 +658,64 @@ class RefactDaemonClientTest {
     }
 
     @Test
+    fun openProjectUsesSuppliedDaemonEndpointWithoutRediscovery() {
+        val root = Files.createTempDirectory("refact-daemon-open-validated")
+        val originalHome = System.getProperty("user.home")
+        val selectedServer = MockWebServer()
+        val staleServer = MockWebServer()
+        try {
+            selectedServer.start()
+            staleServer.start()
+            System.setProperty("user.home", root.toString())
+            writeDaemonJson(root, staleServer.port, "stale-token")
+            staleServer.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"pid\":11,\"version\":\"8.2.0\",\"port\":${staleServer.port},\"workers\":1}")
+                    .build()
+            )
+            staleServer.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"stale-project\"}")
+                    .build()
+            )
+            selectedServer.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"project_id\":\"selected-project\"}")
+                    .build()
+            )
+
+            val client = HttpRefactDaemonClient(portProvider = { staleServer.port }, pluginVersionProvider = { "8.2.0" })
+            val rediscovered = client.status()
+            val selected = DaemonStatus(pid = 22, version = "8.2.0", port = selectedServer.port, authToken = "selected-token")
+            val project = client.openProject(root.toString(), LSPConfig(), selected)
+
+            assertEquals(staleServer.port, rediscovered.port)
+            assertEquals("stale-token", rediscovered.authToken)
+            assertEquals("selected-project", project.projectId)
+            assertEquals(selectedServer.port, project.daemon.port)
+            assertEquals("selected-token", project.daemon.authToken)
+            val openRequest = selectedServer.takeRequest()
+            assertEquals("/daemon/v1/projects/open", openRequest.path)
+            assertEquals("Bearer selected-token", openRequest.headers["Authorization"])
+            val rediscoveredRequest = staleServer.takeRequest()
+            assertEquals("/daemon/v1/status", rediscoveredRequest.path)
+            assertEquals("Bearer stale-token", rediscoveredRequest.headers["Authorization"])
+            assertEquals(null, staleServer.takeRequest(100, TimeUnit.MILLISECONDS))
+        } finally {
+            selectedServer.shutdown()
+            staleServer.shutdown()
+            System.setProperty("user.home", originalHome)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun slowOpenProjectSucceedsWithinLongTimeoutAndEncodesProjectId() {
         val root = Files.createTempDirectory("refact-daemon-slow-open")
         val originalHome = System.getProperty("user.home")
@@ -690,25 +728,17 @@ class RefactDaemonClientTest {
                 MockResponse.Builder()
                     .code(200)
                     .addHeader("Content-Type", "application/json")
-                    .body("{\"pid\":99,\"version\":\"8.1.0\",\"port\":${server.port},\"workers\":1}")
-                    .build()
-            )
-            server.enqueue(
-                MockResponse.Builder()
-                    .code(200)
-                    .addHeader("Content-Type", "application/json")
                     .body("{\"project_id\":\"project with/slash\"}")
                     .bodyDelay(5500, TimeUnit.MILLISECONDS)
                     .build()
             )
 
             val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
-            val project = client.openProject(root.toString(), LSPConfig())
+            val status = DaemonStatus(pid = 99, version = "8.1.0", port = server.port, authToken = "slow-token")
+            val project = client.openProject(root.toString(), LSPConfig(), status)
 
             assertEquals("project with/slash", project.projectId)
             assertEquals("http://127.0.0.1:${server.port}/p/project%20with%2Fslash/", project.baseUrl.toString())
-            val statusRequest = server.takeRequest()
-            assertEquals("/daemon/v1/status", statusRequest.path)
             val openRequest = server.takeRequest()
             assertEquals("/daemon/v1/projects/open", openRequest.path)
             assertEquals("Bearer slow-token", openRequest.headers["Authorization"])
@@ -751,6 +781,7 @@ class RefactDaemonClientTest {
                                     .body("{\"project_id\":\"project-fresh\"}")
                                     .build()
                             } else {
+                                writeDaemonJson(root, server.port, "fresh-token")
                                 MockResponse.Builder()
                                     .code(401)
                                     .addHeader("Content-Type", "application/json")
@@ -764,12 +795,13 @@ class RefactDaemonClientTest {
             }
 
             val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
-            val project = client.openProject(root.toString(), LSPConfig())
+            val status = DaemonStatus(pid = 100, version = "8.1.0", port = server.port, authToken = "stale-token")
+            val project = client.openProject(root.toString(), LSPConfig(), status)
 
             assertEquals("project-fresh", project.projectId)
             assertEquals("fresh-token", project.daemon.authToken)
             assertEquals(2, openCalls)
-            assertEquals(listOf("Bearer stale-token", "Bearer stale-token", "Bearer fresh-token"), authHeaders)
+            assertEquals(listOf("Bearer stale-token", "Bearer fresh-token"), authHeaders)
         } finally {
             server.shutdown()
             System.setProperty("user.home", originalHome)

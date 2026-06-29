@@ -464,8 +464,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
             }
-            val daemonStatus = compatibleDaemonStatusOrNull()
-            if (daemonStatus == null) {
+            val compatibleDaemonStatus = compatibleDaemonStatusOrNull()
+            val daemonStatus = if (compatibleDaemonStatus == null) {
                 val bin = resolveBinaryPathForDaemon {
                     setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
                 } ?: run {
@@ -477,9 +477,10 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 daemonClient.ensureDaemon(bin)
             } else {
                 clearBinaryResolutionFailure()
-                logger.debug("LSP daemon attach existing pid=${daemonStatus.pid} version=${daemonStatus.version} ${newConfig.toSafeLogString()}")
+                logger.debug("LSP daemon attach existing pid=${compatibleDaemonStatus.pid} version=${compatibleDaemonStatus.version} ${newConfig.toSafeLogString()}")
+                compatibleDaemonStatus
             }
-            val openedProject = daemonClient.openProject(root, newConfig)
+            val openedProject = daemonClient.openProject(root, newConfig, daemonStatus)
             attachedProject = openedProject
             isWorking = true
             refreshAttachedWorkerState()
@@ -572,7 +573,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         return try {
             logger.debug("LSP daemon wake retry: $reason")
             setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
-            if (compatibleDaemonStatusOrNull() == null) {
+            val compatibleDaemonStatus = compatibleDaemonStatusOrNull()
+            val daemonStatus = if (compatibleDaemonStatus == null) {
                 val bin = resolveBinaryPathForDaemon {
                     setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
                 } ?: run {
@@ -582,8 +584,10 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 }
                 clearBinaryResolutionFailure()
                 daemonClient.ensureDaemon(bin)
+            } else {
+                compatibleDaemonStatus
             }
-            attachedProject = daemonClient.openProject(root, config)
+            attachedProject = daemonClient.openProject(root, config, daemonStatus)
             lastConfig = config
             isWorking = true
             refreshAttachedWorkerState()

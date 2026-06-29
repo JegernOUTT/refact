@@ -42,6 +42,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val ensureDaemonPaths = Collections.synchronizedList(mutableListOf<String>())
         val detachedProjects = Collections.synchronizedList(mutableListOf<DaemonProject>())
         val openedSettings = Collections.synchronizedList(mutableListOf<LSPConfig>())
+        val openedDaemons = Collections.synchronizedList(mutableListOf<DaemonStatus>())
         val openProjectEntered = CountDownLatch(1)
         val releaseOpenProject = CountDownLatch(1)
         var blockOpenProject = false
@@ -65,21 +66,22 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             ensureDaemonPaths.add(binPath)
             statusError = null
             statusVersion = ensuredVersion
-            return DaemonStatus(version = ensuredVersion, port = port)
+            return DaemonStatus(version = ensuredVersion, port = port, authToken = authToken)
         }
 
-        override fun openProject(root: String, settings: LSPConfig): DaemonProject {
+        override fun openProject(root: String, settings: LSPConfig, daemon: DaemonStatus): DaemonProject {
             openProjectCalls.incrementAndGet()
             openProjectError?.let { throw it }
             openedSettings.add(settings)
+            openedDaemons.add(daemon)
             openProjectEntered.countDown()
             if (blockOpenProject) {
                 releaseOpenProject.await(2, TimeUnit.SECONDS)
             }
             return DaemonProject(
                 projectId,
-                baseUrlOverride ?: URI("http://127.0.0.1:$port/p/$projectId/"),
-                DaemonStatus(version = statusVersion, port = port, authToken = authToken),
+                baseUrlOverride ?: URI("http://127.0.0.1:${daemon.port}/p/$projectId/"),
+                daemon,
             )
         }
 
@@ -337,6 +339,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(1, fake.openProjectCalls.get())
             assertEquals(0, fake.ensureDaemonCalls.get())
             assertTrue(fake.statusCalls.get() >= 1)
+            assertEquals(DaemonStatus(version = "8.1.0", port = 8488), fake.openedDaemons.single())
             assertEquals(URI("http://127.0.0.1:8488/p/project-123/"), holder.baseUrlOrNull())
         } finally {
             holder.dispose()
@@ -346,7 +349,11 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     @Test
     fun testStatusFailureFallsThroughToEnsureDaemon() {
         val root = createTempDir().canonicalPath
-        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val fake = FakeDaemonClient().apply {
+            statusError = RuntimeException("daemon missing")
+            port = 9595
+            authToken = "ensured-token"
+        }
         val holder = TestLspProcessHolder(mockProject(root), fake)
         LSPProcessHolder.BIN_PATH = "/tmp/refact-status-failure"
         try {
@@ -355,6 +362,8 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertEquals(1, fake.openProjectCalls.get())
             assertEquals(1, fake.ensureDaemonCalls.get())
             assertEquals(listOf("/tmp/refact-status-failure"), fake.ensureDaemonPaths)
+            assertEquals(DaemonStatus(version = "8.1.0", port = 9595, authToken = "ensured-token"), fake.openedDaemons.single())
+            assertEquals(URI("http://127.0.0.1:9595/p/project-123/"), holder.baseUrlOrNull())
         } finally {
             holder.dispose()
         }

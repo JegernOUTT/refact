@@ -28,7 +28,7 @@ private const val DAEMON_SPAWN_EXIT_LOG_WAIT_MS = 500L
 interface RefactDaemonClient {
     fun status(): DaemonStatus
     fun ensureDaemon(binPath: String): DaemonStatus
-    fun openProject(root: String, settings: LSPConfig): DaemonProject
+    fun openProject(root: String, settings: LSPConfig, daemon: DaemonStatus): DaemonProject
     fun detachProject(project: DaemonProject)
 }
 
@@ -213,8 +213,7 @@ class HttpRefactDaemonClient(
         )
     }
 
-    override fun openProject(root: String, settings: LSPConfig): DaemonProject {
-        val daemon = status()
+    override fun openProject(root: String, settings: LSPConfig, daemon: DaemonStatus): DaemonProject {
         val payload = gson.toJson(
             mapOf(
                 "root" to root,
