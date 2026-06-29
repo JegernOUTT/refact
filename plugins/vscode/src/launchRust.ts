@@ -15,6 +15,8 @@ import {
     lspClientStopTimeoutMs,
     lspSocketCloseAction,
     lspSocketConnectTimeoutMs,
+    attachStateForDaemonOpenProject,
+    browserUrlForBackendStatus,
     shouldRunLifecycleGeneration,
 } from './launchRustLifecycle';
 import { WorkerHealthProbe } from './launchRustHealth';
@@ -201,25 +203,16 @@ export class RustBinaryBlob {
     }
 
     public browser_url(): string {
-        if (this.x_debug()) {
-            const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
-            const host = refactDaemon.configuredBrowserHost(configuredHost) ?? this.default_browser_host();
-            return `http://${host}:${DEBUG_HTTP_PORT}/`;
-        }
-        if (!this.port || !this.project_id) {
-            return "";
-        }
         const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
-        return refactDaemon.browserProjectUrlForConfiguredHost(
+        return browserUrlForBackendStatus({
+            status: this.attachState,
+            debug: Boolean(this.x_debug()),
+            debugHttpPort: DEBUG_HTTP_PORT,
+            port: this.port,
+            projectId: this.project_id,
             configuredHost,
-            this.port,
-            this.project_id,
-            this.daemon_auth_token,
-        );
-    }
-
-    private default_browser_host(): string {
-        return refactDaemon.DEFAULT_BROWSER_HOST;
+            authToken: this.daemon_auth_token,
+        });
     }
 
     public attemping_to_reach(): string {
@@ -319,7 +312,7 @@ export class RustBinaryBlob {
         if (!this.is_current_generation(generation)) {
             return;
         }
-        this.set_attach_state(daemon ? "connecting" : "starting");
+        this.set_attach_state(attachStateForDaemonOpenProject());
         if (!daemon) {
             const configuredBinary = vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim();
             const binPath = await refactBinary.resolveRefactBinary({

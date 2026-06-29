@@ -1,3 +1,6 @@
+import { backendReadyForStatus, type RefactBackendConnectionStatus } from "./backendStatus";
+import * as refactDaemon from "./refactDaemon";
+
 export const lspSocketConnectTimeoutMs = 10000;
 export const lspClientReadyTimeoutMs = 20000;
 export const lspClientStopTimeoutMs = 5000;
@@ -22,4 +25,35 @@ export function lspSocketCloseAction(params: {
         return "reconnect";
     }
     return "disconnect";
+}
+
+export function attachStateForDaemonOpenProject(): RefactBackendConnectionStatus {
+    return "starting";
+}
+
+export function browserUrlForBackendStatus(params: {
+    status: RefactBackendConnectionStatus;
+    debug: boolean;
+    debugHttpPort: number;
+    port: number;
+    projectId: string;
+    configuredHost?: string;
+    authToken?: string;
+}): string {
+    if (!backendReadyForStatus(params.status)) {
+        return "";
+    }
+    if (params.debug) {
+        const host = refactDaemon.configuredBrowserHost(params.configuredHost) ?? refactDaemon.DEFAULT_BROWSER_HOST;
+        return `http://${host}:${params.debugHttpPort}/`;
+    }
+    if (!params.port || !params.projectId) {
+        return "";
+    }
+    return refactDaemon.browserProjectUrlForConfiguredHost(
+        params.configuredHost,
+        params.port,
+        params.projectId,
+        params.authToken,
+    );
 }

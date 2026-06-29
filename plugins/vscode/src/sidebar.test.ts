@@ -44,12 +44,19 @@ function runWebviewEndpointConfigTests() {
     assert.deepStrictEqual(webviewEndpointConfig(true, lspUrl, browserUrl), { browserUrl, lspUrl });
 
     const startingConfig = webviewEndpointConfig(false, lspUrl, browserUrl);
-    assert.deepStrictEqual(startingConfig, { browserUrl });
-    assert.strictEqual(Object.prototype.hasOwnProperty.call(startingConfig, "lspUrl"), false);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(startingConfig)), {});
+    assert.strictEqual(startingConfig.lspUrl, undefined);
+    assert.strictEqual(startingConfig.browserUrl, undefined);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(startingConfig, "lspUrl"), true);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(startingConfig, "browserUrl"), true);
 
     const missingProxyConfig = webviewEndpointConfig(true, "", browserUrl);
     assert.deepStrictEqual(missingProxyConfig, { browserUrl });
     assert.strictEqual(Object.prototype.hasOwnProperty.call(missingProxyConfig, "lspUrl"), false);
+
+    const missingBrowserConfig = webviewEndpointConfig(true, lspUrl, "");
+    assert.deepStrictEqual(missingBrowserConfig, { lspUrl });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(missingBrowserConfig, "browserUrl"), false);
 }
 
 runSidebarPathBoundaryTests();

@@ -42,6 +42,8 @@ import {
     shouldReadCapsForCompletion,
 } from "./backendStatus";
 import {
+    attachStateForDaemonOpenProject,
+    browserUrlForBackendStatus,
     lspSocketCloseAction,
     shouldRunLifecycleGeneration,
 } from "./launchRustLifecycle";
@@ -157,6 +159,41 @@ function runBackendStatusTests() {
 }
 
 function runLaunchRustLifecycleTests() {
+    assert.strictEqual(attachStateForDaemonOpenProject(), "starting");
+    assert.strictEqual(browserUrlForBackendStatus({
+        status: "connecting",
+        debug: false,
+        debugHttpPort: 8001,
+        port: 8488,
+        projectId: "abc",
+        configuredHost: "machine.local",
+        authToken: "token",
+    }), "");
+    assert.strictEqual(browserUrlForBackendStatus({
+        status: "starting",
+        debug: true,
+        debugHttpPort: 8001,
+        port: 0,
+        projectId: "",
+        configuredHost: "machine.local",
+    }), "");
+    assert.strictEqual(browserUrlForBackendStatus({
+        status: "ready",
+        debug: true,
+        debugHttpPort: 8001,
+        port: 0,
+        projectId: "",
+        configuredHost: "machine.local",
+    }), "http://machine.local:8001/");
+    assert.strictEqual(browserUrlForBackendStatus({
+        status: "ready",
+        debug: false,
+        debugHttpPort: 8001,
+        port: 8488,
+        projectId: "abc",
+        configuredHost: "machine.local",
+        authToken: "token with/slash",
+    }), "http://machine.local:8488/p/abc/?daemon_token=token%20with%2Fslash");
     assert.strictEqual(shouldRunLifecycleGeneration(2, 2), true);
     assert.strictEqual(shouldRunLifecycleGeneration(1, 2), false);
     assert.strictEqual(lspSocketCloseAction({

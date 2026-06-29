@@ -1,11 +1,14 @@
 export type WebviewEndpointConfig = {
-    browserUrl: string | undefined;
+    browserUrl?: string;
     lspUrl?: string;
 };
 
 export function webviewEndpointConfig(backendReady: boolean, lspUrl: string | undefined, browserUrl: string | undefined): WebviewEndpointConfig {
+    if (!backendReady) {
+        return { lspUrl: undefined, browserUrl: undefined };
+    }
     return {
-        browserUrl,
-        ...(backendReady && lspUrl ? { lspUrl } : {}),
+        ...(lspUrl ? { lspUrl } : {}),
+        ...(browserUrl ? { browserUrl } : {}),
     };
 }
