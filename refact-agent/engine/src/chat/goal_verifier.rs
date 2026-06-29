@@ -48,6 +48,7 @@ pub enum GoalVerificationBegin {
 pub enum GoalVerificationApplyOutcome {
     Finalized,
     Rearmed,
+    Continued,
     NoGoal,
 }
 
@@ -160,6 +161,7 @@ pub async fn verify_goal_before_completion(
     match apply_goal_verdict(&mut session, trigger, reply) {
         GoalVerificationApplyOutcome::Finalized => GoalCompletionGateOutcome::Finalized,
         GoalVerificationApplyOutcome::Rearmed => GoalCompletionGateOutcome::Rearmed,
+        GoalVerificationApplyOutcome::Continued => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::NoGoal => GoalCompletionGateOutcome::Passthrough,
     }
 }
@@ -566,13 +568,18 @@ pub fn apply_goal_verdict(
         }
         GoalVerdict::Unmet(_) => {
             session.goal_set_status(GoalStatus::Active);
-            session.set_runtime_state(SessionState::Idle, None);
-            let _ = session.enqueue_priority_command(CommandRequest {
-                client_request_id: format!("goal-verifier-regenerate-{}", Uuid::new_v4()),
-                priority: true,
-                command: ChatCommand::Regenerate {},
-            });
-            GoalVerificationApplyOutcome::Rearmed
+            if trigger == "validate_goal" {
+                session.goal_note_no_progress_turn();
+                GoalVerificationApplyOutcome::Continued
+            } else {
+                session.set_runtime_state(SessionState::Idle, None);
+                let _ = session.enqueue_priority_command(CommandRequest {
+                    client_request_id: format!("goal-verifier-regenerate-{}", Uuid::new_v4()),
+                    priority: true,
+                    command: ChatCommand::Regenerate {},
+                });
+                GoalVerificationApplyOutcome::Rearmed
+            }
         }
     }
 }
@@ -580,9 +587,13 @@ pub fn apply_goal_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::goal_monitor::{
+        try_apply_goal_nudge, GoalNudgeConfig, GoalNudgeOutcome, GoalNudgeSkip, GoalNudgeTrigger,
+    };
     use refact_chat_api::FrozenRequestPrefix;
     use refact_tool_api::{ToolSource, ToolSourceType};
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     fn session_with_goal() -> ChatSession {
         let mut session = ChatSession::new("goal-verifier-test".to_string());
@@ -950,6 +961,75 @@ mod tests {
             .command_queue
             .iter()
             .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+    }
+
+    #[test]
+    fn apply_goal_verdict_validate_goal_unmet_continues_without_regenerate() {
+        let mut session = session_with_goal();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.goal_set_status(GoalStatus::Verifying);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "validate_goal",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                tokens: 13,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.runtime.state, SessionState::ExecutingTools);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.progress.turns_used, 1);
+        assert_eq!(goal.progress.tokens_used, 13);
+        assert_eq!(goal.progress.no_progress_turns, 1);
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.post_tool_side_effects.len(), 1);
+        assert_eq!(
+            session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
+            json!("verification_gaps")
+        );
+    }
+
+    #[test]
+    fn repeated_validate_goal_unmet_reaches_quiescence_without_regenerate() {
+        let mut session = session_with_goal();
+        for idx in 0..3 {
+            session.goal_set_status(GoalStatus::Verifying);
+            let outcome = apply_goal_verdict(
+                &mut session,
+                "validate_goal",
+                GoalVerifierReply {
+                    verdict: GoalVerdict::Unmet(vec![format!("missing test {idx}")]),
+                    verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                    tokens: 0,
+                },
+            );
+            assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        }
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 3);
+        assert!(session.command_queue.is_empty());
+
+        let now = Instant::now();
+        session.set_runtime_state(SessionState::Idle, None);
+        session.last_activity = now - Duration::from_secs(10);
+        let outcome = try_apply_goal_nudge(
+            &mut session,
+            GoalNudgeTrigger::Monitor,
+            10_000,
+            now,
+            GoalNudgeConfig {
+                stall_grace: Duration::from_secs(5),
+                no_token_grace: Duration::from_secs(5),
+            },
+        );
+
+        assert_eq!(outcome, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
     }
 
     #[test]

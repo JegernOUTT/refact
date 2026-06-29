@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -79,12 +79,13 @@ impl Tool for ToolValidateGoal {
 
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
-        let content = {
+        let outcome = {
             let mut session = session_arc.lock().await;
-            let outcome = apply_goal_verdict(&mut session, "validate_goal", reply);
-            validation_content(outcome, &verdict, &verifier_reply)
+            apply_goal_verdict(&mut session, "validate_goal", reply)
         };
-        tool_message(tool_call_id, content)
+        let content = validation_content(outcome, &verdict, &verifier_reply);
+        let extra = validation_extra(outcome, &verdict);
+        tool_message_with_extra(tool_call_id, content, extra)
     }
 }
 
@@ -119,7 +120,7 @@ fn validation_content(
         GoalVerificationApplyOutcome::Finalized => {
             format!("GOAL MET — goal marked complete; pursuit disabled.\n\n{verifier_reply}")
         }
-        GoalVerificationApplyOutcome::Rearmed => {
+        GoalVerificationApplyOutcome::Rearmed | GoalVerificationApplyOutcome::Continued => {
             let gaps = match verdict {
                 GoalVerdict::Unmet(gaps) => gaps.as_slice(),
                 GoalVerdict::Met => &[],
@@ -134,6 +135,23 @@ fn validation_content(
     }
 }
 
+fn validation_extra(
+    outcome: GoalVerificationApplyOutcome,
+    verdict: &GoalVerdict,
+) -> Map<String, Value> {
+    let marker = match (outcome, verdict) {
+        (GoalVerificationApplyOutcome::Finalized, GoalVerdict::Met) => Some("met"),
+        (
+            GoalVerificationApplyOutcome::Rearmed | GoalVerificationApplyOutcome::Continued,
+            GoalVerdict::Unmet(_),
+        ) => Some("unmet"),
+        _ => None,
+    };
+    marker
+        .map(|verdict| Map::from_iter([("validate_goal".to_string(), json!({"verdict": verdict}))]))
+        .unwrap_or_default()
+}
+
 fn format_gaps(gaps: &[String]) -> String {
     if gaps.is_empty() {
         return "- verification inconclusive; continue".to_string();
@@ -145,12 +163,21 @@ fn format_gaps(gaps: &[String]) -> String {
 }
 
 fn tool_message(tool_call_id: &str, content: String) -> Result<(bool, Vec<ContextEnum>), String> {
+    tool_message_with_extra(tool_call_id, content, Map::new())
+}
+
+fn tool_message_with_extra(
+    tool_call_id: &str,
+    content: String,
+    extra: Map<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
     Ok((
         false,
         vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(content),
             tool_call_id: tool_call_id.to_string(),
+            extra,
             ..Default::default()
         })],
     ))
@@ -163,7 +190,6 @@ mod tests {
 
     use crate::app_state::AppState;
     use crate::chat::goal_verifier::GoalVerifierReply;
-    use crate::chat::types::ChatCommand;
     use crate::tools::tools_list::get_tools_for_mode;
 
     const CHAT_ID: &str = "validate-goal-chat";
@@ -380,11 +406,16 @@ mod tests {
             content,
             "GOAL MET — goal marked complete; pursuit disabled.\n\nGOAL: MET"
         );
+        assert_eq!(
+            validation_extra(outcome, &verdict)["validate_goal"]["verdict"],
+            json!("met")
+        );
     }
 
     #[test]
-    fn unmet_verdict_rearms_and_formats_gaps() {
+    fn unmet_verdict_continues_and_formats_gaps() {
         let mut session = session_with_goal();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
         session.goal_set_status(GoalStatus::Verifying);
         let reply = GoalVerifierReply {
             verdict: GoalVerdict::Unmet(vec!["missing tests".to_string(), "docs".to_string()]),
@@ -397,9 +428,10 @@ mod tests {
         let outcome = apply_goal_verdict(&mut session, "validate_goal", reply);
         let content = validation_content(outcome, &verdict, &verifier_reply);
 
-        assert_eq!(outcome, GoalVerificationApplyOutcome::Rearmed);
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.runtime.state, SessionState::ExecutingTools);
         assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
         assert_eq!(
             session.goal.as_ref().unwrap().attempts[0].gaps,
             vec!["missing tests", "docs"]
@@ -410,10 +442,11 @@ mod tests {
             session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
             json!("verification_gaps")
         );
-        assert!(session
-            .command_queue
-            .iter()
-            .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+        assert!(session.command_queue.is_empty());
+        assert_eq!(
+            validation_extra(outcome, &verdict)["validate_goal"]["verdict"],
+            json!("unmet")
+        );
         assert_eq!(
             content,
             "GOAL NOT YET MET — remaining gaps:\n- missing tests\n- docs\n\nGOAL: UNMET\n- missing tests\n- docs"

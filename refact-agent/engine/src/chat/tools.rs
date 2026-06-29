@@ -83,7 +83,7 @@ pub(super) fn validate_goal_result_state(
         }
         tool_results.iter().find_map(|message| {
             if message.tool_call_id == tool_call.id && message.tool_failed != Some(true) {
-                validate_goal_state_from_text(&message.content.content_text_only())
+                validate_goal_state_from_extra(message)
             } else {
                 None
             }
@@ -91,11 +91,14 @@ pub(super) fn validate_goal_result_state(
     })
 }
 
-fn validate_goal_state_from_text(text: &str) -> Option<SessionState> {
-    if text.starts_with("GOAL MET") {
+fn validate_goal_state_from_extra(message: &ChatMessage) -> Option<SessionState> {
+    let verdict = message
+        .extra
+        .get("validate_goal")
+        .and_then(|value| value.get("verdict"))
+        .and_then(|value| value.as_str())?;
+    if verdict == "met" {
         Some(SessionState::Completed)
-    } else if text.starts_with("GOAL NOT YET MET") {
-        Some(SessionState::Idle)
     } else {
         None
     }
@@ -869,6 +872,15 @@ source:
         }
     }
 
+    fn validate_goal_tool_result(id: &str, verdict: &str, failed: Option<bool>) -> ChatMessage {
+        let mut message = tool_result(id, "human-readable output can change", failed);
+        message.extra.insert(
+            "validate_goal".to_string(),
+            serde_json::json!({"verdict": verdict}),
+        );
+        message
+    }
+
     #[test]
     fn validate_goal_result_state_detects_terminal_outputs() {
         let calls = vec![tool_call("tc", "validate_goal")];
@@ -876,24 +888,16 @@ source:
         assert_eq!(
             validate_goal_result_state(
                 &calls,
-                &[tool_result(
-                    "tc",
-                    "GOAL MET — goal marked complete; pursuit disabled.",
-                    Some(false),
-                )],
+                &[validate_goal_tool_result("tc", "met", Some(false))],
             ),
             Some(SessionState::Completed)
         );
         assert_eq!(
             validate_goal_result_state(
                 &calls,
-                &[tool_result(
-                    "tc",
-                    "GOAL NOT YET MET — remaining gaps:\n- missing tests",
-                    Some(false),
-                )],
+                &[validate_goal_tool_result("tc", "unmet", Some(false))],
             ),
-            Some(SessionState::Idle)
+            None
         );
         assert_eq!(
             validate_goal_result_state(
@@ -912,8 +916,15 @@ source:
                 &[tool_result(
                     "tc",
                     "GOAL MET — goal marked complete; pursuit disabled.",
-                    Some(true),
+                    Some(false),
                 )],
+            ),
+            None
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[validate_goal_tool_result("tc", "met", Some(true),)],
             ),
             None
         );
@@ -1436,7 +1447,6 @@ pub async fn process_tool_calls_once(
     let mut final_state = SessionState::Idle;
     let mut completion_trigger: Option<String> = None;
     let validate_goal_state = validate_goal_result_state(&tools_to_execute, &tool_results);
-    let validate_goal_stop = validate_goal_state.is_some();
     for tool_call in &tools_to_execute {
         let failed = tool_results
             .iter()
@@ -1465,11 +1475,10 @@ pub async fn process_tool_calls_once(
         final_state = state;
     }
 
-    let tool_initiated_stop = validate_goal_stop
-        || matches!(
-            final_state,
-            SessionState::Completed | SessionState::WaitingUserInput
-        );
+    let tool_initiated_stop = matches!(
+        final_state,
+        SessionState::Completed | SessionState::WaitingUserInput
+    );
 
     let was_interrupted = {
         let session = session_arc.lock().await;

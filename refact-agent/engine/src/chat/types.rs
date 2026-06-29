@@ -114,6 +114,7 @@ pub trait GoalSnapshotBudgetExt {
     fn goal_nudge_ready_at_with_backoff(&self, now_ms: u64) -> bool;
     fn goal_record_progress(&mut self, tokens: u64, made_progress: bool);
     fn goal_record_verifier_attempt(&mut self, tokens: u64);
+    fn goal_note_no_progress_turn(&mut self);
     fn goal_record_nudge(&mut self, at_ms: u64);
     fn goal_reset_no_progress(&mut self);
     fn goal_push_attempt(&mut self, attempt: GoalAttempt);
@@ -187,7 +188,11 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
             .cooldown_ms
             .saturating_mul(1u64 << shift)
             .min(GOAL_NUDGE_MAX_BACKOFF_MS);
-        now_ms >= self.progress.last_nudge_at_ms.saturating_add(effective_cooldown_ms)
+        now_ms
+            >= self
+                .progress
+                .last_nudge_at_ms
+                .saturating_add(effective_cooldown_ms)
     }
 
     fn goal_record_progress(&mut self, tokens: u64, made_progress: bool) {
@@ -220,6 +225,24 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
         }
         self.progress.turns_used = self.progress.turns_used.saturating_add(1);
         self.progress.tokens_used = self.progress.tokens_used.saturating_add(tokens);
+        match self.goal_budget_exhaustion_status_at(epoch_ms_now()) {
+            Some(status) => self.status = status,
+            None if matches!(
+                self.status,
+                GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+            ) =>
+            {
+                self.status = GoalStatus::Active;
+            }
+            None => {}
+        }
+    }
+
+    fn goal_note_no_progress_turn(&mut self) {
+        if self.progress.started_at_ms == 0 {
+            self.progress.started_at_ms = epoch_ms_now();
+        }
+        self.progress.no_progress_turns = self.progress.no_progress_turns.saturating_add(1);
         match self.goal_budget_exhaustion_status_at(epoch_ms_now()) {
             Some(status) => self.status = status,
             None if matches!(

@@ -594,6 +594,16 @@ impl ChatSession {
         true
     }
 
+    pub fn goal_note_no_progress_turn(&mut self) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_note_no_progress_turn();
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
     pub fn goal_record_nudge(&mut self, at_ms: u64) -> bool {
         let Some(goal) = self.goal.as_mut() else {
             return false;

@@ -131,6 +131,10 @@ fn command_triggers_generation(cmd: &ChatCommand) -> bool {
     )
 }
 
+fn note_user_turn_resets_goal_pursuit(session: &mut ChatSession) {
+    session.goal_reset_no_progress();
+}
+
 pub async fn inject_priority_messages_if_any(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -227,6 +231,7 @@ pub async fn inject_priority_messages_if_any(
                     ..Default::default()
                 };
                 session.add_message(user_message);
+                note_user_turn_resets_goal_pursuit(&mut session);
                 accepted
             };
             let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
@@ -1399,7 +1404,7 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
-                    session.goal_reset_no_progress();
+                    note_user_turn_resets_goal_pursuit(&mut session);
                     if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
                         let chat_id = session.chat_id.clone();
                         let first_user_text_preview = parsed_content
@@ -1453,6 +1458,7 @@ pub async fn process_command_queue(
                                 ..Default::default()
                             };
                             session.add_message(add_message);
+                            note_user_turn_resets_goal_pursuit(&mut session);
                         }
                     }
                 }
@@ -1483,6 +1489,7 @@ pub async fn process_command_queue(
                     ..Default::default()
                 };
                 session.add_message(user_message);
+                note_user_turn_resets_goal_pursuit(&mut session);
                 drop(session);
 
                 maybe_save_trajectory_background(app.clone(), session_arc.clone());
@@ -1898,6 +1905,7 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
+                    note_user_turn_resets_goal_pursuit(&mut session);
 
                     if let Some(ref skill_name) = pending.skill_activation_name {
                         session.set_active_skill(skill_name.clone());
@@ -2220,7 +2228,6 @@ async fn handle_tool_decisions(
         let mut final_state = SessionState::Idle;
         let mut completion_trigger: Option<String> = None;
         let validate_goal_state = validate_goal_result_state(&tool_calls_to_execute, &tool_results);
-        let validate_goal_stop = validate_goal_state.is_some();
         for tool_call in &tool_calls_to_execute {
             let tool_name =
                 crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
@@ -2243,11 +2250,10 @@ async fn handle_tool_decisions(
             final_state = state;
         }
 
-        let tool_initiated_stop = validate_goal_stop
-            || matches!(
-                final_state,
-                SessionState::Completed | SessionState::WaitingUserInput
-            );
+        let tool_initiated_stop = matches!(
+            final_state,
+            SessionState::Completed | SessionState::WaitingUserInput
+        );
 
         // Check if we were aborted during tool execution
         let was_aborted = {
@@ -3262,6 +3268,41 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].client_request_id, "req-1");
         assert_eq!(queue[1].client_request_id, "req-abort");
+    }
+
+    #[tokio::test]
+    async fn priority_user_message_resets_goal_no_progress() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("priority-reset".to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.checkpoints_enabled = false;
+            session.install_goal("agent", "ship it", true, GoalBudget::default());
+            session.goal.as_mut().unwrap().progress.no_progress_turns = 3;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "priority-user".to_string(),
+                priority: true,
+                command: ChatCommand::UserMessage {
+                    content: json!("resume pursuit"),
+                    attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: false,
+                },
+            });
+        }
+
+        assert!(inject_priority_messages_if_any(app, session_arc.clone()).await);
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+        assert!(session.messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .content_text_only()
+                    .contains("resume pursuit")
+        }));
     }
 
     #[test]
