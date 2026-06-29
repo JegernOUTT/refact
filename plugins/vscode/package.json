@@ -227,7 +227,7 @@
 				},
 				"refactai.browserHost": {
 					"type": "string",
-					"markdownDescription": "Host/IP to open for the daemon-served Refact UI. Leave empty to open this machine's `.local` name. For LAN access, set this to this machine's LAN IP, for example `192.168.1.20`.",
+					"markdownDescription": "Host/IP to open for the daemon-served Refact UI. Leave empty to open loopback `127.0.0.1`. For LAN access, set this to this machine's LAN IP or mDNS name, for example `192.168.1.20` or `machine.local`.",
 					"default": "",
 					"order": 18
 				}

@@ -50,13 +50,14 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         var baseUrlOverride: URI? = null
         var statusVersion = "8.1.0"
         var ensuredVersion = "8.1.0"
+        var authToken: String? = null
         var statusError: RuntimeException? = null
         var openProjectError: RuntimeException? = null
 
         override fun status(): DaemonStatus {
             statusCalls.incrementAndGet()
             statusError?.let { throw it }
-            return DaemonStatus(version = statusVersion, port = port)
+            return DaemonStatus(version = statusVersion, port = port, authToken = authToken)
         }
 
         override fun ensureDaemon(binPath: String): DaemonStatus {
@@ -78,7 +79,7 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             return DaemonProject(
                 projectId,
                 baseUrlOverride ?: URI("http://127.0.0.1:$port/p/$projectId/"),
-                DaemonStatus(version = statusVersion, port = port),
+                DaemonStatus(version = statusVersion, port = port, authToken = authToken),
             )
         }
 
@@ -271,6 +272,16 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         assertFalse(holder.hasPendingLifecycleWork())
     }
 
+    private fun withBrowserHost(host: String, block: () -> Unit) {
+        val previous = InferenceGlobalContext.browserHost
+        try {
+            InferenceGlobalContext.browserHost = host
+            block()
+        } finally {
+            InferenceGlobalContext.browserHost = previous
+        }
+    }
+
     @Test
     fun testAlreadyDisposedException() {
         val mockProject = mockProject()
@@ -382,6 +393,43 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             runOffEdt { holder.ensureStartedBlockingForTest("base-url") }
 
             assertEquals(URI("http://127.0.0.1:9999/p/abc123/"), holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBrowserUrlDefaultsToLoopbackBaseUrlAndPreservesToken() = withBrowserHost("") {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            port = 9999
+            projectId = "abc123"
+            authToken = "token with/slash"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("browser-url") }
+
+            assertEquals(URI("http://127.0.0.1:9999/p/abc123/?daemon_token=token%20with%2Fslash"), holder.browserUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBrowserUrlUsesExplicitBrowserHost() = withBrowserHost("machine.local") {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            port = 9999
+            projectId = "abc123"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("browser-url-override") }
+
+            assertEquals(URI("http://machine.local:9999/p/abc123/"), holder.browserUrlOrNull())
         } finally {
             holder.dispose()
         }

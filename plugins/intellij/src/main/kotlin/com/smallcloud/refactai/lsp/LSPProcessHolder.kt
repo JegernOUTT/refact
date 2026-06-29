@@ -18,6 +18,8 @@ import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
 import java.io.File
 import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
@@ -126,30 +128,25 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
-    private fun defaultMdnsHost(): String {
-        val label = runCatching { java.net.InetAddress.getLocalHost().hostName }
-            .getOrNull()
-            ?.lowercase()
-            ?.replace(Regex("[^a-z0-9-]"), "-")
-            ?.trim('-')
-            ?.takeIf { it.isNotEmpty() }
-            ?: "refact"
-        return "$label.local"
-    }
-
-    private fun defaultBrowserHost(): String {
-        return defaultMdnsHost()
-    }
-
     open fun browserUrlOrNull(): URI? {
         val base = baseUrlOrNull() ?: return null
         val configuredHost = InferenceGlobalContext.browserHost.trim()
         val host = if (configuredHost.isNotEmpty() && configuredHost != "0.0.0.0") {
             configuredHost
         } else {
-            defaultBrowserHost()
+            base.host ?: "127.0.0.1"
         }
-        return URI("http://$host:${base.port}${base.rawPath}")
+        return browserUrl(base, host, attachedProject?.daemon?.authToken)
+    }
+
+    private fun browserUrl(base: URI, host: String, authToken: String?): URI {
+        val scheme = base.scheme?.takeIf { it.isNotBlank() } ?: "http"
+        val path = base.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
+        val token = authToken?.trim()?.takeIf { it.isNotEmpty() }
+        val query = token?.let {
+            "?daemon_token=${URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")}"
+        }.orEmpty()
+        return URI("$scheme://$host:${base.port}$path$query")
     }
 
     private fun shouldAbortLifecycleWork(): Boolean {

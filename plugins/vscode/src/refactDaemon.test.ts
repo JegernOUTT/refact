@@ -7,8 +7,11 @@ import * as os from "os";
 import * as path from "path";
 import {
     DAEMON_OPEN_PROJECT_TIMEOUT_MS,
+    DEFAULT_BROWSER_HOST,
     browserProjectUrl,
+    browserProjectUrlForConfiguredHost,
     compareVersions,
+    configuredBrowserHost,
     daemonRequestHeaders,
     daemonEndpoints,
     daemonOpenProjectUrl,
@@ -62,6 +65,27 @@ export async function runRefactDaemonTests() {
     );
     assert.strictEqual(
         browserProjectUrl("machine.local", 8488, "abc", "token with/slash"),
+        "http://machine.local:8488/p/abc/?daemon_token=token%20with%2Fslash",
+    );
+    assert.strictEqual(DEFAULT_BROWSER_HOST, "127.0.0.1");
+    assert.strictEqual(configuredBrowserHost(undefined), undefined);
+    assert.strictEqual(configuredBrowserHost(""), undefined);
+    assert.strictEqual(configuredBrowserHost(" 0.0.0.0 "), undefined);
+    assert.strictEqual(configuredBrowserHost(" machine.local "), "machine.local");
+    assert.strictEqual(
+        browserProjectUrlForConfiguredHost(undefined, 8488, "abc"),
+        "http://127.0.0.1:8488/p/abc/",
+    );
+    assert.strictEqual(
+        browserProjectUrlForConfiguredHost("", 8488, "abc"),
+        "http://127.0.0.1:8488/p/abc/",
+    );
+    assert.strictEqual(
+        browserProjectUrlForConfiguredHost("0.0.0.0", 8488, "abc"),
+        "http://127.0.0.1:8488/p/abc/",
+    );
+    assert.strictEqual(
+        browserProjectUrlForConfiguredHost("machine.local", 8488, "abc", "token with/slash"),
         "http://machine.local:8488/p/abc/?daemon_token=token%20with%2Fslash",
     );
     assert.deepStrictEqual(

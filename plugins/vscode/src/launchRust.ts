@@ -4,7 +4,6 @@ import * as fetchH2 from 'fetch-h2';
 import * as fetchAPI from "./fetchAPI";
 import * as lspClient from 'vscode-languageclient/node';
 import * as net from 'net';
-import * as os from 'os';
 import * as path from 'path';
 import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
@@ -151,28 +150,23 @@ export class RustBinaryBlob {
     public browser_url(): string {
         if (this.x_debug()) {
             const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
-            const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
+            const host = refactDaemon.configuredBrowserHost(configuredHost) ?? this.default_browser_host();
             return `http://${host}:${DEBUG_HTTP_PORT}/`;
         }
         if (!this.port || !this.project_id) {
             return "";
         }
         const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
-        const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
-        return refactDaemon.browserProjectUrl(host, this.port, this.project_id, this.daemon_auth_token);
+        return refactDaemon.browserProjectUrlForConfiguredHost(
+            configuredHost,
+            this.port,
+            this.project_id,
+            this.daemon_auth_token,
+        );
     }
 
     private default_browser_host(): string {
-        return this.default_mdns_host();
-    }
-
-    private default_mdns_host(): string {
-        const hostname = os.hostname() as string;
-        const label = hostname
-            .toLowerCase()
-            .replace(/[^a-z0-9-]/g, "-")
-            .replace(/^-+|-+$/g, "");
-        return label ? `${label}.local` : "refact.local";
+        return refactDaemon.DEFAULT_BROWSER_HOST;
     }
 
     public attemping_to_reach(): string {

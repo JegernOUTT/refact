@@ -6,6 +6,7 @@ import * as os from "os";
 import * as path from "path";
 
 export const DEFAULT_DAEMON_PORT = 8488;
+export const DEFAULT_BROWSER_HOST = "127.0.0.1";
 export const DAEMON_POLL_TIMEOUT_MS = 15000;
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10000;
 export const DAEMON_SHUTDOWN_POLL_MS = 200;
@@ -233,10 +234,24 @@ export function projectProxyBaseUrl(port: number, projectId: string): string {
     return `${daemonBaseUrl(port)}/p/${encodeURIComponent(projectId)}/`;
 }
 
+export function configuredBrowserHost(configuredHost?: string | null): string | undefined {
+    const host = configuredHost?.trim();
+    return host && host !== "0.0.0.0" ? host : undefined;
+}
+
 export function browserProjectUrl(host: string, port: number, projectId: string, authToken?: string | null): string {
     const baseUrl = `http://${host}:${normalizeDaemonPort(port)}/p/${encodeURIComponent(projectId)}/`;
     const token = normalizeAuthToken(authToken);
     return token ? `${baseUrl}?daemon_token=${encodeURIComponent(token)}` : baseUrl;
+}
+
+export function browserProjectUrlForConfiguredHost(
+    configuredHost: string | null | undefined,
+    port: number,
+    projectId: string,
+    authToken?: string | null,
+): string {
+    return browserProjectUrl(configuredBrowserHost(configuredHost) ?? DEFAULT_BROWSER_HOST, port, projectId, authToken);
 }
 
 export type PrimaryWorkspaceRootSelection = {
