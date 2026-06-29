@@ -53,10 +53,11 @@ import { execFile } from "child_process";
 import * as estate from './estate';
 import { animation_start } from "./interactiveDiff";
 import { backendConfigForStatus, effectiveLspPortForStatus, type RefactBackendConfig } from "./backendStatus";
+import { webviewEndpointConfig } from "./sidebarConfig";
 
 const OPEN_CHAT_IN_BROWSER_EVENT = "ide/openChatInBrowser";
 
-type ConfigUpdatePayload = Parameters<typeof updateConfig>[0] & RefactBackendConfig;
+type ConfigUpdatePayload = Parameters<typeof updateConfig>[0] & RefactBackendConfig & { lspUrl?: string };
 
 type QueuedWebviewMessage = {
     generation: number;
@@ -383,13 +384,18 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
         const currentActiveWorkspaceName = this.getActiveWorkspace();
 
+        const backendConfig = this.backendConfig();
         const config: ConfigUpdatePayload = {
             lspPort: port,
             shiftEnterToSubmit: submitChatWithShiftEnter,
             features: {vecdb, ast},
             currentWorkspaceName: currentActiveWorkspaceName,
-            browserUrl: global.rust_binary_blob?.browser_url?.() || undefined,
-            ...this.backendConfig(),
+            ...webviewEndpointConfig(
+                backendConfig.backendReady,
+                global.rust_binary_blob?.rust_url?.() || undefined,
+                global.rust_binary_blob?.browser_url?.() || undefined,
+            ),
+            ...backendConfig,
         };
         const message = updateConfig(config);
 
@@ -1058,6 +1064,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const currentActiveWorkspaceName = this.getActiveWorkspace();
         const currentProject = this.getCurrentProjectInfo();
 
+        const backendConfig = this.backendConfig();
         const config: InitialState["config"] & RefactBackendConfig = {
             host: "vscode",
             tabbed,
@@ -1078,9 +1085,13 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 completeManual,
             },
             lspPort: port,
-            browserUrl: global.rust_binary_blob?.browser_url?.() || undefined,
+            ...webviewEndpointConfig(
+                backendConfig.backendReady,
+                global.rust_binary_blob?.rust_url?.() || undefined,
+                global.rust_binary_blob?.browser_url?.() || undefined,
+            ),
             currentWorkspaceName: currentActiveWorkspaceName,
-            ...this.backendConfig(),
+            ...backendConfig,
         };
 
         const state: Partial<InitialState> = {

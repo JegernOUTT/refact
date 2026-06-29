@@ -4,6 +4,7 @@ import {
     createCurrentProjectInfo,
     resolveFilePathWithinWorkspace,
 } from "./sidebarPaths";
+import { webviewEndpointConfig } from "./sidebarConfig";
 
 export function runSidebarPathBoundaryTests() {
     const workspaceRoot = path.resolve("/workspace/repo");
@@ -36,4 +37,20 @@ export function runSidebarPathBoundaryTests() {
     assert.deepStrictEqual(createCurrentProjectInfo("repo", []), { name: "repo" });
 }
 
+function runWebviewEndpointConfigTests() {
+    const lspUrl = "http://127.0.0.1:8488/p/PID/";
+    const browserUrl = "http://machine.local:8488/p/PID/";
+
+    assert.deepStrictEqual(webviewEndpointConfig(true, lspUrl, browserUrl), { browserUrl, lspUrl });
+
+    const startingConfig = webviewEndpointConfig(false, lspUrl, browserUrl);
+    assert.deepStrictEqual(startingConfig, { browserUrl });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(startingConfig, "lspUrl"), false);
+
+    const missingProxyConfig = webviewEndpointConfig(true, "", browserUrl);
+    assert.deepStrictEqual(missingProxyConfig, { browserUrl });
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(missingProxyConfig, "lspUrl"), false);
+}
+
 runSidebarPathBoundaryTests();
+runWebviewEndpointConfigTests();
