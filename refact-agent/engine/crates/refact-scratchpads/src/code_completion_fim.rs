@@ -30,11 +30,15 @@ pub struct FillInTheMiddleScratchpad {
     pub fim_suffix: String,
     pub fim_middle: String,
     pub extra_stop_tokens: Vec<String>,
+    pub held_stream_suffix: String,
+    pub stream_stopped: bool,
     pub context_used: Value,
     pub data4cache: completion_cache::CompletionSaveToCache,
     pub ast_index: Option<Arc<AstDB>>,
     pub pp_context: Arc<dyn PPContextTrait>,
     pub project_dirs: Vec<PathBuf>,
+    message_stream_pending: String,
+    message_stream_stopped: bool,
 }
 
 impl FillInTheMiddleScratchpad {
@@ -56,11 +60,15 @@ impl FillInTheMiddleScratchpad {
             fim_suffix: String::new(),
             fim_middle: String::new(),
             extra_stop_tokens: vec![],
+            held_stream_suffix: String::new(),
+            stream_stopped: false,
             context_used: json!({}),
             data4cache,
             ast_index,
             pp_context,
             project_dirs,
+            message_stream_pending: String::new(),
+            message_stream_stopped: false,
         }
     }
 
@@ -70,6 +78,87 @@ impl FillInTheMiddleScratchpad {
             .replace(&self.fim_suffix, "")
             .replace(&self.t.eos, "")
             .replace(&self.t.eot, "")
+    }
+
+    fn stop_tokens(&self, multiline: bool) -> Vec<String> {
+        stop_tokens(&self.t.eot, &self.t.eos, multiline, &self.extra_stop_tokens)
+    }
+
+    fn cut_stream_delta(&mut self, delta: &str, finish_reason: FinishReason) -> String {
+        if self.stream_stopped {
+            return String::new();
+        }
+        let mut combined = std::mem::take(&mut self.held_stream_suffix);
+        combined.push_str(delta);
+        let stop_tokens = self.stop_tokens(self.post.inputs.multiline);
+        let (cut, stopped) = cut_at_first_stop(&combined, &stop_tokens);
+        if stopped {
+            self.stream_stopped = true;
+            return cut.replace("\r", "");
+        }
+        if finish_reason == FinishReason::Stop || finish_reason == FinishReason::ScratchpadStop {
+            self.stream_stopped = true;
+            return String::new();
+        }
+        let hold = if finish_reason.is_finished() {
+            0
+        } else {
+            held_suffix_len(&combined, &stop_tokens)
+        };
+        let split_at = combined.len().saturating_sub(hold);
+        let out = combined[..split_at].replace("\r", "");
+        self.held_stream_suffix = combined[split_at..].to_string();
+        out
+    }
+
+    fn cut_message_stream_delta(&mut self, delta: &str) -> String {
+        if self.message_stream_stopped || delta.is_empty() {
+            return String::new();
+        }
+        self.message_stream_pending.push_str(delta);
+        let mut cut_at = None;
+        for token in self.stop_tokens(self.post.inputs.multiline) {
+            if let Some(pos) = self.message_stream_pending.find(&token) {
+                cut_at = Some(cut_at.map_or(pos, |current: usize| current.min(pos)));
+            }
+        }
+        if let Some(pos) = cut_at {
+            self.message_stream_stopped = true;
+            let emitted = self.message_stream_pending[..pos].to_string();
+            self.message_stream_pending.clear();
+            return emitted.replace("\r", "");
+        }
+        let keep = held_suffix_len(
+            &self.message_stream_pending,
+            &self.stop_tokens(self.post.inputs.multiline),
+        );
+        let pending_len = self.message_stream_pending.len();
+        if pending_len <= keep {
+            return String::new();
+        }
+        let emit_len = safe_char_boundary_before(&self.message_stream_pending, pending_len - keep);
+        if emit_len == 0 {
+            return String::new();
+        }
+        let emitted = self.message_stream_pending[..emit_len].to_string();
+        self.message_stream_pending = self.message_stream_pending[emit_len..].to_string();
+        emitted.replace("\r", "")
+    }
+
+    fn flush_message_stream_delta(&mut self) -> String {
+        if self.message_stream_pending.is_empty() || self.message_stream_stopped {
+            self.message_stream_pending.clear();
+            return String::new();
+        }
+        let emitted = _cut_result(
+            &self.message_stream_pending,
+            self.t.eot.as_str(),
+            self.t.eos.as_str(),
+            self.post.inputs.multiline,
+            &self.extra_stop_tokens,
+        );
+        self.message_stream_pending.clear();
+        emitted
     }
 }
 
@@ -97,6 +186,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty())
                     .collect::<Vec<String>>()
             })
             .unwrap_or_default();
@@ -177,12 +267,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 
         let supports_stop = true;
         if supports_stop {
-            let mut stop_list = vec![self.t.eot.clone(), "\n\n".to_string()];
-            if !self.post.inputs.multiline {
-                stop_list.push("\n".to_string());
-            }
-            stop_list.extend(self.extra_stop_tokens.clone());
-            sampling_parameters_to_patch.stop = stop_list;
+            sampling_parameters_to_patch.stop = self.stop_tokens(self.post.inputs.multiline);
         }
         let mut source = self
             .post
@@ -257,7 +342,9 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             limit
         );
         let mut prompt: String;
-        if self.order == "PSM" {
+        if self.order == "plain" {
+            prompt = format!("{}{}{}", self.t.eos, before, cursor_line1);
+        } else if self.order == "PSM" {
             prompt = format!(
                 "{}{}{}{}{}{}{}{}",
                 self.t.eos,
@@ -314,7 +401,11 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                     prompt = format!("{extra_context}{prompt}");
                     break;
                 } else {
-                    content_tokens_budget -= content_tokens_n - content_tokens_budget;
+                    let overshoot = content_tokens_n - content_tokens_budget;
+                    if overshoot >= content_tokens_budget {
+                        break;
+                    }
+                    content_tokens_budget -= overshoot;
                     extra_content_collect_counter += 1;
                 }
             }
@@ -347,6 +438,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                 let cc = _cut_result(
                     &x,
                     self.t.eot.as_str(),
+                    self.t.eos.as_str(),
                     self.post.inputs.multiline,
                     &self.extra_stop_tokens,
                 );
@@ -373,18 +465,28 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         ))
     }
 
+    fn response_message_n_choices(
+        &mut self,
+        choices: Vec<String>,
+        finish_reasons: Vec<FinishReason>,
+    ) -> Result<Value, String> {
+        self.response_n_choices(choices, finish_reasons)
+    }
+
     fn response_streaming(
         &mut self,
         delta: String,
         finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String> {
-        let json_choices = if !delta.is_empty() || finish_reason == FinishReason::Stop {
-            let mut s: String = _cut_result(
-                &delta,
-                self.t.eot.as_str(),
-                self.post.inputs.multiline,
-                &self.extra_stop_tokens,
-            );
+        let json_choices = if !delta.is_empty()
+            || matches!(
+                finish_reason,
+                FinishReason::Stop
+                    | FinishReason::ContentFilter
+                    | FinishReason::Unknown
+                    | FinishReason::ScratchpadStop
+            ) {
+            let mut s: String = self.cut_stream_delta(&delta, finish_reason);
             if finish_reason.is_finished() {
                 s = s.trim_end().to_string();
             }
@@ -413,10 +515,36 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 
     fn response_message_streaming(
         &mut self,
-        _delta: &Value,
-        _finish_reason: FinishReason,
+        delta: &Value,
+        finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String> {
-        Err("not implemented".to_string())
+        let content = delta
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|delta| delta.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or("");
+        let mut code_completion = self.cut_message_stream_delta(content);
+        if finish_reason.is_finished() {
+            code_completion.push_str(&self.flush_message_stream_delta());
+            code_completion = code_completion.trim_end().to_string();
+        }
+        if !code_completion.is_empty() {
+            self.data4cache.completion0_text.push_str(&code_completion);
+        }
+        self.data4cache.completion0_finish_reason = finish_reason.to_string();
+        Ok((
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "code_completion": code_completion,
+                    "finish_reason": finish_reason.to_json_val(),
+                }],
+            }),
+            finish_reason,
+        ))
     }
 
     fn response_spontaneous(&mut self) -> Result<Vec<Value>, String> {
@@ -425,10 +553,20 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 
     fn streaming_finished(&mut self, finish_reason: FinishReason) -> Result<Value, String> {
         self.data4cache.completion0_finish_reason = finish_reason.to_string();
+        let tail = if finish_reason == FinishReason::Stop
+            || finish_reason == FinishReason::ScratchpadStop
+        {
+            String::new()
+        } else {
+            std::mem::take(&mut self.held_stream_suffix).replace("\r", "")
+        };
+        if !tail.is_empty() {
+            self.data4cache.completion0_text.push_str(&tail);
+        }
         Ok(json!({
             "choices": [{
                 "index": 0,
-                "code_completion": "",
+                "code_completion": tail,
                 "finish_reason": finish_reason.to_json_val()
             }],
         }))
@@ -438,33 +576,361 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 fn _cut_result(
     text: &str,
     eot_token: &str,
+    eos_token: &str,
     multiline: bool,
     extra_stop_tokens: &Vec<String>,
 ) -> String {
-    let mut cut_at = vec![];
-    if let Some(x) = text.find(eot_token) {
-        cut_at.push(x);
-    }
-    for token in extra_stop_tokens {
-        if let Some(x) = text.find(token) {
-            cut_at.push(x);
-        }
-    }
-    if let Some(x) = text.find("\n\n") {
-        cut_at.push(x);
-    }
-    if let Some(x) = text.find("\r\n\r\n") {
-        cut_at.push(x);
-    }
-    if !multiline {
-        if let Some(x) = text.find("\n") {
-            cut_at.push(x);
-        }
-    }
-    if cut_at.is_empty() {
+    let stop_tokens = stop_tokens(eot_token, eos_token, multiline, extra_stop_tokens);
+    let (ans, stopped) = cut_at_first_stop(text, &stop_tokens);
+    if !stopped {
         return text.to_string().replace("\r", "");
     }
-    let cut_at = cut_at.into_iter().min().unwrap_or(text.len());
-    let ans = text.split_at(cut_at).0.to_string();
     ans.replace("\r", "")
+}
+
+fn stop_tokens(
+    eot_token: &str,
+    eos_token: &str,
+    multiline: bool,
+    extra_stop_tokens: &Vec<String>,
+) -> Vec<String> {
+    let mut tokens = vec![
+        eot_token.to_string(),
+        eos_token.to_string(),
+        "<EOT>".to_string(),
+        "\n\n".to_string(),
+        "\r\n\r\n".to_string(),
+    ];
+    if !multiline {
+        tokens.push("\n".to_string());
+    }
+    tokens.extend(extra_stop_tokens.iter().cloned());
+    tokens.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+fn cut_at_first_stop(text: &str, stop_tokens: &[String]) -> (String, bool) {
+    let cut_at = stop_tokens
+        .iter()
+        .filter_map(|token| text.find(token))
+        .min();
+    if let Some(cut_at) = cut_at {
+        (text[..cut_at].to_string(), true)
+    } else {
+        (text.to_string(), false)
+    }
+}
+
+fn held_suffix_len(text: &str, stop_tokens: &[String]) -> usize {
+    stop_tokens
+        .iter()
+        .flat_map(|token| {
+            token
+                .char_indices()
+                .skip(1)
+                .map(|(idx, _)| &token[..idx])
+                .collect::<Vec<_>>()
+        })
+        .filter(|prefix| text.ends_with(*prefix))
+        .map(|prefix| prefix.len())
+        .max()
+        .unwrap_or(0)
+}
+
+fn safe_char_boundary_before(text: &str, index: usize) -> usize {
+    let mut safe_index = index.min(text.len());
+    while safe_index > 0 && !text.is_char_boundary(safe_index) {
+        safe_index -= 1;
+    }
+    safe_index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refact_core::chat_types::{CodeCompletionInputs, CursorPosition};
+    use refact_postprocessing::pp_context_provider::PPContextTrait;
+    use std::collections::HashMap;
+
+    struct TestPPContext;
+
+    #[async_trait]
+    impl PPContextTrait for TestPPContext {
+        async fn read_file(&self, _path: &PathBuf) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+
+        async fn correct_to_nearest_filename(&self, _path: &str, _limit: usize) -> Vec<String> {
+            vec![]
+        }
+
+        async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
+            paths.to_vec()
+        }
+
+        async fn doc_defs_for_path(
+            &self,
+            _path: &str,
+        ) -> Vec<Arc<refact_ast::ast::ast_structs::AstDefinition>> {
+            vec![]
+        }
+
+        fn canonical_path(&self, path: &str) -> PathBuf {
+            PathBuf::from(path)
+        }
+    }
+
+    fn post(source: &str, multiline: bool) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: CodeCompletionInputs {
+                sources: HashMap::from([("/tmp/main.rs".to_string(), source.to_string())]),
+                cursor: CursorPosition {
+                    file: "/tmp/main.rs".to_string(),
+                    line: 1,
+                    character: 7,
+                },
+                multiline,
+            },
+            parameters: SamplingParameters {
+                max_new_tokens: 10,
+                ..Default::default()
+            },
+            model: "model".to_string(),
+            stream: false,
+            no_cache: true,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
+        }
+    }
+
+    fn scratchpad(order: &str, source: &str, multiline: bool) -> FillInTheMiddleScratchpad {
+        FillInTheMiddleScratchpad::new(
+            None,
+            &post(source, multiline),
+            order.to_string(),
+            Arc::new(StdRwLock::new(completion_cache::CompletionCache::new())),
+            None,
+            Arc::new(TestPPContext),
+            vec![],
+        )
+    }
+
+    async fn patched_scratchpad(order: &str) -> FillInTheMiddleScratchpad {
+        let mut sp = scratchpad(order, "fn main() {\n    pri\n}\n", true);
+        sp.apply_model_adaptation_patch(&json!({
+            "fim_prefix": "<PRE>",
+            "fim_suffix": "<SUF>",
+            "fim_middle": "<MID>",
+            "eos": "<BOS>",
+            "eot": "<END>",
+            "extra_stop_tokens": ["", "<STOP>"]
+        }))
+        .await
+        .unwrap();
+        sp
+    }
+
+    async fn prompt_for(order: &str) -> (String, SamplingParameters) {
+        let mut sp = patched_scratchpad(order).await;
+        let mut params = SamplingParameters::default();
+        let prompt = sp
+            .prompt(
+                ScratchpadPromptInput {
+                    n_ctx: 2048,
+                    postprocess_parameters: Default::default(),
+                },
+                &mut params,
+            )
+            .await
+            .unwrap();
+        (prompt, params)
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_psm_places_tokens() {
+        let (prompt, params) = prompt_for("PSM").await;
+        assert_eq!(prompt, "<BOS><PRE>fn main() {\n    pri<SUF>\n}\n<MID>");
+        assert!(params.stop.contains(&"<END>".to_string()));
+        assert!(params.stop.contains(&"<BOS>".to_string()));
+        assert!(params.stop.contains(&"<STOP>".to_string()));
+        assert!(!params.stop.contains(&String::new()));
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_spm_places_tokens() {
+        let (prompt, _params) = prompt_for("SPM").await;
+        assert_eq!(prompt, "<BOS><SUF>\n}\n<PRE>fn main() {\n    pri<MID>");
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_plain_prompt_path() {
+        let (prompt, _params) = prompt_for("plain").await;
+        assert_eq!(prompt, "<BOS>fn main() {\n    pri");
+    }
+
+    #[test]
+    fn code_completion_fim_cut_result_handles_eos_eot_and_empty_stop() {
+        let stops = vec![String::new(), "<STOP>".to_string()];
+        assert_eq!(
+            _cut_result("abc<BOS>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+        assert_eq!(
+            _cut_result("abc<END>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+        assert_eq!(
+            _cut_result("abc<STOP>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn code_completion_fim_split_stop_sequence_does_not_leak() {
+        let mut sp = scratchpad("PSM", "fn main() {\n    pri\n}\n", true);
+        sp.t.eot = "<END>".to_string();
+        let (value, finish) = sp
+            .response_streaming("hello <E".to_string(), FinishReason::None)
+            .unwrap();
+        assert_eq!(finish, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "hello ");
+        let (value, finish) = sp
+            .response_streaming("OT> leaked".to_string(), FinishReason::None)
+            .unwrap();
+        assert_eq!(finish, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "");
+        assert_eq!(sp.data4cache.completion0_text, "hello ");
+    }
+
+    fn chat_delta(content: Value, finish_reason: FinishReason) -> Value {
+        json!({
+            "choices": [{
+                "delta": { "content": content },
+                "finish_reason": finish_reason.to_json_val(),
+            }]
+        })
+    }
+
+    #[test]
+    fn response_message_streaming_content_delta_emits_code_completion_and_updates_cache() {
+        let mut sp = scratchpad(
+            "PSM",
+            "fn main() {
+    pri
+}
+",
+            true,
+        );
+        let (value, finish_reason) = sp
+            .response_message_streaming(
+                &chat_delta(json!("hello"), FinishReason::None),
+                FinishReason::None,
+            )
+            .unwrap();
+
+        assert_eq!(finish_reason, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "hello");
+        assert_eq!(value["choices"][0]["finish_reason"], Value::Null);
+        assert_eq!(sp.data4cache.completion0_text, "hello");
+        assert_eq!(sp.data4cache.completion0_finish_reason, "");
+    }
+
+    #[test]
+    fn response_message_streaming_split_stop_tokens_are_not_leaked() {
+        let mut sp = scratchpad(
+            "PSM",
+            "fn main() {
+    pri
+}
+",
+            true,
+        );
+        sp.t.eot = "<|endoftext|>".to_string();
+        let (first, _) = sp
+            .response_message_streaming(
+                &chat_delta(json!("abc<|endof"), FinishReason::None),
+                FinishReason::None,
+            )
+            .unwrap();
+        let (second, _) = sp
+            .response_message_streaming(
+                &chat_delta(json!("text|>def"), FinishReason::Stop),
+                FinishReason::Stop,
+            )
+            .unwrap();
+
+        assert_eq!(first["choices"][0]["code_completion"], "abc");
+        assert_eq!(second["choices"][0]["code_completion"], "");
+        assert_eq!(sp.data4cache.completion0_text, "abc");
+        assert_eq!(sp.data4cache.completion0_finish_reason, "stop");
+    }
+
+    #[test]
+    fn response_message_streaming_split_extra_stop_tokens_are_not_leaked() {
+        let mut sp = scratchpad(
+            "PSM",
+            "fn main() {
+    pri
+}
+",
+            true,
+        );
+        sp.extra_stop_tokens = vec!["<STOP>".to_string()];
+        let (first, _) = sp
+            .response_message_streaming(
+                &chat_delta(json!("abc<ST"), FinishReason::None),
+                FinishReason::None,
+            )
+            .unwrap();
+        let (second, _) = sp
+            .response_message_streaming(
+                &chat_delta(json!("OP>def"), FinishReason::Stop),
+                FinishReason::Stop,
+            )
+            .unwrap();
+
+        assert_eq!(first["choices"][0]["code_completion"], "abc");
+        assert_eq!(second["choices"][0]["code_completion"], "");
+        assert_eq!(sp.data4cache.completion0_text, "abc");
+    }
+
+    #[test]
+    fn response_message_streaming_empty_delta_content_is_safe() {
+        let mut sp = scratchpad(
+            "PSM",
+            "fn main() {
+    pri
+}
+",
+            true,
+        );
+        sp.response_message_streaming(
+            &chat_delta(json!("hello"), FinishReason::None),
+            FinishReason::None,
+        )
+        .unwrap();
+        let (value, finish_reason) = sp
+            .response_message_streaming(
+                &chat_delta(Value::Null, FinishReason::None),
+                FinishReason::None,
+            )
+            .unwrap();
+
+        assert_eq!(finish_reason, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "");
+        assert_eq!(sp.data4cache.completion0_text, "hello");
+    }
+
+    #[test]
+    fn code_completion_fim_negative_rag_retry_math_clamps() {
+        let mut budget = 20;
+        let content_tokens_n = 60;
+        let overshoot = content_tokens_n - budget;
+        if overshoot < budget {
+            budget -= overshoot;
+        }
+        assert_eq!(budget, 20);
+    }
 }

@@ -147,6 +147,8 @@ available:
             chat_endpoint,
             completion_endpoint: "https://api.openai.com/v1/completions".to_string(),
             embedding_endpoint: "https://api.openai.com/v1/embeddings".to_string(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

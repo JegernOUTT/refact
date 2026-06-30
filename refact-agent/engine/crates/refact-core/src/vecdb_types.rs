@@ -40,6 +40,8 @@ pub struct EmbeddingModelConfig {
     pub endpoint_style: String,
     pub embedding_endpoint_style: String,
     pub api_key: String,
+    pub auth_token: String,
+    pub extra_headers: std::collections::HashMap<String, String>,
     pub model_name: String,
     pub embedding_size: i32,
     pub dimensions: Option<usize>,
@@ -48,6 +50,43 @@ pub struct EmbeddingModelConfig {
     pub rejection_threshold: f32,
     pub embedding_batch: usize,
     pub n_ctx: usize,
+}
+
+impl EmbeddingModelConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.endpoint.trim().is_empty() {
+            return Err("VecDB embedding config error: endpoint is empty".to_string());
+        }
+        if self.model_name.trim().is_empty() {
+            return Err("VecDB embedding config error: model_name is empty".to_string());
+        }
+        if self.embedding_size <= 0 {
+            return Err(format!(
+                "VecDB embedding config error: embedding_size must be positive, got {}",
+                self.embedding_size
+            ));
+        }
+        if self.embedding_batch == 0 {
+            return Err(
+                "VecDB embedding config error: embedding_batch must be positive".to_string(),
+            );
+        }
+        if self.rejection_threshold <= 0.0 {
+            return Err(format!(
+                "VecDB embedding config error: rejection_threshold must be positive, got {}",
+                self.rejection_threshold
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn prefixed_query(&self, text: &str) -> String {
+        format!("{}{}", self.query_prefix, text)
+    }
+
+    pub fn prefixed_document(&self, text: &str) -> String {
+        format!("{}{}", self.document_prefix, text)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +143,8 @@ impl From<&EmbeddingModelRecord> for EmbeddingModelConfig {
             endpoint_style: model.base.endpoint_style.clone(),
             embedding_endpoint_style: model.base.embedding_endpoint_style.clone(),
             api_key: model.base.api_key.clone(),
+            auth_token: model.base.auth_token.clone(),
+            extra_headers: model.base.extra_headers.clone(),
             model_name: model.base.name.clone(),
             embedding_size: model.embedding_size,
             dimensions: model.dimensions,

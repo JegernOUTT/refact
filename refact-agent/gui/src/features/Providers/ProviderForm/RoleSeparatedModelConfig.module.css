@@ -1,0 +1,32 @@
+.root {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-5);
+}
+
+.intro {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  margin: 0;
+  max-width: 64ch;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.footer {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-3);
+}

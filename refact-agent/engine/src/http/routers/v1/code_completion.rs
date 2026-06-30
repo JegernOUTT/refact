@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::Mutex as AMutex;
 
 use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
+use refact_core::llm_types::BaseModelRecord;
+use sha2::{Digest, Sha256};
 use tracing::info;
 use crate::call_validation::{CodeCompletionPost, code_completion_post_validate};
 use crate::caps::resolve_completion_model;
@@ -17,6 +20,63 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::scratchpad_abstract::ScratchpadPromptInput;
 
 const CODE_COMPLETION_TOP_N: usize = 5;
+
+fn normalize_code_completion_post(
+    code_completion_post: &mut CodeCompletionPost,
+    model_rec: &crate::caps::CompletionModelRecord,
+) -> Result<(), ScratchError> {
+    if code_completion_post.use_vecdb {
+        return Err(ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Code completion use_vecdb is not supported yet; use use_ast for completion RAG"
+                .to_string(),
+        ));
+    }
+    if code_completion_post.parameters.max_new_tokens == 0 {
+        code_completion_post.parameters.max_new_tokens = 50;
+    }
+    code_completion_post.model = model_rec.base.id.clone();
+    code_completion_post.parameters.temperature =
+        Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
+    Ok(())
+}
+
+fn safe_hash(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn completion_cache_salt(
+    model: &BaseModelRecord,
+    scratchpad: &str,
+    scratchpad_patch: &serde_json::Value,
+) -> String {
+    let mut headers: Vec<_> = model.extra_headers.iter().collect();
+    headers.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let header_hashes: Vec<_> = headers
+        .into_iter()
+        .map(|(key, value)| serde_json::json!({"key": key, "value_sha256": safe_hash(value)}))
+        .collect();
+    serde_json::json!({
+        "model_id": model.id,
+        "upstream_model": model.name,
+        "endpoint": model.endpoint,
+        "endpoint_style": model.endpoint_style,
+        "completion_endpoint_style": model.completion_endpoint_style,
+        "wire_format": model.wire_format,
+        "api_key_sha256": safe_hash(&model.api_key),
+        "auth_token_sha256": safe_hash(&model.auth_token),
+        "tokenizer_api_key_sha256": safe_hash(&model.tokenizer_api_key),
+        "extra_headers": header_hashes,
+        "scratchpad": scratchpad,
+        "scratchpad_patch": scratchpad_patch,
+    })
+    .to_string()
+}
 
 pub async fn handle_v1_code_completion(
     app: AppState,
@@ -36,17 +96,18 @@ pub async fn handle_v1_code_completion(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &code_completion_post.model)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    if code_completion_post.parameters.max_new_tokens == 0 {
-        code_completion_post.parameters.max_new_tokens = 50;
-    }
-    code_completion_post.model = model_rec.base.id.clone();
+    normalize_code_completion_post(code_completion_post, &model_rec)?;
     info!(
         "chosen completion model: {}, scratchpad: {}",
         code_completion_post.model, model_rec.scratchpad
     );
-    code_completion_post.parameters.temperature =
-        Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
     let cache_arc = { gcx.completions_cache.clone() };
+    code_completion_post.cache_generation = gcx.completion_cache_generation.load(Ordering::Relaxed);
+    code_completion_post.cache_salt = completion_cache_salt(
+        &model_rec.base,
+        &model_rec.scratchpad,
+        &model_rec.scratchpad_patch,
+    );
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
         let cached_maybe = completion_cache::cache_get(cache_arc.clone(), cache_key.clone());
@@ -139,6 +200,7 @@ pub async fn handle_v1_code_completion_prompt(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &post.model)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    normalize_code_completion_post(&mut post, &model_rec)?;
 
     // don't need cache, but go along
     let cache_arc = { gcx.completions_cache.clone() };
@@ -190,4 +252,251 @@ pub async fn handle_v1_code_completion_prompt(
         .body(Body::from(body))
         .unwrap();
     return Ok(response);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caps::{CodeAssistantCaps, CompletionModelRecord};
+    use refact_core::llm_types::{BaseModelRecord, WireFormat};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn post(model: &str) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: crate::call_validation::CodeCompletionInputs::default(),
+            parameters: crate::call_validation::SamplingParameters::default(),
+            model: model.to_string(),
+            stream: false,
+            no_cache: false,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
+        }
+    }
+
+    fn model_rec() -> crate::caps::CompletionModelRecord {
+        let mut record = crate::caps::CompletionModelRecord::default();
+        record.base.id = "provider/model".to_string();
+        record
+    }
+
+    fn test_model(
+        endpoint: &str,
+        api_key: &str,
+        headers: HashMap<String, String>,
+    ) -> BaseModelRecord {
+        BaseModelRecord {
+            id: "custom/qwen".to_string(),
+            name: "qwen".to_string(),
+            endpoint: endpoint.to_string(),
+            endpoint_style: "openai".to_string(),
+            completion_endpoint_style: "openai_completions".to_string(),
+            wire_format: WireFormat::OpenaiChatCompletions,
+            api_key: api_key.to_string(),
+            extra_headers: headers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn code_completion_prompt_uses_real_completion_normalization() {
+        let mut post = post("");
+        normalize_code_completion_post(&mut post, &model_rec()).unwrap();
+
+        assert_eq!(post.model, "provider/model");
+        assert_eq!(post.parameters.max_new_tokens, 50);
+        assert_eq!(post.parameters.temperature, Some(0.2));
+    }
+
+    #[test]
+    fn code_completion_use_vecdb_is_explicitly_rejected() {
+        let mut post = post("");
+        post.use_vecdb = true;
+        let err = normalize_code_completion_post(&mut post, &model_rec()).unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err.message.contains("use_vecdb"));
+    }
+
+    #[test]
+    fn completion_cache_salt_changes_with_endpoint_and_auth() {
+        let first = completion_cache_salt(
+            &test_model(
+                "https://one.example/v1/completions",
+                "sk-one",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let second = completion_cache_salt(
+            &test_model(
+                "https://two.example/v1/completions",
+                "sk-one",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let third = completion_cache_salt(
+            &test_model(
+                "https://one.example/v1/completions",
+                "sk-two",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+
+        assert_ne!(first, second);
+        assert_ne!(first, third);
+        assert!(!third.contains("sk-two"));
+    }
+
+    #[test]
+    fn completion_cache_salt_hashes_extra_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer secret-token".to_string(),
+        );
+        let salt = completion_cache_salt(
+            &test_model("https://one.example/v1/completions", "", headers),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+
+        assert!(salt.contains("Authorization"));
+        assert!(!salt.contains("secret-token"));
+        assert!(!salt.contains("Bearer secret-token"));
+    }
+
+    #[test]
+    fn completion_cache_salt_changes_with_scratchpad_patch() {
+        let model = test_model("https://one.example/v1/completions", "", HashMap::new());
+        let first = completion_cache_salt(
+            &model,
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let second = completion_cache_salt(
+            &model,
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "plain"}),
+        );
+
+        assert_ne!(first, second);
+    }
+
+    fn custom_completion_post(model: &str) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: crate::call_validation::CodeCompletionInputs {
+                sources: HashMap::from([(
+                    "src/main.rs".to_string(),
+                    "fn main() {\n    pri\n}\n".to_string(),
+                )]),
+                cursor: refact_core::chat_types::CursorPosition {
+                    file: "src/main.rs".to_string(),
+                    line: 1,
+                    character: 7,
+                },
+                multiline: false,
+            },
+            parameters: crate::call_validation::SamplingParameters::default(),
+            model: model.to_string(),
+            stream: false,
+            no_cache: false,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
+        }
+    }
+
+    fn custom_completion_caps() -> Arc<CodeAssistantCaps> {
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.completion_default_model = "custom/native-model".to_string();
+        caps.completion_models.insert(
+            "custom/native-model".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "custom/native-model".to_string(),
+                    name: "native-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/completions".to_string(),
+                    api_key: "sk-test".to_string(),
+                    extra_headers: HashMap::from([("X-Tenant".to_string(), "team-a".to_string())]),
+                    ..Default::default()
+                },
+                scratchpad: "FIM-PSM".to_string(),
+                scratchpad_patch: serde_json::json!({
+                    "fim_prefix": "<fim_prefix>",
+                    "fim_suffix": "<fim_suffix>",
+                    "fim_middle": "<fim_middle>",
+                    "eot": "<eot>",
+                    "context_format": "plain"
+                }),
+                ..Default::default()
+            }),
+        );
+        caps.completion_models.insert(
+            "custom/other-model".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "custom/other-model".to_string(),
+                    name: "other-model".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        Arc::new(caps)
+    }
+
+    fn resolve_and_normalize_for_test(
+        caps: Arc<CodeAssistantCaps>,
+        post: &mut CodeCompletionPost,
+    ) -> Arc<CompletionModelRecord> {
+        let model = resolve_completion_model(caps, &post.model).unwrap();
+        normalize_code_completion_post(post, &model).unwrap();
+        model
+    }
+
+    #[test]
+    fn custom_completion_empty_model_resolves_default_before_cache_keying() {
+        let caps = custom_completion_caps();
+        let mut post = custom_completion_post("");
+
+        let resolved = resolve_and_normalize_for_test(caps, &mut post);
+        let key = completion_cache::cache_key_from_post(&post);
+        let key_part: serde_json::Value = serde_json::from_str(&key.1).unwrap();
+
+        assert_eq!(resolved.base.id, "custom/native-model");
+        assert_eq!(resolved.base.name, "native-model");
+        assert_eq!(post.model, "custom/native-model");
+        assert_eq!(key_part["model"], "custom/native-model");
+        assert_eq!(key_part["line_mode"], "singleline");
+    }
+
+    #[test]
+    fn custom_completion_cache_key_separates_resolved_models() {
+        let caps = custom_completion_caps();
+        let mut post_a = custom_completion_post("");
+        let mut post_b = custom_completion_post("custom/other-model");
+
+        resolve_and_normalize_for_test(caps.clone(), &mut post_a);
+        resolve_and_normalize_for_test(caps, &mut post_b);
+
+        let key_a = completion_cache::cache_key_from_post(&post_a);
+        let key_b = completion_cache::cache_key_from_post(&post_b);
+        let part_a: serde_json::Value = serde_json::from_str(&key_a.1).unwrap();
+        let part_b: serde_json::Value = serde_json::from_str(&key_b.1).unwrap();
+
+        assert_ne!(key_a, key_b);
+        assert_eq!(part_a["model"], "custom/native-model");
+        assert_eq!(part_b["model"], "custom/other-model");
+    }
 }
