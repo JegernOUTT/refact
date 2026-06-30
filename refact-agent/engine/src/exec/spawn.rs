@@ -10,6 +10,7 @@ use process_wrap::tokio::{TokioChildWrapper, TokioCommandWrap};
 use process_wrap::tokio::ProcessGroup;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
+use refact_core::net_utils::is_someone_listening_on_that_tcp_port;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -20,7 +21,6 @@ use crate::exec::types::{
     ExecReadinessProbe, ExecSpawnRequest, ExecStatus, EXEC_ENV_DEFAULTS,
 };
 use crate::exec::ExecRegistry;
-use crate::integrations::process_io_utils::is_someone_listening_on_that_tcp_port;
 
 const PIPE_READ_BYTES: usize = 8192;
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);

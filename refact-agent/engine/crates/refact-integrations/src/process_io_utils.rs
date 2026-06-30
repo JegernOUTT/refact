@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
-use tokio::net::TcpStream;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::Duration;
+
+pub use refact_core::net_utils::is_someone_listening_on_that_tcp_port;
 pub async fn blocking_read_until_token_or_timeout<
     StdoutReader: AsyncRead + Unpin,
     StderrReader: AsyncRead + Unpin,
@@ -93,20 +94,6 @@ pub async fn read_file_with_cursor(
     Ok((buffer, bytes_read))
 }
 
-pub async fn is_someone_listening_on_that_tcp_port(
-    port: u16,
-    timeout: tokio::time::Duration,
-) -> bool {
-    match tokio::time::timeout(timeout, TcpStream::connect(&format!("127.0.0.1:{}", port))).await {
-        Ok(Ok(_)) => true,   // Connection successful
-        Ok(Err(_)) => false, // Connection failed, refused
-        Err(e) => {
-            // Timeout occurred
-            tracing::error!("Timeout occurred while checking port {}: {}", port, e);
-            false // still no one is listening, as far as we can tell
-        }
-    }
-}
 pub trait AnsiStrippable {
     fn to_string_lossy_and_strip_ansi(&self) -> String;
 }
