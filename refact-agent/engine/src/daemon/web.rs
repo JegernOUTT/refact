@@ -903,9 +903,8 @@ mod tests {
             crate::daemon::auth::project_cookie_value(&entry_a.id, "secret-token")
         );
         let router = crate::daemon::server::make_router(state, 8488);
-        let remote = || {
-            axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 50], 40000)))
-        };
+        let remote =
+            || axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 50], 40000)));
 
         let mut same_request = Request::builder()
             .uri(format!("/p/{}/", entry_a.id))

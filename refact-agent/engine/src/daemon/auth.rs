@@ -46,6 +46,39 @@ pub(crate) fn peer_is_loopback<B>(req: &Request<B>) -> bool {
     }
 }
 
+pub(crate) fn origin_is_loopback(origin: &str) -> bool {
+    let host = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin);
+    let host = host.split('/').next().unwrap_or(host).trim();
+    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host.rsplit_once(':').map(|(left, _)| left).unwrap_or(host)
+    };
+    host_no_port.eq_ignore_ascii_case("localhost")
+        || host_no_port
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn loopback_trust_allowed<B>(req: &Request<B>) -> bool {
+    if !peer_is_loopback(req) {
+        return false;
+    }
+    match req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        None => true,
+        Some(origin) if origin.eq_ignore_ascii_case("null") => false,
+        Some(origin) => origin_is_loopback(origin),
+    }
+}
+
 fn basic_credentials_from_headers(headers: &HeaderMap) -> Option<(String, String)> {
     if has_multiple_authorization_headers(headers) {
         return None;
@@ -346,6 +379,31 @@ pub(crate) fn redact_daemon_query_token(value: &str) -> String {
     out
 }
 
+pub(crate) fn daemon_lan_auth_ok(config: &DaemonConfig) -> bool {
+    if !config.auth.enabled {
+        return false;
+    }
+    let has_token = config
+        .auth
+        .token
+        .as_deref()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    let has_basic = config
+        .auth
+        .username
+        .as_deref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        && config
+            .auth
+            .password
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+    has_token || has_basic
+}
+
 pub(crate) fn hooks_unauthenticated_allowed_for_bind(bind: &str) -> bool {
     bind.parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
@@ -428,7 +486,7 @@ pub(crate) async fn enforce<B>(policy: DaemonAuthPolicy, req: Request<B>, next: 
 where
     B: Send + 'static,
 {
-    let peer_loopback = peer_is_loopback(&req);
+    let peer_loopback = loopback_trust_allowed(&req);
     if is_hook_request(&req) {
         if query_contains_daemon_token(req.uri().query()) {
             return (

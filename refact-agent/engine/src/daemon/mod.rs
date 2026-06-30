@@ -121,18 +121,28 @@ pub(crate) async fn run_daemon_entry_with_paths(
             return 1;
         }
     };
-    let _lock_guard = match lock::try_lock(&mut lock_file) {
-        Ok(guard) => guard,
-        Err(error) if lock::is_already_locked(&error) => {
-            print_already_running(&paths.daemon_json_path).await;
-            return 0;
-        }
-        Err(error) => {
-            eprintln!(
-                "failed to lock daemon {}: {error}",
-                paths.lock_path.display()
-            );
-            return 1;
+    let relaunch_wait = std::env::var("REFACT_DAEMON_RELAUNCH")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let lock_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let _lock_guard = loop {
+        match lock::try_lock(&mut lock_file) {
+            Ok(guard) => break guard,
+            Err(error) if lock::is_already_locked(&error) => {
+                if relaunch_wait && std::time::Instant::now() < lock_deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+                print_already_running(&paths.daemon_json_path).await;
+                return 0;
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to lock daemon {}: {error}",
+                    paths.lock_path.display()
+                );
+                return 1;
+            }
         }
     };
 

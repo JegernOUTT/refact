@@ -1893,6 +1893,7 @@ mod tests {
             idle_deadline_ms: Some(456),
             last_status_report_ms: Some(99),
             last_error: None,
+            log_path: "/tmp/demo/logs/worker-demo.log".to_string(),
         }
     }
 

@@ -757,7 +757,10 @@ mod tests {
 
         assert!(is_sse_request(&headers, "/v1/sidebar/subscribe"));
         assert!(is_sse_request(&headers, "/v1/tasks/subscribe"));
-        assert!(is_sse_request(&headers, "/v1/sidebar/subscribe?after_seq=3"));
+        assert!(is_sse_request(
+            &headers,
+            "/v1/sidebar/subscribe?after_seq=3"
+        ));
         assert!(is_sse_request(
             &headers,
             "/v1/voice/stream/abc123/subscribe"

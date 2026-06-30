@@ -15,7 +15,7 @@ use futures::Stream;
 use hyper::{Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::state::DaemonState;
@@ -56,11 +56,20 @@ fn default_log_tail() -> usize {
 }
 
 pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
-    let ip = config
+    let requested_ip = config
         .bind
         .parse::<IpAddr>()
         .map_err(|error| format!("invalid daemon bind address '{}': {error}", config.bind))?;
-    crate::daemon::auth::validate_hooks_auth_policy(config, ip)?;
+    crate::daemon::auth::validate_hooks_auth_policy(config, requested_ip)?;
+    let ip = if !requested_ip.is_loopback() && !crate::daemon::auth::daemon_lan_auth_ok(config) {
+        tracing::warn!(
+            "daemon bind {requested_ip} is non-loopback but no auth credentials are configured; \
+             falling back to 127.0.0.1 (enable auth with a username/password to allow LAN access)"
+        );
+        IpAddr::from([127, 0, 0, 1])
+    } else {
+        requested_ip
+    };
     let addr = SocketAddr::new(ip, config.port);
     let listener = TcpListener::bind(addr)
         .map_err(|error| format!("failed to bind daemon control API at {addr}: {error}"))?;
@@ -162,7 +171,17 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             };
             crate::daemon::auth::enforce(policy, req, next)
         }))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                    origin
+                        .to_str()
+                        .map(crate::daemon::auth::origin_is_loopback)
+                        .unwrap_or(false)
+                })),
+        )
         .with_state((state, port))
 }
 
@@ -346,12 +365,38 @@ async fn update_settings(
         )
             .into_response();
     }
+    spawn_settings_relaunch();
     state.request_shutdown("settings_changed".to_string());
     Json(json!({"success": true, "restarting": true})).into_response()
 }
 
 fn settings_error(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+
+fn spawn_settings_relaunch() {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!("settings relaunch: cannot resolve current executable: {error}");
+            return;
+        }
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("daemon")
+        .env("REFACT_DAEMON_RELAUNCH", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    if let Err(error) = command.spawn() {
+        tracing::warn!("settings relaunch spawn failed: {error}");
+    }
 }
 
 async fn logs_stream(
@@ -369,13 +414,24 @@ async fn logs_stream(
         for line in initial.lines() {
             yield Ok::<Event, Infallible>(Event::default().data(line.to_string()));
         }
-        let mut offset = file_len(&path).await;
+        let mut cursor = LogTailCursor::default();
+        if let Ok(mut file) = tokio::fs::File::open(&path).await {
+            if let Ok(meta) = file.metadata().await {
+                let len = meta.len();
+                cursor.head = log_head(&mut file, len).await;
+                cursor.offset = len;
+            }
+        }
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => break,
                 _ = tokio::time::sleep(Duration::from_millis(1000)) => {
-                    let (text, new_offset) = read_log_from_offset(&path, offset).await;
-                    offset = new_offset;
+                    let (text, next, error) = read_log_tail(&path, cursor).await;
+                    cursor = next;
+                    if let Some(error) = error {
+                        yield Ok(Event::default().data(format!("[refact: {error}]")));
+                        continue;
+                    }
                     if !text.is_empty() {
                         let redacted = crate::daemon::auth::redact_daemon_query_token(&text);
                         for line in redacted.lines() {
@@ -391,36 +447,96 @@ async fn logs_stream(
         .into_response()
 }
 
-async fn file_len(path: &std::path::Path) -> u64 {
-    tokio::fs::metadata(path)
-        .await
-        .map(|meta| meta.len())
-        .unwrap_or(0)
+const LOG_STREAM_READ_CAP: u64 = 256 * 1024;
+const LOG_STREAM_HEAD_LEN: u64 = 256;
+
+#[derive(Default)]
+struct LogTailCursor {
+    offset: u64,
+    head: Vec<u8>,
 }
 
-async fn read_log_from_offset(path: &std::path::Path, offset: u64) -> (String, u64) {
+async fn log_head(file: &mut tokio::fs::File, len: u64) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let want = len.min(LOG_STREAM_HEAD_LEN);
+    if want == 0 {
+        return Vec::new();
+    }
+    if file.seek(std::io::SeekFrom::Start(0)).await.is_err() {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; want as usize];
+    match file.read_exact(&mut buf).await {
+        Ok(_) => buf,
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn read_log_tail(
+    path: &std::path::Path,
+    cursor: LogTailCursor,
+) -> (String, LogTailCursor, Option<String>) {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
-        Err(_) => return (String::new(), offset),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (String::new(), LogTailCursor::default(), None);
+        }
+        Err(error) => {
+            return (
+                String::new(),
+                cursor,
+                Some(format!("failed to open log: {error}")),
+            )
+        }
     };
     let len = match file.metadata().await {
         Ok(meta) => meta.len(),
-        Err(_) => return (String::new(), offset),
+        Err(error) => {
+            return (
+                String::new(),
+                cursor,
+                Some(format!("failed to stat log: {error}")),
+            )
+        }
     };
-    let start = if len < offset { 0 } else { offset };
+    let head = log_head(&mut file, len).await;
+    let rotated = !cursor.head.is_empty() && (head != cursor.head || len < cursor.offset);
+    let start = if rotated { 0 } else { cursor.offset.min(len) };
     if len <= start {
-        return (String::new(), len);
+        return (String::new(), LogTailCursor { offset: len, head }, None);
     }
+    let to_read = (len - start).min(LOG_STREAM_READ_CAP);
     if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-        return (String::new(), len);
+        return (
+            String::new(),
+            LogTailCursor {
+                offset: start,
+                head,
+            },
+            Some("failed to seek log".to_string()),
+        );
     }
-    let mut buf = Vec::with_capacity((len - start) as usize);
-    if file.take(len - start).read_to_end(&mut buf).await.is_err() {
-        return (String::new(), len);
+    let mut buf = vec![0u8; to_read as usize];
+    if let Err(error) = file.read_exact(&mut buf).await {
+        return (
+            String::new(),
+            LogTailCursor {
+                offset: start,
+                head,
+            },
+            Some(format!("failed to read log: {error}")),
+        );
     }
-    (String::from_utf8_lossy(&buf).to_string(), len)
+    (
+        String::from_utf8_lossy(&buf).to_string(),
+        LogTailCursor {
+            offset: start + to_read,
+            head,
+        },
+        None,
+    )
 }
 
 async fn worker_status(
@@ -636,6 +752,17 @@ mod tests {
         assert!(error.contains("hooks without hooks.token or daemon auth"));
     }
 
+    #[test]
+    fn daemon_server_bind_falls_back_to_loopback_without_lan_auth() {
+        let wildcard = DaemonConfig {
+            bind: "0.0.0.0".to_string(),
+            port: 0,
+            ..DaemonConfig::default()
+        };
+        let listener = bind_listener(&wildcard).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
     #[tokio::test]
     async fn daemon_server_status_router_reports_workers_zero() {
         use hyper::{Body, Request, StatusCode};
@@ -705,6 +832,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn update_settings_rejects_lan_without_credentials() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"lan_enabled":true,"mdns_enabled":true,"auth_enabled":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

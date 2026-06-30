@@ -152,6 +152,7 @@ pub async fn load_from_path(path: &Path) -> Result<DaemonConfig, String> {
 }
 
 pub async fn save_to_path(config: &DaemonConfig, path: &Path) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
     let yaml = serde_yaml::to_string(config)
         .map_err(|error| format!("failed to serialize daemon config: {error}"))?;
     if let Some(parent) = path.parent() {
@@ -159,14 +160,74 @@ pub async fn save_to_path(config: &DaemonConfig, path: &Path) -> Result<(), Stri
             .await
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
-    tokio::fs::write(path, yaml)
+    let tmp = path.with_extension("yaml.tmp");
+    let _ = tokio::fs::remove_file(&tmp).await;
+    #[cfg(unix)]
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
         .await
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
+    #[cfg(not(unix))]
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| format!("failed to chmod {}: {error}", tmp.display()))?;
+    }
+    file.write_all(yaml.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write daemon config: {error}"))?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("failed to flush {}: {error}", tmp.display()))?;
+    drop(file);
+    #[cfg(windows)]
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|error| format!("failed to publish {}: {error}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn save_to_path_round_trips_and_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.yaml");
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("tok".to_string()),
+                username: Some("alice".to_string()),
+                password: Some("hunter2".to_string()),
+            },
+            ..DaemonConfig::default()
+        };
+        save_to_path(&config, &path).await.unwrap();
+        let loaded = load_from_path(&path).await.unwrap();
+        assert_eq!(loaded, config);
+        assert!(!dir.path().join("daemon.yaml.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 
     #[tokio::test]
     async fn daemon_config_missing_file_uses_defaults() {

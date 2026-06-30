@@ -68,6 +68,7 @@ pub struct WorkerRow {
     pub idle_deadline_ms: Option<u64>,
     pub last_status_report_ms: Option<u64>,
     pub last_error: Option<String>,
+    pub log_path: String,
 }
 
 pub struct DaemonState {
@@ -498,6 +499,12 @@ impl DaemonState {
                 idle_deadline_ms,
                 last_status_report_ms: status.map(|status| status.received_ms),
                 last_error: worker.as_ref().and_then(|worker| worker.last_error.clone()),
+                log_path: self
+                    .daemon_dir
+                    .join("logs")
+                    .join(format!("worker-{}.log", entry.slug))
+                    .to_string_lossy()
+                    .to_string(),
             });
         }
         rows.sort_by(|a, b| {
