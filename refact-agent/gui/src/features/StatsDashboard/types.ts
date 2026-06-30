@@ -213,7 +213,7 @@ export interface StatsEventsResponse {
   offset: number;
 }
 
-export type DateRangePreset = "7d" | "30d" | "90d" | "all" | "custom";
+export type DateRangePreset = "today" | "7d" | "30d" | "90d" | "all" | "custom";
 
 export interface DateRange {
   preset: DateRangePreset;

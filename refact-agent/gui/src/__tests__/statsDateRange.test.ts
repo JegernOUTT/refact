@@ -16,6 +16,14 @@ describe("dateRangeToApiArgs", () => {
     expect(dateRangeToApiArgs({ preset: "all" })).toEqual({});
   });
 
+  it("'today' bounds both ends to today", () => {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    expect(dateRangeToApiArgs({ preset: "today" })).toEqual({
+      from: todayIso,
+      to: todayIso,
+    });
+  });
+
   it("'7d' starts 6 days ago so the window covers 7 inclusive days", () => {
     const { from } = dateRangeToApiArgs({ preset: "7d" });
     expect(from).toBeTruthy();
@@ -51,6 +59,7 @@ describe("dateRangeToApiArgs", () => {
 
 describe("dateRangeSpanDays", () => {
   it("returns the preset day counts", () => {
+    expect(dateRangeSpanDays({ preset: "today" }, 0)).toBe(1);
     expect(dateRangeSpanDays({ preset: "7d" }, 0)).toBe(7);
     expect(dateRangeSpanDays({ preset: "30d" }, 0)).toBe(30);
     expect(dateRangeSpanDays({ preset: "90d" }, 0)).toBe(90);

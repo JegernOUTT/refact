@@ -500,13 +500,20 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   const errorCategories = data?.errors?.by_category ?? [];
   const topError = errorCategories.at(0);
   const topErrorLabel = topError ? formatErrorLabel(topError.key) : "None";
-  const cacheEfficiency =
-    t && t.total_prompt_tokens > 0
-      ? (t.total_cache_read_tokens / t.total_prompt_tokens) * 100
+  // Input tokens are split into uncached prompt + cache reads + cache writes;
+  // the hit rate is the share of all input tokens served from cache (0-100%).
+  const totalInputTokens = t
+    ? t.total_prompt_tokens +
+      t.total_cache_read_tokens +
+      t.total_cache_creation_tokens
+    : 0;
+  const cacheHitRate =
+    t && totalInputTokens > 0
+      ? (t.total_cache_read_tokens / totalInputTokens) * 100
       : 0;
-  const cacheHitShare =
-    t && t.total_tokens > 0
-      ? (t.total_cache_read_tokens / t.total_tokens) * 100
+  const cacheReuse =
+    t && t.total_cache_creation_tokens > 0
+      ? t.total_cache_read_tokens / t.total_cache_creation_tokens
       : 0;
 
   const topConversations = data?.top_conversations ?? [];
@@ -665,14 +672,15 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
                 value={formatTokenCount(t.total_cache_creation_tokens)}
               />
               <StatCard
-                title="Cache Efficiency"
-                value={formatPercent(cacheEfficiency)}
-                subtitle="of prompt tokens served from cache"
+                title="Cache Hit Rate"
+                value={formatPercent(cacheHitRate)}
+                subtitle="of input tokens served from cache"
                 tone="success"
               />
               <StatCard
-                title="Cache Hit Share"
-                value={formatPercent(cacheHitShare)}
+                title="Cache Reuse"
+                value={cacheReuse > 0 ? `${cacheReuse.toFixed(1)}×` : "—"}
+                subtitle="tokens read per token cached"
               />
             </StatSection>
           </div>

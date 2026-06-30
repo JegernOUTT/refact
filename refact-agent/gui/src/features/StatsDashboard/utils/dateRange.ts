@@ -1,7 +1,7 @@
 import type { DateRange, DateRangePreset } from "../types";
 
 const PRESET_DAYS: Record<
-  Exclude<DateRangePreset, "all" | "custom">,
+  Exclude<DateRangePreset, "all" | "custom" | "today">,
   number
 > = {
   "7d": 7,
@@ -38,6 +38,10 @@ export function dateRangeToApiArgs(dateRange: DateRange): {
     if (dateRange.to) args.to = dateRange.to;
     return args;
   }
+  if (dateRange.preset === "today") {
+    const today = todayIsoDate();
+    return { from: today, to: today };
+  }
   // Backend filters inclusively by calendar day, so "last N days" (today plus
   // the prior N-1 days) starts N-1 days ago.
   return { from: daysAgoIsoDate(PRESET_DAYS[dateRange.preset] - 1) };
@@ -51,6 +55,7 @@ export function dateRangeSpanDays(
   if (dateRange.preset === "all") {
     return Math.max(1, fallbackActiveDays);
   }
+  if (dateRange.preset === "today") return 1;
   if (dateRange.preset === "custom") {
     const from = dateRange.from ? new Date(dateRange.from) : null;
     const to = dateRange.to ? new Date(dateRange.to) : new Date();
@@ -69,6 +74,8 @@ export function describeDateRange(dateRange: DateRange): string {
   switch (dateRange.preset) {
     case "all":
       return "All time";
+    case "today":
+      return "Today";
     case "custom":
       if (dateRange.from && dateRange.to)
         return `${dateRange.from} → ${dateRange.to}`;

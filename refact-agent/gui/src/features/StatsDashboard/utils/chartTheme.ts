@@ -1,13 +1,13 @@
-import { useTokens } from "../../../components/ui";
+import { useAppearance } from "../../../hooks";
 import { formatCompact } from "./formatters";
 
 /**
- * Concrete dark-theme fallbacks. ECharts cannot parse `currentColor` or an
+ * Concrete fallbacks per appearance. ECharts cannot parse `currentColor` or an
  * unresolved `var(...)`; when it receives one it silently falls back to its
  * built-in cobalt/green palette that clashes with the app theme. We therefore
  * always resolve tokens to a real color string, defaulting to these values.
  */
-const FALLBACK = {
+const FALLBACK_DARK = {
   fg: "rgba(255,255,255,0.92)",
   muted: "rgba(255,255,255,0.48)",
   faint: "rgba(255,255,255,0.28)",
@@ -15,6 +15,11 @@ const FALLBACK = {
   axis: "rgba(255,255,255,0.32)",
   surface: "#16181d",
   border: "rgba(255,255,255,0.11)",
+  accent: "#7f93d8",
+  success: "#5fae8b",
+  warning: "#cda04e",
+  danger: "#d8736d",
+  info: "#6cb6c9",
   palette: [
     "#7f93d8",
     "#5fae8b",
@@ -27,40 +32,53 @@ const FALLBACK = {
   ],
 } as const;
 
-const CHART_TOKENS = [
-  "--rf-color-fg",
-  "--rf-color-muted",
-  "--rf-color-faint",
-  "--rf-chart-grid",
-  "--rf-chart-axis",
-  "--rf-surface-overlay",
-  "--rf-border-strong",
-  "--rf-color-accent",
-  "--rf-color-success",
-  "--rf-color-warning",
-  "--rf-color-danger",
-  "--rf-color-info",
-  "--rf-chart-1",
-  "--rf-chart-2",
-  "--rf-chart-3",
-  "--rf-chart-4",
-  "--rf-chart-5",
-  "--rf-chart-6",
-  "--rf-chart-7",
-  "--rf-chart-8",
-];
+const FALLBACK_LIGHT = {
+  fg: "rgba(0,0,0,0.88)",
+  muted: "rgba(0,0,0,0.55)",
+  faint: "rgba(0,0,0,0.4)",
+  grid: "rgba(0,0,0,0.09)",
+  axis: "rgba(0,0,0,0.45)",
+  surface: "#ffffff",
+  border: "rgba(0,0,0,0.14)",
+  accent: "#5566c4",
+  success: "#2f9e74",
+  warning: "#b8862f",
+  danger: "#cc5b54",
+  info: "#3f93a8",
+  palette: [
+    "#5566c4",
+    "#2f9e74",
+    "#b8862f",
+    "#cc5b54",
+    "#3f93a8",
+    "#8f63b8",
+    "#c07a3f",
+    "#5e7490",
+  ],
+} as const;
 
-function isUsable(value: string | undefined): value is string {
-  return Boolean(
-    value &&
-      value.trim() !== "" &&
-      !value.includes("currentColor") &&
-      !value.includes("var("),
+function isUsable(value: string): boolean {
+  return (
+    value.trim() !== "" &&
+    !value.includes("currentColor") &&
+    !value.includes("var(")
   );
 }
 
-function resolve(value: string | undefined, fallback: string): string {
-  return isUsable(value) ? value.trim() : fallback;
+/**
+ * Resolve design tokens from the element that actually carries the active
+ * `data-appearance` (the Radix Theme root), NOT `document.documentElement`.
+ * `useToken`/`useTokens` read the document root, which never receives the
+ * nested theme's appearance, so chart text would render with the wrong
+ * (often invisible) color in dark mode.
+ */
+function themedElement(appearance: "light" | "dark"): Element | null {
+  if (typeof document === "undefined") return null;
+  return (
+    document.querySelector(`[data-appearance="${appearance}"]`) ??
+    document.querySelector(".radix-themes") ??
+    document.documentElement
+  );
 }
 
 export interface ChartTheme {
@@ -80,33 +98,37 @@ export interface ChartTheme {
 }
 
 export function useChartTheme(): ChartTheme {
-  const t = useTokens(CHART_TOKENS);
-  const palette = [
-    resolve(t["--rf-chart-1"], FALLBACK.palette[0]),
-    resolve(t["--rf-chart-2"], FALLBACK.palette[1]),
-    resolve(t["--rf-chart-3"], FALLBACK.palette[2]),
-    resolve(t["--rf-chart-4"], FALLBACK.palette[3]),
-    resolve(t["--rf-chart-5"], FALLBACK.palette[4]),
-    resolve(t["--rf-chart-6"], FALLBACK.palette[5]),
-    resolve(t["--rf-chart-7"], FALLBACK.palette[6]),
-    resolve(t["--rf-chart-8"], FALLBACK.palette[7]),
-  ];
-  const fg = resolve(t["--rf-color-fg"], FALLBACK.fg);
+  // Reactive to in-app theme toggles, host theme changes, and system scheme.
+  const { appearance } = useAppearance();
+  const fallback = appearance === "light" ? FALLBACK_LIGHT : FALLBACK_DARK;
+  const el = themedElement(appearance);
+
+  const read = (name: string, fb: string): string => {
+    if (!el || typeof window === "undefined") return fb;
+    const value = window.getComputedStyle(el).getPropertyValue(name).trim();
+    return isUsable(value) ? value : fb;
+  };
+
+  const palette = fallback.palette.map((fb, i) =>
+    read(`--rf-chart-${i + 1}`, fb),
+  );
+  const fg = read("--rf-color-fg", fallback.fg);
+
   return {
     fg,
-    muted: resolve(t["--rf-color-muted"], FALLBACK.muted),
-    faint: resolve(t["--rf-color-faint"], FALLBACK.faint),
-    grid: resolve(t["--rf-chart-grid"], FALLBACK.grid),
-    axis: resolve(t["--rf-chart-axis"], FALLBACK.axis),
-    accent: resolve(t["--rf-color-accent"], FALLBACK.palette[0]),
-    success: resolve(t["--rf-color-success"], FALLBACK.palette[1]),
-    warning: resolve(t["--rf-color-warning"], FALLBACK.palette[2]),
-    danger: resolve(t["--rf-color-danger"], FALLBACK.palette[3]),
-    info: resolve(t["--rf-color-info"], FALLBACK.palette[4]),
+    muted: read("--rf-color-muted", fallback.muted),
+    faint: read("--rf-color-faint", fallback.faint),
+    grid: read("--rf-chart-grid", fallback.grid),
+    axis: read("--rf-chart-axis", fallback.axis),
+    accent: read("--rf-chart-1", fallback.accent),
+    success: read("--rf-color-success", fallback.success),
+    warning: read("--rf-color-warning", fallback.warning),
+    danger: read("--rf-color-danger", fallback.danger),
+    info: read("--rf-chart-5", fallback.info),
     palette,
     tooltip: {
-      bg: resolve(t["--rf-surface-overlay"], FALLBACK.surface),
-      border: resolve(t["--rf-border-strong"], FALLBACK.border),
+      bg: read("--rf-surface-overlay", fallback.surface),
+      border: read("--rf-border-strong", fallback.border),
       text: fg,
     },
   };
