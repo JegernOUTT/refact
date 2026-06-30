@@ -1852,10 +1852,7 @@ async fn load_trajectory_candidate(
         auto_compact_enabled: t.get("auto_compact_enabled").and_then(|v| v.as_bool()),
         frozen_request_prefix,
         claude_code_identity,
-        reactive_compact_attempts: t
-            .get("reactive_compact_attempts")
-            .and_then(|v| v.as_u64())
-            .map(|n| (n as usize).min(1)),
+        reactive_compact_attempts: None,
     };
 
     let auto_approve_editing_tools_present = t
@@ -2309,9 +2306,6 @@ pub async fn save_trajectory_snapshot(
     if let Some(ref claude_code_identity) = snapshot.claude_code_identity {
         trajectory["claude_code_identity"] =
             serde_json::to_value(claude_code_identity).unwrap_or_default();
-    }
-    if let Some(reactive_compact_attempts) = snapshot.reactive_compact_attempts {
-        trajectory["reactive_compact_attempts"] = json!(reactive_compact_attempts);
     }
     if let Some(wake_up_at) = snapshot.wake_up_at {
         trajectory["wake_up_at"] = json!(wake_up_at);
@@ -15746,7 +15740,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reactive_compact_attempts_roundtrip_and_clamp() {
+    async fn reactive_compact_attempts_is_runtime_only_not_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
         let mut snapshot = test_snapshot(
@@ -15759,18 +15753,15 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = load_trajectory_for_chat(gcx.clone(), "reactive-attempts-roundtrip")
-            .await
-            .unwrap();
-        assert_eq!(loaded.thread.reactive_compact_attempts, Some(1));
-
         let traj_path = dir
             .path()
             .join(".refact")
             .join("trajectories")
             .join("reactive-attempts-roundtrip.json");
-        let mut raw: serde_json::Value =
-            serde_json::from_str(&tokio::fs::read_to_string(&traj_path).await.unwrap()).unwrap();
+        let saved = tokio::fs::read_to_string(&traj_path).await.unwrap();
+        assert!(!saved.contains("reactive_compact_attempts"));
+
+        let mut raw: serde_json::Value = serde_json::from_str(&saved).unwrap();
         raw["reactive_compact_attempts"] = json!(99);
         tokio::fs::write(&traj_path, serde_json::to_string(&raw).unwrap())
             .await
@@ -15779,7 +15770,7 @@ mod tests {
         let loaded = load_trajectory_for_chat(gcx, "reactive-attempts-roundtrip")
             .await
             .unwrap();
-        assert_eq!(loaded.thread.reactive_compact_attempts, Some(1));
+        assert_eq!(loaded.thread.reactive_compact_attempts, None);
     }
 
     #[tokio::test]

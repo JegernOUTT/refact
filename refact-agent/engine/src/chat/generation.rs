@@ -59,12 +59,7 @@ const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
 const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
     "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextLimitCompactionDecision {
-    Skip,
-    Attempt { attempt: usize },
-    MaxAttemptsReached,
-}
+const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalizedStopReason {
@@ -103,25 +98,6 @@ fn compression_reason_for_stop_reason(reason: NormalizedStopReason) -> Compressi
     match reason {
         NormalizedStopReason::ProviderLengthStop => CompressionReason::ProviderLengthStop,
         NormalizedStopReason::ContextLengthStop => CompressionReason::ContextLengthStop,
-    }
-}
-
-fn context_limit_compaction_decision(
-    error: &LlmStreamError,
-    thread: &ThreadParams,
-    abort_flag: &AtomicBool,
-) -> ContextLimitCompactionDecision {
-    if !error.retry_decision().is_context_limit() || abort_flag.load(Ordering::SeqCst) {
-        return ContextLimitCompactionDecision::Skip;
-    }
-    let attempt = thread
-        .reactive_compact_attempts
-        .unwrap_or(0)
-        .saturating_add(1);
-    if attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
-        ContextLimitCompactionDecision::MaxAttemptsReached
-    } else {
-        ContextLimitCompactionDecision::Attempt { attempt }
     }
 }
 
@@ -912,8 +888,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
         }
         return false;
     };
-    let (reactive_attempt, reason) = {
-        let mut session = session_arc.lock().await;
+    let reason = {
+        let session = session_arc.lock().await;
         if !matches!(
             session.runtime.state,
             SessionState::Idle | SessionState::Completed
@@ -931,32 +907,12 @@ async fn maybe_compact_after_high_pressure_length_stop(
         ) {
             return false;
         }
-        let reason = length_like_finish_reason(message.finish_reason.as_deref())
-            .map(compression_reason_for_stop_reason);
-        let reactive_attempt = session
-            .thread
-            .reactive_compact_attempts
-            .unwrap_or(0)
-            .saturating_add(1);
-        if reactive_attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
-            crate::chat::summarization::emit_compression_skipped_status(
-                &mut session,
-                CompressionReason::MaxAttemptsReached,
-            );
-            return false;
-        }
-        session.thread.reactive_compact_attempts = Some(reactive_attempt);
-        session.increment_version();
-        session.touch();
-        (reactive_attempt, reason)
+        length_like_finish_reason(message.finish_reason.as_deref())
+            .map(compression_reason_for_stop_reason)
     };
 
-    warn!(
-        "High-pressure length stop, summarizing oldest eligible segment attempt {}/{}",
-        reactive_attempt,
-        crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
-    );
-    let compacted = crate::chat::summarization::apply_segment_summarization_with_reason(
+    warn!("High-pressure length stop, summarizing oldest eligible segments to reduce context");
+    let outcome = crate::chat::summarization::apply_segment_summarization_with_reason(
         gcx,
         session_arc,
         thread,
@@ -964,15 +920,19 @@ async fn maybe_compact_after_high_pressure_length_stop(
         reason,
     )
     .await;
-    if compacted {
+    if outcome.applied() {
         let mut session = session_arc.lock().await;
         session.thread.previous_response_id = None;
         session.cache_guard_force_next = true;
         return true;
     }
 
-    if crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc).await {
-        warn!("High-pressure length stop recovered via deterministic compaction fallback");
+    if matches!(
+        outcome,
+        crate::chat::summarization::CompactionOutcome::LlmUnavailable
+    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc).await
+    {
+        warn!("High-pressure length stop recovered via deterministic full sweep");
         return true;
     }
 
@@ -1475,29 +1435,31 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                let compaction_decision = {
-                    let session = session_arc.lock().await;
-                    context_limit_compaction_decision(&error, &session.thread, &abort_flag)
-                };
-                match compaction_decision {
-                    ContextLimitCompactionDecision::Attempt {
-                        attempt: reactive_attempt,
-                    } => {
-                        let original_error = error.message.clone();
+                let is_context_limit = error.retry_decision().is_context_limit()
+                    && !abort_flag.load(Ordering::SeqCst);
+                if is_context_limit {
+                    let original_error = error.message.clone();
+                    let round = {
+                        let mut session = session_arc.lock().await;
+                        session.clear_stream_for_retry();
+                        session.add_message(make_ui_only_error_message(&original_error));
+                        let round = session
+                            .thread
+                            .reactive_compact_attempts
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        session.thread.reactive_compact_attempts = Some(round);
+                        session.increment_version();
+                        session.touch();
+                        round
+                    };
+                    if round <= MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS {
                         let log_error = safe_context_limit_error_for_log(&original_error);
                         warn!(
-                            "Context limit error, summarizing oldest eligible segment attempt {}/{}: {}",
-                            reactive_attempt,
-                            crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
-                            log_error,
+                            "Context limit error, compacting (round {}/{}): {}",
+                            round, MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS, log_error,
                         );
-                        {
-                            let mut session = session_arc.lock().await;
-                            session.clear_stream_for_retry();
-                            session.add_message(make_ui_only_error_message(&original_error));
-                            session.thread.reactive_compact_attempts = Some(reactive_attempt);
-                        }
-                        let compacted =
+                        let outcome =
                             crate::chat::summarization::apply_segment_summarization_with_reason(
                                 gcx.clone(),
                                 &session_arc,
@@ -1506,47 +1468,38 @@ pub fn start_generation(
                                 Some(CompressionReason::ContextLengthStop),
                             )
                             .await;
-                        if compacted {
-                            let mut session = session_arc.lock().await;
-                            session.clear_stream_for_retry();
-                            session.thread.previous_response_id = None;
-                            session.cache_guard_force_next = true;
-                            continue;
-                        }
-                        if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
-                            &session_arc,
-                        )
-                        .await
-                        {
-                            warn!("Context limit error recovered via deterministic compaction");
-                            continue;
-                        }
-                    }
-                    ContextLimitCompactionDecision::MaxAttemptsReached => {
-                        {
-                            let mut session = session_arc.lock().await;
-                            crate::chat::summarization::emit_compression_skipped_status(
-                                &mut session,
-                                CompressionReason::MaxAttemptsReached,
-                            );
-                            session.clear_stream_for_retry();
-                            session.add_message(make_ui_only_error_message(&error.message));
-                        }
-                        if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
-                            &session_arc,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "Context limit error recovered via deterministic compaction after attempt limit"
-                            );
-                            continue;
+                        match outcome {
+                            crate::chat::summarization::CompactionOutcome::Applied => {
+                                let mut session = session_arc.lock().await;
+                                session.clear_stream_for_retry();
+                                session.thread.previous_response_id = None;
+                                session.cache_guard_force_next = true;
+                                continue;
+                            }
+                            crate::chat::summarization::CompactionOutcome::LlmUnavailable => {
+                                if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
+                                    &session_arc,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "Context limit recovered via deterministic full sweep (summarizer unavailable)"
+                                    );
+                                    let mut session = session_arc.lock().await;
+                                    session.clear_stream_for_retry();
+                                    session.thread.previous_response_id = None;
+                                    session.cache_guard_force_next = true;
+                                    continue;
+                                }
+                            }
+                            crate::chat::summarization::CompactionOutcome::NothingToCompact => {}
                         }
                     }
-                    ContextLimitCompactionDecision::Skip => {}
-                }
-                if compaction_decision != ContextLimitCompactionDecision::Skip {
-                    error.message = context_limit_final_error_message(&error.message);
+                    error.message = context_limit_final_error_message(&original_error);
+                    {
+                        let mut session = session_arc.lock().await;
+                        crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
+                    }
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
@@ -3265,12 +3218,6 @@ mod tests {
             PARTIAL_OUTPUT_STREAM_ERROR,
         );
         let error = context_limit_error(&wrapped, true);
-        let abort = std::sync::atomic::AtomicBool::new(false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &ThreadParams::default(), &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
 
         let final_message = context_limit_final_error_message(&error.message);
         let wrapped_final = format!(
@@ -3525,7 +3472,7 @@ mod tests {
         );
 
         let session = session_arc.lock().await;
-        assert_eq!(session.thread.reactive_compact_attempts, Some(1));
+        assert_eq!(session.thread.reactive_compact_attempts, None);
         assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
         assert_eq!(
             session.compression_reason,
@@ -3587,34 +3534,6 @@ mod tests {
         assert!(is_high_pressure_length_stop(
             &message, &messages, 100_000, false
         ));
-    }
-
-    #[tokio::test]
-    async fn length_stop_reactive_attempts_are_bounded() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut session = ChatSession::new("length-stop-bounded".to_string());
-        session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
-        session.thread.reactive_compact_attempts = Some(usize::MAX);
-        let thread = session.thread.clone();
-        let session_arc = Arc::new(AMutex::new(session));
-
-        assert!(
-            !maybe_compact_after_high_pressure_length_stop(
-                gcx,
-                &session_arc,
-                &thread,
-                Some(100_000),
-            )
-            .await
-        );
-
-        let session = session_arc.lock().await;
-        assert_eq!(session.thread.reactive_compact_attempts, Some(usize::MAX));
-        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
-        assert_eq!(
-            session.compression_reason,
-            Some(CompressionReason::MaxAttemptsReached)
-        );
     }
 
     #[test]
@@ -3814,8 +3733,6 @@ mod tests {
 
     #[test]
     fn test_context_limit_gate_recognizes_explicit_and_wrapped_errors() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let thread = ThreadParams::default();
         let explicit = context_limit_error("context_length_exceeded: reduce prompt", false);
         let wrapped = context_limit_error(
             &format!(
@@ -3824,87 +3741,26 @@ mod tests {
             ),
             true,
         );
-
-        assert_eq!(
-            context_limit_compaction_decision(&explicit, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
-        assert_eq!(
-            context_limit_compaction_decision(&wrapped, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
-    }
-
-    #[test]
-    fn test_context_limit_reactive_compact_attempts_are_bounded() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.reactive_compact_attempts =
-            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
-        let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::MaxAttemptsReached
-        );
-    }
-
-    #[test]
-    fn test_context_limit_reactive_compact_attempts_saturate_at_usize_max() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.reactive_compact_attempts = Some(usize::MAX);
-        let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::MaxAttemptsReached
-        );
+        assert!(explicit.retry_decision().is_context_limit());
+        assert!(wrapped.retry_decision().is_context_limit());
     }
 
     #[test]
     fn normal_chat_context_limit_requests_reactive_compaction() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.mode = "agent".to_string();
         let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
     fn context_length_error_triggers_reactive_compression() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let thread = ThreadParams::default();
         let error = context_limit_error("input too long for model_length", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
     fn task_planner_context_limit_requests_reactive_compaction() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.mode = "task_planner".to_string();
-        thread.task_meta = Some(TaskMeta {
-            task_id: "task-1".to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("planner-task-1-1".to_string()),
-        });
         let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
@@ -3958,13 +3814,10 @@ mod tests {
         let partial_context_error = context_limit_error("context_length_exceeded", false);
 
         assert!(partial_context_error.retry_decision().is_context_limit());
-        assert_eq!(
-            context_limit_compaction_decision(
-                &partial_context_error,
-                &ThreadParams::default(),
-                &abort,
-            ),
-            ContextLimitCompactionDecision::Skip
+        assert!(
+            !(partial_context_error.retry_decision().is_context_limit()
+                && !abort.load(Ordering::SeqCst)),
+            "abort must suppress reactive compaction",
         );
     }
 
@@ -3975,12 +3828,6 @@ mod tests {
         session.messages = vec![make_user_msg("continue")];
         session.start_stream();
         let error = context_limit_error("context_length_exceeded", false);
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let decision = context_limit_compaction_decision(&error, &session.thread, &abort);
-        assert_eq!(
-            decision,
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
@@ -4011,24 +3858,6 @@ mod tests {
             .messages
             .iter()
             .any(crate::chat::diagnostics::is_ui_only_message));
-    }
-
-    #[test]
-    fn test_segment_summary_circuit_breaker_stops_at_two() {
-        let max = crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS;
-        assert_eq!(max, 2);
-        let mut count = 0usize;
-        let mut stopped = false;
-        for _ in 0..10 {
-            if count < max {
-                count += 1;
-            } else {
-                stopped = true;
-                break;
-            }
-        }
-        assert!(stopped);
-        assert_eq!(count, max);
     }
 
     #[test]

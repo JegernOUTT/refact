@@ -410,6 +410,37 @@ fn goal_is_quiescent(session: &ChatSession) -> bool {
     })
 }
 
+pub fn mark_goal_blocked_on_context_limit(session: &mut ChatSession) -> bool {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    {
+        let Some(goal) = session.goal.as_mut() else {
+            return false;
+        };
+        if !goal.active || !matches!(goal.status, GoalStatus::Active) {
+            return false;
+        }
+        let floor = goal
+            .budget
+            .no_progress_turns
+            .filter(|limit| *limit > 0)
+            .map(|limit| limit.max(QUIESCENCE_NUDGES))
+            .unwrap_or(QUIESCENCE_NUDGES);
+        if goal.progress.no_progress_turns < floor {
+            goal.progress.no_progress_turns = floor;
+        }
+        if goal.budget.no_progress_turns.is_some_and(|limit| limit > 0) {
+            goal.status = GoalStatus::NoProgress;
+        }
+    }
+    record_quiescent_event_if_needed(session, GoalNudgeTrigger::Monitor, now_ms);
+    session.mark_persisted_runtime_changed();
+    session.emit_goal_status();
+    true
+}
+
 fn goal_pursuit_kind(message: &crate::call_validation::ChatMessage) -> Option<&str> {
     if message.role != internal_roles::EVENT_ROLE {
         return None;
@@ -765,6 +796,33 @@ mod tests {
             })
             .count();
         assert_eq!(quiescent_events, 1);
+    }
+
+    #[test]
+    fn context_limit_block_quiesces_unlimited_goal() {
+        let mut session = unlimited_no_progress_session();
+        assert!(!goal_is_quiescent(&session));
+        assert!(mark_goal_blocked_on_context_limit(&mut session));
+        let goal = session.goal.as_ref().unwrap();
+        assert!(goal.progress.no_progress_turns >= QUIESCENCE_NUDGES);
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert!(goal_is_quiescent(&session));
+    }
+
+    #[test]
+    fn context_limit_block_terminates_finite_no_progress_goal() {
+        let mut session = active_goal_session();
+        assert!(mark_goal_blocked_on_context_limit(&mut session));
+        assert_eq!(
+            session.goal.as_ref().unwrap().status,
+            GoalStatus::NoProgress
+        );
+    }
+
+    #[test]
+    fn context_limit_block_without_goal_is_noop() {
+        let mut session = ChatSession::new("no-goal".to_string());
+        assert!(!mark_goal_blocked_on_context_limit(&mut session));
     }
 
     #[test]

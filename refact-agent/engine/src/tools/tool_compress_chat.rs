@@ -446,6 +446,57 @@ fn compress_chat_apply_head_output(
     }
 }
 
+pub(crate) fn deterministic_full_sweep(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    let truncate_tool_outputs: HashSet<String> = messages
+        .iter()
+        .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
+        .filter(|m| {
+            let text = m.content.content_text_only();
+            text.len() > TOOL_OUTPUT_TRUNCATE_LIMIT
+                && !text.starts_with("Tool result compressed:")
+        })
+        .map(|m| m.tool_call_id.clone())
+        .collect();
+    let drop_context_files: HashSet<String> = messages
+        .iter()
+        .flat_map(extract_context_files)
+        .map(|cf| cf.file_name)
+        .collect();
+    let tool_call_names: HashMap<String, String> = messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|tc| (tc.id.clone(), tc.function.name.clone()))
+        .collect();
+    let empty: HashSet<String> = HashSet::new();
+    let request = CompressChatApplyRequest {
+        drop_context_files: &drop_context_files,
+        drop_memories: &empty,
+        drop_all_memories: true,
+        truncate_tool_outputs: &truncate_tool_outputs,
+        drop_tool_outputs: &empty,
+        drop_context_messages: &empty,
+        dedup_context_files: true,
+        drop_project_information: true,
+        strength: "aggressive",
+        preserve_last_turns: None,
+        target_tokens: None,
+        tool_call_names: &tool_call_names,
+    };
+    let CompressChatApplyOutput {
+        mut messages,
+        stats,
+        report,
+        affected_boundary,
+        ..
+    } = compress_chat_apply_head_output(messages.to_vec(), &[], &request);
+    if !stats.has_meaningful_mutation() {
+        return None;
+    }
+    insert_current_compression_report(&mut messages, report, affected_boundary);
+    Some(messages)
+}
+
 #[cfg(test)]
 fn compress_chat_apply_head_messages(
     head_messages: Vec<ChatMessage>,
@@ -562,6 +613,29 @@ mod tests {
             .iter()
             .map(|message| message.content.content_text_only())
             .collect()
+    }
+
+    #[test]
+    fn deterministic_full_sweep_truncates_tools_drops_context_and_is_idempotent() {
+        let big = "tool output line ".repeat(400);
+        let messages = vec![
+            user_message("start"),
+            assistant_tool_call_message("call_1", "cat"),
+            tool_message("call_1", &big),
+            context_file_message("call_2", "/repo/big.rs", &"x".repeat(5000)),
+            user_message("continue"),
+        ];
+
+        let swept = deterministic_full_sweep(&messages).expect("sweep must free space");
+        assert!(swept.iter().any(|m| m.role == "tool"
+            && m
+                .content
+                .content_text_only()
+                .starts_with("Tool result compressed:")));
+        assert!(!swept.iter().any(|m| m.role == "context_file"));
+        assert!(swept.iter().any(|m| m.role == "compression_report"));
+
+        assert!(deterministic_full_sweep(&swept).is_none());
     }
 
     fn apply_request<'a>(
