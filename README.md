@@ -22,6 +22,27 @@
 
 **10+ agent modes · 50+ tools · 20+ provider families · worktree-isolated agent fleets · MCP · skills · subagents · BYOK · 100% local — zero cloud**
 
+## Install
+
+**Unix/macOS**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
+refact
+refact tui
+```
+
+**Windows PowerShell**
+
+```powershell
+irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
+refact
+refact tui
+```
+
+> [!WARNING]
+> The resident **daemon** and **TUI** are an early preview and may be buggy or change without notice. The IDE plugins (VS Code/JetBrains) and core engine are the stable surfaces. Please report issues.
+
 Refact is a local-first agentic coding engine shipped as a standalone `refact` binary. Start it once and a resident daemon keeps the control plane warm: one daemon supervises project workers, serves the in-browser GUI, brokers the full-screen TUI, exposes LSP/HTTP for editor clients, and gives autonomous tool-using agents the same concrete surfaces you use every day — files, shells, browser automation, AST search, patches, checkpoints, integrations, and verification loops. It is not just an IDE sidebar: the task planner can break big work into cards, launch fleets of task agents in isolated git worktrees, and let Buddy keep a nosy little watch over project memory, diagnostics, docs, dependencies, and opportunities without handing your repo to a hosted control plane.
 
 What makes Refact different is ownership. You bring the models and keys, choose hosted or local providers, wire MCP, skills, hooks, and subagents into your own workflows, and keep every byte of project state under `<project>/.refact/` where it can be inspected, backed up, deleted, or versioned on your terms. The same daemon-backed stack is steerable and hackable from any client: modes are YAML, plans are durable, memory is project-scoped, and the Rust engine serves a browser-reachable UI from your machine — powerful enough for multi-agent coding runs, transparent enough to debug when the gremlin gets spicy.
@@ -178,21 +199,9 @@ One `refact` binary becomes the whole control room. Running `refact` opens the f
 
 ## Quickstart & install
 
-Install the standalone binary first. It gives you the daemon, TUI, in-browser GUI, worker supervisor, and CLI controls in one local package.
+Use the one-line installer at the top of this README, or download a binary manually from [GitHub Releases](https://github.com/JegernOUTT/refact/releases). The standalone binary gives you the daemon, TUI, in-browser GUI, worker supervisor, and CLI controls in one local package.
 
-**Unix/macOS:**
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
-```
-
-**Windows PowerShell:**
-
-```powershell
-irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
-```
-
-Then open Refact from a workspace:
+After installation, open Refact from a workspace:
 
 ```sh
 refact
@@ -204,8 +213,6 @@ That launches the interactive TUI and starts or reuses the local daemon. You can
 refact projects open .
 refact
 ```
-
-Manual binary downloads are also available from [GitHub Releases](https://github.com/JegernOUTT/refact/releases).
 
 IDE plugins are optional clients for the same daemon-backed projects:
 
