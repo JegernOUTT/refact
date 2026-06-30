@@ -1,4 +1,4 @@
-name: Refact JetBrains Plugin Release
+name: Plugin Release
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
       - "release/v*"
 
 concurrency:
-  group: plugin-intellij-release-${{ github.ref_name }}
+  group: plugin-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -51,7 +51,6 @@ jobs:
 
       - name: Package engine release assets
         id: engine-assets
-        shell: bash
         run: |
           version="${GITHUB_REF_NAME#release/v}"
           bash tools/dev/package_engine_release_assets.sh \
@@ -62,7 +61,6 @@ jobs:
 
       - name: Resolve release notes
         id: release_notes
-        shell: bash
         run: |
           notes_path="docs/release-notes/v${{ steps.engine-assets.outputs.version }}.md"
           if [[ -f "$notes_path" ]]; then
@@ -78,7 +76,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: engine/v${{ steps.engine-assets.outputs.version }}
-          name: Refact Engine v${{ steps.engine-assets.outputs.version }}
+          name: Engine v${{ steps.engine-assets.outputs.version }}
           body_path: ${{ steps.release_notes.outputs.body_path }}
           prerelease: false
           make_latest: true
@@ -94,7 +92,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: engine/v${{ steps.engine-assets.outputs.version }}
-          name: Refact Engine v${{ steps.engine-assets.outputs.version }}
+          name: Engine v${{ steps.engine-assets.outputs.version }}
           body: |
             > [!WARNING]
             > **Breaking change — local daemon**
@@ -109,14 +107,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  release:
-    name: release
-    needs: [engine, gui]
+  intellij:
+    name: JetBrains plugin
+    needs: [gui]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.setupvars.outputs.plugin_version }}
-      changelog: ${{ steps.properties.outputs.changelog }}
-
     steps:
       - name: Maximize build space
         run: |
@@ -136,7 +132,6 @@ jobs:
           java-version: 17
 
       - name: Set release channel and check tag version
-        shell: bash
         id: setupvars
         working-directory: plugins/intellij
         run: |
@@ -165,7 +160,6 @@ jobs:
           merge-multiple: true
 
       - name: Prepare GUI package
-        shell: bash
         working-directory: plugins/intellij
         run: |
           mkdir -p ./chat_package_fixed
@@ -176,7 +170,6 @@ jobs:
 
       - name: Export properties
         id: properties
-        shell: bash
         working-directory: plugins/intellij
         run: |
           echo "pluginVerifierHomeDir=~/.pluginVerifier" >> $GITHUB_OUTPUT
@@ -224,7 +217,6 @@ jobs:
 
       - name: Prepare plugin artifact
         id: artifact
-        shell: bash
         working-directory: plugins/intellij
         run: |
           cd build/distributions
@@ -264,7 +256,6 @@ jobs:
       - name: Resolve release notes
         if: startsWith(github.ref, 'refs/tags/release/v')
         id: release_notes
-        shell: bash
         run: |
           version="${{ steps.setupvars.outputs.plugin_version }}"
           notes_path="docs/release-notes/v${version}.md"
@@ -282,7 +273,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Refact v${{ steps.release_notes.outputs.version }}
+          name: v${{ steps.release_notes.outputs.version }}
           body_path: ${{ steps.release_notes.outputs.body_path }}
           overwrite_files: true
           fail_on_unmatched_files: true
@@ -295,7 +286,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Refact v${{ steps.release_notes.outputs.version }}
+          name: v${{ steps.release_notes.outputs.version }}
           body: |
             > [!WARNING]
             > **Breaking change — local daemon**
@@ -304,5 +295,122 @@ jobs:
           overwrite_files: true
           fail_on_unmatched_files: true
           files: plugins/intellij/build/distributions/*.zip
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  vscode:
+    name: VS Code plugin
+    needs: [gui]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/vscode
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download GUI package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/vscode/chat_package
+          merge-multiple: true
+
+      - name: Prepare GUI package
+        run: |
+          mkdir -p ./chat_package_fixed
+          find ./chat_package -name "*.tgz" -type f -exec cp {} ./chat_package_fixed/ \;
+          ls -la ./chat_package_fixed
+
+      - name: Install dependencies and VSCE
+        run: |
+          npm ci
+          npm install ./chat_package_fixed/*.tgz --no-save
+          REFACT_CHAT_JS_VERSION=$(node -p "require('./node_modules/refact-chat-js/package.json').version")
+          npm pkg set "dependencies.refact-chat-js=${REFACT_CHAT_JS_VERSION}"
+          npm install -g @vscode/vsce
+          rm -rf ./chat_package ./chat_package_fixed
+
+      - name: Check release tag version
+        if: startsWith(github.ref, 'refs/tags/release/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#release/v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "release tag version $TAG_VERSION does not match VS Code package version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Package VS Code extension
+        run: |
+          if [[ "${{ github.event_name }}" != "push" && "${{ inputs.stable_release }}" != "true" ]]; then
+            export PRERELEASE=--pre-release
+          fi
+          echo "PRERELEASE=${PRERELEASE}"
+          vsce package ${PRERELEASE}
+
+      - name: Publish VS Code extension
+        run: |
+          if [[ "${{ github.event_name }}" != "push" && "${{ inputs.stable_release }}" != "true" ]]; then
+            export PRERELEASE=--pre-release
+          fi
+          echo "PRERELEASE=${PRERELEASE}"
+          vsce publish --skip-duplicate --pat ${{ secrets.VSCE_PAT }} ${PRERELEASE} --packagePath *.vsix
+
+      - name: Upload VS Code package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-plugin
+          path: plugins/vscode/*.vsix
+
+      - name: Resolve release notes
+        if: startsWith(github.ref, 'refs/tags/release/v')
+        id: release_notes
+        run: |
+          version="${GITHUB_REF_NAME#release/v}"
+          notes_path="docs/release-notes/v${version}.md"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ -f "$GITHUB_WORKSPACE/$notes_path" ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "Release notes file $notes_path not found; using generated notes with daemon warning."
+          fi
+
+      - name: Upload VS Code package to release
+        if: startsWith(github.ref, 'refs/tags/release/v') && steps.release_notes.outputs.found == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.release_notes.outputs.version }}
+          body_path: ${{ steps.release_notes.outputs.body_path }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: plugins/vscode/*.vsix
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload VS Code package to release with generated notes
+        if: startsWith(github.ref, 'refs/tags/release/v') && steps.release_notes.outputs.found != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.release_notes.outputs.version }}
+          body: |
+            > [!WARNING]
+            > **Breaking change — local daemon**
+            > The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
+          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: plugins/vscode/*.vsix
         env:
           GITHUB_TOKEN: ${{ github.token }}
