@@ -865,6 +865,8 @@ mod tests {
                     endpoint_style: String::new(),
                     embedding_endpoint_style: String::new(),
                     api_key: String::new(),
+                    auth_token: String::new(),
+                    extra_headers: std::collections::HashMap::new(),
                     model_name: String::new(),
                     embedding_size: 0,
                     dimensions: None,
