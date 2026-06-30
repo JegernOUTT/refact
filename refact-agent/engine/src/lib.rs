@@ -11,6 +11,7 @@ use tracing_appender;
 use backtrace;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use crate::background_tasks::start_background_tasks;
 use crate::lsp::spawn_lsp_task;
@@ -153,15 +154,7 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
         writer_is_stderr = true;
         tracing_appender::non_blocking(std::io::stderr())
     } else if !cmdline.logs_to_file.is_empty() {
-        tracing_appender::non_blocking(tracing_appender::rolling::RollingFileAppender::new(
-            tracing_appender::rolling::Rotation::NEVER,
-            std::path::Path::new(&cmdline.logs_to_file)
-                .parent()
-                .unwrap(),
-            std::path::Path::new(&cmdline.logs_to_file)
-                .file_name()
-                .unwrap(),
-        ))
+        daemon::non_blocking_bounded_log_writer(std::path::Path::new(&cmdline.logs_to_file))
     } else {
         let _ = write!(std::io::stderr(), "This rust binary keeps logs as files, rotated daily. Try\ntail -f {}/logs/\nor use --logs-stderr for debugging. Any errors will duplicate here in stderr.\n\n", cache_dir.display());
         tracing_appender::non_blocking(
@@ -176,14 +169,19 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     let my_layer = nicer_logs::CustomLayer::new(
         logs_writer.clone(),
         writer_is_stderr,
-        if cmdline.verbose {
+        if daemon::rust_log_is_set() {
+            Level::TRACE
+        } else if cmdline.verbose {
             Level::DEBUG
         } else {
             Level::INFO
         },
         Level::ERROR,
         cmdline.lsp_stdin_stdout == 0,
-    );
+    )
+    .with_filter(daemon::log_env_filter_with_default_level(
+        if cmdline.verbose { "debug" } else { "info" },
+    ));
     let _tracing = tracing_subscriber::registry().with(my_layer).init();
 
     panic::set_hook(Box::new(|panic_info| {

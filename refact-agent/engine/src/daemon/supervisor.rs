@@ -858,6 +858,9 @@ impl Supervisor {
         if let Some(token) = &self.daemon_auth_token {
             command.env("REFACT_DAEMON_TOKEN", token);
         }
+        if std::env::var_os("RUST_LOG").is_none() {
+            command.env("RUST_LOG", crate::daemon::default_log_filter_directives());
+        }
         command.current_dir(&spec.root);
         Ok(command)
     }
@@ -1692,6 +1695,31 @@ mod tests {
         }
     }
 
+    struct RustLogGuard(Option<String>);
+
+    impl RustLogGuard {
+        fn unset() -> Self {
+            let previous = std::env::var("RUST_LOG").ok();
+            std::env::remove_var("RUST_LOG");
+            Self(previous)
+        }
+
+        fn set(value: &str) -> Self {
+            let previous = std::env::var("RUST_LOG").ok();
+            std::env::set_var("RUST_LOG", value);
+            Self(previous)
+        }
+    }
+
+    impl Drop for RustLogGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("RUST_LOG", value),
+                None => std::env::remove_var("RUST_LOG"),
+            }
+        }
+    }
+
     fn test_launch_spec(root: PathBuf) -> WorkerLaunchSpec {
         WorkerLaunchSpec {
             project_id: "project".to_string(),
@@ -1820,6 +1848,70 @@ mod tests {
 
         assert_eq!(token.as_deref(), Some("secret-token"));
         assert!(!args.iter().any(|arg| arg.contains("secret-token")));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn worker_command_sets_default_rust_log_filter_when_unset() {
+        let _rust_log = RustLogGuard::unset();
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let spec = test_launch_spec(dir.path().join("project"));
+        let command = supervisor
+            .worker_command(
+                &spec,
+                PortPair {
+                    http_port: 8111,
+                    lsp_port: 8112,
+                },
+                "nonce",
+            )
+            .await
+            .unwrap();
+
+        let rust_log = command.as_std().get_envs().find_map(|(key, value)| {
+            (key == "RUST_LOG")
+                .then(|| value.map(|value| value.to_string_lossy().to_string()))
+                .flatten()
+        });
+
+        assert_eq!(
+            rust_log.as_deref(),
+            Some(crate::daemon::default_log_filter_directives().as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn worker_command_preserves_existing_rust_log_override() {
+        let _rust_log = RustLogGuard::set("hyper=trace");
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let spec = test_launch_spec(dir.path().join("project"));
+        let command = supervisor
+            .worker_command(
+                &spec,
+                PortPair {
+                    http_port: 8111,
+                    lsp_port: 8112,
+                },
+                "nonce",
+            )
+            .await
+            .unwrap();
+
+        assert!(!command
+            .as_std()
+            .get_envs()
+            .any(|(key, _)| key == "RUST_LOG"));
     }
 
     #[tokio::test]
