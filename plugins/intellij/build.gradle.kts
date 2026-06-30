@@ -84,8 +84,10 @@ intellijPlatform {
     }
 
     pluginVerification {
+        // INTERNAL_API_USAGES is reported as a warning (not a failure) so the plugin can
+        // declare an unbounded until-build and stay available on future IDEs (262+). Real
+        // breakage is still caught by COMPATIBILITY_PROBLEMS / INVALID_PLUGIN.
         failureLevel = listOf(
-            VerifyPluginTask.FailureLevel.INTERNAL_API_USAGES,
             VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
             VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
         )
