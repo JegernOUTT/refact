@@ -23,7 +23,7 @@ pub const EXEC_ENV_DEFAULTS: &[(&str, &str)] = &[
     ("REFACT_EXEC", "1"),
 ];
 
-pub(crate) fn normalize_workspace_path(path: &Path) -> PathBuf {
+pub fn normalize_workspace_path(path: &Path) -> PathBuf {
     let normalized = dunce::canonicalize(path).unwrap_or_else(|_| lexical_normalize_path(path));
     normalize_windows_drive(dunce::simplified(&normalized).to_path_buf())
 }
@@ -96,7 +96,7 @@ fn normalize_workspace_option(workspace: &Option<PathBuf>) -> Option<PathBuf> {
     workspace.as_deref().map(normalize_workspace_path)
 }
 
-pub(crate) fn current_timestamp_ms() -> u64 {
+pub fn current_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

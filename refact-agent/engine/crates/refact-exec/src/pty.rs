@@ -67,8 +67,8 @@ mod tests {
 
     use tokio::time::timeout;
 
-    use crate::exec::types::{ExecOutputStream, ExecSpawnRequest, ExecStatus};
-    use crate::exec::ExecRegistry;
+    use crate::types::{ExecOutputStream, ExecSpawnRequest, ExecStatus};
+    use crate::ExecRegistry;
 
     #[cfg(unix)]
     #[test]

@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use crate::exec::types::ExecProcessId;
+use crate::types::ExecProcessId;
 
 #[derive(Debug, Clone)]
 pub struct SpillTarget {

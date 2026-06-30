@@ -15,12 +15,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 
-use crate::exec::registry::{ExecProcessCommand, ExecProcessRuntime};
-use crate::exec::types::{
+use crate::registry::{ExecProcessCommand, ExecProcessRuntime};
+use crate::types::{
     ExecMode, ExecOutputStream, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot,
     ExecReadinessProbe, ExecSpawnRequest, ExecStatus, EXEC_ENV_DEFAULTS,
 };
-use crate::exec::ExecRegistry;
+use crate::ExecRegistry;
 
 const PIPE_READ_BYTES: usize = 8192;
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -190,10 +190,10 @@ fn output_to_text(bytes: &[u8]) -> String {
 
 fn pump_output(
     registry: ExecRegistry,
-    process_id: crate::exec::types::ExecProcessId,
+    process_id: crate::types::ExecProcessId,
     stream: ExecOutputStream,
     mut pipe: impl AsyncRead + Unpin + Send + 'static,
-    progress_tx: Option<mpsc::UnboundedSender<crate::exec::types::ExecOutputChunk>>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buffer = [0; PIPE_READ_BYTES];
@@ -224,10 +224,10 @@ fn pump_output(
 
 fn pump_blocking_output(
     registry: ExecRegistry,
-    process_id: crate::exec::types::ExecProcessId,
+    process_id: crate::types::ExecProcessId,
     stream: ExecOutputStream,
     mut reader: Box<dyn Read + Send>,
-    progress_tx: Option<mpsc::UnboundedSender<crate::exec::types::ExecOutputChunk>>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let mut buffer = [0; PIPE_READ_BYTES];
@@ -658,8 +658,7 @@ impl ExecRegistry {
         let command = pty_command(&request)?;
         let (meta, process_id) = build_process_meta(&request)?;
         let startup_wait = request.startup_wait;
-        let (pty_handle, child) =
-            crate::exec::pty::spawn_pty(command, crate::exec::pty::default_pty_size())?;
+        let (pty_handle, child) = crate::pty::spawn_pty(command, crate::pty::default_pty_size())?;
         let stdin_writer = Arc::new(Mutex::new(pty_handle.writer));
         let child = Arc::new(Mutex::new(RuntimeChild::Pty(PtyRuntimeProcess {
             child,
@@ -749,7 +748,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::exec::types::{ExecProcessFilter, ExecStatusKind};
+    use crate::types::{ExecProcessFilter, ExecStatusKind};
 
     #[cfg(windows)]
     fn shell_script(script: &str) -> String {
@@ -825,9 +824,9 @@ mod tests {
         let is_service = matches!(mode, ExecMode::Service);
         let request = ExecSpawnRequest::new(mode, shell_script(command));
         if is_service {
-            request.with_owner(crate::exec::types::ExecOwnerMeta {
+            request.with_owner(crate::types::ExecOwnerMeta {
                 service_name: Some("env-default-test".to_string()),
-                ..crate::exec::types::ExecOwnerMeta::default()
+                ..crate::types::ExecOwnerMeta::default()
             })
         } else {
             request
@@ -1264,9 +1263,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_attach_failure_kills_child() {
         let registry = ExecRegistry::new();
-        let owner = crate::exec::types::ExecOwnerMeta {
+        let owner = crate::types::ExecOwnerMeta {
             service_name: Some("dup".to_string()),
-            ..crate::exec::types::ExecOwnerMeta::default()
+            ..crate::types::ExecOwnerMeta::default()
         };
         let first = registry
             .spawn(
@@ -1340,13 +1339,13 @@ mod tests {
         } else {
             "printf svc; sleep 5"
         };
-        let owner_a = crate::exec::types::ExecOwnerMeta {
+        let owner_a = crate::types::ExecOwnerMeta {
             chat_id: Some("chat".to_string()),
             tool_call_id: Some("tool-a".to_string()),
             service_name: Some("api".to_string()),
             workspace: Some(first_workspace.path().to_path_buf()),
         };
-        let owner_b = crate::exec::types::ExecOwnerMeta {
+        let owner_b = crate::types::ExecOwnerMeta {
             chat_id: Some("chat".to_string()),
             tool_call_id: Some("tool-b".to_string()),
             service_name: Some("api".to_string()),
@@ -1379,7 +1378,7 @@ mod tests {
         assert_eq!(
             registry
                 .find_service(
-                    crate::exec::types::ExecServiceLookup::new("api")
+                    crate::types::ExecServiceLookup::new("api")
                         .with_chat_id("chat")
                         .with_workspace(first_workspace.path().to_path_buf()),
                 )
@@ -1392,7 +1391,7 @@ mod tests {
         assert_eq!(
             registry
                 .find_service(
-                    crate::exec::types::ExecServiceLookup::new("api")
+                    crate::types::ExecServiceLookup::new("api")
                         .with_chat_id("chat")
                         .with_workspace(second_workspace.path().to_path_buf()),
                 )
@@ -1422,13 +1421,13 @@ mod tests {
         } else {
             "printf svc; sleep 5"
         };
-        let owner_a = crate::exec::types::ExecOwnerMeta {
+        let owner_a = crate::types::ExecOwnerMeta {
             chat_id: Some("chat-a".to_string()),
             tool_call_id: Some("tool-a".to_string()),
             service_name: Some("api".to_string()),
             workspace: Some(workspace.path().to_path_buf()),
         };
-        let owner_b = crate::exec::types::ExecOwnerMeta {
+        let owner_b = crate::types::ExecOwnerMeta {
             chat_id: Some("chat-b".to_string()),
             tool_call_id: Some("tool-b".to_string()),
             service_name: Some("api".to_string()),

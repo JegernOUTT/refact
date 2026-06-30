@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::exec::spill::{SpillTarget, SpillWriter};
-use crate::exec::types::{
+use crate::spill::{SpillTarget, SpillWriter};
+use crate::types::{
     current_timestamp_ms, ExecOutputChunk, ExecOutputStream, ExecProcessId, ExecReadResult,
 };
 
@@ -462,7 +462,7 @@ async fn create_spill_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::spill::SpillTarget;
+    use crate::spill::SpillTarget;
 
     fn make_transcript(max_bytes: usize) -> ExecTranscript {
         ExecTranscript::new(ExecProcessId("exec_test".to_string()), max_bytes)

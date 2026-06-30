@@ -5,12 +5,10 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
-use crate::exec::transcript::{
-    ExecRawCapture, ExecRawOutput, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES,
-};
+use crate::transcript::{ExecRawCapture, ExecRawOutput, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES};
 #[cfg(test)]
-use crate::exec::spill::SpillTarget;
-use crate::exec::types::{
+use crate::spill::SpillTarget;
+use crate::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
     ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup,
     ExecStatus, ExecWriteStdinResult,
@@ -1557,9 +1555,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::exec::spill::SpillTarget;
-    use crate::exec::transcript::DEFAULT_MAX_BYTES;
-    use crate::exec::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
+    use crate::spill::SpillTarget;
+    use crate::transcript::DEFAULT_MAX_BYTES;
+    use crate::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
 
     struct BlockingWriter;
 
@@ -2296,7 +2294,7 @@ mod tests {
         let registry = ExecRegistry::new();
         let first = registry
             .spawn(
-                crate::exec::ExecSpawnRequest::background(long_running_command()).with_owner(
+                crate::ExecSpawnRequest::background(long_running_command()).with_owner(
                     ExecOwnerMeta {
                         chat_id: Some("chat-drop".to_string()),
                         ..ExecOwnerMeta::default()
@@ -2307,7 +2305,7 @@ mod tests {
             .unwrap();
         let second = registry
             .spawn(
-                crate::exec::ExecSpawnRequest::background(long_running_command()).with_owner(
+                crate::ExecSpawnRequest::background(long_running_command()).with_owner(
                     ExecOwnerMeta {
                         chat_id: Some("chat-drop".to_string()),
                         ..ExecOwnerMeta::default()
@@ -2483,9 +2481,7 @@ mod tests {
     async fn test_cleanup_shutdown_kills_runtime_background_process() {
         let registry = ExecRegistry::new();
         let result = registry
-            .spawn(crate::exec::ExecSpawnRequest::background(
-                long_running_command(),
-            ))
+            .spawn(crate::ExecSpawnRequest::background(long_running_command()))
             .await
             .unwrap();
         let process_id = result.snapshot.meta.process_id.clone();
@@ -2739,7 +2735,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let blocker = temp.path().join("not-a-dir");
         let _ = tokio::fs::write(&blocker, "block").await;
-        let target = crate::exec::spill::SpillTarget::with_root(blocker, "chat-slow", &process_id);
+        let target = crate::spill::SpillTarget::with_root(blocker, "chat-slow", &process_id);
         {
             let mut records = registry.records.lock().await;
             records
@@ -3261,41 +3257,42 @@ mod tests {
             "sleep 30 & printf %s $! > {}; sleep 30",
             pid_path.display()
         ));
-        let child = command.spawn().expect("spawn child");
+        let mut child = command.spawn().expect("spawn child");
         let child_pid = child.id().expect("child pid");
 
         for _ in 0..20 {
-            if pid_path.exists() {
-                break;
+            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = contents.trim().parse::<i32>() {
+                    let descendant_pid = pid;
+                    let duplicate = registry
+                        .register_non_isolated_child_for_test(
+                            meta(
+                                "exec_test_non_isolated_child",
+                                ExecMode::Background,
+                                "sleep 30 & sleep 30",
+                            ),
+                            DEFAULT_MAX_BYTES,
+                            child,
+                        )
+                        .await
+                        .unwrap();
+
+                    let stored = registry.get(&existing.meta.process_id).await.unwrap();
+                    assert_eq!(duplicate, stored);
+                    assert_eq!(stored.meta.command, "existing");
+                    assert!(wait_until_process_exits(child_pid).await);
+                    #[cfg(target_os = "linux")]
+                    assert!(wait_until_process_exits(descendant_pid as u32).await);
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = descendant_pid;
+                    return;
+                }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let descendant_pid = std::fs::read_to_string(&pid_path)
-            .unwrap()
-            .parse::<i32>()
-            .unwrap();
-
-        let duplicate = registry
-            .register_non_isolated_child_for_test(
-                meta(
-                    "exec_test_non_isolated_child",
-                    ExecMode::Background,
-                    "sleep 30 & sleep 30",
-                ),
-                DEFAULT_MAX_BYTES,
-                child,
-            )
-            .await
-            .unwrap();
-
-        let stored = registry.get(&existing.meta.process_id).await.unwrap();
-        assert_eq!(duplicate, stored);
-        assert_eq!(stored.meta.command, "existing");
-        assert!(wait_until_process_exits(child_pid).await);
-        #[cfg(target_os = "linux")]
-        assert!(wait_until_process_exits(descendant_pid as u32).await);
-        #[cfg(not(target_os = "linux"))]
-        let _ = descendant_pid;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        panic!("descendant pid file was not populated");
     }
 
     #[tokio::test]

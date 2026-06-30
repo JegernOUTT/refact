@@ -27,6 +27,7 @@ pub use refact_at_web;
 pub use refact_buddy_core;
 pub use refact_caps_core;
 pub use refact_context_api;
+pub use refact_exec;
 pub use refact_file_edit_core;
 pub use refact_files;
 pub use refact_pricing_core;

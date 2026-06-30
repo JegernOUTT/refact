@@ -30,6 +30,7 @@ members = [
     "crates/refact-voice",
     "crates/refact-context-api",
     "crates/refact-runtime-api",
+    "crates/refact-exec",
     "crates/refact-tui",
 ]
 resolver = "2"
@@ -147,6 +148,7 @@ refact-caps-core = { path = "crates/refact-caps-core" }
 refact-voice = { path = "crates/refact-voice" }
 refact-context-api = { path = "crates/refact-context-api", features = ["http-client"] }
 refact-runtime-api = { path = "crates/refact-runtime-api" }
+refact-exec = { path = "crates/refact-exec" }
 refact-tui = { path = "crates/refact-tui" }
 
 astral-tokio-tar = "0.5.2"

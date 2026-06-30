@@ -1,0 +1,24 @@
+[package]
+name = "refact-exec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+dunce = "1.0.5"
+futures = "0.3"
+hex = "0.4.3"
+home = "0.5"
+libc = "0.2"
+portable-pty = "0.9"
+process-wrap = { version = "8.0.2", features = ["tokio1"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.8"
+strip-ansi-escapes = "0.2.1"
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
