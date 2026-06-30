@@ -426,7 +426,9 @@ export function subscribeToSidebarEvents(
   }, CONNECT_TIMEOUT_MS);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+  };
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
   }

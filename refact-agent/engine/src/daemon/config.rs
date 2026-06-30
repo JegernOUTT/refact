@@ -12,6 +12,10 @@ pub struct AuthConfig {
     pub enabled: bool,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -19,6 +23,8 @@ impl Default for AuthConfig {
         Self {
             enabled: false,
             token: None,
+            username: None,
+            password: None,
         }
     }
 }
@@ -143,6 +149,19 @@ pub async fn load_from_path(path: &Path) -> Result<DaemonConfig, String> {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(DaemonConfig::default()),
         Err(error) => Err(format!("failed to read {}: {error}", path.display())),
     }
+}
+
+pub async fn save_to_path(config: &DaemonConfig, path: &Path) -> Result<(), String> {
+    let yaml = serde_yaml::to_string(config)
+        .map_err(|error| format!("failed to serialize daemon config: {error}"))?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    tokio::fs::write(path, yaml)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 #[cfg(test)]

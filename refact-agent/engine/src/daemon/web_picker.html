@@ -112,10 +112,124 @@
         color: #fff;
         text-decoration: none;
         font-weight: 650;
+        border: 0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .button.ghost {
+        background: rgba(255, 255, 255, 0.08);
+        color: #e7e9ee;
+      }
+      .button.ghost:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+      .row-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
       }
       .empty {
         padding: 28px 16px;
         text-align: center;
+      }
+      .section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 28px 0 12px;
+      }
+      .section-title h2 {
+        margin: 0;
+        font-size: 18px;
+      }
+      .log-path {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: #aeb4c1;
+        overflow-wrap: anywhere;
+        margin: 0 0 10px;
+      }
+      .log-output {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #0b0c0f;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 12px 14px;
+        height: 320px;
+        overflow: auto;
+        margin: 0;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(6, 7, 10, 0.66);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        z-index: 30;
+      }
+      .overlay[hidden] {
+        display: none;
+      }
+      .modal {
+        width: min(860px, 100%);
+        max-height: calc(100dvh - 48px);
+        display: flex;
+        flex-direction: column;
+        padding: 20px 22px 22px;
+      }
+      .modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .modal-head h2 {
+        margin: 0;
+        font-size: 18px;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+      .field label {
+        font-size: 13px;
+        color: #cbd0da;
+      }
+      .field input[type="text"],
+      .field input[type="password"] {
+        background: #0b0c0f;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 10px;
+        color: #f5f6f8;
+        padding: 9px 11px;
+        font-size: 14px;
+      }
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+        font-size: 14px;
+      }
+      .hint {
+        font-size: 12px;
+        color: #aeb4c1;
+        margin: -4px 0 14px;
+      }
+      .form-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 6px;
       }
       @media (max-width: 760px) {
         header {
@@ -165,6 +279,9 @@
         <div class="status">
           <div id="daemon-meta">__REFACT_DAEMON_PICKER_META__</div>
           <div id="refresh-state" class="muted">Refreshing every 5s</div>
+          <div style="margin-top: 8px">
+            <button class="button ghost" type="button" id="open-settings">Settings</button>
+          </div>
         </div>
       </header>
       <section class="panel" aria-label="Projects">
@@ -182,10 +299,73 @@
           <tbody id="projects-body">__REFACT_DAEMON_PICKER_ROWS__</tbody>
         </table>
       </section>
+
+      <div class="section-title">
+        <h2>Daemon logs</h2>
+        <div class="toolbar">
+          <button class="button ghost" type="button" id="daemon-log-toggle">Pause</button>
+        </div>
+      </div>
+      <section class="panel" aria-label="Daemon logs" style="padding: 16px">
+        <p class="log-path" id="daemon-log-path"></p>
+        <pre class="log-output" id="daemon-log-output"></pre>
+      </section>
     </main>
+
+    <div class="overlay" id="log-modal" hidden>
+      <section class="panel modal" role="dialog" aria-modal="true" aria-label="Worker logs">
+        <div class="modal-head">
+          <h2 id="log-modal-title">Logs</h2>
+          <button class="button ghost" type="button" id="log-modal-close">Close</button>
+        </div>
+        <p class="log-path" id="log-modal-path"></p>
+        <pre class="log-output" id="log-modal-output"></pre>
+      </section>
+    </div>
+
+    <div class="overlay" id="settings-modal" hidden>
+      <section class="panel modal" role="dialog" aria-modal="true" aria-label="Daemon settings">
+        <div class="modal-head">
+          <h2>Daemon settings</h2>
+          <button class="button ghost" type="button" id="settings-close">Close</button>
+        </div>
+        <div class="toggle">
+          <input type="checkbox" id="set-lan" />
+          <label for="set-lan">Allow access from other devices (bind 0.0.0.0)</label>
+        </div>
+        <div class="toggle">
+          <input type="checkbox" id="set-mdns" />
+          <label for="set-mdns">Advertise on the local network (mDNS / .local)</label>
+        </div>
+        <div class="toggle">
+          <input type="checkbox" id="set-auth" />
+          <label for="set-auth">Require username &amp; password for remote access</label>
+        </div>
+        <p class="hint">
+          Connections from this machine (127.0.0.1) never need a password. LAN access
+          requires authentication with a username and password.
+        </p>
+        <div class="field">
+          <label for="set-username">Username</label>
+          <input type="text" id="set-username" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="set-password">Password</label>
+          <input type="password" id="set-password" autocomplete="new-password" />
+        </div>
+        <p class="hint" id="settings-mdns-url"></p>
+        <div class="form-actions">
+          <button class="button" type="button" id="settings-save">Save &amp; restart</button>
+          <span class="muted" id="settings-status"></span>
+        </div>
+      </section>
+    </div>
     <script>
       const initialData = __REFACT_DAEMON_PICKER_DATA__;
       const state = { data: initialData };
+      let logSource = null;
+      let daemonLogSource = null;
+      let daemonLogsPaused = false;
 
       function escapeHtml(value) {
         return String(value ?? "").replace(/[&<>"']/g, function (ch) {
@@ -217,9 +397,66 @@
         return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`;
       }
 
+      function appendLog(out, text) {
+        if (!out) return;
+        const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 48;
+        out.textContent += text + "\n";
+        if (atBottom) out.scrollTop = out.scrollHeight;
+      }
+
+      function streamUrl(projectId) {
+        return projectId
+          ? `/daemon/v1/logs/stream?project_id=${encodeURIComponent(projectId)}&tail=300`
+          : "/daemon/v1/logs/stream?tail=300";
+      }
+
+      function openLogs(projectId, label, logPath) {
+        closeLogs();
+        document.getElementById("log-modal").hidden = false;
+        document.getElementById("log-modal-title").textContent = `Logs · ${label}`;
+        document.getElementById("log-modal-path").textContent = logPath || "";
+        const out = document.getElementById("log-modal-output");
+        out.textContent = "";
+        logSource = new EventSource(streamUrl(projectId));
+        logSource.onmessage = function (event) {
+          appendLog(out, event.data);
+        };
+      }
+
+      function closeLogs() {
+        if (logSource) {
+          logSource.close();
+          logSource = null;
+        }
+        const modal = document.getElementById("log-modal");
+        if (modal) modal.hidden = true;
+      }
+
+      function startDaemonLogs() {
+        stopDaemonLogs();
+        daemonLogsPaused = false;
+        document.getElementById("daemon-log-toggle").textContent = "Pause";
+        const out = document.getElementById("daemon-log-output");
+        out.textContent = "";
+        daemonLogSource = new EventSource(streamUrl(null));
+        daemonLogSource.onmessage = function (event) {
+          appendLog(out, event.data);
+        };
+      }
+
+      function stopDaemonLogs() {
+        if (daemonLogSource) {
+          daemonLogSource.close();
+          daemonLogSource = null;
+        }
+      }
+
       function render(data) {
         const daemon = data.daemon || {};
         document.getElementById("daemon-meta").textContent = `v${daemon.version || "unknown"} · port ${daemon.port || "—"} · uptime ${formatUptime(daemon.uptime_secs)}`;
+        if (daemon.log_path) {
+          document.getElementById("daemon-log-path").textContent = daemon.log_path;
+        }
         const projects = Array.isArray(data.projects) ? data.projects : [];
         const body = document.getElementById("projects-body");
         if (projects.length === 0) {
@@ -229,13 +466,15 @@
         body.innerHTML = projects.map(function (project) {
           const workerState = project.worker_state || "stopped";
           const id = encodeURIComponent(project.id || "");
+          const label = escapeHtml(project.slug || project.id);
+          const logPath = escapeHtml(project.log_path || "");
           return `<tr>
             <td data-label="Project"><div class="project"><strong>${escapeHtml(project.slug || project.id)}</strong><span class="root muted">${escapeHtml(project.root)}</span></div></td>
             <td data-label="Worker"><span class="dot dot-${stateClass(workerState)}"></span>${escapeHtml(workerState)}</td>
             <td data-label="LSP clients">${Number(project.lsp_clients || 0)}</td>
             <td data-label="Cron next fire">${formatTime(project.cron_next_fire_ms)}</td>
             <td data-label="Last active">${formatTime(project.last_active_ms)}</td>
-            <td data-label="Action"><a class="button" href="/p/${id}/">Open GUI</a></td>
+            <td data-label="Action"><div class="row-actions"><a class="button" href="/p/${id}/">Open GUI</a><button class="button ghost" type="button" data-logs="${escapeHtml(project.id || "")}" data-log-label="${label}" data-log-path="${logPath}">Logs</button></div></td>
           </tr>`;
         }).join("");
       }
@@ -296,6 +535,7 @@
             port: status.port,
             uptime_secs: status.uptime_secs,
             started_at_ms: status.started_at_ms,
+            log_path: (previous.daemon && previous.daemon.log_path) || "",
           },
           projects: rows,
         };
@@ -322,7 +562,100 @@
         }
       }
 
+      async function openSettings() {
+        document.getElementById("settings-modal").hidden = false;
+        const status = document.getElementById("settings-status");
+        status.textContent = "Loading…";
+        try {
+          const response = await fetch("/daemon/v1/settings");
+          if (!response.ok) throw new Error("failed to load settings");
+          const settings = await response.json();
+          document.getElementById("set-lan").checked = !!settings.lan_enabled;
+          document.getElementById("set-mdns").checked = !!settings.mdns_enabled;
+          document.getElementById("set-auth").checked = !!settings.auth_enabled;
+          document.getElementById("set-username").value = settings.username || "";
+          const password = document.getElementById("set-password");
+          password.value = "";
+          password.placeholder = settings.has_password ? "•••••••• (unchanged)" : "Set a password";
+          const mdns = (settings.urls && settings.urls.mdns) || "";
+          document.getElementById("settings-mdns-url").textContent =
+            settings.lan_enabled && mdns ? `Reachable at ${mdns}` : "";
+          status.textContent = "";
+        } catch (error) {
+          status.textContent = `Error: ${error.message || error}`;
+        }
+      }
+
+      function closeSettings() {
+        document.getElementById("settings-modal").hidden = true;
+      }
+
+      async function saveSettings() {
+        const status = document.getElementById("settings-status");
+        const body = {
+          lan_enabled: document.getElementById("set-lan").checked,
+          mdns_enabled: document.getElementById("set-mdns").checked,
+          auth_enabled: document.getElementById("set-auth").checked,
+          username: document.getElementById("set-username").value,
+          password: document.getElementById("set-password").value,
+        };
+        status.textContent = "Saving…";
+        try {
+          const response = await fetch("/daemon/v1/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const data = await response.json().catch(function () { return {}; });
+          if (!response.ok) throw new Error(data.error || "save failed");
+          status.textContent = "Saved. The daemon is restarting to apply the changes…";
+        } catch (error) {
+          status.textContent = `Error: ${error.message || error}`;
+        }
+      }
+
+      document.getElementById("projects-body").addEventListener("click", function (event) {
+        const button = event.target.closest("[data-logs]");
+        if (!button) return;
+        openLogs(
+          button.getAttribute("data-logs"),
+          button.getAttribute("data-log-label"),
+          button.getAttribute("data-log-path"),
+        );
+      });
+      document.getElementById("log-modal-close").addEventListener("click", closeLogs);
+      document.getElementById("log-modal").addEventListener("click", function (event) {
+        if (event.target === this) closeLogs();
+      });
+      document.getElementById("open-settings").addEventListener("click", openSettings);
+      document.getElementById("settings-close").addEventListener("click", closeSettings);
+      document.getElementById("settings-modal").addEventListener("click", function (event) {
+        if (event.target === this) closeSettings();
+      });
+      document.getElementById("settings-save").addEventListener("click", saveSettings);
+      document.getElementById("set-lan").addEventListener("change", function () {
+        if (this.checked) {
+          document.getElementById("set-auth").checked = true;
+        }
+      });
+      document.getElementById("daemon-log-toggle").addEventListener("click", function () {
+        if (daemonLogsPaused) {
+          startDaemonLogs();
+        } else {
+          stopDaemonLogs();
+          daemonLogsPaused = true;
+          this.textContent = "Resume";
+        }
+      });
+      document.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") {
+          closeLogs();
+          closeSettings();
+        }
+      });
+
       render(initialData);
+      startDaemonLogs();
       refresh();
       setInterval(refresh, 5000);
     </script>

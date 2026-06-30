@@ -364,7 +364,12 @@ fn is_sse_request(headers: &HeaderMap, path: &str) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.contains("text/event-stream"))
         .unwrap_or(false)
-        || path.contains("/chats/subscribe")
+        || path_is_streaming(path)
+}
+
+fn path_is_streaming(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path.ends_with("/subscribe") || path.contains("/voice/stream/")
 }
 
 fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::HeaderMap {
@@ -744,6 +749,19 @@ mod tests {
         let headers = HeaderMap::new();
 
         assert!(!is_sse_request(&headers, "/v1/chat/completions"));
+    }
+
+    #[test]
+    fn sse_request_detected_for_subscribe_endpoints_without_accept_header() {
+        let headers = HeaderMap::new();
+
+        assert!(is_sse_request(&headers, "/v1/sidebar/subscribe"));
+        assert!(is_sse_request(&headers, "/v1/tasks/subscribe"));
+        assert!(is_sse_request(&headers, "/v1/sidebar/subscribe?after_seq=3"));
+        assert!(is_sse_request(
+            &headers,
+            "/v1/voice/stream/abc123/subscribe"
+        ));
     }
 
     #[tokio::test]

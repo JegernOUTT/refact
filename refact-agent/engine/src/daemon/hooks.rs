@@ -386,6 +386,7 @@ mod tests {
             auth: AuthConfig {
                 enabled: true,
                 token: Some("daemon-secret".to_string()),
+                ..Default::default()
             },
             hooks: HooksConfig {
                 enabled,

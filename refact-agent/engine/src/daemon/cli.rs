@@ -2557,6 +2557,7 @@ mod tests {
             auth: crate::daemon::config::AuthConfig {
                 enabled: true,
                 token: Some("secret".to_string()),
+                ..Default::default()
             },
             ..crate::daemon::config::DaemonConfig::default()
         };

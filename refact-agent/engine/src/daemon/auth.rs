@@ -1,12 +1,107 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
+use axum::extract::ConnectInfo;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::Engine;
 use serde_json::json;
 
 use crate::daemon::config::DaemonConfig;
+
+const BASIC_AUTH_REALM: &str = "Refact daemon";
+
+#[derive(Clone, Default)]
+pub(crate) struct DaemonAuthPolicy {
+    pub token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub hook_token: Option<String>,
+    pub open_hooks_allowed: bool,
+}
+
+impl DaemonAuthPolicy {
+    fn basic_credentials(&self) -> Option<(&str, &str)> {
+        match (self.username.as_deref(), self.password.as_deref()) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                Some((username, password))
+            }
+            _ => None,
+        }
+    }
+
+    fn requires_auth(&self) -> bool {
+        self.token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+            || self.basic_credentials().is_some()
+    }
+}
+
+pub(crate) fn peer_is_loopback<B>(req: &Request<B>) -> bool {
+    match req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        Some(ConnectInfo(addr)) => addr.ip().is_loopback(),
+        None => true,
+    }
+}
+
+fn basic_credentials_from_headers(headers: &HeaderMap) -> Option<(String, String)> {
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    let mut parts = value.splitn(2, |ch: char| ch.is_ascii_whitespace());
+    let scheme = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
+    let encoded = parts.next()?.trim();
+    let decoded = base64::prelude::BASE64_STANDARD.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+fn basic_auth_matches(req_headers: &HeaderMap, expected_user: &str, expected_pass: &str) -> bool {
+    match basic_credentials_from_headers(req_headers) {
+        Some((username, password)) => {
+            token_matches(&username, expected_user) && token_matches(&password, expected_pass)
+        }
+        None => false,
+    }
+}
+
+fn remote_authorized<B>(req: &Request<B>, policy: &DaemonAuthPolicy) -> bool {
+    if let Some((username, password)) = policy.basic_credentials() {
+        if basic_auth_matches(req.headers(), username, password) {
+            return true;
+        }
+    }
+    if let Some(token) = policy
+        .token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+    {
+        return request_authorized(req, token);
+    }
+    false
+}
+
+fn unauthorized_basic() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            header::WWW_AUTHENTICATE,
+            format!("Basic realm=\"{BASIC_AUTH_REALM}\""),
+        )],
+        Json(json!({"error": "Unauthorized"})),
+    )
+        .into_response()
+}
 
 pub(crate) const DAEMON_AUTH_COOKIE: &str = "refact_daemon_auth";
 pub(crate) const DAEMON_AUTH_QUERY: &str = "daemon_token";
@@ -329,16 +424,11 @@ fn is_token_delimiter(ch: char) -> bool {
     )
 }
 
-pub(crate) async fn check_with_hooks<B>(
-    token: Option<String>,
-    hook_token: Option<String>,
-    open_hooks_allowed: bool,
-    req: Request<B>,
-    next: Next<B>,
-) -> Response
+pub(crate) async fn enforce<B>(policy: DaemonAuthPolicy, req: Request<B>, next: Next<B>) -> Response
 where
     B: Send + 'static,
 {
+    let peer_loopback = peer_is_loopback(&req);
     if is_hook_request(&req) {
         if query_contains_daemon_token(req.uri().query()) {
             return (
@@ -347,10 +437,16 @@ where
             )
                 .into_response();
         }
-        let expected = hook_token
+        let expected = policy
+            .hook_token
             .as_deref()
             .filter(|token| !token.trim().is_empty())
-            .or_else(|| token.as_deref().filter(|token| !token.trim().is_empty()));
+            .or_else(|| {
+                policy
+                    .token
+                    .as_deref()
+                    .filter(|token| !token.trim().is_empty())
+            });
         match expected {
             Some(expected) => {
                 if !hook_request_authorized(&req, expected) {
@@ -361,7 +457,7 @@ where
                         .into_response();
                 }
             }
-            None if open_hooks_allowed => {}
+            None if policy.open_hooks_allowed => {}
             None => {
                 return (
                     StatusCode::FORBIDDEN,
@@ -372,16 +468,14 @@ where
         }
         return next.run(req).await;
     }
-    if let Some(expected) = token {
-        if !is_public_request(&req) {
-            if !request_authorized(&req, &expected) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Unauthorized"})),
-                )
-                    .into_response();
-            }
-        }
+    if peer_loopback || is_public_request(&req) {
+        return next.run(req).await;
+    }
+    if !policy.requires_auth() {
+        return unauthorized_basic();
+    }
+    if !remote_authorized(&req, &policy) {
+        return unauthorized_basic();
     }
     next.run(req).await
 }

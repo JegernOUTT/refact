@@ -396,6 +396,13 @@ impl Supervisor {
         else {
             return;
         };
+        if let Some(info) = self.worker_info(&project_id).await {
+            if matches!(info.state, WorkerState::Ready)
+                && self.worker_answers_ping(info.http_port).await
+            {
+                return;
+            }
+        }
         let supervisor = self.clone();
         let mut restarts = self.proxy_restarts.lock().await;
         drain_proxy_restart_tasks(&mut restarts);
@@ -412,6 +419,14 @@ impl Supervisor {
             }
             (project_id, generation)
         });
+    }
+
+    async fn worker_answers_ping(&self, http_port: u16) -> bool {
+        let url = format!("http://127.0.0.1:{http_port}/v1/ping");
+        matches!(
+            self.client.get(url).send().await,
+            Ok(response) if response.status().is_success()
+        )
     }
 
     pub async fn worker_count(&self) -> u64 {

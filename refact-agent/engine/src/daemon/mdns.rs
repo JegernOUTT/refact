@@ -136,6 +136,7 @@ mod tests {
             auth: AuthConfig {
                 enabled: true,
                 token: Some("secret".to_string()),
+                ..Default::default()
             },
             ..DaemonConfig::default()
         };
