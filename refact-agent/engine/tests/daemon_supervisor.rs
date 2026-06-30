@@ -523,6 +523,14 @@ async fn concurrent_proxy_failures_queue_one_restart_for_generation() {
     let pid = info.pid.unwrap();
     std::env::set_var("FAKE_WORKER_DELAY_READY", "1");
 
+    // notify_proxy_unreachable now pings the worker and skips the restart when it is
+    // Ready and answers /v1/ping, so a benign stream error never kills a healthy worker.
+    // Make the worker genuinely unreachable before signalling the proxy failures so a
+    // restart is actually warranted, then assert the 10 concurrent failures still queue
+    // exactly one restart for the generation.
+    kill_pid(pid);
+    wait_for_pid_exit(pid).await;
+
     for _ in 0..10 {
         supervisor
             .notify_proxy_unreachable(entry.clone(), false, Some(pid))
