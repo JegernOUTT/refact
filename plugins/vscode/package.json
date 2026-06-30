@@ -18,7 +18,7 @@
 	"bugs": {
 		"url": "https://github.com/JegernOUTT/refact/issues"
 	},
-	"version": "8.2.0",
+	"version": "8.2.1",
 	"dependencies": {
 		"@types/marked": "^4.0.8",
 		"@types/vscode": "^1.69.0",
