@@ -331,8 +331,8 @@ jobs:
 
       - name: Install dependencies and VSCE
         run: |
-          npm ci
-          npm install ./chat_package_fixed/*.tgz --no-save
+          npm ci --ignore-scripts
+          npm install ./chat_package_fixed/*.tgz --no-save --ignore-scripts
           REFACT_CHAT_JS_VERSION=$(node -p "require('./node_modules/refact-chat-js/package.json').version")
           npm pkg set "dependencies.refact-chat-js=${REFACT_CHAT_JS_VERSION}"
           npm install -g @vscode/vsce
