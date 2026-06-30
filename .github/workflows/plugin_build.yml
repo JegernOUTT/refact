@@ -1,0 +1,258 @@
+name: Refact Plugin CI build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+
+concurrency:
+  group: plugin-build-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build_version:
+    name: Build version
+    runs-on: ubuntu-latest
+    outputs:
+      build_version: ${{ steps.version.outputs.build_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check resolver target parity
+        shell: bash
+        run: bash tools/dev/check_resolver_target_parity.sh
+
+      - name: Compute build version
+        id: version
+        shell: bash
+        run: |
+          version="$(bash tools/dev/compute_build_version.sh)"
+          if [[ "${PUBLISH_EAP:-}" != "1" && ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid build version: $version" >&2
+            exit 1
+          fi
+          echo "build_version=$version" >> "$GITHUB_OUTPUT"
+
+  engine:
+    uses: ./.github/workflows/agent_engine_build.yml
+
+  gui:
+    uses: ./.github/workflows/agent_gui_build.yml
+
+  engine-prerelease:
+    name: Engine prerelease
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build_version, engine]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download engine artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: engine-dist
+
+      - name: Package engine release assets
+        shell: bash
+        run: |
+          bash tools/dev/package_engine_release_assets.sh \
+            --version "${{ needs.build_version.outputs.build_version }}" \
+            --input-dir engine-dist \
+            --output-dir engine-release-assets
+
+      - name: Publish engine prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: engine/v${{ needs.build_version.outputs.build_version }}
+          name: Refact Engine v${{ needs.build_version.outputs.build_version }}
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            engine-release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  vscode-package:
+    name: VS Code package
+    needs: [build_version, engine, gui]
+    runs-on: ubuntu-latest
+
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.build_version.outputs.build_version }}
+
+    defaults:
+      run:
+        working-directory: plugins/vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download GUI package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/vscode/chat_package
+          merge-multiple: true
+
+      - name: Prepare GUI package
+        shell: bash
+        run: |
+          mkdir -p ./chat_package_fixed
+          find ./chat_package -name "*.tgz" -type f -exec cp {} ./chat_package_fixed/ \;
+          ls -la ./chat_package_fixed
+
+      - name: Install dependencies and VSCE
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npm install ./chat_package_fixed/*.tgz --no-save --ignore-scripts
+          REFACT_CHAT_JS_VERSION=$(node -p "require('./node_modules/refact-chat-js/package.json').version")
+          npm pkg set "dependencies.refact-chat-js=${REFACT_CHAT_JS_VERSION}"
+          npm install -g @vscode/vsce
+          rm -rf ./chat_package ./chat_package_fixed
+          npm version "$REFACT_BUILD_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Package VS Code extension
+        shell: bash
+        run: vsce package
+
+      - name: Upload VS Code package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-plugin
+          path: plugins/vscode/*.vsix
+
+  intellij-package:
+    name: JetBrains package
+    needs: [build_version, engine, gui]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.properties.outputs.version }}
+      changelog: ${{ steps.properties.outputs.changelog }}
+
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.build_version.outputs.build_version }}
+
+    steps:
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download GUI package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/intellij/chat_package
+          merge-multiple: true
+
+      - name: Prepare GUI package
+        shell: bash
+        working-directory: plugins/intellij
+        run: |
+          mkdir -p ./chat_package_fixed
+          find ./chat_package -name "*.tgz" -type f -exec tar -xzf {} -C ./chat_package_fixed/ \;
+          rm -rf ./src/main/resources/webview/dist
+          mv ./chat_package_fixed/package/dist ./src/main/resources/webview/dist
+          rm -rf ./chat_package ./chat_package_fixed
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Export properties
+        id: properties
+        shell: bash
+        working-directory: plugins/intellij
+        run: |
+          echo "pluginVerifierHomeDir=~/.pluginVerifier" >> $GITHUB_OUTPUT
+          ./gradlew properties --console=plain -q
+          ./gradlew printProductsReleases
+
+      - name: Run tests
+        working-directory: plugins/intellij
+        run: ./gradlew check
+
+      - name: Collect test results
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: intellij-tests-result
+          path: plugins/intellij/build/reports/tests
+
+      - name: Setup Plugin Verifier IDEs cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.properties.outputs.pluginVerifierHomeDir }}/ides
+          key: plugin-verifier-${{ hashFiles('plugins/intellij/build/listProductsReleases.txt') }}
+
+      - name: Run plugin verification tasks
+        working-directory: plugins/intellij
+        run: |
+          for attempt in 1 2; do
+            if ./gradlew verifyPlugin -Dplugin.verifier.home.dir=${{ steps.properties.outputs.pluginVerifierHomeDir }}; then
+              exit 0
+            fi
+            if [[ "$attempt" == "2" ]]; then
+              exit 1
+            fi
+            echo "Plugin verifier failed, retrying once after cleaning verifier reports"
+            rm -rf build/reports/pluginVerifier
+            sleep 10
+          done
+
+      - name: Collect plugin verifier result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: intellij-pluginVerifier-result
+          path: plugins/intellij/build/reports/pluginVerifier
+
+      - name: Prepare plugin artifact
+        id: artifact
+        shell: bash
+        working-directory: plugins/intellij
+        run: |
+          cd build/distributions
+          FILENAME=$(ls *.zip)
+          unzip "$FILENAME" -d content
+          echo "filename=${FILENAME:0:-4}" >> $GITHUB_OUTPUT
+
+      - name: Upload JetBrains plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.filename }}
+          path: plugins/intellij/build/distributions/content/*/*

@@ -1,4 +1,10 @@
-import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   Badge,
   Button,
@@ -167,6 +173,19 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
   ).length;
   const showTaskError = Boolean(loadError);
   const tasksLoading = !showTaskError && projectLoading;
+  const shouldFetchTasks =
+    !tasksLoading && !showTaskError && tasks.length === 0;
+  useEffect(() => {
+    if (shouldFetchTasks) {
+      const query = dispatch(
+        tasksApi.endpoints.listTasks.initiate(undefined, {
+          forceRefetch: true,
+        }),
+      );
+      return () => query.unsubscribe();
+    }
+    return undefined;
+  }, [dispatch, shouldFetchTasks]);
 
   const renderHeader = (children?: React.ReactNode, showSearch = false) => (
     <div className={styles.header}>

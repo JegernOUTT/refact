@@ -9,8 +9,8 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{
-    active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    Action, AgentTarget, CronStore, Delivery, Job,
+    active_durable_cron_store, cron_task_response, next_run_ms, scheduler_timezone,
+    session_cron_store, CronStore, Job,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -90,13 +90,23 @@ impl Tool for ToolCronList {
 
         if scope == CronListScope::Session || scope == CronListScope::All {
             let session_tasks = self.session_store().list().await;
-            tasks.extend(session_tasks.iter().map(|t| task_value(t, now_ms, tz)));
+            tasks.extend(
+                session_tasks
+                    .iter()
+                    .map(|t| task_value(t, now_ms, tz))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
         }
 
         if scope == CronListScope::Durable || scope == CronListScope::All {
             if let Some(store) = self.durable_store(ccx).await? {
                 let durable_tasks = store.list().await;
-                tasks.extend(durable_tasks.iter().map(|t| task_value(t, now_ms, tz)));
+                tasks.extend(
+                    durable_tasks
+                        .iter()
+                        .map(|t| task_value(t, now_ms, tz))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             }
         }
 
@@ -179,70 +189,14 @@ fn parse_scope(args: &HashMap<String, Value>) -> Result<CronListScope, String> {
     }
 }
 
-fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Value {
-    let cron = task.cron_expr().unwrap_or_default();
-    json!({
-        "id": task.id,
-        "cron": cron,
-        "human_schedule": human_schedule(cron),
-        "description": task.description,
-        "prompt": first_chars(task.prompt().unwrap_or_default(), 200),
-        "action_kind": task.action_kind(),
-        "delivery": delivery_value(&task.delivery),
-        "chat_id": task.chat_id(),
-        "target": if job_is_isolated(task) { "isolated" } else { "existing_chat" },
-        "isolated": job_is_isolated(task),
-        "mode": task.mode(),
-        "recurring": task.recurring,
-        "durable": task.durable,
-        "next_fire_at_ms": next_run_ms(task, now_ms, tz).unwrap_or(0),
-        "fire_count": task.fire_count,
-        "created_at_ms": task.created_at_ms,
-    })
-}
-
-fn delivery_value(delivery: &Delivery) -> Value {
-    match delivery {
-        Delivery::Chat => json!({"kind": "chat"}),
-        Delivery::Webhook { url, token } => json!({
-            "kind": "webhook",
-            "url": url,
-            "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
-        }),
-        Delivery::Notifier {
-            integration_id,
-            target,
-        } => json!({
-            "kind": "notifier",
-            "integration_id": integration_id,
-            "target": target,
-        }),
-        Delivery::None => json!({"kind": "none"}),
-    }
-}
-
-fn job_is_isolated(task: &Job) -> bool {
-    matches!(
-        &task.action,
-        Action::AgentTurn {
-            target: AgentTarget::Isolated,
-            ..
-        } | Action::Command {
-            target: AgentTarget::Isolated,
-            ..
-        }
-    )
+fn task_value(task: &Job, now_ms: u64, tz: chrono_tz::Tz) -> Result<Value, String> {
+    let next_fire_at_ms = next_run_ms(task, now_ms, tz).unwrap_or(0);
+    serde_json::to_value(cron_task_response(task, next_fire_at_ms)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 fn set_job_isolated(task: &mut Job) {
-    if let Action::AgentTurn { target, .. } = &mut task.action {
-        *target = AgentTarget::Isolated;
-    }
-}
-
-fn first_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+    task.set_isolated();
 }
 
 #[cfg(test)]
@@ -250,7 +204,8 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::scheduler::{
-        InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+        Action, AgentTarget, Delivery, InMemoryCronStore, JsonFileCronStore, Trigger,
+        DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
     };
 
     fn session_task(id: &str) -> Job {
@@ -296,6 +251,23 @@ mod tests {
             env: None,
             timeout_secs: None,
         };
+        task
+    }
+
+    fn interval_task(id: &str) -> Job {
+        let mut task = session_task(id);
+        task.set_trigger(Trigger::Interval {
+            every_ms: 30 * 60_000,
+        });
+        task
+    }
+
+    fn webhook_task(id: &str) -> Job {
+        let mut task = command_task(id);
+        task.set_trigger(Trigger::Webhook {
+            hook_id: "deploy".to_string(),
+        });
+        task.delivery = Delivery::None;
         task
     }
 
@@ -432,6 +404,46 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["action_kind"], json!("command"));
         assert_eq!(items[0]["chat_id"], json!("chat"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_interval_and_webhook_trigger_fields() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        session_store
+            .add(interval_task("cron_list_interval"))
+            .await
+            .unwrap();
+        session_store
+            .add(webhook_task("cron_list_webhook"))
+            .await
+            .unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        let interval = items
+            .iter()
+            .find(|item| item["id"] == json!("cron_list_interval"))
+            .unwrap();
+        assert_eq!(interval["trigger_kind"], json!("interval"));
+        assert_eq!(interval["human_schedule"], json!("every 30m"));
+        assert_eq!(interval["every_ms"], json!(30 * 60_000));
+        assert_eq!(interval["hook_id"], Value::Null);
+        assert_eq!(interval["action_kind"], json!("agent_turn"));
+        assert_eq!(interval["delivery_kind"], json!("chat"));
+        assert_eq!(interval["delivery"]["kind"], json!("chat"));
+
+        let webhook = items
+            .iter()
+            .find(|item| item["id"] == json!("cron_list_webhook"))
+            .unwrap();
+        assert_eq!(webhook["trigger_kind"], json!("webhook"));
+        assert_eq!(webhook["human_schedule"], json!("webhook"));
+        assert_eq!(webhook["hook_id"], json!("deploy"));
+        assert_eq!(webhook["next_fire_at_ms"], json!(0));
+        assert_eq!(webhook["action_kind"], json!("command"));
+        assert_eq!(webhook["delivery_kind"], json!("none"));
+        assert_eq!(webhook["delivery"]["kind"], json!("none"));
     }
 
     #[tokio::test]

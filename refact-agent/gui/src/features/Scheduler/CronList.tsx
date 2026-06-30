@@ -16,6 +16,8 @@ import type {
   CronTask,
   UpdateCronRequest,
 } from "../../services/refact/schedulerApi";
+import { RunHistory } from "./RunHistory";
+import { WebhookManager } from "./WebhookManager";
 import styles from "./Scheduler.module.css";
 
 type CronListUpdate = Omit<UpdateCronRequest, "id">;
@@ -32,7 +34,7 @@ type CronListProps = {
   onUpdate: (id: string, request: CronListUpdate) => void;
 };
 
-type EditableScheduleKind = "cron" | "interval" | "once";
+type EditableScheduleKind = "cron" | "interval" | "once" | "webhook";
 
 type EditDraft = {
   kind: EditableScheduleKind;
@@ -120,6 +122,7 @@ function statusTone(status: string | null) {
 function triggerLabel(task: CronTask): string {
   if (task.trigger_kind === "interval") return "Interval";
   if (task.trigger_kind === "once") return "One-shot";
+  if (task.trigger_kind === "webhook") return "Webhook";
   if (task.trigger_kind === "cron") return "Cron";
   return "Manual";
 }
@@ -164,6 +167,7 @@ function scheduleCode(task: CronTask): string {
 function editKind(task: CronTask): EditableScheduleKind {
   if (task.trigger_kind === "interval") return "interval";
   if (task.trigger_kind === "once") return "once";
+  if (task.trigger_kind === "webhook") return "webhook";
   return "cron";
 }
 
@@ -203,6 +207,7 @@ function validateDraft(draft: EditDraft): string | null {
 
 function draftUpdate(draft: EditDraft): CronListUpdate {
   const base = { description: draft.description.trim() };
+  if (draft.kind === "webhook") return base;
   if (draft.kind === "interval") return { ...base, every: draft.every.trim() };
   if (draft.kind === "once") return { ...base, at: draft.at.trim() };
   return {
@@ -347,6 +352,10 @@ export const CronList: React.FC<CronListProps> = ({
               ) : null}
             </dl>
 
+            <WebhookManager task={task} />
+
+            <RunHistory runs={task.recent_runs} />
+
             {editing ? (
               <form
                 className={styles.editForm}
@@ -421,6 +430,20 @@ export const CronList: React.FC<CronListProps> = ({
                       value={editDraft.at}
                       onChange={(at) => setEditDraft({ ...editDraft, at })}
                       aria-label="Edit one-shot time"
+                    />
+                  </Field>
+                ) : null}
+                {editDraft.kind === "webhook" ? (
+                  <Field
+                    label="Hook ID"
+                    helper="Webhook trigger IDs are read-only."
+                  >
+                    <FieldText
+                      className={styles.monoField}
+                      value={task.hook_id ?? ""}
+                      onChange={() => undefined}
+                      aria-label="Edit hook ID"
+                      disabled
                     />
                   </Field>
                 ) : null}

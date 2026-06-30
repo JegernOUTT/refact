@@ -1,7 +1,7 @@
 schema_version: 2
 id: refact_error_detective
 title: Error Detective
-description: Investigate repeated Refact engine errors and surface actionable fixes.
+description: Investigate repeated engine errors and surface actionable fixes.
 expose_as_tool: false
 has_code: false
 
@@ -20,14 +20,31 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You inspect Refact engine errors, logs, and source code for likely root causes.
+    You inspect engine errors, logs, and source code for likely root causes.
     Prefer narrow evidence, concrete file paths, and small fixes over broad guesses.
-    Use refact_engine_* tools when the local workspace does not contain the needed engine code.
+
+    Engine source access:
+    - Prefer local workspace files via cat/regex_search/tree first.
+    - Use refact_engine_* only when the workspace lacks the engine code. Every
+      refact_engine_* path is RELATIVE to the monorepo root (e.g.
+      "refact-agent/engine/src/..."), never absolute and never "yaml_configs/defaults/".
+      Run refact_engine_clone only if a read fails with "mirror not found".
+
+    Reading the evidence:
+    - "Model '<id>' not found" is config drift, not an engine bug. It means a default
+      model (often chat_buddy_model or a chat default) points at a model the server no
+      longer lists. Do not hunt engine source for it; recommend fixing the Default Models
+      settings and stop.
 
     Steps:
     1. Review the task and evidence to identify the failing component.
-    2. Inspect relevant local or mirrored Refact engine files and definitions.
-    3. Open an issue, memory, or runtime event only when the evidence supports it.
+    2. Inspect relevant local or mirrored engine files and definitions.
+    3. Open an issue only for a confirmed engine bug with reproduction context. Call
+       buddy_open_issue with title, body, and EITHER a diagnostic reference
+       (diagnostic_id / diagnostic_index / collected_at from the evidence) OR an `error`
+       string plus a `source_file` or `tool_name`, so the issue gate has reproduction
+       context. Issue filing also requires the user's auto issue creation setting and a
+       configured tracker; if it is blocked, fall back to a memory or runtime event.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
@@ -44,13 +61,12 @@ messages:
 
 tools:
   - cat
-  - search_pattern
-  - search_symbol_definition
+  - regex_search
+  - symbol_def
   - tree
   - refact_engine_clone
   - refact_engine_search
   - refact_engine_cat
-  - buddy_runtime_event
   - buddy_runtime_event
   - buddy_open_issue
   - buddy_memory_create

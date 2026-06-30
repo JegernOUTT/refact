@@ -24,6 +24,7 @@ use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::constants::CHAT_TOP_N;
 use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 
+use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
@@ -53,13 +54,12 @@ const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
+const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
+    "LLM stream ended unexpectedly without completion signal";
+const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
+    "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextLimitCompactionDecision {
-    Skip,
-    Attempt { attempt: usize },
-    MaxAttemptsReached,
-}
+const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalizedStopReason {
@@ -101,23 +101,56 @@ fn compression_reason_for_stop_reason(reason: NormalizedStopReason) -> Compressi
     }
 }
 
-fn context_limit_compaction_decision(
+fn is_responses_incomplete_stream_error(error: &LlmStreamError) -> bool {
+    error.message.contains(RESPONSES_INCOMPLETE_STREAM_ERROR)
+        || error
+            .message
+            .contains("OpenAI Codex WebSocket ended before completion")
+        || error
+            .message
+            .contains("OpenAI Codex WebSocket closed before completion")
+}
+
+fn responses_incomplete_stream_at_critical_pressure(
     error: &LlmStreamError,
-    thread: &ThreadParams,
-    abort_flag: &AtomicBool,
-) -> ContextLimitCompactionDecision {
-    if !error.retry_decision().is_context_limit() || abort_flag.load(Ordering::SeqCst) {
-        return ContextLimitCompactionDecision::Skip;
+    model_rec: &BaseModelRecord,
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    usage_stale: bool,
+) -> bool {
+    model_rec.wire_format == crate::llm::WireFormat::OpenaiResponses
+        && effective_n_ctx > 0
+        && is_responses_incomplete_stream_error(error)
+        && matches!(
+            crate::chat::summarization::estimated_provider_context_pressure_with_usage(
+                messages,
+                effective_n_ctx,
+                usage_stale,
+            ),
+            ContextPressure::Critical
+        )
+}
+
+fn synthesize_responses_context_cutoff_error_if_needed(
+    mut error: LlmStreamError,
+    model_rec: &BaseModelRecord,
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+    usage_stale: bool,
+) -> LlmStreamError {
+    if responses_incomplete_stream_at_critical_pressure(
+        &error,
+        model_rec,
+        messages,
+        effective_n_ctx,
+        usage_stale,
+    ) {
+        error.message = format!(
+            "{RESPONSES_CONTEXT_CUTOFF_ERROR}. Original error: {}",
+            error.message
+        );
     }
-    let attempt = thread
-        .reactive_compact_attempts
-        .unwrap_or(0)
-        .saturating_add(1);
-    if attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
-        ContextLimitCompactionDecision::MaxAttemptsReached
-    } else {
-        ContextLimitCompactionDecision::Attempt { attempt }
-    }
+    error
 }
 
 fn safe_context_limit_error_for_log(error: &str) -> String {
@@ -237,6 +270,14 @@ fn maybe_inject_token_budget_instruction(
         })
         .unwrap_or(false);
     if last_has_tool_calls {
+        return false;
+    }
+
+    if session
+        .messages
+        .last()
+        .is_some_and(|message| length_stop_kind(message).is_some())
+    {
         return false;
     }
 
@@ -847,8 +888,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
         }
         return false;
     };
-    let (reactive_attempt, reason) = {
-        let mut session = session_arc.lock().await;
+    let reason = {
+        let session = session_arc.lock().await;
         if !matches!(
             session.runtime.state,
             SessionState::Idle | SessionState::Completed
@@ -866,32 +907,12 @@ async fn maybe_compact_after_high_pressure_length_stop(
         ) {
             return false;
         }
-        let reason = length_like_finish_reason(message.finish_reason.as_deref())
-            .map(compression_reason_for_stop_reason);
-        let reactive_attempt = session
-            .thread
-            .reactive_compact_attempts
-            .unwrap_or(0)
-            .saturating_add(1);
-        if reactive_attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
-            crate::chat::summarization::emit_compression_skipped_status(
-                &mut session,
-                CompressionReason::MaxAttemptsReached,
-            );
-            return false;
-        }
-        session.thread.reactive_compact_attempts = Some(reactive_attempt);
-        session.increment_version();
-        session.touch();
-        (reactive_attempt, reason)
+        length_like_finish_reason(message.finish_reason.as_deref())
+            .map(compression_reason_for_stop_reason)
     };
 
-    warn!(
-        "High-pressure length stop, summarizing oldest eligible segment attempt {}/{}",
-        reactive_attempt,
-        crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
-    );
-    let compacted = crate::chat::summarization::apply_segment_summarization_with_reason(
+    warn!("High-pressure length stop, summarizing oldest eligible segments to reduce context");
+    let outcome = crate::chat::summarization::apply_segment_summarization_with_reason(
         gcx,
         session_arc,
         thread,
@@ -899,12 +920,23 @@ async fn maybe_compact_after_high_pressure_length_stop(
         reason,
     )
     .await;
-    if compacted {
+    if outcome.applied() {
         let mut session = session_arc.lock().await;
         session.thread.previous_response_id = None;
         session.cache_guard_force_next = true;
+        return true;
     }
-    compacted
+
+    if matches!(
+        outcome,
+        crate::chat::summarization::CompactionOutcome::LlmUnavailable
+    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc).await
+    {
+        warn!("High-pressure length stop recovered via deterministic full sweep");
+        return true;
+    }
+
+    false
 }
 
 const LENGTH_STOP_CONTINUE_MARKER: &str = "length_stop_continue";
@@ -948,6 +980,15 @@ fn length_stop_recovery_attempts(messages: &[ChatMessage]) -> usize {
         .count()
 }
 
+fn trailing_token_budget_marker_index(messages: &[ChatMessage]) -> Option<usize> {
+    messages
+        .last()
+        .is_some_and(|message| {
+            message.role == "cd_instruction" && message.tool_call_id == TOKEN_BUDGET_MARKER
+        })
+        .then_some(messages.len().saturating_sub(1))
+}
+
 fn length_stop_continue_instruction(kind: LengthStopKind) -> ChatMessage {
     let text = match kind {
         LengthStopKind::EmptyOutput => {
@@ -971,7 +1012,7 @@ async fn maybe_recover_after_length_stop(
     thread: &ThreadParams,
     effective_n_ctx: Option<usize>,
 ) -> bool {
-    let (kind, dead_end_message_id, attempts) = {
+    let (kind, dead_end_message_id, attempts, trailing_budget_marker_id) = {
         let session = session_arc.lock().await;
         if !matches!(
             session.runtime.state,
@@ -979,7 +1020,10 @@ async fn maybe_recover_after_length_stop(
         ) {
             return false;
         }
-        let Some(last) = session.messages.last() else {
+        let last_idx = trailing_token_budget_marker_index(&session.messages)
+            .unwrap_or(session.messages.len())
+            .saturating_sub(1);
+        let Some(last) = session.messages.get(last_idx) else {
             return false;
         };
         let Some(kind) = length_stop_kind(last) else {
@@ -989,6 +1033,9 @@ async fn maybe_recover_after_length_stop(
             kind,
             last.message_id.clone(),
             length_stop_recovery_attempts(&session.messages),
+            trailing_token_budget_marker_index(&session.messages)
+                .and_then(|idx| session.messages.get(idx))
+                .map(|message| message.message_id.clone()),
         )
     };
 
@@ -1024,6 +1071,9 @@ async fn maybe_recover_after_length_stop(
     }
 
     let mut session = session_arc.lock().await;
+    if let Some(marker_id) = trailing_budget_marker_id.as_deref() {
+        session.remove_message(marker_id);
+    }
     if kind == LengthStopKind::EmptyOutput {
         if !dead_end_message_id.is_empty() {
             session.remove_message(&dead_end_message_id);
@@ -1051,9 +1101,24 @@ async fn maybe_recover_after_length_stop(
     true
 }
 
+fn should_notify_task_agent_reasoning_token_stop(
+    message: &ChatMessage,
+    messages: &[ChatMessage],
+    effective_n_ctx: Option<usize>,
+    usage_stale: bool,
+) -> bool {
+    if !is_reasoning_token_limit_stop(message) {
+        return false;
+    }
+
+    !effective_n_ctx
+        .is_some_and(|n_ctx| is_high_pressure_length_stop(message, messages, n_ctx, usage_stale))
+}
+
 async fn handle_task_agent_reasoning_token_stop(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
+    effective_n_ctx: Option<usize>,
 ) -> bool {
     let (task_meta, finish_reason, usage, message_id, agent_chat_id) = {
         let mut session = session_arc.lock().await;
@@ -1066,7 +1131,12 @@ async fn handle_task_agent_reasoning_token_stop(
         let Some(message) = session.messages.last() else {
             return false;
         };
-        if !is_reasoning_token_limit_stop(message) {
+        if !should_notify_task_agent_reasoning_token_stop(
+            message,
+            &session.messages,
+            effective_n_ctx,
+            session.provider_usage_stale,
+        ) {
             return false;
         }
 
@@ -1365,29 +1435,31 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                let compaction_decision = {
-                    let session = session_arc.lock().await;
-                    context_limit_compaction_decision(&error, &session.thread, &abort_flag)
-                };
-                match compaction_decision {
-                    ContextLimitCompactionDecision::Attempt {
-                        attempt: reactive_attempt,
-                    } => {
-                        let original_error = error.message.clone();
+                let is_context_limit = error.retry_decision().is_context_limit()
+                    && !abort_flag.load(Ordering::SeqCst);
+                if is_context_limit {
+                    let original_error = error.message.clone();
+                    let round = {
+                        let mut session = session_arc.lock().await;
+                        session.clear_stream_for_retry();
+                        session.add_message(make_ui_only_error_message(&original_error));
+                        let round = session
+                            .thread
+                            .reactive_compact_attempts
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        session.thread.reactive_compact_attempts = Some(round);
+                        session.increment_version();
+                        session.touch();
+                        round
+                    };
+                    if round <= MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS {
                         let log_error = safe_context_limit_error_for_log(&original_error);
                         warn!(
-                            "Context limit error, summarizing oldest eligible segment attempt {}/{}: {}",
-                            reactive_attempt,
-                            crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
-                            log_error,
+                            "Context limit error, compacting (round {}/{}): {}",
+                            round, MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS, log_error,
                         );
-                        {
-                            let mut session = session_arc.lock().await;
-                            session.clear_stream_for_retry();
-                            session.add_message(make_ui_only_error_message(&original_error));
-                            session.thread.reactive_compact_attempts = Some(reactive_attempt);
-                        }
-                        let compacted =
+                        let outcome =
                             crate::chat::summarization::apply_segment_summarization_with_reason(
                                 gcx.clone(),
                                 &session_arc,
@@ -1396,47 +1468,38 @@ pub fn start_generation(
                                 Some(CompressionReason::ContextLengthStop),
                             )
                             .await;
-                        if compacted {
-                            let mut session = session_arc.lock().await;
-                            session.clear_stream_for_retry();
-                            session.thread.previous_response_id = None;
-                            session.cache_guard_force_next = true;
-                            continue;
-                        }
-                        if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
-                            &session_arc,
-                        )
-                        .await
-                        {
-                            warn!("Context limit error recovered via deterministic compaction");
-                            continue;
-                        }
-                    }
-                    ContextLimitCompactionDecision::MaxAttemptsReached => {
-                        {
-                            let mut session = session_arc.lock().await;
-                            crate::chat::summarization::emit_compression_skipped_status(
-                                &mut session,
-                                CompressionReason::MaxAttemptsReached,
-                            );
-                            session.clear_stream_for_retry();
-                            session.add_message(make_ui_only_error_message(&error.message));
-                        }
-                        if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
-                            &session_arc,
-                        )
-                        .await
-                        {
-                            warn!(
-                                "Context limit error recovered via deterministic compaction after attempt limit"
-                            );
-                            continue;
+                        match outcome {
+                            crate::chat::summarization::CompactionOutcome::Applied => {
+                                let mut session = session_arc.lock().await;
+                                session.clear_stream_for_retry();
+                                session.thread.previous_response_id = None;
+                                session.cache_guard_force_next = true;
+                                continue;
+                            }
+                            crate::chat::summarization::CompactionOutcome::LlmUnavailable => {
+                                if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
+                                    &session_arc,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "Context limit recovered via deterministic full sweep (summarizer unavailable)"
+                                    );
+                                    let mut session = session_arc.lock().await;
+                                    session.clear_stream_for_retry();
+                                    session.thread.previous_response_id = None;
+                                    session.cache_guard_force_next = true;
+                                    continue;
+                                }
+                            }
+                            crate::chat::summarization::CompactionOutcome::NothingToCompact => {}
                         }
                     }
-                    ContextLimitCompactionDecision::Skip => {}
-                }
-                if compaction_decision != ContextLimitCompactionDecision::Skip {
-                    error.message = context_limit_final_error_message(&error.message);
+                    error.message = context_limit_final_error_message(&original_error);
+                    {
+                        let mut session = session_arc.lock().await;
+                        crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
+                    }
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
@@ -1572,8 +1635,12 @@ pub fn start_generation(
                 .await
             {
                 ToolStepOutcome::NoToolCalls => {
-                    if handle_task_agent_reasoning_token_stop(app.clone(), session_arc.clone())
-                        .await
+                    if handle_task_agent_reasoning_token_stop(
+                        app.clone(),
+                        session_arc.clone(),
+                        effective_n_ctx,
+                    )
+                    .await
                     {
                         break;
                     }
@@ -1599,6 +1666,12 @@ pub fn start_generation(
                     };
                     if should_continue {
                         continue;
+                    }
+                    if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    }
+                    if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
+                        break;
                     }
                     let app_stop = AppState::from_gcx(gcx.clone()).await;
                     let session_id_stop = chat_id.clone();
@@ -1650,20 +1723,29 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Stop => {
-                    let mut ev = make_runtime_event(
-                        "chat_completed",
-                        &format!("Completed: {}", chat_label),
-                        "chat",
-                        &format!("chat_{}", chat_id),
-                        "completed",
-                        None,
-                    );
-                    ev.chat_id = Some(chat_id.to_string());
-                    app.buddy_event_sink
-                        .apply_chat_completion(ev, 4, "happy".to_string())
+                    let completed = {
+                        let session = session_arc.lock().await;
+                        session.runtime.state == SessionState::Completed
+                    };
+                    if completed {
+                        let mut ev = make_runtime_event(
+                            "chat_completed",
+                            &format!("Completed: {}", chat_label),
+                            "chat",
+                            &format!("chat_{}", chat_id),
+                            "completed",
+                            None,
+                        );
+                        ev.chat_id = Some(chat_id.to_string());
+                        app.buddy_event_sink
+                            .apply_chat_completion(ev, 4, "happy".to_string())
+                            .await;
+                        maybe_enqueue_completion_activity_reaction(
+                            app.clone(),
+                            session_arc.clone(),
+                        )
                         .await;
-                    maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
-                        .await;
+                    }
                     break;
                 }
                 ToolStepOutcome::Continue => {
@@ -2053,10 +2135,6 @@ async fn run_streaming_generation(
             overflow_ops: overflow_ops.clone(),
         };
 
-        if let Some(count) = cloud_input_usage.as_ref() {
-            collector.on_usage(&count.usage);
-        }
-
         let session_arc_emitter = session_arc.clone();
         let emitter_task = tokio::spawn(async move {
             fn merge_events(
@@ -2239,10 +2317,20 @@ async fn run_streaming_generation(
             return Ok(GenerationResult::PausedForUserDecision);
         }
 
-        let results = stream_outcome.map(|o| match o {
-            LlmStreamOutcome::Choices(c) => c,
-            LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
-        });
+        let results = stream_outcome
+            .map(|o| match o {
+                LlmStreamOutcome::Choices(c) => c,
+                LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
+            })
+            .map_err(|error| {
+                synthesize_responses_context_cutoff_error_if_needed(
+                    error,
+                    &model_rec.base,
+                    &llm_request.messages,
+                    llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx),
+                    true,
+                )
+            });
 
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
@@ -2324,20 +2412,10 @@ async fn run_streaming_generation(
 
         let mut result = results.into_iter().next().unwrap_or_default();
 
-        if let Some(count) = cloud_input_usage.clone() {
-            let usage = count.usage;
-            result.usage = Some(match result.usage.take() {
-                Some(provider_usage) => ChatUsage {
-                    prompt_tokens: usage.prompt_tokens,
-                    total_tokens: usage
-                        .prompt_tokens
-                        .saturating_add(provider_usage.completion_tokens)
-                        .saturating_add(provider_usage.cache_creation_tokens.unwrap_or(0))
-                        .saturating_add(provider_usage.cache_read_tokens.unwrap_or(0)),
-                    ..provider_usage
-                },
-                None => usage,
-            });
+        if result.usage.is_none() {
+            if let Some(count) = cloud_input_usage.clone() {
+                result.usage = Some(count.usage);
+            }
         }
         if let Some(usage) = result.usage.clone() {
             let mut session = session_arc.lock().await;
@@ -2682,6 +2760,63 @@ fn is_result_empty(result: &ChoiceFinal) -> bool {
         && result.server_content_blocks.is_empty()
 }
 
+fn event_payload_bool(message: &ChatMessage, subkind: &str, key: &str) -> bool {
+    message.role == crate::chat::internal_roles::EVENT_ROLE
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(|value| value.as_str())
+            == Some(subkind)
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("payload"))
+            .and_then(|payload| payload.get(key))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn assistant_goal_pursuit_accounting_enabled(message: &ChatMessage) -> bool {
+    message
+        .extra
+        .get("goal_pursuit")
+        .and_then(|value| value.get("account_progress"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn latest_goal_pursuit_usage(session: &ChatSession) -> Option<ChatUsage> {
+    let goal = session.goal.as_ref()?;
+    if !goal.active || goal.status != GoalStatus::Active {
+        return None;
+    }
+    let assistant_index = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == "assistant")?;
+    let assistant = &session.messages[assistant_index];
+    let marked_on_assistant = assistant_goal_pursuit_accounting_enabled(assistant);
+    let marked_before_assistant = session.messages[..assistant_index]
+        .iter()
+        .rev()
+        .take_while(|message| message.role != "assistant")
+        .any(|message| event_payload_bool(message, "goal_pursuit", "account_progress"));
+    if marked_on_assistant || marked_before_assistant {
+        assistant.usage.clone()
+    } else {
+        None
+    }
+}
+
+async fn maybe_record_goal_pursuit_progress(session_arc: Arc<AMutex<ChatSession>>) -> bool {
+    let mut session = session_arc.lock().await;
+    let Some(usage) = latest_goal_pursuit_usage(&session) else {
+        return false;
+    };
+    session.goal_record_progress_from_usage(&usage)
+}
+
 fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stage: &str) {
     if result.finish_reason.as_deref() != Some("tool_calls") || !result.tool_calls_raw.is_empty() {
         return;
@@ -2780,6 +2915,73 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn goal_budget_pursuit_usage_requires_marker() {
+        let mut session = ChatSession::new("goal-generation".to_string());
+        session.install_goal("agent", "ship it", true, GoalBudget::default());
+        session.add_message(make_assistant_msg("not a pursuit"));
+        session.messages.last_mut().unwrap().usage = Some(ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        });
+        assert!(latest_goal_pursuit_usage(&session).is_none());
+
+        session.messages.last_mut().unwrap().extra.insert(
+            "goal_pursuit".to_string(),
+            json!({"account_progress": true}),
+        );
+        let usage = latest_goal_pursuit_usage(&session).unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        assert!(session.goal_record_progress_from_usage(&usage));
+        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
+        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 15);
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+    }
+
+    #[test]
+    fn goal_budget_pursuit_usage_records_expiring_turn() {
+        let mut session = ChatSession::new("goal-generation-expiring".to_string());
+        session.install_goal(
+            "agent",
+            "ship it",
+            true,
+            GoalBudget {
+                max_turns: Some(10),
+                max_minutes: Some(1),
+                max_tokens: Some(1_000),
+                cooldown_ms: 1_500,
+                no_progress_token_threshold: 10,
+                no_progress_turns: Some(2),
+                explicit: false,
+            },
+        );
+        session.goal.as_mut().unwrap().progress.started_at_ms = 1;
+        let mut assistant = make_assistant_msg("late pursuit");
+        assistant.usage = Some(ChatUsage {
+            prompt_tokens: 10,
+            completion_tokens: 15,
+            total_tokens: 25,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        });
+        assistant.extra.insert(
+            "goal_pursuit".to_string(),
+            json!({"account_progress": true}),
+        );
+        session.add_message(assistant);
+
+        let usage = latest_goal_pursuit_usage(&session).unwrap();
+        assert!(session.goal_record_progress_from_usage(&usage));
+        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 1);
+        assert_eq!(session.goal.as_ref().unwrap().progress.tokens_used, 25);
+        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
     }
 
     fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
@@ -3016,12 +3218,6 @@ mod tests {
             PARTIAL_OUTPUT_STREAM_ERROR,
         );
         let error = context_limit_error(&wrapped, true);
-        let abort = std::sync::atomic::AtomicBool::new(false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &ThreadParams::default(), &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
 
         let final_message = context_limit_final_error_message(&error.message);
         let wrapped_final = format!(
@@ -3243,6 +3439,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn token_budget_marker_not_injected_after_length_stop() {
+        let mut session = ChatSession::new("length-stop-budget-marker".to_string());
+        session.messages = vec![make_user_msg("continue"), make_low_pressure_length_stop()];
+
+        assert!(!maybe_inject_token_budget_instruction(
+            &mut session,
+            100_000,
+            1
+        ));
+        assert_eq!(session.messages.len(), 2);
+    }
+
     #[tokio::test]
     async fn high_pressure_length_stop_triggers_compression_attempt() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -3263,7 +3472,7 @@ mod tests {
         );
 
         let session = session_arc.lock().await;
-        assert_eq!(session.thread.reactive_compact_attempts, Some(1));
+        assert_eq!(session.thread.reactive_compact_attempts, None);
         assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
         assert_eq!(
             session.compression_reason,
@@ -3325,34 +3534,6 @@ mod tests {
         assert!(is_high_pressure_length_stop(
             &message, &messages, 100_000, false
         ));
-    }
-
-    #[tokio::test]
-    async fn length_stop_reactive_attempts_are_bounded() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut session = ChatSession::new("length-stop-bounded".to_string());
-        session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
-        session.thread.reactive_compact_attempts = Some(usize::MAX);
-        let thread = session.thread.clone();
-        let session_arc = Arc::new(AMutex::new(session));
-
-        assert!(
-            !maybe_compact_after_high_pressure_length_stop(
-                gcx,
-                &session_arc,
-                &thread,
-                Some(100_000),
-            )
-            .await
-        );
-
-        let session = session_arc.lock().await;
-        assert_eq!(session.thread.reactive_compact_attempts, Some(usize::MAX));
-        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
-        assert_eq!(
-            session.compression_reason,
-            Some(CompressionReason::MaxAttemptsReached)
-        );
     }
 
     #[test]
@@ -3552,8 +3733,6 @@ mod tests {
 
     #[test]
     fn test_context_limit_gate_recognizes_explicit_and_wrapped_errors() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let thread = ThreadParams::default();
         let explicit = context_limit_error("context_length_exceeded: reduce prompt", false);
         let wrapped = context_limit_error(
             &format!(
@@ -3562,87 +3741,26 @@ mod tests {
             ),
             true,
         );
-
-        assert_eq!(
-            context_limit_compaction_decision(&explicit, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
-        assert_eq!(
-            context_limit_compaction_decision(&wrapped, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
-    }
-
-    #[test]
-    fn test_context_limit_reactive_compact_attempts_are_bounded() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.reactive_compact_attempts =
-            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
-        let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::MaxAttemptsReached
-        );
-    }
-
-    #[test]
-    fn test_context_limit_reactive_compact_attempts_saturate_at_usize_max() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.reactive_compact_attempts = Some(usize::MAX);
-        let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::MaxAttemptsReached
-        );
+        assert!(explicit.retry_decision().is_context_limit());
+        assert!(wrapped.retry_decision().is_context_limit());
     }
 
     #[test]
     fn normal_chat_context_limit_requests_reactive_compaction() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.mode = "agent".to_string();
         let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
     fn context_length_error_triggers_reactive_compression() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let thread = ThreadParams::default();
         let error = context_limit_error("input too long for model_length", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
     fn task_planner_context_limit_requests_reactive_compaction() {
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let mut thread = ThreadParams::default();
-        thread.mode = "task_planner".to_string();
-        thread.task_meta = Some(TaskMeta {
-            task_id: "task-1".to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("planner-task-1-1".to_string()),
-        });
         let error = context_limit_error("context_length_exceeded", false);
-
-        assert_eq!(
-            context_limit_compaction_decision(&error, &thread, &abort),
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
+        assert!(error.retry_decision().is_context_limit());
     }
 
     #[test]
@@ -3696,13 +3814,10 @@ mod tests {
         let partial_context_error = context_limit_error("context_length_exceeded", false);
 
         assert!(partial_context_error.retry_decision().is_context_limit());
-        assert_eq!(
-            context_limit_compaction_decision(
-                &partial_context_error,
-                &ThreadParams::default(),
-                &abort,
-            ),
-            ContextLimitCompactionDecision::Skip
+        assert!(
+            !(partial_context_error.retry_decision().is_context_limit()
+                && !abort.load(Ordering::SeqCst)),
+            "abort must suppress reactive compaction",
         );
     }
 
@@ -3713,12 +3828,6 @@ mod tests {
         session.messages = vec![make_user_msg("continue")];
         session.start_stream();
         let error = context_limit_error("context_length_exceeded", false);
-        let abort = std::sync::atomic::AtomicBool::new(false);
-        let decision = context_limit_compaction_decision(&error, &session.thread, &abort);
-        assert_eq!(
-            decision,
-            ContextLimitCompactionDecision::Attempt { attempt: 1 }
-        );
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
@@ -3749,24 +3858,6 @@ mod tests {
             .messages
             .iter()
             .any(crate::chat::diagnostics::is_ui_only_message));
-    }
-
-    #[test]
-    fn test_segment_summary_circuit_breaker_stops_at_two() {
-        let max = crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS;
-        assert_eq!(max, 2);
-        let mut count = 0usize;
-        let mut stopped = false;
-        for _ in 0..10 {
-            if count < max {
-                count += 1;
-            } else {
-                stopped = true;
-                break;
-            }
-        }
-        assert!(stopped);
-        assert_eq!(count, max);
     }
 
     #[test]
@@ -3995,6 +4086,36 @@ mod tests {
             })
             .count();
         assert_eq!(markers, 1);
+    }
+
+    #[tokio::test]
+    async fn length_stop_recovery_ignores_trailing_token_budget_marker() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = ChatSession::new("length-stop-trailing-budget".to_string());
+        session.messages = vec![make_user_msg("continue"), make_low_pressure_length_stop()];
+        session.add_message(ChatMessage {
+            role: "cd_instruction".to_string(),
+            tool_call_id: TOKEN_BUDGET_MARKER.to_string(),
+            content: ChatContent::SimpleText("budget".to_string()),
+            ..Default::default()
+        });
+        let thread = session.thread.clone();
+        let session_arc = Arc::new(AMutex::new(session));
+
+        assert!(maybe_recover_after_length_stop(gcx, &session_arc, &thread, Some(100_000)).await);
+
+        let session = session_arc.lock().await;
+        assert!(!session
+            .messages
+            .iter()
+            .any(|message| message.tool_call_id == TOKEN_BUDGET_MARKER));
+        assert_eq!(
+            session
+                .messages
+                .last()
+                .map(|message| message.tool_call_id.clone()),
+            Some(LENGTH_STOP_CONTINUE_MARKER.to_string())
+        );
     }
 
     #[tokio::test]

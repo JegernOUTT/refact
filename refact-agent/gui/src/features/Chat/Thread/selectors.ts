@@ -7,10 +7,12 @@ import {
   isToolMessage,
   isUserMessage,
   isEventMessage,
+  isGoalMessage,
   isPlanMessage,
   ChatMessages,
   DiffMessage,
   EventMessage,
+  GoalSnapshot,
   getEventMetadata,
   getPlanMetadata,
   normalizeEventMessageMetadata,
@@ -129,6 +131,7 @@ export type TabDisplayData = {
   session_state?: string;
   mode?: string;
   is_buddy_chat?: boolean;
+  is_task_chat?: boolean;
   unreadNotificationCount: number;
 };
 
@@ -149,7 +152,6 @@ export const selectTabsDisplayData = createSelector(
   ): TabDisplayData[] =>
     openIds.flatMap((id) => {
       const runtime = threads[id];
-      if (runtime?.thread.buddy_meta?.is_buddy_chat) return [];
       const historyItem = historyChats[id] as
         | (typeof historyChats)[string]
         | undefined;
@@ -162,7 +164,8 @@ export const selectTabsDisplayData = createSelector(
           title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
           session_state: liveSessionState ?? historyItem?.session_state,
           mode: runtime?.thread.mode ?? historyItem?.mode,
-          is_buddy_chat: false,
+          is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
+          is_task_chat: Boolean(runtime?.thread.is_task_chat),
           unreadNotificationCount:
             pendingNotifications?.filter(
               (notification) => notification.receivedAt > lastSeen,
@@ -182,7 +185,7 @@ export const selectRuntimeById = (
 export const selectCurrentRuntime = (
   state: RootState,
 ): ChatThreadRuntime | null =>
-  state.chat.threads[state.chat.current_thread_id] ?? null;
+  selectRuntimeById(state, state.chat.current_thread_id);
 
 export const selectThreadById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread ?? null;
@@ -201,29 +204,39 @@ export const selectBackgroundAgent = (
   state.chat.threads[threadId]?.background_agents[agentId];
 
 export const selectThread = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread ?? null;
+  selectThreadById(state, state.chat.current_thread_id);
+
+export const selectThreadTitleById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.title;
 
 export const selectThreadTitle = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.title;
+  selectThreadTitleById(state, state.chat.current_thread_id);
 
-export const selectChatId = (state: RootState) => state.chat.current_thread_id;
+export function selectChatId(state: RootState) {
+  return state.chat.current_thread_id;
+}
 
-export const selectModel = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.model ?? "";
-
-export const selectMessages = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.messages ??
-  EMPTY_MESSAGES;
+export const selectModelById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.model ?? "";
 
 export const selectMessagesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread.messages ?? EMPTY_MESSAGES;
+
+export const selectMessages = (state: RootState) =>
+  selectMessagesById(state, state.chat.current_thread_id);
+
+export const selectModel = (state: RootState) =>
+  selectModelById(state, state.chat.current_thread_id);
 
 export const selectVisibleMessages = (
   state: RootState,
   threadId: string,
 ): ChatMessages =>
   selectMessagesById(state, threadId).filter(
-    (message) => message.role !== "event" && message.role !== "plan",
+    (message) =>
+      message.role !== "event" &&
+      message.role !== "plan" &&
+      !isGoalMessage(message),
   );
 
 export const selectEventLog = (
@@ -234,7 +247,14 @@ export const selectEventLog = (
     (message) => {
       if (!isEventMessage(message)) return [];
       const metadata = getEventMetadata(message);
-      if (!metadata || metadata.subkind === "plan_delta") return [];
+      if (
+        !metadata ||
+        metadata.subkind === "plan_delta" ||
+        metadata.subkind === "goal_delta" ||
+        metadata.subkind === "goal_pursuit"
+      ) {
+        return [];
+      }
       return [normalizeEventMessageMetadata(message)];
     },
   );
@@ -340,57 +360,120 @@ export const selectPlanBannerState = createSelector(
 
 export const selectToolUse = (state: RootState) => state.chat.tool_use;
 
+export const selectThreadToolUseById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.tool_use;
+
 export const selectThreadToolUse = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.tool_use;
+  selectThreadToolUseById(state, state.chat.current_thread_id);
+
+export const selectAutoApproveEditingToolsById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.auto_approve_editing_tools ?? false;
 
 export const selectAutoApproveEditingTools = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .auto_approve_editing_tools ?? false;
+  selectAutoApproveEditingToolsById(state, state.chat.current_thread_id);
+
+export const selectAutoApproveDangerousCommandsById = (
+  state: RootState,
+  chatId: string,
+) =>
+  state.chat.threads[chatId]?.thread.auto_approve_dangerous_commands ?? false;
 
 export const selectAutoApproveDangerousCommands = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .auto_approve_dangerous_commands ?? false;
+  selectAutoApproveDangerousCommandsById(state, state.chat.current_thread_id);
 
-export const selectCheckpointsEnabled = (state: RootState) =>
+export const selectCheckpointsEnabledById = (
+  state: RootState,
+  chatId: string,
+) =>
+  state.chat.threads[chatId]?.thread.checkpoints_enabled ??
   state.chat.checkpoints_enabled;
 
+export const selectCheckpointsEnabled = (state: RootState) =>
+  selectCheckpointsEnabledById(state, state.chat.current_thread_id);
+
+export const selectThreadBoostReasoningById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.boost_reasoning;
+
 export const selectThreadBoostReasoning = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.boost_reasoning;
+  selectThreadBoostReasoningById(state, state.chat.current_thread_id);
+
+export const selectIncludeProjectInfoById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.include_project_info;
 
 export const selectIncludeProjectInfo = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.include_project_info;
+  selectIncludeProjectInfoById(state, state.chat.current_thread_id);
+
+export const selectContextTokensCapById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.context_tokens_cap;
 
 export const selectContextTokensCap = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.context_tokens_cap;
+  selectContextTokensCapById(state, state.chat.current_thread_id);
+
+export const selectReasoningEffortById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.reasoning_effort;
 
 export const selectReasoningEffort = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.reasoning_effort;
+  selectReasoningEffortById(state, state.chat.current_thread_id);
+
+export const selectThinkingBudgetById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.thinking_budget;
 
 export const selectThinkingBudget = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.thinking_budget;
+  selectThinkingBudgetById(state, state.chat.current_thread_id);
+
+export const selectTemperatureById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.temperature;
 
 export const selectTemperature = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.temperature;
+  selectTemperatureById(state, state.chat.current_thread_id);
+
+export const selectFrequencyPenaltyById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.frequency_penalty;
 
 export const selectFrequencyPenalty = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.frequency_penalty;
+  selectFrequencyPenaltyById(state, state.chat.current_thread_id);
+
+export const selectMaxTokensById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.max_tokens;
 
 export const selectMaxTokens = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.max_tokens;
+  selectMaxTokensById(state, state.chat.current_thread_id);
+
+export const selectParallelToolCallsById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.thread.parallel_tool_calls;
 
 export const selectParallelToolCalls = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.parallel_tool_calls;
+  selectParallelToolCallsById(state, state.chat.current_thread_id);
 
-export const selectThreadNewChatSuggested = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.new_chat_suggested ??
+export const selectThreadNewChatSuggestedById = (
+  state: RootState,
+  chatId: string,
+) =>
+  state.chat.threads[chatId]?.thread.new_chat_suggested ??
   DEFAULT_NEW_CHAT_SUGGESTED;
 
-export const selectThreadMaximumTokens = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .currentMaximumContextTokens;
+export const selectThreadNewChatSuggested = (state: RootState) =>
+  selectThreadNewChatSuggestedById(state, state.chat.current_thread_id);
 
-export const selectEffectiveMaxContextTokens = (state: RootState) => {
-  const thread = state.chat.threads[state.chat.current_thread_id]?.thread;
+export const selectThreadMaximumTokensById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.currentMaximumContextTokens;
+
+export const selectThreadMaximumTokens = (state: RootState) =>
+  selectThreadMaximumTokensById(state, state.chat.current_thread_id);
+
+export const selectEffectiveMaxContextTokensById = (
+  state: RootState,
+  chatId: string,
+) => {
+  const thread = state.chat.threads[chatId]?.thread;
   if (!thread) return undefined;
   const modelMax = thread.currentMaximumContextTokens;
   const cap = thread.context_tokens_cap;
@@ -400,13 +483,19 @@ export const selectEffectiveMaxContextTokens = (state: RootState) => {
   return modelMax;
 };
 
+export const selectEffectiveMaxContextTokens = (state: RootState) =>
+  selectEffectiveMaxContextTokensById(state, state.chat.current_thread_id);
+
+export const selectThreadCurrentMessageTokensById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.currentMessageContextTokens;
+
 export const selectThreadCurrentMessageTokens = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .currentMessageContextTokens;
+  selectThreadCurrentMessageTokensById(state, state.chat.current_thread_id);
 
 export const selectIsWaiting = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.waiting_for_response ??
-  false;
+  selectIsWaitingById(state, state.chat.current_thread_id);
 
 export const selectIsWaitingById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.waiting_for_response ?? false;
@@ -414,8 +503,9 @@ export const selectIsWaitingById = (state: RootState, chatId: string) =>
 export const selectAreFollowUpsEnabled = (state: RootState) =>
   state.chat.follow_ups_enabled;
 
-export const selectIsStreaming = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.streaming ?? false;
+export function selectIsStreaming(state: RootState) {
+  return selectIsStreamingById(state, state.chat.current_thread_id);
+}
 
 export const selectIsStreamingById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.streaming ?? false;
@@ -445,25 +535,28 @@ export function selectCompressionPulseSeqById(
 }
 
 export const selectSnapshotReceived = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.snapshot_received ?? false;
+  selectSnapshotReceivedById(state, state.chat.current_thread_id);
 
 export const selectSnapshotReceivedById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.snapshot_received ?? false;
 
 export const selectPreventSend = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.prevent_send ?? false;
+  selectPreventSendById(state, state.chat.current_thread_id);
 
 export const selectPreventSendById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.prevent_send ?? false;
 
 export const selectChatError = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.error ?? null;
+  selectChatErrorById(state, state.chat.current_thread_id);
 
 export const selectChatErrorById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.error ?? null;
 
+export const selectSendImmediatelyById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.send_immediately ?? false;
+
 export const selectSendImmediately = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.send_immediately ?? false;
+  selectSendImmediatelyById(state, state.chat.current_thread_id);
 
 export const getSelectedSystemPrompt = (state: RootState) =>
   state.chat.system_prompt;
@@ -483,6 +576,11 @@ export const selectStreamingThreadIds = createSelector(
 
 export const toolMessagesSelector = createSelector(selectMessages, (messages) =>
   messages.filter(isToolMessage),
+);
+
+export const selectToolMessagesByThreadId = createSelector(
+  [selectMessagesById],
+  (messages) => messages.filter(isToolMessage),
 );
 
 export const toolResultsByIdSelector = (() => {
@@ -511,10 +609,80 @@ export const toolResultsByIdSelector = (() => {
   });
 })();
 
+export const toolResultsByIdByThreadSelector = (() => {
+  const cacheByThread = new Map<
+    string,
+    { messages: ToolMessage[]; map: ReadonlyMap<string, ToolResult> }
+  >();
+
+  return createSelector(
+    [
+      selectToolMessagesByThreadId,
+      (_state: RootState, chatId: string) => chatId,
+    ],
+    (messages, chatId) => {
+      if (messages.length === 0) {
+        cacheByThread.set(chatId, {
+          messages: [],
+          map: EMPTY_TOOL_RESULTS_BY_ID,
+        });
+        return EMPTY_TOOL_RESULTS_BY_ID;
+      }
+
+      const cached = cacheByThread.get(chatId);
+      if (cached && sameRefArray(cached.messages, messages)) {
+        return cached.map;
+      }
+
+      const nextMap = new Map<string, ToolResult>();
+      for (const msg of messages) {
+        nextMap.set(msg.tool_call_id, msg as unknown as ToolResult);
+      }
+
+      cacheByThread.set(chatId, { messages, map: nextMap });
+      return nextMap;
+    },
+  );
+})();
+
 export const selectToolResultById = createSelector(
   [toolResultsByIdSelector, (_, id?: string) => id],
   (messagesById, id) => (id ? messagesById.get(id) : undefined),
 );
+
+export const selectToolResultByThreadAndId = createSelector(
+  [toolResultsByIdByThreadSelector, (_, _threadId: string, id?: string) => id],
+  (messagesById, id) => (id ? messagesById.get(id) : undefined),
+);
+export const selectManyToolResultsByThreadAndIds = (
+  threadId: string,
+  ids: string[],
+) => {
+  let prev = EMPTY_TOOL_RESULTS;
+
+  return createSelector(
+    (state: RootState) => toolResultsByIdByThreadSelector(state, threadId),
+    (messagesById) => {
+      if (ids.length === 0 || messagesById.size === 0) {
+        prev = EMPTY_TOOL_RESULTS;
+        return prev;
+      }
+
+      const next: ToolResult[] = [];
+      for (const id of ids) {
+        const msg = messagesById.get(id);
+        if (msg) next.push(msg);
+      }
+
+      if (sameRefArray(prev, next)) {
+        return prev;
+      }
+
+      prev = next;
+      return next;
+    },
+  );
+};
 export const selectManyToolResultsByIds = (ids: string[]) => {
   let prev = EMPTY_TOOL_RESULTS;
 
@@ -541,6 +709,11 @@ export const selectManyToolResultsByIds = (ids: string[]) => {
 
 const selectDiffMessages = createSelector(selectMessages, (messages) =>
   messages.filter(isDiffMessage),
+);
+
+const selectDiffMessagesByThreadId = createSelector(
+  [selectMessagesById],
+  (messages) => messages.filter(isDiffMessage),
 );
 
 export const diffMessagesByIdSelector = (() => {
@@ -574,6 +747,47 @@ export const diffMessagesByIdSelector = (() => {
   });
 })();
 
+export const diffMessagesByIdByThreadSelector = (() => {
+  const cacheByThread = new Map<
+    string,
+    { diffs: DiffMessage[]; map: ReadonlyMap<string, DiffMessage[]> }
+  >();
+
+  return createSelector(
+    [
+      selectDiffMessagesByThreadId,
+      (_state: RootState, chatId: string) => chatId,
+    ],
+    (diffs, chatId) => {
+      if (diffs.length === 0) {
+        cacheByThread.set(chatId, {
+          diffs: [],
+          map: EMPTY_DIFF_MESSAGES_BY_ID,
+        });
+        return EMPTY_DIFF_MESSAGES_BY_ID;
+      }
+
+      const cached = cacheByThread.get(chatId);
+      if (cached && sameRefArray(cached.diffs, diffs)) {
+        return cached.map;
+      }
+
+      const nextMap = new Map<string, DiffMessage[]>();
+      for (const diff of diffs) {
+        const existing = nextMap.get(diff.tool_call_id);
+        if (existing) {
+          existing.push(diff);
+        } else {
+          nextMap.set(diff.tool_call_id, [diff]);
+        }
+      }
+
+      cacheByThread.set(chatId, { diffs, map: nextMap });
+      return nextMap;
+    },
+  );
+})();
+
 export const selectDiffMessageById = createSelector(
   [diffMessagesByIdSelector, (_, id?: string) => id],
   (messagesById, id) => {
@@ -582,6 +796,43 @@ export const selectDiffMessageById = createSelector(
     return messages ? messages[messages.length - 1] : undefined;
   },
 );
+export const selectDiffMessageByThreadAndId = createSelector(
+  [diffMessagesByIdByThreadSelector, (_, _threadId: string, id?: string) => id],
+  (messagesById, id) => {
+    if (!id) return undefined;
+    const messages = messagesById.get(id);
+    return messages ? messages[messages.length - 1] : undefined;
+  },
+);
+export const selectManyDiffMessageByThreadAndIds = (
+  threadId: string,
+  ids: string[],
+) => {
+  let prev = EMPTY_DIFF_MESSAGES;
+
+  return createSelector(
+    (state: RootState) => diffMessagesByIdByThreadSelector(state, threadId),
+    (diffsById) => {
+      if (ids.length === 0 || diffsById.size === 0) {
+        prev = EMPTY_DIFF_MESSAGES;
+        return prev;
+      }
+
+      const next: DiffMessage[] = [];
+      for (const id of ids) {
+        const messages = diffsById.get(id);
+        if (messages) next.push(...messages);
+      }
+
+      if (sameRefArray(prev, next)) {
+        return prev;
+      }
+
+      prev = next;
+      return next;
+    },
+  );
+};
 export const selectManyDiffMessageByIds = (ids: string[]) => {
   let prev = EMPTY_DIFF_MESSAGES;
 
@@ -607,21 +858,22 @@ export const selectManyDiffMessageByIds = (ids: string[]) => {
 };
 
 export const getSelectedToolUse = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.tool_use;
+  selectThreadToolUseById(state, state.chat.current_thread_id);
 
-export const selectIntegration = createSelector(
-  selectThread,
-  (thread) => thread?.integration,
-);
+export const selectIntegrationById = (state: RootState, chatId: string) =>
+  selectThreadById(state, chatId)?.integration;
 
-export const selectThreadMode = createSelector(
-  selectThread,
-  (thread) => thread?.mode,
-);
+export const selectIntegration = (state: RootState) =>
+  selectIntegrationById(state, state.chat.current_thread_id);
+
+export const selectThreadModeById = (state: RootState, chatId: string) =>
+  selectThreadById(state, chatId)?.mode;
+
+export const selectThreadMode = (state: RootState) =>
+  selectThreadModeById(state, state.chat.current_thread_id);
 
 export const selectQueuedItems = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.queued_items ??
-  EMPTY_QUEUED;
+  selectQueuedItemsById(state, state.chat.current_thread_id);
 
 export const selectQueuedItemsById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.queued_items ?? EMPTY_QUEUED;
@@ -678,31 +930,40 @@ export const selectHasUncalledTools = createSelector(
 );
 
 export const selectThreadConfirmation = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.confirmation ??
-  DEFAULT_CONFIRMATION;
+  selectThreadConfirmationById(state, state.chat.current_thread_id);
 
 export const selectThreadConfirmationById = (
   state: RootState,
   chatId: string,
 ) => state.chat.threads[chatId]?.confirmation ?? DEFAULT_CONFIRMATION;
 
+export const selectThreadPauseReasonsById = (
+  state: RootState,
+  chatId: string,
+) =>
+  state.chat.threads[chatId]?.confirmation.pause_reasons ?? EMPTY_PAUSE_REASONS;
+
 export const selectThreadPauseReasons = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.confirmation
-    .pause_reasons ?? EMPTY_PAUSE_REASONS;
+  selectThreadPauseReasonsById(state, state.chat.current_thread_id);
 
 export const selectThreadPause = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.confirmation.pause ?? false;
+  selectThreadPauseById(state, state.chat.current_thread_id);
 
 export const selectThreadPauseById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.confirmation.pause ?? false;
 
-export const selectThreadConfirmationStatus = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.confirmation.status ??
+export const selectThreadConfirmationStatusById = (
+  state: RootState,
+  chatId: string,
+) =>
+  state.chat.threads[chatId]?.confirmation.status ??
   DEFAULT_CONFIRMATION_STATUS;
 
+export const selectThreadConfirmationStatus = (state: RootState) =>
+  selectThreadConfirmationStatusById(state, state.chat.current_thread_id);
+
 export const selectThreadImages = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.attached_images ??
-  EMPTY_IMAGES;
+  selectThreadImagesById(state, state.chat.current_thread_id);
 
 export const selectThreadImagesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.attached_images ?? EMPTY_IMAGES;
@@ -710,8 +971,7 @@ export const selectThreadImagesById = (state: RootState, chatId: string) =>
 const EMPTY_TEXT_FILES: import("./types").TextFile[] = [];
 
 export const selectThreadTextFiles = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.attached_text_files ??
-  EMPTY_TEXT_FILES;
+  selectThreadTextFilesById(state, state.chat.current_thread_id);
 
 export const selectThreadTextFilesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.attached_text_files ?? EMPTY_TEXT_FILES;
@@ -725,13 +985,41 @@ export const selectStreamVersion = (state: RootState): number =>
 // Task Progress Widget selectors
 
 export const selectTaskWidgetExpanded = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.task_widget_expanded ??
-  false;
+  selectTaskWidgetExpandedById(state, state.chat.current_thread_id);
 
 export const selectTaskWidgetExpandedById = (
   state: RootState,
   chatId: string,
 ) => state.chat.threads[chatId]?.task_widget_expanded ?? false;
+
+export const selectTaskGoalExpanded = (state: RootState) =>
+  selectTaskGoalExpandedById(state, state.chat.current_thread_id);
+
+export const selectTaskGoalExpandedById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.task_goal_expanded ?? false;
+
+export const selectGoalById = (
+  state: RootState,
+  chatId: string,
+): GoalSnapshot | null => state.chat.threads[chatId]?.thread.goal ?? null;
+
+export const selectGoal = (state: RootState): GoalSnapshot | null =>
+  selectGoalById(state, state.chat.current_thread_id);
+
+export const selectGoalStatusById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.status;
+
+export const selectGoalActiveById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.active ?? false;
+
+export const selectGoalContentById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.content ?? "";
+
+export const selectGoalAttemptsById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.attempts ?? [];
+
+export const selectGoalEventsById = (state: RootState, chatId: string) =>
+  selectGoalById(state, chatId)?.events ?? [];
 
 function normalizeTaskStatus(status: unknown): TodoStatus | null {
   if (typeof status !== "string") return null;
@@ -851,51 +1139,68 @@ export const selectCurrentTasks = (() => {
   );
 })();
 
-export const selectCurrentTasksById = (state: RootState, chatId: string) => {
-  const messages = selectMessagesById(state, chatId);
-  const toolMessages = messages.filter(isToolMessage);
-  return deriveTasksFromMessages(messages, toolMessages);
-};
+export const selectCurrentTasksById = createSelector(
+  [(state: RootState, chatId: string) => selectMessagesById(state, chatId)],
+  (messages) =>
+    deriveTasksFromMessages(messages, messages.filter(isToolMessage)),
+);
 
 export const selectHasTasks = createSelector(
   [selectCurrentTasks],
   (tasks) => tasks.length > 0,
 );
 
-export const selectTasksEverUsed = createSelector(
-  [selectMessages, toolMessagesSelector],
-  (messages, toolMessages): boolean => {
-    const successfulToolIds = new Set(
-      toolMessages.filter((m) => !m.tool_failed).map((m) => m.tool_call_id),
-    );
+export const selectHasTasksById = (state: RootState, chatId: string) =>
+  selectCurrentTasksById(state, chatId).length > 0;
 
-    for (const msg of messages) {
-      if (!isAssistantMessage(msg) || !msg.tool_calls) continue;
-      for (const tc of msg.tool_calls) {
-        if (
-          isToolName(tc.function.name, "tasks_set") &&
-          tc.id &&
-          successfulToolIds.has(tc.id)
-        ) {
-          return true;
-        }
+function tasksEverUsedInMessages(
+  messages: ChatMessages,
+  toolMessages: ToolMessage[],
+): boolean {
+  const successfulToolIds = new Set(
+    toolMessages.filter((m) => !m.tool_failed).map((m) => m.tool_call_id),
+  );
+
+  for (const msg of messages) {
+    if (!isAssistantMessage(msg) || !msg.tool_calls) continue;
+    for (const tc of msg.tool_calls) {
+      if (
+        isToolName(tc.function.name, "tasks_set") &&
+        tc.id &&
+        successfulToolIds.has(tc.id)
+      ) {
+        return true;
       }
     }
-    return false;
-  },
+  }
+  return false;
+}
+
+export const selectTasksEverUsed = createSelector(
+  [selectMessages, toolMessagesSelector],
+  tasksEverUsedInMessages,
 );
+
+export const selectTasksEverUsedById = (state: RootState, chatId: string) => {
+  const messages = selectMessagesById(state, chatId);
+  return tasksEverUsedInMessages(messages, messages.filter(isToolMessage));
+};
+
+function deriveTaskProgress(tasks: TodoItem[]): TaskProgress {
+  const done = tasks.filter((t) => t.status === "completed").length;
+  const active = tasks.find((t) => t.status === "in_progress");
+  return {
+    done,
+    total: tasks.length,
+    activeTitle: active?.content,
+  };
+}
 
 export const selectTaskProgress = (() => {
   let prev: TaskProgress = { done: 0, total: 0, activeTitle: undefined };
 
   return createSelector([selectCurrentTasks], (tasks): TaskProgress => {
-    const done = tasks.filter((t) => t.status === "completed").length;
-    const active = tasks.find((t) => t.status === "in_progress");
-    const next = {
-      done,
-      total: tasks.length,
-      activeTitle: active?.content,
-    };
+    const next = deriveTaskProgress(tasks);
 
     if (sameTaskProgress(prev, next)) {
       return prev;
@@ -905,6 +1210,11 @@ export const selectTaskProgress = (() => {
     return next;
   });
 })();
+
+export const selectTaskProgressById = createSelector(
+  [selectCurrentTasksById],
+  deriveTaskProgress,
+);
 
 export type TaskProgressInfo = {
   done: number;
@@ -932,8 +1242,7 @@ export function getTaskProgressFromMessages(
 }
 
 export const selectAutoEnrichmentEnabled = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .auto_enrichment_enabled ?? false;
+  selectAutoEnrichmentEnabledById(state, state.chat.current_thread_id);
 
 export const selectAutoEnrichmentEnabledById = (
   state: RootState,
@@ -941,21 +1250,23 @@ export const selectAutoEnrichmentEnabledById = (
 ) => state.chat.threads[chatId]?.thread.auto_enrichment_enabled ?? false;
 
 export const selectAutoCompactEnabled = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.thread
-    .auto_compact_enabled ?? true;
+  selectAutoCompactEnabledById(state, state.chat.current_thread_id);
 
 export const selectAutoCompactEnabledById = (
   state: RootState,
   chatId: string,
 ) => state.chat.threads[chatId]?.thread.auto_compact_enabled ?? true;
 
+export const selectMemoryEnrichmentUserTouchedById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.memory_enrichment_user_touched ?? false;
+
 export const selectMemoryEnrichmentUserTouched = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]
-    ?.memory_enrichment_user_touched ?? false;
+  selectMemoryEnrichmentUserTouchedById(state, state.chat.current_thread_id);
 
 export const selectManualPreviewItems = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.manual_preview_items ??
-  EMPTY_MANUAL_PREVIEW_ITEMS;
+  selectManualPreviewItemsById(state, state.chat.current_thread_id);
 
 export const selectManualPreviewItemsById = (
   state: RootState,
@@ -964,11 +1275,14 @@ export const selectManualPreviewItemsById = (
   state.chat.threads[chatId]?.manual_preview_items ??
   EMPTY_MANUAL_PREVIEW_ITEMS;
 
+export const selectManualPreviewRanById = (state: RootState, chatId: string) =>
+  state.chat.threads[chatId]?.manual_preview_ran ?? false;
+
 export const selectManualPreviewRan = (state: RootState) =>
-  state.chat.threads[state.chat.current_thread_id]?.manual_preview_ran ?? false;
+  selectManualPreviewRanById(state, state.chat.current_thread_id);
 
 export const selectThreadWorktree = (state: RootState): WorktreeMeta | null =>
-  state.chat.threads[state.chat.current_thread_id]?.thread.worktree ?? null;
+  selectThreadWorktreeById(state, state.chat.current_thread_id);
 
 export const selectThreadWorktreeById = (
   state: RootState,

@@ -9,6 +9,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffBox {
     pub x: u32,
@@ -22,6 +26,20 @@ pub struct BrowserTabInfo {
     pub tab_id: String,
     pub url: String,
     pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserSnapshot {
+    pub runtime_id: String,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<BrowserTabInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +136,131 @@ pub enum CompressionReason {
     TransientFailure,
     SourceChanged,
     InsufficientSavings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    Verifying,
+    Paused,
+    Completed,
+    Stopped,
+    BudgetExhausted,
+    NoProgress,
+    Transferred,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default = "default_goal_budget_cooldown_ms")]
+    pub cooldown_ms: u64,
+    #[serde(default = "default_goal_no_progress_token_threshold")]
+    pub no_progress_token_threshold: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit: bool,
+}
+
+fn default_goal_budget_cooldown_ms() -> u64 {
+    1_500
+}
+
+fn default_goal_no_progress_token_threshold() -> u64 {
+    50
+}
+
+impl Default for GoalBudget {
+    fn default() -> Self {
+        Self {
+            max_turns: None,
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: default_goal_budget_cooldown_ms(),
+            no_progress_token_threshold: default_goal_no_progress_token_threshold(),
+            no_progress_turns: None,
+            explicit: false,
+        }
+    }
+}
+
+impl GoalBudget {
+    pub fn legacy_default_hard_limits() -> Self {
+        Self {
+            max_turns: Some(10),
+            max_minutes: Some(15),
+            max_tokens: Some(200_000),
+            cooldown_ms: default_goal_budget_cooldown_ms(),
+            no_progress_token_threshold: default_goal_no_progress_token_threshold(),
+            no_progress_turns: Some(2),
+            explicit: false,
+        }
+    }
+
+    pub fn migrate_legacy_default_hard_limits(self) -> Self {
+        if self.explicit {
+            return self;
+        }
+        if self.max_turns == Some(10)
+            && self.max_minutes == Some(15)
+            && self.max_tokens == Some(200_000)
+            && self.no_progress_turns == Some(2)
+        {
+            Self {
+                cooldown_ms: self.cooldown_ms,
+                no_progress_token_threshold: self.no_progress_token_threshold,
+                ..Default::default()
+            }
+        } else {
+            self
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GoalProgress {
+    pub turns_used: u32,
+    pub tokens_used: u64,
+    pub started_at_ms: u64,
+    pub no_progress_turns: u32,
+    pub last_nudge_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalAttempt {
+    pub at_ms: u64,
+    pub trigger: String,
+    pub verdict: String,
+    pub gaps: Vec<String>,
+    pub verifier_reply: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalEvent {
+    pub at_ms: u64,
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalSnapshot {
+    pub content: String,
+    pub version: u32,
+    pub active: bool,
+    pub status: GoalStatus,
+    pub budget: GoalBudget,
+    pub progress: GoalProgress,
+    pub attempts: Vec<GoalAttempt>,
+    pub events: Vec<GoalEvent>,
+    pub transferred_from: Option<String>,
+    pub transferred_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -277,6 +420,16 @@ pub struct RuntimeState {
     pub error: Option<String>,
     pub queue_size: usize,
     #[serde(default)]
+    pub goal_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_status: Option<GoalStatus>,
+    #[serde(default)]
+    pub goal_turns_used: u32,
+    #[serde(default)]
+    pub goal_tokens_used: u64,
+    #[serde(default)]
+    pub goal_no_progress_turns: u32,
+    #[serde(default)]
     pub is_compressing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_phase: Option<CompressionPhase>,
@@ -301,6 +454,11 @@ impl Default for RuntimeState {
             paused: false,
             error: None,
             queue_size: 0,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -355,6 +513,10 @@ pub enum ChatEvent {
         runtime: RuntimeState,
         messages: Vec<ChatMessage>,
         background_agents: Vec<BackgroundAgentSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser: Option<BrowserSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<GoalSnapshot>,
     },
     BackgroundAgentUpdated {
         chat_id: String,
@@ -420,6 +582,16 @@ pub enum ChatEvent {
         state: SessionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default)]
+        goal_active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_status: Option<GoalStatus>,
+        #[serde(default)]
+        goal_turns_used: u32,
+        #[serde(default)]
+        goal_tokens_used: u64,
+        #[serde(default)]
+        goal_no_progress_turns: u32,
         #[serde(default)]
         is_compressing: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -554,6 +726,20 @@ pub enum ChatCommand {
     SetParams {
         patch: serde_json::Value,
     },
+    SetGoal {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<GoalBudget>,
+    },
+    SetGoalBudget {
+        budget: GoalBudget,
+    },
+    UpdateGoal {
+        note: String,
+    },
+    GoalControl {
+        action: String,
+    },
     Abort {},
     CleanBackgroundProcesses {
         #[serde(default)]
@@ -656,6 +842,18 @@ impl CommandRequest {
                     format!("model={}", model),
                     String::new(),
                 )
+            }
+            ChatCommand::SetGoal { content, .. } => {
+                ("set_goal".to_string(), content.clone(), content.clone())
+            }
+            ChatCommand::SetGoalBudget { .. } => {
+                ("set_goal_budget".to_string(), String::new(), String::new())
+            }
+            ChatCommand::UpdateGoal { note } => {
+                ("update_goal".to_string(), note.clone(), note.clone())
+            }
+            ChatCommand::GoalControl { action } => {
+                ("goal_control".to_string(), action.clone(), String::new())
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
             ChatCommand::CleanBackgroundProcesses { include_services } => (
@@ -823,6 +1021,49 @@ mod tests {
         }
     }
 
+    fn finite_goal_budget() -> GoalBudget {
+        GoalBudget {
+            max_turns: Some(10),
+            max_minutes: Some(15),
+            max_tokens: Some(200_000),
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: Some(2),
+            explicit: false,
+        }
+    }
+
+    fn goal_snapshot() -> GoalSnapshot {
+        GoalSnapshot {
+            content: "Ship the frog pond".to_string(),
+            version: 2,
+            active: true,
+            status: GoalStatus::Verifying,
+            budget: GoalBudget::default(),
+            progress: GoalProgress {
+                turns_used: 3,
+                tokens_used: 1234,
+                started_at_ms: 10,
+                no_progress_turns: 1,
+                last_nudge_at_ms: 20,
+            },
+            attempts: vec![GoalAttempt {
+                at_ms: 30,
+                trigger: "done".to_string(),
+                verdict: "needs_work".to_string(),
+                gaps: vec!["tests".to_string()],
+                verifier_reply: "Run tests".to_string(),
+            }],
+            events: vec![GoalEvent {
+                at_ms: 40,
+                kind: "delta".to_string(),
+                text: "Added verification".to_string(),
+            }],
+            transferred_from: Some("source-chat".to_string()),
+            transferred_to: Some("target-chat".to_string()),
+        }
+    }
+
     #[test]
     fn test_session_state_default() {
         assert_eq!(SessionState::default(), SessionState::Idle);
@@ -836,6 +1077,108 @@ mod tests {
 
         let parsed: SessionState = serde_json::from_str("\"executing_tools\"").unwrap();
         assert_eq!(parsed, SessionState::ExecutingTools);
+    }
+
+    #[test]
+    fn test_goal_status_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&GoalStatus::BudgetExhausted).unwrap(),
+            "\"budget_exhausted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GoalStatus::NoProgress).unwrap(),
+            "\"no_progress\""
+        );
+
+        let parsed: GoalStatus = serde_json::from_str("\"budget_exhausted\"").unwrap();
+        assert_eq!(parsed, GoalStatus::BudgetExhausted);
+        let parsed: GoalStatus = serde_json::from_str("\"no_progress\"").unwrap();
+        assert_eq!(parsed, GoalStatus::NoProgress);
+    }
+
+    #[test]
+    fn test_goal_snapshot_roundtrip_full() {
+        let snapshot = goal_snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(json["content"], "Ship the frog pond");
+        assert_eq!(json["status"], "verifying");
+        assert!(json["budget"].get("max_turns").is_none());
+        assert!(json["budget"].get("max_minutes").is_none());
+        assert!(json["budget"].get("max_tokens").is_none());
+        assert_eq!(json["budget"]["cooldown_ms"], 1500);
+        assert_eq!(json["budget"]["no_progress_token_threshold"], 50);
+        assert!(json["budget"].get("no_progress_turns").is_none());
+        assert_eq!(json["progress"]["turns_used"], 3);
+        assert_eq!(json["attempts"][0]["gaps"][0], "tests");
+        assert_eq!(json["events"][0]["text"], "Added verification");
+
+        let roundtrip: GoalSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, snapshot);
+    }
+
+    #[test]
+    fn test_goal_budget_default_omits_hard_limits_and_roundtrips_unlimited() {
+        let budget = GoalBudget::default();
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert!(json.get("max_turns").is_none());
+        assert!(json.get("max_minutes").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert_eq!(json["cooldown_ms"], 1_500);
+        assert_eq!(json["no_progress_token_threshold"], 50);
+        assert!(json.get("no_progress_turns").is_none());
+        assert!(json.get("explicit").is_none());
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
+    }
+
+    #[test]
+    fn test_goal_budget_finite_roundtrips_unchanged() {
+        let budget = finite_goal_budget();
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert_eq!(json["max_turns"], 10);
+        assert_eq!(json["max_minutes"], 15);
+        assert_eq!(json["max_tokens"], 200_000);
+        assert_eq!(json["cooldown_ms"], 1_500);
+        assert_eq!(json["no_progress_token_threshold"], 50);
+        assert_eq!(json["no_progress_turns"], 2);
+        assert!(json.get("explicit").is_none());
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
+    }
+
+    #[test]
+    fn test_goal_budget_legacy_default_migrates_to_unlimited() {
+        let budget = GoalBudget::legacy_default_hard_limits();
+
+        assert_eq!(
+            budget.migrate_legacy_default_hard_limits(),
+            GoalBudget::default()
+        );
+    }
+
+    #[test]
+    fn test_goal_budget_explicit_legacy_default_does_not_migrate() {
+        let mut budget = GoalBudget::legacy_default_hard_limits();
+        budget.explicit = true;
+
+        assert_eq!(budget.clone().migrate_legacy_default_hard_limits(), budget);
+    }
+
+    #[test]
+    fn test_goal_budget_explicit_serializes_and_roundtrips() {
+        let mut budget = GoalBudget::default();
+        budget.explicit = true;
+        let json = serde_json::to_value(&budget).unwrap();
+
+        assert_eq!(json["explicit"], true);
+
+        let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, budget);
     }
 
     #[test]
@@ -938,12 +1281,17 @@ mod tests {
         assert!(!runtime.paused);
         assert!(runtime.error.is_none());
         assert_eq!(runtime.queue_size, 0);
+        assert!(!runtime.goal_active);
+        assert_eq!(runtime.goal_status, None);
+        assert_eq!(runtime.goal_turns_used, 0);
+        assert_eq!(runtime.goal_tokens_used, 0);
+        assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
         assert!(runtime.pause_reasons.is_empty());
     }
 
     #[test]
-    fn test_runtime_state_missing_is_compressing_defaults_false() {
+    fn test_runtime_state_missing_goal_and_compression_fields_defaults() {
         let json = r#"{
             "state":"idle",
             "paused":false,
@@ -953,6 +1301,11 @@ mod tests {
 
         let runtime: RuntimeState = serde_json::from_str(json).unwrap();
 
+        assert!(!runtime.goal_active);
+        assert_eq!(runtime.goal_status, None);
+        assert_eq!(runtime.goal_turns_used, 0);
+        assert_eq!(runtime.goal_tokens_used, 0);
+        assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
     }
 
@@ -1062,6 +1415,10 @@ mod tests {
             json!({"type":"user_message","content":"hi","attachments":[]}),
             json!({"type":"retry_from_index","index":2,"content":"retry","attachments":[]}),
             json!({"type":"set_params","patch":{"title":"New"}}),
+            json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"set_goal_budget","budget":{"max_turns":3,"cooldown_ms":1500,"no_progress_token_threshold":50}}),
+            json!({"type":"update_goal","note":"verify the reeds"}),
+            json!({"type":"goal_control","action":"pause"}),
             json!({"type":"abort"}),
             json!({"type":"tool_decision","tool_call_id":"tc1","accepted":true}),
             json!({"type":"tool_decisions","decisions":[{"tool_call_id":"tc1","accepted":false}]}),
@@ -1073,6 +1430,22 @@ mod tests {
             let cmd: ChatCommand = serde_json::from_value(cmd_json.clone()).unwrap();
             let roundtrip = serde_json::to_value(&cmd).unwrap();
             assert_eq!(roundtrip["type"], cmd_json["type"]);
+        }
+    }
+
+    #[test]
+    fn test_chat_command_goal_variants_roundtrip() {
+        let commands = vec![
+            json!({"type":"set_goal","content":"finish the pond"}),
+            json!({"type":"set_goal_budget","budget":{"max_turns":3,"cooldown_ms":1500,"no_progress_token_threshold":50}}),
+            json!({"type":"update_goal","note":"verify the reeds"}),
+            json!({"type":"goal_control","action":"resume"}),
+        ];
+
+        for cmd_json in commands {
+            let cmd: ChatCommand = serde_json::from_value(cmd_json.clone()).unwrap();
+            let roundtrip = serde_json::to_value(&cmd).unwrap();
+            assert_eq!(roundtrip, cmd_json);
         }
     }
 
@@ -1121,11 +1494,75 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![],
+            browser: None,
+            goal: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
+        assert!(json.get("goal").is_none());
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
         matches!(parsed, ChatEvent::Snapshot { .. });
+    }
+
+    #[test]
+    fn test_chat_event_snapshot_goal_roundtrip() {
+        let goal = goal_snapshot();
+        let event = ChatEvent::Snapshot {
+            thread: ThreadParams::default(),
+            runtime: RuntimeState::default(),
+            messages: vec![],
+            background_agents: vec![],
+            browser: None,
+            goal: Some(goal.clone()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "snapshot");
+        assert_eq!(json["goal"]["content"], "Ship the frog pond");
+        assert_eq!(json["goal"]["status"], "verifying");
+
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::Snapshot { goal: parsed, .. } => assert_eq!(parsed, Some(goal)),
+            _ => panic!("Expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_missing_goal_defaults_none() {
+        let json = r#"{
+            "type":"snapshot",
+            "thread":{
+                "id":"test",
+                "title":"Test",
+                "model":"gpt-4",
+                "mode":"agent",
+                "tool_use":"agent",
+                "context_tokens_cap":null,
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            },
+            "runtime":{
+                "state":"idle",
+                "paused":false,
+                "error":null,
+                "queue_size":0
+            },
+            "messages":[],
+            "background_agents":[]
+        }"#;
+
+        let event: ChatEvent = serde_json::from_str(json).unwrap();
+        match event {
+            ChatEvent::Snapshot { runtime, goal, .. } => {
+                assert!(!runtime.goal_active);
+                assert_eq!(runtime.goal_status, None);
+                assert_eq!(runtime.goal_turns_used, 0);
+                assert_eq!(runtime.goal_tokens_used, 0);
+                assert_eq!(runtime.goal_no_progress_turns, 0);
+                assert_eq!(goal, None);
+            }
+            _ => panic!("Expected Snapshot"),
+        }
     }
 
     #[test]
@@ -1164,6 +1601,8 @@ mod tests {
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![background_agent_summary()],
+            browser: None,
+            goal: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
@@ -1171,6 +1610,42 @@ mod tests {
             ChatEvent::Snapshot {
                 background_agents, ..
             } => assert_eq!(background_agents, vec![background_agent_summary()]),
+            _ => panic!("Expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_roundtrip_with_browser() {
+        let event = ChatEvent::Snapshot {
+            thread: ThreadParams::default(),
+            runtime: RuntimeState::default(),
+            messages: vec![],
+            background_agents: vec![],
+            browser: Some(BrowserSnapshot {
+                runtime_id: "rt-1".to_string(),
+                connected: true,
+                active_tab: Some("tab-1".to_string()),
+                url: Some("https://example.com".to_string()),
+                title: Some("Example".to_string()),
+                tabs: vec![BrowserTabInfo {
+                    tab_id: "tab-1".to_string(),
+                    url: "https://example.com".to_string(),
+                    title: "Example".to_string(),
+                }],
+            }),
+            goal: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["browser"]["runtime_id"], "rt-1");
+        assert_eq!(json["browser"]["connected"], true);
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::Snapshot { browser, .. } => {
+                let browser = browser.expect("browser snapshot present");
+                assert_eq!(browser.runtime_id, "rt-1");
+                assert_eq!(browser.url.as_deref(), Some("https://example.com"));
+                assert_eq!(browser.tabs.len(), 1);
+            }
             _ => panic!("Expected Snapshot"),
         }
     }
@@ -1259,10 +1734,71 @@ mod tests {
     }
 
     #[test]
+    fn test_set_goal_command_budget_is_optional() {
+        let cmd: ChatCommand =
+            serde_json::from_str(r#"{"type":"set_goal","content":"ship"}"#).unwrap();
+        match cmd {
+            ChatCommand::SetGoal { content, budget } => {
+                assert_eq!(content, "ship");
+                assert_eq!(budget, None);
+            }
+            other => panic!("expected SetGoal, got {other:?}"),
+        }
+
+        let budget = finite_goal_budget();
+        let cmd = ChatCommand::SetGoal {
+            content: "ship".to_string(),
+            budget: Some(budget.clone()),
+        };
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(json["type"], "set_goal");
+        assert_eq!(json["budget"], json!(budget));
+    }
+
+    #[test]
+    fn test_set_goal_budget_command_serde_and_queue_preview() {
+        let budget = GoalBudget {
+            max_turns: Some(4),
+            max_minutes: None,
+            max_tokens: None,
+            cooldown_ms: 1_500,
+            no_progress_token_threshold: 50,
+            no_progress_turns: None,
+            explicit: false,
+        };
+        let req = CommandRequest {
+            client_request_id: "req-budget".into(),
+            priority: false,
+            command: ChatCommand::SetGoalBudget {
+                budget: budget.clone(),
+            },
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["type"], "set_goal_budget");
+        assert_eq!(json["budget"], json!(budget));
+
+        let roundtrip: CommandRequest = serde_json::from_value(json).unwrap();
+        match roundtrip.command {
+            ChatCommand::SetGoalBudget { budget: parsed } => assert_eq!(parsed, budget),
+            other => panic!("expected SetGoalBudget, got {other:?}"),
+        }
+
+        let queued = req.to_queued_item();
+        assert_eq!(queued.command_type, "set_goal_budget");
+        assert!(queued.preview.is_empty());
+        assert!(queued.content.is_empty());
+    }
+
+    #[test]
     fn test_runtime_updated_serde() {
         let event = ChatEvent::RuntimeUpdated {
             state: SessionState::Completed,
             error: None,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -1276,6 +1812,11 @@ mod tests {
         let event_with_error = ChatEvent::RuntimeUpdated {
             state: SessionState::Error,
             error: Some("test error".into()),
+            goal_active: true,
+            goal_status: Some(GoalStatus::NoProgress),
+            goal_turns_used: 4,
+            goal_tokens_used: 5678,
+            goal_no_progress_turns: 2,
             is_compressing: true,
             compression_phase: Some(CompressionPhase::Failed),
             compression_reason: Some(CompressionReason::TransientFailure),
@@ -1284,13 +1825,18 @@ mod tests {
         assert_eq!(json2["type"], "runtime_updated");
         assert_eq!(json2["state"], "error");
         assert_eq!(json2["error"], "test error");
+        assert_eq!(json2["goal_active"], true);
+        assert_eq!(json2["goal_status"], "no_progress");
+        assert_eq!(json2["goal_turns_used"], 4);
+        assert_eq!(json2["goal_tokens_used"], 5678);
+        assert_eq!(json2["goal_no_progress_turns"], 2);
         assert_eq!(json2["is_compressing"], true);
         assert_eq!(json2["compression_phase"], "failed");
         assert_eq!(json2["compression_reason"], "transient_failure");
     }
 
     #[test]
-    fn test_runtime_updated_missing_is_compressing_defaults_false() {
+    fn test_runtime_updated_missing_goal_and_compression_fields_defaults() {
         let json = r#"{
             "type":"runtime_updated",
             "state":"completed"
@@ -1302,12 +1848,22 @@ mod tests {
             ChatEvent::RuntimeUpdated {
                 state,
                 error,
+                goal_active,
+                goal_status,
+                goal_turns_used,
+                goal_tokens_used,
+                goal_no_progress_turns,
                 is_compressing,
                 compression_phase,
                 compression_reason,
             } => {
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);
+                assert!(!goal_active);
+                assert_eq!(goal_status, None);
+                assert_eq!(goal_turns_used, 0);
+                assert_eq!(goal_tokens_used, 0);
+                assert_eq!(goal_no_progress_turns, 0);
                 assert!(!is_compressing);
                 assert_eq!(compression_phase, None);
                 assert_eq!(compression_reason, None);

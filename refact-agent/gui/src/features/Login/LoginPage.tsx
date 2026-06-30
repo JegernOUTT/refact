@@ -3,19 +3,19 @@ import classNames from "classnames";
 import { ArrowLeft } from "lucide-react";
 import { ScrollArea } from "../../components/ScrollArea";
 import { Button, EmptyState, LoadingState } from "../../components/ui";
-import { useAppDispatch, useGetConfiguredProvidersQuery } from "../../hooks";
+import { useAppDispatch, useProviderBootstrapState } from "../../hooks";
 import { ProviderCard } from "../Providers/ProviderCard";
 import { ProviderPreview } from "../Providers/ProviderPreview";
 import type { ProviderListItem } from "../../services/refact";
 import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useConfiguredProvidersView";
 import { push } from "../Pages/pagesSlice";
 import { getProviderName } from "../Providers/getProviderName";
-import { hasAnyUsableActiveProvider } from "./providerAccess";
 import styles from "./LoginPage.module.css";
 
 export const LoginPage: React.FC = () => {
   const dispatch = useAppDispatch();
-  const providersQuery = useGetConfiguredProvidersQuery();
+  const providerBootstrap = useProviderBootstrapState();
+  const providersQuery = providerBootstrap.providersQuery;
   const configuredProviders = providersQuery.data?.providers ?? [];
   const { sortedConfiguredProviders } = useGetConfiguredProvidersView({
     configuredProviders,
@@ -31,33 +31,59 @@ export const LoginPage: React.FC = () => {
     );
   }, [currentProviderName, sortedConfiguredProviders]);
 
-  const hasAnyActiveProvider = React.useMemo(() => {
-    return hasAnyUsableActiveProvider({
-      providers: sortedConfiguredProviders,
-    });
-  }, [sortedConfiguredProviders]);
+  const hasAnyActiveProvider = providerBootstrap.hasAnyActiveProvider;
+  const canShowProviderSetup = providerBootstrap.canShowProviderSetup;
+  const visibleCurrentProvider = canShowProviderSetup ? currentProvider : null;
 
-  const providerStatusLabel = React.useMemo(() => {
-    if (providersQuery.isFetching || providersQuery.isLoading) {
-      return "Loading providers…";
+  const bootstrapCopy = React.useMemo(() => {
+    switch (providerBootstrap.status) {
+      case "backend_connecting":
+        return {
+          title: "Connecting to Refact",
+          subtitle:
+            "Waiting for the local Refact engine before loading providers.",
+          status: "Connecting to backend…",
+        };
+      case "backend_installing":
+        return {
+          title: "Setting up Refact",
+          subtitle: "Downloading the local engine (first run only)…",
+          status: "Downloading engine…",
+        };
+      case "backend_offline":
+        return {
+          title: "Connection Problem",
+          subtitle: "The local Refact engine is not reachable yet.",
+          status: "Backend server unreachable",
+        };
+      case "provider_loading":
+        return {
+          title: "Loading Providers",
+          subtitle: "Refact is checking provider and model availability.",
+          status: "Loading providers…",
+        };
+      case "provider_error":
+        return {
+          title: "Unable to Load Providers",
+          subtitle:
+            "Check that the local Refact engine is running and the UI is using the correct port.",
+          status: "Unable to load providers",
+        };
+      case "ready":
+        return {
+          title: "Providers Ready",
+          subtitle: "At least one provider is active and ready for chat.",
+          status: "Ready to start",
+        };
+      case "setup_required":
+        return {
+          title: "Set Up Providers",
+          subtitle:
+            "Configure at least one BYOK provider or local runtime, enable a model, then continue.",
+          status: "Enable at least one model to continue",
+        };
     }
-    if (providersQuery.isUninitialized) {
-      return "Connecting to backend…";
-    }
-    if (providersQuery.isError) {
-      return "Unable to load providers";
-    }
-    if (hasAnyActiveProvider) {
-      return "Ready to start";
-    }
-    return "Enable at least one model to continue";
-  }, [
-    hasAnyActiveProvider,
-    providersQuery.isError,
-    providersQuery.isFetching,
-    providersQuery.isLoading,
-    providersQuery.isUninitialized,
-  ]);
+  }, [providerBootstrap.status]);
 
   const onContinue = useCallback(() => {
     dispatch(push({ name: "history" }));
@@ -68,14 +94,11 @@ export const LoginPage: React.FC = () => {
       <main className={classNames(styles.page, "rf-enter")}>
         <section className={styles.hero}>
           <p className={styles.kicker}>Welcome to Refact</p>
-          <h2 className={styles.title}>Set Up Providers</h2>
-          <p className={styles.subtitle}>
-            Configure at least one BYOK provider or local runtime, enable a
-            model, then continue.
-          </p>
+          <h2 className={styles.title}>{bootstrapCopy.title}</h2>
+          <p className={styles.subtitle}>{bootstrapCopy.subtitle}</p>
         </section>
 
-        {!currentProvider && (
+        {!visibleCurrentProvider && canShowProviderSetup && (
           <>
             <div className={classNames(styles.providerGrid, "rf-stagger")}>
               {sortedConfiguredProviders.map((provider) => (
@@ -88,32 +111,35 @@ export const LoginPage: React.FC = () => {
                 />
               ))}
             </div>
-            {providersQuery.isError && (
+            {sortedConfiguredProviders.length === 0 && (
+              <EmptyState
+                title="No providers found"
+                description="Restart the local Refact engine, then open the Providers screen again."
+              />
+            )}
+          </>
+        )}
+
+        {!visibleCurrentProvider && !canShowProviderSetup && (
+          <div className={styles.bootstrapState}>
+            {providerBootstrap.status === "provider_error" ? (
               <EmptyState
                 title="Unable to load providers"
                 description="Check that the local Refact engine is running and the UI is using the correct port."
               />
+            ) : (
+              <LoadingState label={bootstrapCopy.status} variant="full" />
             )}
-            {!providersQuery.isSuccess && !providersQuery.isError && (
-              <LoadingState label="Waiting for the local Refact engine before loading providers." />
-            )}
-            {providersQuery.isSuccess &&
-              sortedConfiguredProviders.length === 0 && (
-                <EmptyState
-                  title="No providers found"
-                  description="Restart the local Refact engine, then open the Providers screen again."
-                />
-              )}
-          </>
+          </div>
         )}
 
-        {currentProvider && (
+        {visibleCurrentProvider && (
           <section
             className={classNames(styles.providerPreview, "rf-enter-rise")}
           >
             <div className={styles.providerHeader}>
               <h3 className={styles.providerTitle}>
-                {getProviderName(currentProvider)}
+                {getProviderName(visibleCurrentProvider)}
               </h3>
               <Button
                 variant="soft"
@@ -125,7 +151,7 @@ export const LoginPage: React.FC = () => {
             </div>
             <ProviderPreview
               configuredProviders={sortedConfiguredProviders}
-              currentProvider={currentProvider}
+              currentProvider={visibleCurrentProvider}
               handleSetCurrentProvider={(provider: ProviderListItem | null) =>
                 setCurrentProviderName(provider?.name ?? null)
               }
@@ -134,7 +160,7 @@ export const LoginPage: React.FC = () => {
         )}
 
         <footer className={styles.footer}>
-          <span className={styles.status}>{providerStatusLabel}</span>
+          <span className={styles.status}>{bootstrapCopy.status}</span>
           <Button
             variant="primary"
             onClick={onContinue}

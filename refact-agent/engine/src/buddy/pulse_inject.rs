@@ -2,17 +2,16 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::buddy::conversation_ledger::list_all_buddy_conversations;
+use crate::buddy::conversation_ledger::list_recent_buddy_conversations;
 use crate::buddy::actor::redact_sensitive;
 use crate::buddy::types::BuddyConversationEntry;
 use crate::buddy::user_activity::time_of_day_pattern;
 use refact_buddy_core::user_action::UserAction;
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use crate::app_state::AppState;
-use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 
 pub const BUDDY_PULSE_MARKER: &str = "buddy_project_memory_pulse";
 const MAX_PULSE_MARKDOWN_CHARS: usize = 2000;
@@ -76,11 +75,6 @@ struct UserPreferenceRecord {
     last_updated: String,
 }
 
-struct LessonCandidate {
-    lesson: PulseLesson,
-    score: f64,
-}
-
 pub async fn build_buddy_pulse_payload(gcx: AppState) -> Option<BuddyPulsePayload> {
     let buddy_arc = gcx.buddy.buddy.clone();
     let project_root = {
@@ -90,7 +84,7 @@ pub async fn build_buddy_pulse_payload(gcx: AppState) -> Option<BuddyPulsePayloa
     };
 
     let preferences = read_preferences(&project_root).await;
-    let lessons = read_lessons(&project_root).await;
+    let lessons = read_lessons(&gcx).await;
     let friction = build_friction(gcx.clone()).await;
     let recent_reports = build_recent_reports(&project_root).await;
     let user_activity = build_activity_section(gcx).await;
@@ -186,7 +180,10 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
             ));
         }
         if payload.friction.stuck_tasks > 0 {
-            lines.push(format!("- stuck tasks: {}", payload.friction.stuck_tasks));
+            lines.push(format!(
+                "- recent stuck task alerts (1h): {}",
+                payload.friction.stuck_tasks
+            ));
         }
         sections.push(lines.join("\n"));
     }
@@ -330,82 +327,33 @@ fn parse_profile_value(value: &str) -> String {
     }
 }
 
-async fn read_lessons(project_root: &Path) -> Vec<PulseLesson> {
-    let dir = project_root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
-    if !dir.exists() {
-        return Vec::new();
-    }
-    let mut lessons = Vec::new();
-    for entry in walkdir::WalkDir::new(&dir)
+async fn read_lessons(app: &AppState) -> Vec<PulseLesson> {
+    let idx_arc = app.gcx.knowledge_index.clone();
+    let cards = {
+        let idx = idx_arc.lock().await;
+        idx.lessons_for_pulse(5)
+    };
+    cards
         .into_iter()
-        .filter_map(|entry| entry.ok())
-    {
-        let path = entry.path().to_path_buf();
-        if !path.is_file() || path_has_component(&path, "archive") {
-            continue;
-        }
-        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        if ext != "md" && ext != "mdx" {
-            continue;
-        }
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-        if frontmatter.is_archived() || frontmatter.is_deprecated() {
-            continue;
-        }
-        if !frontmatter
-            .tags
-            .iter()
-            .any(|tag| matches!(tag.trim().to_lowercase().as_str(), "lesson" | "convention"))
-        {
-            continue;
-        }
-        let updated = frontmatter
-            .updated
-            .clone()
-            .or_else(|| frontmatter.created_at.clone())
-            .or_else(|| frontmatter.created.clone())
-            .unwrap_or_default();
-        let content = text.get(content_start..).unwrap_or("");
-        let preview = frontmatter
-            .description
-            .clone()
-            .or_else(|| frontmatter.summary.clone())
-            .or_else(|| first_nonempty_line(content))
-            .unwrap_or_default();
-        let title = frontmatter.title.clone().unwrap_or_else(|| {
-            path.file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        });
-        lessons.push(LessonCandidate {
-            score: lesson_score(&updated, frontmatter.source_confidence),
-            lesson: PulseLesson {
-                title: redact(title),
+        .map(|card| {
+            let updated = card
+                .updated
+                .clone()
+                .or_else(|| card.created_at.clone())
+                .or_else(|| card.created.clone())
+                .unwrap_or_default();
+            let preview = card
+                .description
+                .clone()
+                .or_else(|| card.summary.clone())
+                .unwrap_or_default();
+            PulseLesson {
+                title: redact(card.title),
                 preview: redact(preview),
-                tags: frontmatter
-                    .tags
-                    .iter()
-                    .map(|tag| redact(tag))
-                    .collect::<Vec<_>>(),
+                tags: card.tags.iter().map(redact).collect::<Vec<_>>(),
                 updated: redact(updated),
-            },
-        });
-    }
-    lessons.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| b.lesson.updated.cmp(&a.lesson.updated))
-            .then_with(|| a.lesson.title.cmp(&b.lesson.title))
-    });
-    lessons
-        .into_iter()
-        .take(5)
-        .map(|candidate| candidate.lesson)
+            }
+        })
         .collect()
 }
 
@@ -419,7 +367,7 @@ async fn build_friction(gcx: AppState) -> PulseFriction {
         (
             service.recent_diagnostics.clone(),
             service.pulse.diagnostics.top_error_types.clone(),
-            service.pulse.tasks.stuck,
+            service.pulse.tasks.recent_stuck_alert_count_1h(),
         )
     };
     let cutoff = Utc::now() - Duration::hours(1);
@@ -445,10 +393,9 @@ async fn build_friction(gcx: AppState) -> PulseFriction {
 }
 
 async fn build_recent_reports(project_root: &Path) -> Vec<PulseReport> {
-    list_all_buddy_conversations(project_root, None)
+    list_recent_buddy_conversations(project_root, 2)
         .await
         .into_iter()
-        .take(2)
         .map(report_from_entry)
         .collect()
 }
@@ -572,41 +519,6 @@ fn payload_is_empty(payload: &BuddyPulsePayload) -> bool {
         && payload.user_activity.grouped.is_empty()
         && payload.friction.top_error_types.is_empty()
         && payload.friction.stuck_tasks == 0
-}
-
-fn path_has_component(path: &Path, component: &str) -> bool {
-    path.components().any(|part| part.as_os_str() == component)
-}
-
-fn first_nonempty_line(content: &str) -> Option<String> {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.trim_start_matches('#').trim().to_string())
-}
-
-fn lesson_score(updated: &str, source_confidence: Option<f32>) -> f64 {
-    let confidence = source_confidence.unwrap_or(1.0).clamp(0.0, 1.0) as f64;
-    let recency = parse_timestamp(updated)
-        .map(|dt| {
-            let days = Utc::now().signed_duration_since(dt).num_days().max(0) as f64;
-            1.0 / (1.0 + days)
-        })
-        .unwrap_or(0.1);
-    recency * confidence
-}
-
-fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .ok()
-        .or_else(|| {
-            NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .ok()
-                .and_then(|date| date.and_hms_opt(0, 0, 0))
-                .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
-        })
 }
 
 fn redact(text: impl AsRef<str>) -> String {

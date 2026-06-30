@@ -12,10 +12,31 @@ pub const DAEMON_LINK_INTERVAL: Duration = Duration::from_secs(10);
 const DAEMON_LINK_POST_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DAEMON_LINK_FAILURE_LIMIT: u32 = 6;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonLinkError {
+    PlannedShutdown,
+    Auth(String),
+    Transient(String),
+    Fatal(String),
+}
+
+impl std::fmt::Display for DaemonLinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PlannedShutdown => write!(f, "daemon reported planned shutdown"),
+            Self::Auth(message) | Self::Transient(message) | Self::Fatal(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerStatusReport {
     pub project_id: String,
     pub pid: u32,
+    #[serde(default)]
+    pub instance_token: String,
     pub lsp_clients: usize,
     pub busy_chats: usize,
     pub exec_running: usize,
@@ -41,6 +62,7 @@ pub async fn collect_status_snapshot(gcx: Arc<GlobalContext>) -> WorkerStatusRep
     WorkerStatusReport {
         project_id,
         pid: std::process::id(),
+        instance_token: gcx.cmdline.ping_message.clone(),
         lsp_clients,
         busy_chats,
         exec_running,
@@ -98,7 +120,17 @@ pub async fn daemon_link_task(gcx: Arc<GlobalContext>) {
                 let report = collect_status_snapshot(gcx.clone()).await;
                 match post_worker_status(gcx.clone(), &url, &report).await {
                     Ok(()) => consecutive_failures = 0,
-                    Err(error) => {
+                    Err(DaemonLinkError::PlannedShutdown) => {
+                        tracing::info!("daemon requested planned worker shutdown");
+                        request_worker_shutdown(&gcx, "daemon-planned-shutdown");
+                        return;
+                    }
+                    Err(DaemonLinkError::Auth(error)) => {
+                        tracing::error!("daemon link authorization failed: {error}");
+                        request_worker_shutdown(&gcx, "daemon-auth-failed");
+                        return;
+                    }
+                    Err(DaemonLinkError::Transient(error)) => {
                         consecutive_failures += 1;
                         tracing::warn!(
                             "daemon link status push failed ({consecutive_failures}/{}): {error}",
@@ -106,13 +138,19 @@ pub async fn daemon_link_task(gcx: Arc<GlobalContext>) {
                         );
                         if should_self_terminate(consecutive_failures) {
                             tracing::error!("daemon lost, self-terminating");
-                            let _ = gcx
-                                .ask_shutdown_sender
-                                .lock()
-                                .unwrap()
-                                .send("daemon-lost".to_string());
+                            request_worker_shutdown(&gcx, "daemon-lost");
                             return;
                         }
+                        let backoff = daemon_link_retry_backoff(consecutive_failures);
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = wait_for_shutdown(gcx.clone()) => return,
+                        }
+                    }
+                    Err(DaemonLinkError::Fatal(error)) => {
+                        tracing::error!("daemon link fatal status push failure: {error}");
+                        request_worker_shutdown(&gcx, "daemon-link-fatal");
+                        return;
                     }
                 }
             }
@@ -121,6 +159,19 @@ pub async fn daemon_link_task(gcx: Arc<GlobalContext>) {
             }
         }
     }
+}
+
+fn request_worker_shutdown(gcx: &GlobalContext, reason: &str) {
+    let _ = gcx
+        .ask_shutdown_sender
+        .lock()
+        .unwrap()
+        .send(reason.to_string());
+}
+
+fn daemon_link_retry_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    Duration::from_secs(1u64 << exponent)
 }
 
 async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
@@ -133,19 +184,43 @@ async fn post_worker_status(
     gcx: Arc<GlobalContext>,
     url: &str,
     report: &WorkerStatusReport,
-) -> Result<(), String> {
+) -> Result<(), DaemonLinkError> {
     let mut request = gcx.http_client.post(url).json(report);
     if let Some(token) = &gcx.cmdline.daemon_auth_token {
         request = request.bearer_auth(token);
     }
     let response = tokio::time::timeout(DAEMON_LINK_POST_TIMEOUT, request.send())
         .await
-        .map_err(|_| "request timed out".to_string())?
-        .map_err(|error| error.to_string())?;
-    if response.status().is_success() {
+        .map_err(|_| DaemonLinkError::Transient("request timed out".to_string()))?
+        .map_err(|error| DaemonLinkError::Transient(error.to_string()))?;
+    let status = response.status();
+    if status.is_success() {
         Ok(())
     } else {
-        Err(format!("daemon returned {}", response.status()))
+        Err(classify_daemon_link_status(status))
+    }
+}
+
+fn classify_daemon_link_status(status: reqwest::StatusCode) -> DaemonLinkError {
+    if status == reqwest::StatusCode::GONE {
+        DaemonLinkError::PlannedShutdown
+    } else if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        DaemonLinkError::Auth(format!("daemon returned {status}"))
+    } else if status.is_server_error()
+        || matches!(
+            status,
+            reqwest::StatusCode::REQUEST_TIMEOUT
+                | reqwest::StatusCode::TOO_MANY_REQUESTS
+                | reqwest::StatusCode::BAD_GATEWAY
+                | reqwest::StatusCode::GATEWAY_TIMEOUT
+        )
+    {
+        DaemonLinkError::Transient(format!("daemon returned {status}"))
+    } else {
+        DaemonLinkError::Fatal(format!("daemon returned {status}"))
     }
 }
 
@@ -175,10 +250,19 @@ mod tests {
     }
 
     #[test]
+    fn daemon_link_retry_backoff_caps_at_thirty_two_seconds() {
+        assert_eq!(daemon_link_retry_backoff(1), Duration::from_secs(1));
+        assert_eq!(daemon_link_retry_backoff(2), Duration::from_secs(2));
+        assert_eq!(daemon_link_retry_backoff(6), Duration::from_secs(32));
+        assert_eq!(daemon_link_retry_backoff(99), Duration::from_secs(32));
+    }
+
+    #[test]
     fn worker_status_serialization_roundtrip() {
         let report = WorkerStatusReport {
             project_id: "abc123".to_string(),
             pid: 42,
+            instance_token: "token".to_string(),
             lsp_clients: 2,
             busy_chats: 1,
             exec_running: 3,
@@ -187,6 +271,45 @@ mod tests {
         let encoded = serde_json::to_string(&report).unwrap();
         let decoded: WorkerStatusReport = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn worker_status_deserializes_missing_instance_token_as_empty() {
+        let decoded: WorkerStatusReport = serde_json::from_value(json!({
+            "project_id": "abc123",
+            "pid": 42,
+            "lsp_clients": 0,
+            "busy_chats": 0,
+            "exec_running": 0,
+            "last_activity_ts": 99,
+        }))
+        .unwrap();
+
+        assert_eq!(decoded.instance_token, "");
+    }
+
+    #[test]
+    fn daemon_link_classifies_response_statuses() {
+        assert_eq!(
+            classify_daemon_link_status(reqwest::StatusCode::GONE),
+            DaemonLinkError::PlannedShutdown
+        );
+        assert!(matches!(
+            classify_daemon_link_status(reqwest::StatusCode::UNAUTHORIZED),
+            DaemonLinkError::Auth(_)
+        ));
+        assert!(matches!(
+            classify_daemon_link_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            DaemonLinkError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_daemon_link_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            DaemonLinkError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_daemon_link_status(reqwest::StatusCode::BAD_REQUEST),
+            DaemonLinkError::Fatal(_)
+        ));
     }
 
     #[tokio::test]
@@ -258,6 +381,7 @@ mod tests {
         let report = WorkerStatusReport {
             project_id: "project".to_string(),
             pid: 42,
+            instance_token: "token".to_string(),
             lsp_clients: 0,
             busy_chats: 0,
             exec_running: 0,
@@ -273,5 +397,64 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn post_worker_status_classifies_auth_and_transient_failures() {
+        async fn serve_status(
+            status: axum::http::StatusCode,
+        ) -> (u16, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new().route(
+                "/daemon/v1/worker-status",
+                post(move |Json(_): Json<WorkerStatusReport>| async move {
+                    (status, Json(json!({"success": false})))
+                }),
+            );
+            let server = axum::Server::from_tcp(listener.into_std().unwrap())
+                .unwrap()
+                .serve(app.into_make_service());
+            (
+                port,
+                tokio::spawn(async move {
+                    let _ = server.await;
+                }),
+            )
+        }
+
+        let report = WorkerStatusReport {
+            project_id: "project".to_string(),
+            pid: 42,
+            instance_token: "token".to_string(),
+            lsp_clients: 0,
+            busy_chats: 0,
+            exec_running: 0,
+            last_activity_ts: 1,
+        };
+
+        let (auth_port, auth_task) = serve_status(axum::http::StatusCode::UNAUTHORIZED).await;
+        let auth_result = post_worker_status(
+            crate::global_context::tests::make_test_gcx().await,
+            &format!("http://127.0.0.1:{auth_port}/daemon/v1/worker-status"),
+            &report,
+        )
+        .await;
+        assert!(matches!(auth_result, Err(DaemonLinkError::Auth(_))));
+        auth_task.abort();
+
+        let (transient_port, transient_task) =
+            serve_status(axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+        let transient_result = post_worker_status(
+            crate::global_context::tests::make_test_gcx().await,
+            &format!("http://127.0.0.1:{transient_port}/daemon/v1/worker-status"),
+            &report,
+        )
+        .await;
+        assert!(matches!(
+            transient_result,
+            Err(DaemonLinkError::Transient(_))
+        ));
+        transient_task.abort();
     }
 }

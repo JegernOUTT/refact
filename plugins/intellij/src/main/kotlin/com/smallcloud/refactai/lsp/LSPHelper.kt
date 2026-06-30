@@ -56,7 +56,7 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
         findRoots(listOfFiles)
     }.ifEmpty { listOfNotNull(project.basePath) }
         .map { path -> runCatching { File(path).canonicalPath }.getOrElse { path } }
-    val baseUrl = lsp.baseUrlOrNull() ?: return
+    val baseUrl = lsp.baseUrlOrNull() ?: throw IllegalStateException("LSP project initialize requires an attached worker")
     val url = baseUrl.resolve("v1/lsp-initialize")
     val data = Gson().toJson(
         mapOf(
@@ -72,14 +72,21 @@ fun lspProjectInitialize(lsp: LSPProcessHolder, project: Project) {
         if (it != null) {
             InferenceGlobalContext.lastErrorMsg = it.message
         }
-    })
+    }).join().get()
+}
+
+internal fun isRecoverableHttpStatus(error: Throwable?): Boolean {
+    val statusCode = when (error) {
+        is HttpStatusException -> error.statusCode
+        is DaemonHttpStatusException -> error.statusCode
+        else -> null
+    }
+    if (statusCode != null) return statusCode in 500..599
+    return error?.cause?.let { isRecoverableHttpStatus(it) } ?: false
 }
 
 private fun shouldWakeAndRetry(error: Throwable?): Boolean {
-    if (error is HttpStatusException) {
-        return error.statusCode == 502 || error.statusCode == 503
-    }
-    return error?.cause?.let { shouldWakeAndRetry(it) } ?: false
+    return isRecoverableHttpStatus(error)
 }
 
 private fun sleepBeforeWakeRetry(attempt: Int) {

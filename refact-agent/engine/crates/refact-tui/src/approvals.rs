@@ -5,8 +5,10 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::client::ToolDecision;
+use crate::key_hint;
 use crate::render::wrapping::wrap_line;
 use crate::render::{color_enabled_from_env, render_unified_diff};
+use crate::style::accent_style;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PauseReason {
@@ -370,19 +372,11 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
         Line::from(vec![
             Span::styled(
                 "Approval required",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!(" · {}", state.queue_label()),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!(" · {}", state.queue_label()), muted_style()),
         ]),
-        Line::from(Span::styled(
-            approval_help_text(state.details_open()),
-            Style::default().fg(Color::DarkGray),
-        )),
+        approval_help_line(state.details_open()),
     ];
     if state.details_open() {
         render_detail_lines(state, width, &mut lines);
@@ -392,22 +386,58 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
     lines
 }
 
-fn approval_help_text(details_open: bool) -> &'static str {
+fn approval_help_line(details_open: bool) -> Line<'static> {
+    let detail_label = if details_open { "summary" } else { "details" };
+    let mut spans = vec![
+        hint_key("y"),
+        hint_label(" approve"),
+        hint_separator(),
+        hint_key("a"),
+        hint_label(" approve for chat"),
+        hint_separator(),
+        hint_key("n"),
+        hint_label(" reject"),
+        hint_separator(),
+        hint_key("v"),
+        hint_label(format!(" {detail_label}")),
+        hint_separator(),
+        hint_key("Esc"),
+    ];
     if details_open {
-        "y approve once · a approve for chat · n reject · v summary · Esc back · ↑/↓ scroll"
-    } else {
-        "y approve once · a approve for chat · n reject · v details · Esc back"
+        spans.extend([hint_separator(), hint_key("↑/↓"), hint_label(" scroll")]);
     }
+    Line::from(spans)
+}
+
+fn hint_key(key: &'static str) -> Span<'static> {
+    let mut span = key_hint::plain(key.to_string());
+    span.style = span.style.add_modifier(Modifier::DIM);
+    span
+}
+
+fn hint_label(label: impl Into<String>) -> Span<'static> {
+    Span::styled(label.into(), muted_style())
+}
+
+fn hint_separator() -> Span<'static> {
+    Span::styled(" · ", muted_style())
+}
+
+fn muted_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
 }
 
 fn render_summary_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec<Line<'static>>) {
     if state.pending_after() > 0 {
         lines.push(Line::from(Span::styled(
             format!("{} more pending in queue", state.pending_after()),
-            Style::default().fg(Color::DarkGray),
+            muted_style(),
         )));
     }
     for (idx, reason) in state.reasons().iter().enumerate() {
+        let current = idx == 0;
         let command = reason
             .command
             .is_empty()
@@ -415,25 +445,50 @@ fn render_summary_lines(state: &ApprovalModalState, width: usize, lines: &mut Ve
             .flatten()
             .unwrap_or_else(|| preview_command(&reason.command, width.saturating_sub(12).min(140)));
         let prefix = if state.reasons().len() > 1 {
-            format!("• {}/{} ", idx + 1, state.reasons().len())
+            format!(
+                "{} {}/{} ",
+                cursor_marker(current),
+                idx + 1,
+                state.reasons().len()
+            )
         } else {
-            "• ".to_string()
+            format!("{} ", cursor_marker(current))
+        };
+        let prefix_style = if current {
+            accent_style()
+        } else {
+            muted_style()
+        };
+        let tool_style = if current {
+            accent_style()
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        let command_style = if current {
+            accent_style()
+        } else {
+            Style::default().fg(Color::White)
         };
         lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(Color::Cyan)),
-            Span::styled(
-                reason.tool_name.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(prefix, prefix_style),
+            Span::styled(reason.tool_name.clone(), tool_style),
             Span::styled("  ", Style::default()),
-            Span::styled(command, Style::default().fg(Color::White)),
+            Span::styled(command, command_style),
         ]));
         if !reason.rule.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("  rule: {}", reason.rule),
-                Style::default().fg(Color::DarkGray),
+                muted_style(),
             )));
         }
+    }
+}
+
+fn cursor_marker(current: bool) -> &'static str {
+    if current {
+        "›"
+    } else {
+        " "
     }
 }
 
@@ -448,17 +503,19 @@ fn args_preview(args: Option<&str>) -> Option<String> {
 fn render_detail_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::default());
     for (idx, reason) in state.reasons().iter().enumerate() {
+        let current = idx == 0;
+        let heading_style = if current {
+            accent_style()
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
         lines.push(Line::from(vec![
+            Span::styled(format!("{} ", cursor_marker(current)), heading_style),
             Span::styled(
                 format!("tool {}/{}", idx + 1, state.reasons().len()),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                heading_style,
             ),
-            Span::styled(
-                format!(" · {}", reason.tool_name),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!(" · {}", reason.tool_name), heading_style),
         ]));
         if !reason.tool_call_id.is_empty() {
             lines.push(meta_line("id", &reason.tool_call_id));
@@ -502,18 +559,13 @@ fn render_detail_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec
 }
 
 fn meta_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {label}: {value}"),
-        Style::default().fg(Color::DarkGray),
-    ))
+    Line::from(Span::styled(format!("  {label}: {value}"), muted_style()))
 }
 
 fn section_line(label: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("  {label}:"),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
+        muted_style().add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -525,7 +577,7 @@ fn push_wrapped_block(lines: &mut Vec<Line<'static>>, text: &str, width: usize, 
     let block_width = width.saturating_sub(2).max(8);
     for raw_line in text.lines() {
         let line = Line::from(vec![
-            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  ", muted_style()),
             Span::styled(raw_line.to_string(), style),
         ]);
         lines.extend(wrap_line(line, Some(block_width)));
@@ -660,7 +712,7 @@ mod tests {
         assert!(rendered.contains("args"));
         assert!(rendered.contains("\"command\": \"printf hi\""));
         assert!(rendered.contains("diff"));
-        assert!(rendered.contains("- old"));
-        assert!(rendered.contains("+ new"));
+        assert!(rendered.contains("-old"));
+        assert!(rendered.contains("+new"));
     }
 }

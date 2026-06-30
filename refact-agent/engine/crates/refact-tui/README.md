@@ -14,6 +14,7 @@ This crate uses `competitors/codex/codex-rs/tui` as the reference implementation
 - `src/streaming/commit_tick.rs`
 - `src/streaming/controller.rs`
 - `src/streaming/table_holdback.rs`
+- `src/table_detect.rs`
 
 The first TUI slice ports only the protocol-agnostic streaming and rendering helpers. The app loop, daemon client, project picker, and terminal guard are local implementations following the Codex event-loop and terminal-restore patterns without importing Codex protocol, auth, app-server, cloud, or onboarding code.
 

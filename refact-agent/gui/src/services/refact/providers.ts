@@ -275,6 +275,29 @@ export type OpenAICodexUsageResponse = {
   error?: string | null;
 };
 
+export type OpenCodeUsageWindow = {
+  used_percent: number;
+  reset_at?: string | null;
+  reset_after_seconds?: number | null;
+  limit_window_seconds?: number | null;
+  status?: string | null;
+};
+
+export type OpenCodeUsageData = {
+  plan_type?: string | null;
+  workspace_id?: string | null;
+  balance?: number | null;
+  rolling?: OpenCodeUsageWindow | null;
+  weekly?: OpenCodeUsageWindow | null;
+  monthly?: OpenCodeUsageWindow | null;
+  raw_extra?: Record<string, unknown>;
+};
+
+export type OpenCodeUsageResponse = {
+  data?: OpenCodeUsageData | null;
+  error?: string | null;
+};
+
 export type OpenAICodexResetRedeemData = {
   code: string;
   windows_reset?: number | null;
@@ -863,6 +886,52 @@ export const providersApi = createApi({
         }
 
         return { data: result.data as OpenAICodexUsageResponse };
+      },
+    }),
+
+    getOpenCodeUsage: builder.query<
+      OpenCodeUsageResponse,
+      ProviderScopedQueryRequiredArg
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/usage`,
+        );
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url,
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/usage`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as OpenCodeUsageResponse };
       },
     }),
 
@@ -1885,6 +1954,7 @@ export const {
   useGetOpenRouterHealthQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
   useRedeemOpenAICodexResetCreditMutation,
   useToggleModelMutation,
   useSetModelProviderMutation,

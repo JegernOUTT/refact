@@ -26,14 +26,14 @@ import { CommandMarkdown } from "../Command";
 import { Chevron } from "../Collapsible";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectChatId,
-  selectIsStreaming,
-  selectIsWaiting,
+  selectIsStreamingById,
+  selectIsWaitingById,
   selectBackgroundAgentsByThread,
-  selectManyDiffMessageByIds,
-  selectManyToolResultsByIds,
-  selectToolResultById,
+  selectManyDiffMessageByThreadAndIds,
+  selectManyToolResultsByThreadAndIds,
+  selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
+import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { ScrollArea } from "../ScrollArea";
 import { takeWhile } from "../../utils";
 import { DialogImage } from "../DialogImage";
@@ -363,10 +363,11 @@ function decorateBackgroundAgentTool(
 // TODO: Sort of duplicated
 const ToolMessage: React.FC<{
   toolCall: ToolCall;
-}> = ({ toolCall }) => {
+  threadId: string;
+}> = ({ toolCall, threadId }) => {
   const name = normalizeToolName(toolCall.function.name) ?? "";
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const argsString = React.useMemo(() => {
@@ -423,9 +424,16 @@ const AnimatedCollapsibleContent: React.FC<{
 // Use this for a single tool results
 export const SingleModelToolContent: React.FC<{
   toolCalls: ToolCall[];
-}> = ({ toolCalls }) => {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  threadId?: string;
+}> = ({ toolCalls, threadId }) => {
+  const contextThreadId = useThreadId();
+  const resolvedThreadId = threadId ?? contextThreadId;
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, resolvedThreadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, resolvedThreadId),
+  );
   const store = useCollapsibleStore();
 
   const toolCallsId = useMemo(() => {
@@ -452,14 +460,14 @@ export const SingleModelToolContent: React.FC<{
     if (storeKey && store) store.set(storeKey, open);
   }, [storeKey, store, open]);
   const selectResults = useMemo(
-    () => selectManyToolResultsByIds(toolCallsId),
+    () => selectManyToolResultsByThreadAndIds(resolvedThreadId, toolCallsId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolCallsIdKey],
+    [resolvedThreadId, toolCallsIdKey],
   );
   const selectDiffs = useMemo(
-    () => selectManyDiffMessageByIds(toolCallsId),
+    () => selectManyDiffMessageByThreadAndIds(resolvedThreadId, toolCallsId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolCallsIdKey],
+    [resolvedThreadId, toolCallsIdKey],
   );
   const results = useAppSelector(selectResults);
   const diffs = useAppSelector(selectDiffs);
@@ -541,7 +549,7 @@ export const SingleModelToolContent: React.FC<{
             const key = `${toolCall.id}-${toolCall.index}`;
             return (
               <Box key={key} py="2">
-                <ToolMessage toolCall={toolCall} />
+                <ToolMessage toolCall={toolCall} threadId={resolvedThreadId} />
               </Box>
             );
           })}
@@ -556,6 +564,7 @@ export type ToolContentProps = {
   contextFilesByToolId?: Record<string, ChatContextFile[]>;
   diffsByToolId?: Record<string, DiffChunk[]>;
   isActiveAssistant?: boolean;
+  threadId?: string;
 };
 
 export const ToolContent: React.FC<ToolContentProps> = ({
@@ -563,12 +572,14 @@ export const ToolContent: React.FC<ToolContentProps> = ({
   contextFilesByToolId,
   diffsByToolId,
   isActiveAssistant = false,
+  threadId,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
+  const contextThreadId = useThreadId();
+  const toolThreadId = threadId ?? contextThreadId;
   const features = useAppSelector(selectFeatures);
   const backgroundAgents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, chatId),
+    selectBackgroundAgentsByThread(state, toolThreadId),
   );
   const handleOpenTrajectory = useCallback(
     (agent: BackgroundAgentSummary, childChatId: string) => {
@@ -576,14 +587,14 @@ export const ToolContent: React.FC<ToolContentProps> = ({
         createChatWithId({
           id: childChatId,
           title: agent.title,
-          parentId: agent.parent_chat_id || chatId,
+          parentId: agent.parent_chat_id || toolThreadId,
           linkType: agent.kind,
         }),
       );
       dispatch(switchToThread({ id: childChatId }));
       dispatch(push({ name: "chat" }));
     },
-    [chatId, dispatch],
+    [toolThreadId, dispatch],
   );
   const ids = useMemo(() => {
     const out: string[] = [];
@@ -596,23 +607,28 @@ export const ToolContent: React.FC<ToolContentProps> = ({
   }, [toolCalls]);
   const idsKey = ids.join("|");
   const selectResults = useMemo(
-    () => selectManyToolResultsByIds(ids),
+    () => selectManyToolResultsByThreadAndIds(toolThreadId, ids),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [idsKey],
+    [toolThreadId, idsKey],
   );
   const allToolResults = useAppSelector(selectResults);
   const activeToolCallId = isActiveAssistant ? ids[ids.length - 1] : undefined;
 
-  return processToolCalls(
-    toolCalls,
-    allToolResults,
-    features,
-    [],
-    contextFilesByToolId,
-    diffsByToolId,
-    activeToolCallId,
-    backgroundAgents,
-    handleOpenTrajectory,
+  return (
+    <ChatThreadProvider chatId={toolThreadId}>
+      {processToolCalls(
+        toolCalls,
+        allToolResults,
+        features,
+        [],
+        contextFilesByToolId,
+        diffsByToolId,
+        activeToolCallId,
+        backgroundAgents,
+        handleOpenTrajectory,
+        toolThreadId,
+      )}
+    </ChatThreadProvider>
   );
 };
 
@@ -629,6 +645,7 @@ function processToolCalls(
     agent: BackgroundAgentSummary,
     childChatId: string,
   ) => void = () => undefined,
+  threadId?: string,
 ) {
   if (toolCalls.length === 0) return processed;
   const [head, ...tail] = toolCalls;
@@ -657,6 +674,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -678,6 +696,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -700,6 +719,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -722,6 +742,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -744,6 +765,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -765,6 +787,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -785,6 +808,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -805,6 +829,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -832,6 +857,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -859,6 +885,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -879,6 +906,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -899,6 +927,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -919,6 +948,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -941,6 +971,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -963,6 +994,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -985,6 +1017,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1007,6 +1040,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1021,6 +1055,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1043,6 +1078,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1065,6 +1101,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1087,6 +1124,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1109,6 +1147,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1132,6 +1171,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1154,6 +1194,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1174,6 +1215,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1194,6 +1236,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1214,6 +1257,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1234,6 +1278,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1255,6 +1300,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1283,6 +1329,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1303,6 +1350,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1323,6 +1371,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1429,6 +1478,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1455,6 +1505,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1463,6 +1514,7 @@ function processToolCalls(
       <SleepToolCard
         key={`sleep-tool-${processed.length}`}
         toolCall={normalizedHead}
+        threadId={threadId}
       />
     );
     return processToolCalls(
@@ -1475,6 +1527,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1495,6 +1548,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1516,6 +1570,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1542,6 +1597,7 @@ function processToolCalls(
         key={`multi-model-tool-content-${processed.length}`}
         toolCalls={multiModalToolCalls}
         toolResults={multiModalToolResults}
+        threadId={threadId ?? ""}
       />
     );
     return processToolCalls(
@@ -1554,6 +1610,7 @@ function processToolCalls(
       activeToolCallId,
       backgroundAgents,
       onOpenTrajectory,
+      threadId,
     );
   }
 
@@ -1574,15 +1631,21 @@ function processToolCalls(
     activeToolCallId,
     backgroundAgents,
     onOpenTrajectory,
+    threadId,
   );
 }
 
 const MultiModalToolContent: React.FC<{
   toolCalls: ToolCall[];
   toolResults: MultiModalToolResult[];
-}> = ({ toolCalls, toolResults }) => {
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  threadId: string;
+}> = ({ toolCalls, toolResults, threadId }) => {
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
   const store = useCollapsibleStore();
 
   const ids = useMemo(() => {
@@ -1606,9 +1669,9 @@ const MultiModalToolContent: React.FC<{
   }, [mmStoreKey, store, open]);
 
   const selectDiffs = useMemo(
-    () => selectManyDiffMessageByIds(ids),
+    () => selectManyDiffMessageByThreadAndIds(threadId, ids),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [idsKey],
+    [threadId, idsKey],
   );
   const diffs = useAppSelector(selectDiffs);
 

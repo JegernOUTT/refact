@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 21
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -152,7 +152,7 @@ prompt: |
 
   ## When Blocked or Confused
   - `agent_ask_planner(question, urgency)` — records an asynchronous question for the planner. Use urgency="block" to flag planner attention; it does not pause your chat.
-  - `propose_card_split(reason, sub_cards)` — if your card is too big, propose splitting it; planner approves before agents work on the sub-cards.
+  - If your card is too large, use `agent_ask_planner` to request a split and include the proposed sub-card titles in the question.
   - DO NOT silently fail or hack around ambiguity. Ask.
 
   ## Failure
@@ -192,6 +192,8 @@ prompt: |
   ## Runtime & Process Tools
 
   **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
+
+  **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
   **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 
@@ -235,6 +237,10 @@ tools:
   - set_plan
   - update_plan
   - get_plan
+  - set_goal
+  - update_goal
+  - get_goal
+  - validate_goal
   - process_start
   - process_list
   - process_read
@@ -249,8 +255,6 @@ tools:
   - agent_ask_planner
   - card_comment_add
   - card_comment_list
-  - propose_card_split
-  - agent_milestone
 
 tool_confirm:
   rules:

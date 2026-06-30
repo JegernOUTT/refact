@@ -8,19 +8,40 @@ use serde_json::{Map, Value};
 use tokio::sync::{broadcast, Mutex};
 
 const DEFAULT_RING_CAPACITY: usize = 4096;
+const DEFAULT_BROADCAST_CAPACITY: usize = 1024;
 const EVENTS_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonEvent {
+    #[serde(default)]
+    pub seq: u64,
     pub ts_ms: u64,
     pub kind: String,
     pub project_id: Option<String>,
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventReplay {
+    pub events: Vec<DaemonEvent>,
+    pub gap: Option<EventReplayGap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventReplayGap {
+    pub requested_after_seq: u64,
+    pub oldest_seq: u64,
+    pub latest_seq: u64,
+}
+
+struct EventBusState {
+    ring: VecDeque<DaemonEvent>,
+    next_seq: u64,
+}
+
 #[derive(Clone)]
 pub struct EventBus {
-    ring: Arc<Mutex<VecDeque<DaemonEvent>>>,
+    state: Arc<Mutex<EventBusState>>,
     tx: broadcast::Sender<DaemonEvent>,
     events_path: PathBuf,
     rotated_path: PathBuf,
@@ -33,14 +54,30 @@ impl EventBus {
     }
 
     pub fn new_with_capacity(events_path: PathBuf, capacity: usize) -> Self {
+        Self::new_with_capacities(
+            events_path,
+            capacity,
+            capacity.max(16).min(DEFAULT_BROADCAST_CAPACITY),
+        )
+    }
+
+    fn new_with_capacities(
+        events_path: PathBuf,
+        capacity: usize,
+        broadcast_capacity: usize,
+    ) -> Self {
         let rotated_path = events_path.with_file_name("events.jsonl.1");
-        let (tx, _) = broadcast::channel(capacity.max(16));
+        let capacity = capacity.max(1);
+        let (tx, _) = broadcast::channel(broadcast_capacity.max(1));
         Self {
-            ring: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            state: Arc::new(Mutex::new(EventBusState {
+                ring: VecDeque::with_capacity(capacity),
+                next_seq: 0,
+            })),
             tx,
             events_path,
             rotated_path,
-            capacity: capacity.max(1),
+            capacity,
         }
     }
 
@@ -49,7 +86,33 @@ impl EventBus {
     }
 
     pub async fn snapshot(&self) -> Vec<DaemonEvent> {
-        self.ring.lock().await.iter().cloned().collect()
+        self.state.lock().await.ring.iter().cloned().collect()
+    }
+
+    pub async fn replay_after(&self, after_seq: u64) -> EventReplay {
+        let state = self.state.lock().await;
+        let oldest_seq = state.ring.front().map(|event| event.seq);
+        let latest_seq = state
+            .ring
+            .back()
+            .map(|event| event.seq)
+            .unwrap_or(state.next_seq);
+        let gap = oldest_seq
+            .filter(|oldest_seq| {
+                after_seq < latest_seq && after_seq.saturating_add(1) < *oldest_seq
+            })
+            .map(|oldest_seq| EventReplayGap {
+                requested_after_seq: after_seq,
+                oldest_seq,
+                latest_seq,
+            });
+        let events = state
+            .ring
+            .iter()
+            .filter(|event| event.seq > after_seq)
+            .cloned()
+            .collect();
+        EventReplay { events, gap }
     }
 
     pub async fn emit(
@@ -58,28 +121,35 @@ impl EventBus {
         project_id: Option<String>,
         payload: Value,
     ) -> Result<DaemonEvent, String> {
-        let event = DaemonEvent {
+        let mut event = DaemonEvent {
+            seq: 0,
             ts_ms: crate::daemon::state::now_ms(),
             kind: kind.into(),
             project_id,
             payload: redact_value(payload),
         };
         {
-            let mut ring = self.ring.lock().await;
-            while ring.len() >= self.capacity {
-                ring.pop_front();
+            let mut state = self.state.lock().await;
+            state.next_seq = state.next_seq.saturating_add(1);
+            event.seq = state.next_seq;
+            while state.ring.len() >= self.capacity {
+                state.ring.pop_front();
             }
-            ring.push_back(event.clone());
+            state.ring.push_back(event.clone());
+            let _ = self.tx.send(event.clone());
         }
-        append_jsonl(&self.events_path, &self.rotated_path, &event).await?;
-        let _ = self.tx.send(event.clone());
+        if let Err(error) = append_jsonl(&self.events_path, &self.rotated_path, &event).await {
+            tracing::warn!("failed to persist daemon event {}: {error}", event.seq);
+        }
         Ok(event)
     }
 }
 
 fn redact_value(value: Value) -> Value {
     match value {
-        Value::String(value) => Value::String(crate::daemon::auth::redact_daemon_token(&value)),
+        Value::String(value) => {
+            Value::String(crate::daemon::auth::redact_daemon_query_token(&value))
+        }
         Value::Array(values) => Value::Array(values.into_iter().map(redact_value).collect()),
         Value::Object(values) => Value::Object(
             values
@@ -157,6 +227,8 @@ mod tests {
 
         let snapshot = bus.snapshot().await;
         assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].seq, 2);
+        assert_eq!(snapshot[1].seq, 3);
         assert_eq!(snapshot[0].kind, "two");
         assert_eq!(snapshot[1].kind, "three");
         assert_eq!(rx.recv().await.unwrap().kind, "one");
@@ -183,5 +255,76 @@ mod tests {
         let content = tokio::fs::read_to_string(path).await.unwrap();
         assert!(!content.contains("secret-token"));
         assert!(content.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn daemon_event_bus_lagged_subscriber_can_replay_recent_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let bus = EventBus::new_with_capacities(path, 8, 1);
+        let mut rx = bus.subscribe();
+
+        for idx in 1..=4 {
+            bus.emit(format!("event-{idx}"), None, json!({"n": idx}))
+                .await
+                .unwrap();
+        }
+
+        assert!(matches!(
+            rx.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+        ));
+        let replay = bus.replay_after(0).await;
+        assert!(replay.gap.is_none());
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_event_bus_replay_reports_gap_when_cursor_is_too_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let bus = EventBus::new_with_capacity(path, 2);
+
+        bus.emit("one", None, json!({})).await.unwrap();
+        bus.emit("two", None, json!({})).await.unwrap();
+        bus.emit("three", None, json!({})).await.unwrap();
+
+        let replay = bus.replay_after(0).await;
+        assert_eq!(
+            replay.gap,
+            Some(EventReplayGap {
+                requested_after_seq: 0,
+                oldest_seq: 2,
+                latest_seq: 3,
+            })
+        );
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three"]
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_event_bus_persistence_failure_still_broadcasts() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = EventBus::new(dir.path().to_path_buf());
+        let mut rx = bus.subscribe();
+
+        let event = bus.emit("live", None, json!({"ok": true})).await.unwrap();
+
+        assert_eq!(event.seq, 1);
+        assert_eq!(rx.recv().await.unwrap().kind, "live");
+        assert_eq!(bus.snapshot().await[0].kind, "live");
     }
 }

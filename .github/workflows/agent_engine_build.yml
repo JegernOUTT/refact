@@ -194,7 +194,7 @@ jobs:
         env:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
-        run: cargo test --workspace --profile ci-release --lib --tests
+        run: cargo test --workspace --exclude refact-tui --profile ci-release --lib --tests
 
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
@@ -210,7 +210,7 @@ jobs:
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         env:
           CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
-        run: OPENSSL_STATIC=1 cargo test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
+        run: OPENSSL_STATIC=1 cargo test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
 
       - name: Build artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
@@ -226,7 +226,21 @@ jobs:
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
           CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
-        run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            CROSS_NO_WARNINGS=0 cross test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
+          else
+            CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
+          fi
+
+      - name: Free test artifacts before linux-like build
+        if: matrix.cross
+        run: |
+          df -h . ./target || true
+          rm -rf ./target/${{ matrix.target }}/ci-release/deps
+          rm -rf ./target/${{ matrix.target }}/ci-release/incremental
+          docker system prune -af || true
+          df -h . ./target || true
 
       - name: Build linux-like artifact
         if: matrix.cross

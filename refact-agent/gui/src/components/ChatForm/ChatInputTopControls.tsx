@@ -10,11 +10,11 @@ import {
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectAutoApproveEditingTools,
-  selectAutoApproveDangerousCommands,
-  selectCurrentThreadId,
-  selectIncludeProjectInfo,
-} from "../../features/Chat";
+  selectAutoApproveEditingToolsById,
+  selectAutoApproveDangerousCommandsById,
+  selectIncludeProjectInfoById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import {
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
@@ -43,12 +43,16 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
   const isDisabled = disabled ?? false;
   const dispatch = useAppDispatch();
   const host = useAppSelector(selectHost);
-  const chatId = useAppSelector(selectCurrentThreadId);
-  const autoApproveEditing = useAppSelector(selectAutoApproveEditingTools);
-  const autoApproveDangerous = useAppSelector(
-    selectAutoApproveDangerousCommands,
+  const chatId = useThreadId();
+  const autoApproveEditing = useAppSelector((state) =>
+    selectAutoApproveEditingToolsById(state, chatId),
   );
-  const includeProjectInfo = useAppSelector(selectIncludeProjectInfo);
+  const autoApproveDangerous = useAppSelector((state) =>
+    selectAutoApproveDangerousCommandsById(state, chatId),
+  );
+  const includeProjectInfo = useAppSelector((state) =>
+    selectIncludeProjectInfoById(state, chatId),
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const handleEditingChange = useCallback(
@@ -211,6 +215,7 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
       </div>
 
       <ProjectInformationDialog
+        chatId={chatId}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
       />

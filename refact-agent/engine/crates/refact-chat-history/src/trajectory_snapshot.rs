@@ -1,9 +1,11 @@
 use refact_chat_api::{
-    BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, TaskMeta, ThreadParams, WorktreeMeta,
+    BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalSnapshot, TaskMeta, ThreadParams,
+    WorktreeMeta,
 };
 use refact_core::chat_types::ChatMessage;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
     pub chat_id: String,
     pub title: String,
@@ -42,6 +44,8 @@ pub struct TrajectorySnapshot {
     pub reactive_compact_attempts: Option<usize>,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalSnapshot>,
 }
 
 impl TrajectorySnapshot {
@@ -90,6 +94,74 @@ impl TrajectorySnapshot {
             reactive_compact_attempts: thread.reactive_compact_attempts,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            goal: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refact_chat_api::{GoalBudget, GoalProgress, GoalStatus};
+
+    fn goal_snapshot() -> GoalSnapshot {
+        GoalSnapshot {
+            content: "ship the card".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::Active,
+            budget: GoalBudget::default(),
+            progress: GoalProgress {
+                turns_used: 2,
+                tokens_used: 120,
+                started_at_ms: 123,
+                no_progress_turns: 0,
+                last_nudge_at_ms: 456,
+            },
+            attempts: Vec::new(),
+            events: Vec::new(),
+            transferred_from: None,
+            transferred_to: None,
+        }
+    }
+
+    fn snapshot() -> TrajectorySnapshot {
+        TrajectorySnapshot::from_thread_parts(
+            "chat-id".to_string(),
+            &ThreadParams::default(),
+            Vec::new(),
+            "2026-06-18T00:00:00Z".to_string(),
+            1,
+        )
+    }
+
+    #[test]
+    fn from_thread_parts_defaults_goal_none() {
+        let snapshot = snapshot();
+
+        assert_eq!(snapshot.goal, None);
+    }
+
+    #[test]
+    fn trajectory_snapshot_goal_roundtrip() {
+        let mut snapshot = snapshot();
+        let goal = goal_snapshot();
+        snapshot.goal = Some(goal.clone());
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.goal, Some(goal));
+    }
+
+    #[test]
+    fn trajectory_snapshot_missing_goal_defaults_none() {
+        let snapshot = snapshot();
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert!(value.get("goal").is_none());
+        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.goal, None);
     }
 }

@@ -5,7 +5,7 @@ use tokio::time::Duration;
 use tokio::fs;
 use std::time::SystemTime;
 use std::collections::HashMap;
-use crate::files_correction::canonical_path;
+use crate::files_correction::{canonical_path, canonicalize_normalized_path};
 use crate::global_context::GlobalContext;
 use crate::files_correction::any_glob_matches_path;
 
@@ -57,13 +57,14 @@ impl Default for IndexingEverywhere {
 impl IndexingEverywhere {
     pub fn indexing_for_path(&self, path: &Path) -> IndexingSettings {
         assert!(path.is_absolute());
+        let path = canonicalize_normalized_path(path.to_path_buf());
         let mut result: IndexingSettings = self.global.clone();
 
         let mut best_vcs: Option<IndexingSettings> = None;
         let mut best_pathbuf: Option<PathBuf> = None;
         for (vcs, vcs_settings) in &self.vcs_indexing_settings_map {
-            let vcs_pathbuf = PathBuf::from(vcs);
-            if path.starts_with(&vcs) {
+            let vcs_pathbuf = canonicalize_normalized_path(PathBuf::from(vcs));
+            if path.starts_with(&vcs_pathbuf) {
                 if best_vcs.is_none()
                     || vcs_pathbuf.components().count()
                         > best_pathbuf.clone().unwrap().components().count()
@@ -156,6 +157,7 @@ pub async fn reload_indexing_everywhere_if_needed(
             .collect();
         let mut vcs_indexing_settings_map: HashMap<String, IndexingSettings> = HashMap::new();
         for indexing_root in vcs_dirs {
+            let indexing_root = canonicalize_normalized_path(indexing_root);
             let indexing_path = indexing_root.join(".refact").join("indexing.yaml");
             if indexing_path.exists() {
                 match load_indexing_yaml(&indexing_path, Some(&indexing_root)).await {

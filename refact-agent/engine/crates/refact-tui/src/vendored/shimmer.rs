@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-pub fn spans(text: &'static str, tick: u64, base: Style, highlight: Style) -> Vec<Span<'static>> {
+pub fn spans(text: &str, tick: u64, base: Style, highlight: Style) -> Vec<Span<'static>> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
         return Vec::new();

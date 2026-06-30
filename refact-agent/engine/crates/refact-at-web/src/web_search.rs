@@ -20,6 +20,11 @@ const SEARXNG_BACKEND_NAME: &str = "searxng";
 const DDG_BACKEND_NAME: &str = "duckduckgo";
 const WIKIPEDIA_BACKEND_NAME: &str = "wikipedia";
 const WIKIPEDIA_API_URL: &str = "https://en.wikipedia.org/w/api.php";
+const KEENABLE_BACKEND_NAME: &str = "keenable";
+const KEENABLE_SEARCH_API_URL: &str = "https://api.keenable.ai/v1/search";
+const KEENABLE_MCP_URL: &str = "https://api.keenable.ai/mcp";
+const TAVILY_BACKEND_NAME: &str = "tavily";
+const TAVILY_SEARCH_API_URL: &str = "https://api.tavily.com/search";
 const BRAVE_BACKEND_NAME: &str = "brave";
 const BRAVE_WEB_SEARCH_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const GITHUB_ISSUES_BACKEND_NAME: &str = "github_issues";
@@ -534,6 +539,208 @@ fn parse_searxng_json(body: &str) -> Result<Vec<SearchResult>, String> {
     Ok(parsed)
 }
 
+fn parse_keenable_json(body: &str) -> Result<Vec<SearchResult>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse Keenable JSON response: {}", e))?;
+    let Some(results) = value.get("results").and_then(|v| v.as_array()) else {
+        return Err("Keenable response did not contain a `results` array".to_string());
+    };
+
+    let mut parsed = Vec::new();
+    for item in results {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        let snippet = obj
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("description").and_then(|v| v.as_str()))
+            .unwrap_or_default();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        parsed.push(SearchResult {
+            title: normalize_text(title),
+            url: url.to_string(),
+            snippet: normalize_text(snippet),
+            source: Some(KEENABLE_BACKEND_NAME.to_string()),
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn parse_keenable_mcp_text(text: &str) -> Vec<SearchResult> {
+    let mut parsed = Vec::new();
+    for section in text.split("\n---\n") {
+        let mut title = String::new();
+        let mut url = String::new();
+        let mut snippet_lines = Vec::new();
+        let mut after_url = false;
+
+        for line in section.lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("Title:") {
+                title = normalize_text(rest);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("URL:") {
+                url = rest.trim().to_string();
+                after_url = true;
+                continue;
+            }
+            if line.is_empty() || line.starts_with("Published:") || line.starts_with("Acquired:") {
+                continue;
+            }
+            if after_url {
+                snippet_lines.push(line);
+            }
+        }
+
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        parsed.push(SearchResult {
+            title,
+            url,
+            snippet: truncate_chars(&snippet_lines.join(" "), 500),
+            source: Some(KEENABLE_BACKEND_NAME.to_string()),
+        });
+    }
+
+    parsed
+}
+
+fn parse_keenable_mcp_json(body: &str) -> Result<Vec<SearchResult>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse Keenable MCP JSON response: {}", e))?;
+    if let Some(error) = value.get("error") {
+        let detail =
+            json_detail(error).unwrap_or_else(|| "Keenable MCP returned an error".to_string());
+        return Err(detail.to_string());
+    }
+    let Some(content) = value
+        .get("result")
+        .and_then(|v| v.get("content"))
+        .and_then(|v| v.as_array())
+    else {
+        return Ok(vec![]);
+    };
+
+    let mut parsed = Vec::new();
+    for item in content {
+        let Some(text) = item.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        parsed.extend(parse_keenable_mcp_text(text));
+    }
+
+    Ok(parsed)
+}
+
+fn json_detail(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        Value::Null => None,
+        Value::Array(items) if items.is_empty() => None,
+        Value::Object(map) if map.is_empty() => None,
+        _ => Some(value.to_string()),
+    }
+    .map(|text| truncate_chars(&text, 500))
+}
+
+fn provider_error_detail_from_json(value: &Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(json_detail)
+                .or_else(|| error.get("detail").and_then(json_detail))
+                .or_else(|| error.get("details").and_then(json_detail))
+        })
+        .or_else(|| value.get("message").and_then(json_detail))
+        .or_else(|| value.get("detail").and_then(json_detail))
+        .or_else(|| value.get("details").and_then(json_detail))
+        .or_else(|| value.get("error").and_then(json_detail))
+}
+
+fn keenable_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| provider_error_detail_from_json(&value))
+        .unwrap_or_else(|| truncate_chars(body.trim(), 500))
+}
+
+fn keenable_api_key() -> Option<String> {
+    env::var("KEENABLE_API_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+fn parse_tavily_json(body: &str) -> Result<Vec<SearchResult>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse Tavily JSON response: {}", e))?;
+    if let Some(error) = value.get("error") {
+        let detail = error
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| error.as_str())
+            .unwrap_or("Tavily returned an error");
+        return Err(detail.to_string());
+    }
+    let Some(results) = value.get("results").and_then(|v| v.as_array()) else {
+        return Err("Tavily response did not contain a `results` array".to_string());
+    };
+
+    let mut parsed = Vec::new();
+    for item in results {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+        let snippet = obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("raw_content").and_then(|v| v.as_str()))
+            .unwrap_or_default();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        parsed.push(SearchResult {
+            title: normalize_text(title),
+            url: url.to_string(),
+            snippet: normalize_text(snippet),
+            source: Some(TAVILY_BACKEND_NAME.to_string()),
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn tavily_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| provider_error_detail_from_json(&value))
+        .unwrap_or_else(|| truncate_chars(body.trim(), 500))
+}
+
+fn tavily_api_key() -> Option<String> {
+    env::var("TAVILY_API_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
 async fn fetch_searxng_instance(
     client: &Client,
     instance_url: &str,
@@ -700,6 +907,255 @@ async fn search_wikipedia(
     }
 
     Ok(parsed)
+}
+
+async fn search_keenable_rest(
+    client: &Client,
+    query: &str,
+    num_results: usize,
+    api_key: &str,
+) -> Result<Vec<SearchResult>, SearchBackendError> {
+    let url = Url::parse(KEENABLE_SEARCH_API_URL)
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    let response = client
+        .post(url)
+        .header("X-API-Key", api_key)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let detail = keenable_error_detail(&body);
+        return Err(SearchBackendError::new(
+            KEENABLE_BACKEND_NAME,
+            if detail.is_empty() {
+                format!("Keenable returned status: {}", status)
+            } else {
+                format!("Keenable returned status: {} ({})", status, detail)
+            },
+        ));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    let parsed = parse_keenable_json(&body)
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e))?;
+    Ok(parsed.into_iter().take(num_results).collect())
+}
+
+async fn search_keenable_mcp(
+    client: &Client,
+    query: &str,
+    num_results: usize,
+) -> Result<Vec<SearchResult>, SearchBackendError> {
+    let url = Url::parse(KEENABLE_MCP_URL)
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "refact-agent", "version": "0.0.0"}
+        }
+    });
+    let init_response = client
+        .post(url.clone())
+        .header("Accept", "application/json, text/event-stream")
+        .header(CONTENT_TYPE, "application/json")
+        .json(&initialize)
+        .send()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+
+    if !init_response.status().is_success() {
+        let status = init_response.status();
+        let body = init_response.text().await.unwrap_or_default();
+        let detail = keenable_error_detail(&body);
+        return Err(SearchBackendError::new(
+            KEENABLE_BACKEND_NAME,
+            if detail.is_empty() {
+                format!("Keenable MCP initialize returned status: {}", status)
+            } else {
+                format!(
+                    "Keenable MCP initialize returned status: {} ({})",
+                    status, detail
+                )
+            },
+        ));
+    }
+
+    let session_id = init_response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            SearchBackendError::new(
+                KEENABLE_BACKEND_NAME,
+                "Keenable MCP did not return a session id",
+            )
+        })?;
+    let init_body = init_response
+        .text()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    if let Ok(value) = serde_json::from_str::<Value>(&init_body) {
+        if let Some(error) = value.get("error") {
+            let detail = json_detail(error)
+                .unwrap_or_else(|| "Keenable MCP initialize returned an error".to_string());
+            return Err(SearchBackendError::new(KEENABLE_BACKEND_NAME, detail));
+        }
+    }
+
+    let initialized = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    });
+    let initialized_response = client
+        .post(url.clone())
+        .header("Accept", "application/json, text/event-stream")
+        .header(CONTENT_TYPE, "application/json")
+        .header("mcp-session-id", session_id.as_str())
+        .json(&initialized)
+        .send()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    if !initialized_response.status().is_success() {
+        let status = initialized_response.status();
+        let body = initialized_response.text().await.unwrap_or_default();
+        let detail = keenable_error_detail(&body);
+        return Err(SearchBackendError::new(
+            KEENABLE_BACKEND_NAME,
+            if detail.is_empty() {
+                format!(
+                    "Keenable MCP initialized notification returned status: {}",
+                    status
+                )
+            } else {
+                format!(
+                    "Keenable MCP initialized notification returned status: {} ({})",
+                    status, detail
+                )
+            },
+        ));
+    }
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "search_web_pages",
+            "arguments": {"query": query}
+        }
+    });
+    let call_response = client
+        .post(url)
+        .header("Accept", "application/json, text/event-stream")
+        .header(CONTENT_TYPE, "application/json")
+        .header("mcp-session-id", session_id.as_str())
+        .json(&call)
+        .send()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+
+    if !call_response.status().is_success() {
+        let status = call_response.status();
+        let body = call_response.text().await.unwrap_or_default();
+        let detail = keenable_error_detail(&body);
+        return Err(SearchBackendError::new(
+            KEENABLE_BACKEND_NAME,
+            if detail.is_empty() {
+                format!("Keenable MCP search returned status: {}", status)
+            } else {
+                format!(
+                    "Keenable MCP search returned status: {} ({})",
+                    status, detail
+                )
+            },
+        ));
+    }
+
+    let body = call_response
+        .text()
+        .await
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e.to_string()))?;
+    let parsed = parse_keenable_mcp_json(&body)
+        .map_err(|e| SearchBackendError::new(KEENABLE_BACKEND_NAME, e))?;
+    Ok(parsed.into_iter().take(num_results).collect())
+}
+
+async fn search_keenable(
+    client: &Client,
+    query: &str,
+    num_results: usize,
+) -> Result<Vec<SearchResult>, SearchBackendError> {
+    if let Some(api_key) = keenable_api_key() {
+        search_keenable_rest(client, query, num_results, &api_key).await
+    } else {
+        search_keenable_mcp(client, query, num_results).await
+    }
+}
+
+async fn search_tavily(
+    client: &Client,
+    query: &str,
+    num_results: usize,
+) -> Result<Vec<SearchResult>, SearchBackendError> {
+    let url = Url::parse(TAVILY_SEARCH_API_URL)
+        .map_err(|e| SearchBackendError::new(TAVILY_BACKEND_NAME, e.to_string()))?;
+    let body = serde_json::json!({
+        "query": query,
+        "max_results": num_results.min(20),
+        "search_depth": "basic",
+        "include_answer": false,
+        "include_raw_content": false,
+    });
+    let mut request = client
+        .post(url)
+        .header("Accept", "application/json")
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body);
+    if let Some(api_key) = tavily_api_key() {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    } else {
+        request = request.header("X-Tavily-Access-Mode", "keyless");
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| SearchBackendError::new(TAVILY_BACKEND_NAME, e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let detail = tavily_error_detail(&body);
+        return Err(SearchBackendError::new(
+            TAVILY_BACKEND_NAME,
+            if detail.is_empty() {
+                format!("Tavily returned status: {}", status)
+            } else {
+                format!("Tavily returned status: {} ({})", status, detail)
+            },
+        ));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| SearchBackendError::new(TAVILY_BACKEND_NAME, e.to_string()))?;
+    let parsed =
+        parse_tavily_json(&body).map_err(|e| SearchBackendError::new(TAVILY_BACKEND_NAME, e))?;
+    Ok(parsed.into_iter().take(num_results).collect())
 }
 
 async fn search_brave(
@@ -1595,6 +2051,8 @@ pub async fn execute_web_search_results(
     let client = build_http_client()?;
 
     let (
+        keenable_result,
+        tavily_result,
         brave_result,
         searxng_result,
         ddg_result,
@@ -1607,6 +2065,8 @@ pub async fn execute_web_search_results(
         crossref_result,
         hacker_news_result,
     ) = tokio::join!(
+        search_keenable(&client, &query, num_results),
+        search_tavily(&client, &query, num_results),
         search_brave(&client, &query, num_results),
         search_searxng(&client, &query, num_results),
         search_duckduckgo(&client, &query, num_results),
@@ -1623,6 +2083,14 @@ pub async fn execute_web_search_results(
     let mut merged_results = Vec::new();
     let mut errors = Vec::new();
 
+    match keenable_result {
+        Ok(results) => merged_results.extend(results),
+        Err(err) => errors.push(format!("{}: {}", err.backend, err.detail)),
+    }
+    match tavily_result {
+        Ok(results) => merged_results.extend(results),
+        Err(err) => errors.push(format!("{}: {}", err.backend, err.detail)),
+    }
     match brave_result {
         Ok(results) => merged_results.extend(results),
         Err(err) => errors.push(format!("{}: {}", err.backend, err.detail)),
@@ -1674,7 +2142,22 @@ pub async fn execute_web_search_results(
         .collect::<Vec<_>>();
 
     if !deduped.is_empty() {
-        let text = format_search_results(&query, &deduped);
+        let mut text = format_search_results(&query, &deduped);
+        let primary_errors = errors
+            .iter()
+            .filter(|err| {
+                err.starts_with(KEENABLE_BACKEND_NAME) || err.starts_with(TAVILY_BACKEND_NAME)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !primary_errors.is_empty() {
+            text.push_str("\n\nProvider notes:\n");
+            for err in primary_errors {
+                text.push_str("- ");
+                text.push_str(&err);
+                text.push('\n');
+            }
+        }
         return Ok((text, deduped));
     }
 
@@ -1818,6 +2301,160 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Rust Book");
         assert_eq!(results[0].source.as_deref(), Some(SEARXNG_BACKEND_NAME));
+    }
+
+    #[test]
+    fn test_parse_keenable_json_extracts_results() {
+        let body = r#"{
+          "query": "typescript best practices",
+          "results": [
+            {
+              "title": "TypeScript Best Practices 2026",
+              "url": "https://example.com/ts-best-practices",
+              "description": "A comprehensive guide to modern TypeScript patterns.",
+              "snippet": "TypeScript Best Practices 2026 Use strict mode...",
+              "published_at": "2026-01-15T10:30:00Z",
+              "acquired_at": "2026-01-16T08:12:34Z"
+            }
+          ]
+        }"#;
+
+        let results = parse_keenable_json(body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "TypeScript Best Practices 2026");
+        assert_eq!(results[0].url, "https://example.com/ts-best-practices");
+        assert_eq!(
+            results[0].snippet,
+            "TypeScript Best Practices 2026 Use strict mode..."
+        );
+        assert_eq!(results[0].source.as_deref(), Some(KEENABLE_BACKEND_NAME));
+    }
+
+    #[test]
+    fn test_parse_keenable_json_uses_description_when_snippet_missing() {
+        let body = r#"{
+          "query": "rust",
+          "results": [
+            {
+              "title": "Rust",
+              "url": "https://www.rust-lang.org/",
+              "description": "A language empowering everyone."
+            }
+          ]
+        }"#;
+
+        let results = parse_keenable_json(body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "A language empowering everyone.");
+    }
+
+    #[test]
+    fn test_parse_keenable_mcp_text_extracts_results() {
+        let text = r#"Title: W3Schools.com
+URL: https://www.w3schools.com/typescript/typescript_best_practices.php
+Acquired: 2026-05-16
+
+TypeScript Best Practices This guide covers essential TypeScript best practices.
+
+---
+
+Title: TypeScript Best Practices for Production Code in 2026
+URL: https://dev.to/example/typescript-best-practices
+Published: 2026-03-25
+Acquired: 2026-05-11
+
+This guide covers 15 best practices that separate production-quality TypeScript.
+"#;
+
+        let results = parse_keenable_mcp_text(text);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "W3Schools.com");
+        assert_eq!(
+            results[0].url,
+            "https://www.w3schools.com/typescript/typescript_best_practices.php"
+        );
+        assert_eq!(
+            results[0].snippet,
+            "TypeScript Best Practices This guide covers essential TypeScript best practices."
+        );
+        assert_eq!(results[0].source.as_deref(), Some(KEENABLE_BACKEND_NAME));
+        assert_eq!(
+            results[1].title,
+            "TypeScript Best Practices for Production Code in 2026"
+        );
+    }
+
+    #[test]
+    fn test_parse_keenable_mcp_json_extracts_text_content() {
+        let body = serde_json::json!({
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "Title: Rust\nURL: https://www.rust-lang.org/\nAcquired: 2026-05-16\n\nA language empowering everyone."
+                }]
+            },
+            "jsonrpc": "2.0",
+            "id": 2
+        })
+        .to_string();
+
+        let results = parse_keenable_mcp_json(&body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Rust");
+        assert_eq!(results[0].url, "https://www.rust-lang.org/");
+        assert_eq!(results[0].snippet, "A language empowering everyone.");
+    }
+
+    #[test]
+    fn test_parse_tavily_json_extracts_results() {
+        let body = r#"{
+          "query": "typescript best practices",
+          "follow_up_questions": null,
+          "answer": null,
+          "images": [],
+          "results": [
+            {
+              "url": "https://dev.to/example/typescript-best-practices",
+              "title": "TypeScript Best Practices in 2025",
+              "content": "TypeScript Best Practices in 2025: A Comprehensive Guide.",
+              "score": 0.92857105,
+              "raw_content": null
+            }
+          ],
+          "response_time": 0.86,
+          "request_id": "4245bea1-66ae-4ee9-a6b0-c36b3bf43404"
+        }"#;
+
+        let results = parse_tavily_json(body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "TypeScript Best Practices in 2025");
+        assert_eq!(
+            results[0].url,
+            "https://dev.to/example/typescript-best-practices"
+        );
+        assert_eq!(
+            results[0].snippet,
+            "TypeScript Best Practices in 2025: A Comprehensive Guide."
+        );
+        assert_eq!(results[0].source.as_deref(), Some(TAVILY_BACKEND_NAME));
+    }
+
+    #[test]
+    fn test_parse_tavily_json_uses_raw_content_when_content_missing() {
+        let body = r#"{
+          "query": "rust",
+          "results": [
+            {
+              "url": "https://www.rust-lang.org/",
+              "title": "Rust",
+              "raw_content": "A language empowering everyone."
+            }
+          ]
+        }"#;
+
+        let results = parse_tavily_json(body).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "A language empowering everyone.");
     }
 
     #[test]

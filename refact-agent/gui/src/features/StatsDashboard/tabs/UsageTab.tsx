@@ -1,15 +1,18 @@
 import React, { useState } from "react";
-import { Card, Icon, Surface, useTokens } from "../../../components/ui";
+import { Card, Icon, Surface } from "../../../components/ui";
 import {
+  Activity,
   BarChart3,
   CircleDollarSign,
+  Clock3,
   Database,
+  Gauge,
   PieChart as PieChartIcon,
   Table2,
 } from "lucide-react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import * as echarts from "echarts/core";
-import { BarChart, PieChart } from "echarts/charts";
+import { BarChart, LineChart, PieChart } from "echarts/charts";
 import {
   GridComponent,
   TooltipComponent,
@@ -25,7 +28,17 @@ import {
   formatTokenCount,
   formatCostDisplay,
   formatDuration,
+  formatRatioPercent,
 } from "../utils/formatters";
+import {
+  useChartTheme,
+  chartTooltip,
+  chartGrid,
+  chartLegend,
+  categoryAxis,
+  valueAxis,
+  percentAxis,
+} from "../utils/chartTheme";
 import { dateRangeToApiArgs } from "../utils/dateRange";
 import type { DateRange, ModelStats, ProviderStats } from "../types";
 import styles from "./UsageTab.module.css";
@@ -36,6 +49,7 @@ echarts.use([
   LegendComponent,
   GridComponent,
   BarChart,
+  LineChart,
   PieChart,
   CanvasRenderer,
 ]);
@@ -47,6 +61,10 @@ type SortKey =
   | "total_tokens"
   | "total_cost_usd"
   | "avg_duration_ms";
+
+function successRate(successful: number, total: number): number {
+  return total > 0 ? (successful / total) * 100 : 0;
+}
 
 function sortModels(
   models: ModelStats[],
@@ -76,38 +94,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
     dateRangeToApiArgs(dateRange),
   );
-  const chartTokens = useTokens([
-    "--rf-color-fg",
-    "--rf-color-muted",
-    "--rf-color-faint",
-    "--rf-border-strong",
-    "--rf-surface-overlay",
-    "--rf-color-accent",
-    "--rf-color-info",
-    "--rf-color-warning",
-    "--rf-color-danger",
-    "--rf-color-success",
-  ]);
-  const theme = {
-    text: chartTokens["--rf-color-fg"] || "currentColor",
-    textMuted: chartTokens["--rf-color-muted"] || "currentColor",
-    axisLine: chartTokens["--rf-color-faint"] || "currentColor",
-    splitLine: chartTokens["--rf-border-strong"] || "currentColor",
-    tooltip: {
-      bg: chartTokens["--rf-surface-overlay"] || "Canvas",
-      border: chartTokens["--rf-border-strong"] || "currentColor",
-      text: chartTokens["--rf-color-fg"] || "CanvasText",
-    },
-    palette: [
-      chartTokens["--rf-color-accent"] || "currentColor",
-      chartTokens["--rf-color-info"] || "currentColor",
-      chartTokens["--rf-color-warning"] || "currentColor",
-      chartTokens["--rf-color-danger"] || "currentColor",
-      chartTokens["--rf-color-success"] || "currentColor",
-      chartTokens["--rf-color-muted"] || "currentColor",
-      chartTokens["--rf-color-faint"] || "currentColor",
-    ],
-  };
+  const theme = useChartTheme();
 
   const [modelSort, setModelSort] = useState<{ key: SortKey; asc: boolean }>({
     key: "total_tokens",
@@ -134,60 +121,30 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
 
   const days = [...data.by_day].sort((a, b) => a.date.localeCompare(b.date));
   const dayLabels = days.map((d) =>
-    new Date(d.date).toLocaleString(undefined, {
+    // Parse as local time so the YYYY-MM-DD bucket isn't shifted a day for
+    // users west of UTC (`new Date("YYYY-MM-DD")` parses as UTC midnight).
+    new Date(`${d.date}T00:00:00`).toLocaleString(undefined, {
       month: "short",
       day: "numeric",
     }),
   );
 
-  const barOption = {
-    textStyle: { color: theme.text },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      textStyle: { color: theme.tooltip.text },
-      backgroundColor: theme.tooltip.bg,
-      borderColor: theme.tooltip.border,
-    },
-    legend: {
-      data: ["Prompt Tokens", "Completion Tokens"],
-      textStyle: { color: theme.text },
-    },
-    grid: {
-      left: "3%",
-      right: "4%",
-      bottom: "3%",
-      top: "15%",
-      containLabel: true,
-    },
-    xAxis: [
-      {
-        type: "category",
-        data: dayLabels,
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-      },
-    ],
-    yAxis: [
-      {
-        type: "value",
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-        splitLine: {
-          lineStyle: { color: theme.splitLine },
-        },
-      },
-    ],
+  const tokensPerDayOption = {
+    tooltip: chartTooltip(theme, "axis"),
+    legend: chartLegend(theme, { data: ["Prompt", "Completion"] }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels)],
+    yAxis: [valueAxis(theme)],
     series: [
       {
-        name: "Prompt Tokens",
+        name: "Prompt",
         type: "bar",
         stack: "tokens",
         data: days.map((d) => d.total_prompt_tokens),
         itemStyle: { color: theme.palette[0] },
       },
       {
-        name: "Completion Tokens",
+        name: "Completion",
         type: "bar",
         stack: "tokens",
         data: days.map((d) => d.total_completion_tokens),
@@ -196,12 +153,91 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     ],
   };
 
+  const callsPerDayOption = {
+    tooltip: chartTooltip(theme, "axis"),
+    legend: chartLegend(theme, { data: ["Succeeded", "Failed"] }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels)],
+    yAxis: [valueAxis(theme)],
+    series: [
+      {
+        name: "Succeeded",
+        type: "bar",
+        stack: "calls",
+        data: days.map((d) => d.successful_calls),
+        itemStyle: { color: theme.success },
+      },
+      {
+        name: "Failed",
+        type: "bar",
+        stack: "calls",
+        data: days.map((d) => Math.max(0, d.total_calls - d.successful_calls)),
+        itemStyle: { color: theme.danger },
+      },
+    ],
+  };
+
+  const avgDurationPerDayOption = {
+    tooltip: chartTooltip(theme, "axis", {
+      valueFormatter: (value: number) => `${(value / 1000).toFixed(1)}s`,
+    }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels, { boundaryGap: false })],
+    yAxis: [
+      valueAxis(theme, {
+        axisLabel: {
+          color: theme.muted,
+          formatter: (value: number) => `${(value / 1000).toFixed(0)}s`,
+        },
+      }),
+    ],
+    series: [
+      {
+        name: "Avg duration",
+        type: "line",
+        smooth: true,
+        showSymbol: false,
+        data: days.map((d) =>
+          d.total_calls > 0
+            ? Math.round(d.total_duration_ms / d.total_calls)
+            : 0,
+        ),
+        itemStyle: { color: theme.palette[4] },
+        lineStyle: { color: theme.palette[4], width: 2 },
+        areaStyle: { color: theme.palette[4], opacity: 0.12 },
+      },
+    ],
+  };
+
+  const successRatePerDayOption = {
+    tooltip: chartTooltip(theme, "axis", {
+      valueFormatter: (value: number) => `${value.toFixed(0)}%`,
+    }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels, { boundaryGap: false })],
+    yAxis: [percentAxis(theme)],
+    series: [
+      {
+        name: "Success rate",
+        type: "line",
+        smooth: true,
+        showSymbol: false,
+        data: days.map((d) =>
+          Math.round(successRate(d.successful_calls, d.total_calls)),
+        ),
+        itemStyle: { color: theme.success },
+        lineStyle: { color: theme.success, width: 2 },
+        areaStyle: { color: theme.success, opacity: 0.12 },
+      },
+    ],
+  };
+
   const sortedByTokens = [...data.by_model].sort(
     (a, b) => b.total_tokens - a.total_tokens,
   );
-  const topModels = sortedByTokens.slice(0, 5);
+  const topModels = sortedByTokens.slice(0, 6);
   const otherTokens = sortedByTokens
-    .slice(5)
+    .slice(6)
     .reduce((sum, m) => sum + m.total_tokens, 0);
   const modelPieData: { name: string; value: number }[] = topModels.map(
     (m) => ({
@@ -213,36 +249,69 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
     modelPieData.push({ name: "Others", value: otherTokens });
   }
 
-  const pieOption = {
-    textStyle: { color: theme.text },
-    tooltip: {
-      trigger: "item",
-      formatter: "{b}: {c} ({d}%)",
-      textStyle: { color: theme.tooltip.text },
-      backgroundColor: theme.tooltip.bg,
-      borderColor: theme.tooltip.border,
-    },
-    legend: {
-      orient: "horizontal",
-      bottom: 0,
-      textStyle: { color: theme.text },
-    },
+  const modelPieOption = {
+    tooltip: chartTooltip(theme, "item", { formatter: "{b}: {c} ({d}%)" }),
+    legend: chartLegend(theme, { orient: "horizontal", bottom: 0 }),
     color: theme.palette,
     series: [
       {
         type: "pie",
-        radius: ["40%", "70%"],
+        radius: ["42%", "70%"],
+        center: ["50%", "44%"],
         data: modelPieData,
         label: {
-          color: theme.text,
+          color: theme.muted,
           formatter: "{b}: {d}%",
           overflow: "truncate",
-          ellipsis: "...",
         },
-        labelLine: { lineStyle: { color: theme.textMuted } },
-        emphasis: {
-          label: { show: true, fontWeight: "bold" },
-        },
+        labelLine: { lineStyle: { color: theme.faint } },
+        emphasis: { label: { show: true, fontWeight: "bold" } },
+      },
+    ],
+  };
+
+  const promptCompletionOption = {
+    tooltip: chartTooltip(theme, "item", { formatter: "{b}: {c} ({d}%)" }),
+    legend: chartLegend(theme, { orient: "horizontal", bottom: 0 }),
+    color: [theme.palette[0], theme.palette[1]],
+    series: [
+      {
+        type: "pie",
+        radius: ["42%", "70%"],
+        center: ["50%", "44%"],
+        data: [
+          { name: "Prompt (read)", value: data.totals.total_prompt_tokens },
+          {
+            name: "Completion (written)",
+            value: data.totals.total_completion_tokens,
+          },
+        ],
+        label: { color: theme.muted, formatter: "{b}: {d}%" },
+        labelLine: { lineStyle: { color: theme.faint } },
+        emphasis: { label: { show: true, fontWeight: "bold" } },
+      },
+    ],
+  };
+
+  const sortedProvidersByTokens = [...data.by_provider].sort(
+    (a, b) => b.total_tokens - a.total_tokens,
+  );
+  const providerBarOption = {
+    tooltip: chartTooltip(theme, "axis"),
+    grid: chartGrid(),
+    xAxis: [
+      categoryAxis(
+        theme,
+        sortedProvidersByTokens.map((p) => p.provider),
+      ),
+    ],
+    yAxis: [valueAxis(theme)],
+    series: [
+      {
+        name: "Tokens",
+        type: "bar",
+        data: sortedProvidersByTokens.map((p) => p.total_tokens),
+        itemStyle: { color: theme.palette[5] },
       },
     ],
   };
@@ -267,160 +336,54 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   }
 
   const hasCostData = days.some((d) => d.total_cost_usd > 0);
-
   const hasCacheData = days.some(
     (d) => d.total_cache_read_tokens > 0 || d.total_cache_creation_tokens > 0,
   );
 
-  const cacheBarOption = {
-    textStyle: { color: theme.text },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      textStyle: { color: theme.tooltip.text },
-      backgroundColor: theme.tooltip.bg,
-      borderColor: theme.tooltip.border,
-    },
-    legend: {
-      data: ["Cache Read", "Cache Created"],
-      textStyle: { color: theme.text },
-    },
-    grid: {
-      left: "3%",
-      right: "4%",
-      bottom: "3%",
-      top: "15%",
-      containLabel: true,
-    },
-    xAxis: [
-      {
-        type: "category",
-        data: dayLabels,
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-      },
-    ],
+  const costBarOption = {
+    tooltip: chartTooltip(theme, "axis", {
+      valueFormatter: (value: number) => `$${value.toFixed(2)}`,
+    }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels)],
     yAxis: [
-      {
-        type: "value",
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-        splitLine: {
-          lineStyle: { color: theme.splitLine },
+      valueAxis(theme, {
+        axisLabel: {
+          color: theme.muted,
+          formatter: (value: number) => `$${value.toFixed(0)}`,
         },
-      },
+      }),
     ],
     series: [
       {
-        name: "Cache Read",
+        name: "Cost",
+        type: "bar",
+        data: days.map((d) => Number(d.total_cost_usd.toFixed(4))),
+        itemStyle: { color: theme.warning },
+      },
+    ],
+  };
+
+  const cacheBarOption = {
+    tooltip: chartTooltip(theme, "axis"),
+    legend: chartLegend(theme, { data: ["Cache read", "Cache created"] }),
+    grid: chartGrid(),
+    xAxis: [categoryAxis(theme, dayLabels)],
+    yAxis: [valueAxis(theme)],
+    series: [
+      {
+        name: "Cache read",
         type: "bar",
         stack: "cache",
         data: days.map((d) => d.total_cache_read_tokens),
-        itemStyle: { color: theme.palette[4] },
+        itemStyle: { color: theme.palette[1] },
       },
       {
-        name: "Cache Created",
+        name: "Cache created",
         type: "bar",
         stack: "cache",
         data: days.map((d) => d.total_cache_creation_tokens),
-        itemStyle: { color: theme.palette[5] },
-      },
-    ],
-  };
-
-  const costBarOption = {
-    textStyle: { color: theme.text },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      textStyle: { color: theme.tooltip.text },
-      backgroundColor: theme.tooltip.bg,
-      borderColor: theme.tooltip.border,
-    },
-    legend: {
-      data: ["USD Cost"],
-      textStyle: { color: theme.text },
-    },
-    grid: {
-      left: "3%",
-      right: "4%",
-      bottom: "3%",
-      top: "15%",
-      containLabel: true,
-    },
-    xAxis: [
-      {
-        type: "category",
-        data: dayLabels,
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-      },
-    ],
-    yAxis: [
-      {
-        type: "value",
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-        splitLine: {
-          lineStyle: { color: theme.splitLine },
-        },
-      },
-    ],
-    series: [
-      {
-        name: "USD Cost",
-        type: "bar",
-        stack: "cost",
-        data: days.map((d) => d.total_cost_usd),
         itemStyle: { color: theme.palette[2] },
-      },
-    ],
-  };
-
-  const callsBarOption = {
-    textStyle: { color: theme.text },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      textStyle: { color: theme.tooltip.text },
-      backgroundColor: theme.tooltip.bg,
-      borderColor: theme.tooltip.border,
-    },
-    legend: {
-      data: ["Calls"],
-      textStyle: { color: theme.text },
-    },
-    grid: {
-      left: "3%",
-      right: "4%",
-      bottom: "3%",
-      top: "15%",
-      containLabel: true,
-    },
-    xAxis: [
-      {
-        type: "category",
-        data: dayLabels,
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-      },
-    ],
-    yAxis: [
-      {
-        type: "value",
-        axisLine: { lineStyle: { color: theme.axisLine } },
-        axisLabel: { color: theme.text },
-        splitLine: {
-          lineStyle: { color: theme.splitLine },
-        },
-      },
-    ],
-    series: [
-      {
-        name: "Calls",
-        type: "bar",
-        data: days.map((d) => d.total_calls),
-        itemStyle: { color: theme.palette[0] },
       },
     ],
   };
@@ -435,18 +398,18 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
           </h3>
           <ReactEChartsCore
             echarts={echarts}
-            option={barOption}
+            option={tokensPerDayOption}
             className={styles.chartCanvas}
           />
         </Card>
         <Card animated="rise" className={styles.chartBox} interactive>
           <h3 className={styles.sectionTitle}>
             <Icon icon={PieChartIcon} size="md" tone="accent" />
-            By Model
+            Tokens by Model
           </h3>
           <ReactEChartsCore
             echarts={echarts}
-            option={pieOption}
+            option={modelPieOption}
             className={styles.chartCanvasTall}
           />
         </Card>
@@ -460,10 +423,49 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
           </h3>
           <ReactEChartsCore
             echarts={echarts}
-            option={callsBarOption}
+            option={callsPerDayOption}
             className={styles.chartCanvas}
           />
         </Card>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={PieChartIcon} size="md" tone="accent" />
+            Prompt vs Completion
+          </h3>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={promptCompletionOption}
+            className={styles.chartCanvasTall}
+          />
+        </Card>
+      </div>
+
+      <div className={`${styles.chartsRow} rf-stagger`}>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={Clock3} size="md" tone="accent" />
+            Avg Duration Per Day
+          </h3>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={avgDurationPerDayOption}
+            className={styles.chartCanvas}
+          />
+        </Card>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={Gauge} size="md" tone="success" />
+            Success Rate Per Day
+          </h3>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={successRatePerDayOption}
+            className={styles.chartCanvas}
+          />
+        </Card>
+      </div>
+
+      <div className={`${styles.chartsRow} rf-stagger`}>
         {hasCostData && (
           <Card animated="rise" className={styles.chartBox} interactive>
             <h3 className={styles.sectionTitle}>
@@ -477,10 +479,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
             />
           </Card>
         )}
-      </div>
-
-      {hasCacheData && (
-        <div className={`${styles.chartsRow} rf-stagger`}>
+        {hasCacheData && (
           <Card animated="rise" className={styles.chartBox} interactive>
             <h3 className={styles.sectionTitle}>
               <Icon icon={Database} size="md" tone="success" />
@@ -492,8 +491,22 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
               className={styles.chartCanvas}
             />
           </Card>
-        </div>
-      )}
+        )}
+      </div>
+
+      <div className={`${styles.chartsRow} rf-stagger`}>
+        <Card animated="rise" className={styles.chartBox} interactive>
+          <h3 className={styles.sectionTitle}>
+            <Icon icon={Activity} size="md" tone="accent" />
+            Tokens by Provider
+          </h3>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={providerBarOption}
+            className={styles.chartCanvas}
+          />
+        </Card>
+      </div>
 
       <section className={styles.root}>
         <h3 className={styles.sectionTitle}>
@@ -523,6 +536,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                       : ""}
                   </button>
                 </th>
+                <th className={styles.th}>Success</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -560,6 +574,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <tr key={p.provider} className="rf-enter-rise">
                   <td className={styles.td}>{p.provider}</td>
                   <td className={styles.td}>{p.total_calls}</td>
+                  <td className={styles.td}>
+                    {formatRatioPercent(p.successful_calls, p.total_calls)}
+                  </td>
                   <td className={styles.td}>
                     {formatTokenCount(p.total_tokens)}
                   </td>
@@ -607,10 +624,10 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                       : ""}
                   </button>
                 </th>
+                <th className={styles.th}>Success</th>
                 <th className={styles.th}>Prompt</th>
                 <th className={styles.th}>Completion</th>
                 <th className={styles.th}>Cache Read</th>
-                <th className={styles.th}>Cache Created</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -647,6 +664,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                   <td className={styles.td}>{m.model}</td>
                   <td className={styles.td}>{m.total_calls}</td>
                   <td className={styles.td}>
+                    {formatRatioPercent(m.successful_calls, m.total_calls)}
+                  </td>
+                  <td className={styles.td}>
                     {formatTokenCount(m.total_prompt_tokens)}
                   </td>
                   <td className={styles.td}>
@@ -654,9 +674,6 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                   </td>
                   <td className={styles.td}>
                     {formatTokenCount(m.total_cache_read_tokens)}
-                  </td>
-                  <td className={styles.td}>
-                    {formatTokenCount(m.total_cache_creation_tokens)}
                   </td>
                   <td className={styles.td}>
                     {formatCostDisplay(m.total_cost_usd)}

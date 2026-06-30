@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::events::EventBus;
-use crate::daemon::idle::WorkerIdleSnapshot;
+use crate::daemon::idle::{WorkerIdleSnapshot, STATUS_FRESH_MS};
 use crate::daemon::supervisor::{WorkerInfo, WorkerState};
 use crate::daemon_link::WorkerStatusReport;
 
@@ -68,6 +68,7 @@ pub struct WorkerRow {
     pub idle_deadline_ms: Option<u64>,
     pub last_status_report_ms: Option<u64>,
     pub last_error: Option<String>,
+    pub log_path: String,
 }
 
 pub struct DaemonState {
@@ -77,7 +78,7 @@ pub struct DaemonState {
     pub version: String,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
-    pub proxy_activity: SyncRwLock<HashMap<String, ProxyActivity>>,
+    pub proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
     pub proxy_stream_client: reqwest::Client,
@@ -108,13 +109,22 @@ impl DaemonState {
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
+        let proxy_activity = Arc::new(SyncRwLock::new(HashMap::new()));
+        let worker_auth_token = auth_token.clone().or_else(|| {
+            config
+                .hooks
+                .enabled
+                .then(|| config.hooks.token.clone())
+                .flatten()
+        });
         let supervisor = crate::daemon::supervisor::Supervisor::new_with_cron_pending(
             events.clone(),
             daemon_dir.clone(),
             daemon_port,
             cron_pending.clone(),
+            proxy_activity.clone(),
             config.idle_timeout_secs,
-            auth_token.clone(),
+            worker_auth_token,
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -138,7 +148,7 @@ impl DaemonState {
                 daemon_dir.join("projects.json"),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
-            proxy_activity: SyncRwLock::new(HashMap::new()),
+            proxy_activity,
             supervisor,
             proxy_client,
             proxy_stream_client,
@@ -241,7 +251,7 @@ impl DaemonState {
         }
         if !self
             .supervisor
-            .worker_pid_matches(&project_id, report.pid)
+            .worker_identity_matches(&project_id, report.pid, &report.instance_token)
             .await
         {
             return Err("worker status does not match the current worker".to_string());
@@ -274,13 +284,21 @@ impl DaemonState {
         self.supervisor
             .with_project_op_lock(project_id, || async {
                 self.supervisor.note_project_activity(project_id, now).await;
-                let mut activity = self.proxy_activity.write();
-                activity
-                    .entry(project_id.to_string())
-                    .or_default()
-                    .last_proxy_activity_ms = now;
+                self.record_proxy_activity(project_id, now);
             })
             .await;
+    }
+
+    pub async fn refresh_proxy_activity(&self, project_id: &str) {
+        let now = now_ms();
+        self.supervisor.note_project_activity(project_id, now).await;
+        self.record_proxy_activity(project_id, now);
+    }
+
+    fn record_proxy_activity(&self, project_id: &str, activity_ms: u64) {
+        let mut activity = self.proxy_activity.write();
+        let activity = activity.entry(project_id.to_string()).or_default();
+        activity.last_proxy_activity_ms = activity.last_proxy_activity_ms.max(activity_ms);
     }
 
     pub async fn increment_live_proxy_stream(&self, project_id: &str) {
@@ -293,7 +311,28 @@ impl DaemonState {
     pub fn decrement_live_proxy_stream(&self, project_id: &str) {
         let mut activity = self.proxy_activity.write();
         let activity = activity.entry(project_id.to_string()).or_default();
+        activity.last_proxy_activity_ms = now_ms();
         activity.live_proxy_streams = activity.live_proxy_streams.saturating_sub(1);
+    }
+
+    async fn stored_status_matches_current_worker(
+        &self,
+        project_id: &str,
+        worker: Option<&WorkerInfo>,
+        status: Option<&StoredWorkerStatus>,
+    ) -> bool {
+        let Some(worker) = worker else {
+            return false;
+        };
+        let Some(status) = status else {
+            return false;
+        };
+        if worker.pid != Some(status.report.pid) {
+            return false;
+        }
+        self.supervisor
+            .worker_identity_matches(project_id, status.report.pid, &status.report.instance_token)
+            .await
     }
 
     pub(crate) async fn worker_idle_snapshot(
@@ -313,10 +352,18 @@ impl DaemonState {
             .unwrap_or_default();
         let cron_next_fire_ms = self.cron_pending(project_id).await;
         let info = self.supervisor.worker_info(project_id).await?;
+        let status = if self
+            .stored_status_matches_current_worker(project_id, Some(&info), status.as_ref())
+            .await
+        {
+            status.as_ref()
+        } else {
+            None
+        };
         Some(worker_idle_snapshot_from(
             &entry,
             &info,
-            status.as_ref(),
+            status,
             &activity,
             cron_next_fire_ms,
         ))
@@ -336,6 +383,14 @@ impl DaemonState {
                 continue;
             };
             let status = statuses.get(&entry.id);
+            let status = if self
+                .stored_status_matches_current_worker(&entry.id, Some(&info), status)
+                .await
+            {
+                status
+            } else {
+                None
+            };
             let activity = activity.get(&entry.id).cloned().unwrap_or_default();
             snapshots.push((
                 entry.id.clone(),
@@ -397,6 +452,14 @@ impl DaemonState {
         for entry in projects {
             let worker = self.supervisor.worker_info(&entry.id).await;
             let status = statuses.get(&entry.id);
+            let status = if self
+                .stored_status_matches_current_worker(&entry.id, worker.as_ref(), status)
+                .await
+            {
+                status
+            } else {
+                None
+            };
             let activity = activity.get(&entry.id).cloned().unwrap_or_default();
             let last_activity_ms = entry
                 .last_active_ms
@@ -436,6 +499,12 @@ impl DaemonState {
                 idle_deadline_ms,
                 last_status_report_ms: status.map(|status| status.received_ms),
                 last_error: worker.as_ref().and_then(|worker| worker.last_error.clone()),
+                log_path: self
+                    .daemon_dir
+                    .join("logs")
+                    .join(format!("worker-{}.log", entry.slug))
+                    .to_string_lossy()
+                    .to_string(),
             });
         }
         rows.sort_by(|a, b| {
@@ -515,13 +584,15 @@ fn idle_deadline_ms(
     if activity.live_proxy_streams > 0 {
         return None;
     }
-    if status
-        .map(|status| {
-            status.report.lsp_clients > 0
-                || status.report.busy_chats > 0
-                || status.report.exec_running > 0
-        })
-        .unwrap_or(false)
+    let Some(status) = status else {
+        return None;
+    };
+    if now.saturating_sub(status.received_ms) >= STATUS_FRESH_MS {
+        return None;
+    }
+    if status.report.lsp_clients > 0
+        || status.report.busy_chats > 0
+        || status.report.exec_running > 0
     {
         return None;
     }
@@ -534,11 +605,7 @@ fn idle_deadline_ms(
     let last_activity_ms = entry
         .last_active_ms
         .max(activity.last_proxy_activity_ms)
-        .max(
-            status
-                .map(|status| status.report.last_activity_ts)
-                .unwrap_or(0),
-        );
+        .max(status.report.last_activity_ts);
     Some(last_activity_ms.saturating_add(idle_timeout_secs.saturating_mul(1000)))
 }
 
@@ -616,10 +683,27 @@ pub(crate) async fn write_daemon_state_json_atomic<T: Serialize>(
     let content = serde_json::to_vec_pretty(value)
         .map_err(|error| format!("failed to encode {label}: {error}"))?;
     write_daemon_state_tmp(&tmp, &content, label).await?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|error| format!("failed to publish {}: {error}", path.display()))?;
+    publish_daemon_state_tmp(&tmp, path).await?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+async fn publish_daemon_state_tmp(tmp: &Path, path: &Path) -> Result<(), String> {
+    tokio::fs::rename(tmp, path)
+        .await
+        .map_err(|error| format!("failed to publish {}: {error}", path.display()))
+}
+
+#[cfg(windows)]
+async fn publish_daemon_state_tmp(tmp: &Path, path: &Path) -> Result<(), String> {
+    match tokio::fs::remove_file(path).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("failed to replace {}: {error}", path.display())),
+    }
+    tokio::fs::rename(tmp, path)
+        .await
+        .map_err(|error| format!("failed to publish {}: {error}", path.display()))
 }
 
 async fn write_daemon_state_tmp(path: &Path, content: &[u8], label: &str) -> Result<(), String> {
@@ -662,6 +746,7 @@ pub async fn remove_daemon_info(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::projects::{ProjectEntry, ProjectSettings};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -689,10 +774,22 @@ mod tests {
         WorkerStatusReport {
             project_id: "project".to_string(),
             pid: 7,
+            instance_token: "token".to_string(),
             lsp_clients,
             busy_chats,
             exec_running,
             last_activity_ts: 11,
+        }
+    }
+
+    fn test_project_entry() -> ProjectEntry {
+        ProjectEntry {
+            id: "project".to_string(),
+            slug: "project".to_string(),
+            root: PathBuf::from("/tmp/project"),
+            pinned: false,
+            last_active_ms: 100,
+            settings: ProjectSettings::default(),
         }
     }
 
@@ -766,6 +863,25 @@ mod tests {
         assert_eq!(projects_path, daemon_dir.join("projects.json"));
     }
 
+    #[test]
+    fn new_uses_hook_token_for_worker_link_when_daemon_auth_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                token: Some("hook-secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(config, EventBus::new(dir.path().join("e.jsonl")), None);
+
+        assert_eq!(
+            state.supervisor.test_daemon_auth_token().as_deref(),
+            Some("hook-secret")
+        );
+    }
+
     #[tokio::test]
     async fn daemon_json_atomic_write_read_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -773,6 +889,108 @@ mod tests {
         let info = test_daemon_info();
         write_daemon_info_atomic(&path, &info).await.unwrap();
         assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
+    }
+
+    #[tokio::test]
+    async fn daemon_json_atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        let mut info = test_daemon_info();
+        write_daemon_info_atomic(&path, &info).await.unwrap();
+
+        info.port = 9999;
+        write_daemon_info_atomic(&path, &info).await.unwrap();
+
+        assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
+    }
+
+    #[tokio::test]
+    async fn idle_snapshot_ignores_status_from_previous_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+        );
+        let project_root = dir.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(project_root).await.unwrap()
+        };
+        state
+            .supervisor
+            .set_test_worker_info(&entry.id, 8, WorkerState::Ready, "current-token")
+            .await;
+        let mut stale = status_report(5, 6, 7);
+        stale.project_id = entry.id.clone();
+        stale.pid = 7;
+        stale.instance_token = "old-token".to_string();
+        stale.last_activity_ts = 999_999;
+        state.store_worker_status(stale).await;
+
+        let snapshot = state.worker_idle_snapshot(&entry.id).await.unwrap();
+
+        assert_eq!(snapshot.lsp_clients, 0);
+        assert_eq!(snapshot.busy_chats, 0);
+        assert_eq!(snapshot.exec_running, 0);
+        assert_eq!(snapshot.last_status_report_ms, 0);
+        assert_eq!(snapshot.last_proxy_activity_ms, entry.last_active_ms);
+        let rows = state.worker_rows().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].busy_chats, 0);
+        assert_eq!(rows[0].last_status_report_ms, None);
+        assert_eq!(rows[0].idle_deadline_ms, None);
+    }
+
+    #[tokio::test]
+    async fn refresh_proxy_activity_updates_activity_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+        );
+
+        state.refresh_proxy_activity("project").await;
+
+        assert!(state.proxy_activity("project").await.last_proxy_activity_ms > 0);
+    }
+
+    #[test]
+    fn idle_deadline_requires_fresh_status() {
+        let entry = test_project_entry();
+        let worker = WorkerInfo {
+            project_id: entry.id.clone(),
+            pid: Some(7),
+            http_port: 1,
+            lsp_port: 2,
+            state: WorkerState::Ready,
+            last_error: None,
+        };
+        let activity = ProxyActivity {
+            last_proxy_activity_ms: 100,
+            live_proxy_streams: 0,
+        };
+        let status = StoredWorkerStatus {
+            report: status_report(0, 0, 0),
+            received_ms: 1,
+        };
+
+        assert_eq!(
+            idle_deadline_ms(
+                STATUS_FRESH_MS + 1,
+                &entry,
+                Some(&worker),
+                Some(&status),
+                &activity,
+                None,
+                2,
+            ),
+            None
+        );
     }
 
     #[cfg(unix)]

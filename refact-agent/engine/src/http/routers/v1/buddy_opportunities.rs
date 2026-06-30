@@ -640,10 +640,7 @@ fn render_pulse_to_markdown(pulse: &BuddyPulse, scope: PulseScope) -> String {
     let mut out = vec![format!("# Buddy Pulse Report ({})", scope_label(scope))];
     let include = |target: PulseScope| scope == PulseScope::All || scope == target;
     if include(PulseScope::Tasks) {
-        out.push(format!(
-            "## Tasks\n\n- Total: {}\n- Stuck: {}\n- Abandoned: {}",
-            pulse.tasks.total, pulse.tasks.stuck, pulse.tasks.abandoned
-        ));
+        out.push(render_task_pulse_to_markdown(pulse));
     }
     if include(PulseScope::Trajectories) {
         out.push(format!(
@@ -713,6 +710,35 @@ fn render_pulse_to_markdown(pulse: &BuddyPulse, scope: PulseScope) -> String {
         ));
     }
     out.join("\n\n")
+}
+
+fn render_task_pulse_to_markdown(pulse: &BuddyPulse) -> String {
+    let mut lines = vec![
+        "## Tasks".to_string(),
+        String::new(),
+        "### Current board state".to_string(),
+        format!("- Total tasks: {}", pulse.tasks.total),
+    ];
+    let mut by_status = pulse.tasks.by_status.iter().collect::<Vec<_>>();
+    by_status.sort_by(|a, b| a.0.cmp(b.0));
+    if by_status.is_empty() {
+        lines.push("- Status counts: none".to_string());
+    } else {
+        for (status, count) in by_status {
+            lines.push(format!("- {}: {}", status, count));
+        }
+    }
+    lines.push(String::new());
+    lines.push("### Recent alert history".to_string());
+    lines.push(format!(
+        "- Stuck alerts in the last hour: {}",
+        pulse.tasks.recent_stuck_alert_count_1h()
+    ));
+    lines.push(format!(
+        "- Abandoned alerts in the last 24 hours: {}",
+        pulse.tasks.recent_abandoned_alert_count_24h()
+    ));
+    lines.join("\n")
 }
 
 async fn install_marketplace_action(
@@ -996,6 +1022,7 @@ async fn create_investigation_chat(
     let now = chrono::Utc::now().to_rfc3339();
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),
@@ -1103,4 +1130,38 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
     let snap = serde_json::to_value(svc.snapshot())
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(axum::Json(serde_json::json!({ "snapshot": snap })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buddy::types::TaskPulse;
+
+    #[test]
+    fn pulse_report_task_section_separates_current_state_from_recent_alerts() {
+        let mut by_status = std::collections::HashMap::new();
+        by_status.insert("planning".to_string(), 4);
+        by_status.insert("active".to_string(), 1);
+        let pulse = BuddyPulse {
+            tasks: TaskPulse {
+                total: 5,
+                by_status,
+                recent_stuck_alerts_1h: 2,
+                recent_abandoned_alerts_24h: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let markdown = render_pulse_to_markdown(&pulse, PulseScope::Tasks);
+
+        assert!(markdown.contains("### Current board state"));
+        assert!(markdown.contains("- Total tasks: 5"));
+        assert!(markdown.contains("- planning: 4"));
+        assert!(markdown.contains("### Recent alert history"));
+        assert!(markdown.contains("- Stuck alerts in the last hour: 2"));
+        assert!(markdown.contains("- Abandoned alerts in the last 24 hours: 3"));
+        assert!(!markdown.contains("- Stuck: 2"));
+        assert!(!markdown.contains("- Abandoned: 3"));
+    }
 }

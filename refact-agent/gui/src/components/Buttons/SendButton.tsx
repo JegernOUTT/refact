@@ -1,7 +1,7 @@
 import React from "react";
-import { Badge, DropdownMenu, Flex, HoverCard, Text } from "@radix-ui/themes";
+import { Badge, DropdownMenu, Flex } from "@radix-ui/themes";
 import { Clock, ChevronsUp, Send, Zap } from "lucide-react";
-import { Icon, IconButton } from "../ui";
+import { Icon, IconButton, Tooltip } from "../ui";
 
 type SendButtonProps = {
   disabled?: boolean;
@@ -34,8 +34,8 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
             {queuedCount}
           </Badge>
         )}
-        <HoverCard.Root>
-          <HoverCard.Trigger>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <IconButton
               aria-label="Send message"
               disabled={disabled}
@@ -49,13 +49,9 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
                 onSend();
               }}
             />
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Send message
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content side="top">Send message</Tooltip.Content>
+        </Tooltip>
       </Flex>
     );
   }
@@ -73,9 +69,9 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
           {queuedCount}
         </Badge>
       )}
-      <HoverCard.Root>
-        <HoverCard.Trigger>
-          <DropdownMenu.Root>
+      <DropdownMenu.Root>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <DropdownMenu.Trigger>
               <IconButton
                 aria-label="Send options"
@@ -86,25 +82,21 @@ export const SendButtonWithDropdown: React.FC<SendButtonProps> = ({
                 variant="ghost"
               />
             </DropdownMenu.Trigger>
+          </Tooltip.Trigger>
+          <Tooltip.Content side="top">Send options</Tooltip.Content>
+        </Tooltip>
 
-            <DropdownMenu.Content size="1" align="end">
-              <DropdownMenu.Item onSelect={() => onSend()}>
-                <Icon icon={Clock} size="sm" />
-                Queue message
-              </DropdownMenu.Item>
-              <DropdownMenu.Item onSelect={() => onSendImmediately()}>
-                <Icon icon={Zap} size="sm" />
-                Send next
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Root>
-        </HoverCard.Trigger>
-        <HoverCard.Content size="1" side="top">
-          <Text as="p" size="2">
-            Send options
-          </Text>
-        </HoverCard.Content>
-      </HoverCard.Root>
+        <DropdownMenu.Content size="1" align="end">
+          <DropdownMenu.Item onSelect={() => onSend()}>
+            <Icon icon={Clock} size="sm" />
+            Queue message
+          </DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={() => onSendImmediately()}>
+            <Icon icon={Zap} size="sm" />
+            Send next
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
       <Icon icon={ChevronsUp} size="sm" />
     </Flex>
   );

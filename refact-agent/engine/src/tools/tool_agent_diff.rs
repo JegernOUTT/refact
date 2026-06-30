@@ -13,7 +13,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
-use crate::tasks::types::BoardCard;
+use crate::tasks::types::{AbVariantInfo, BoardCard};
 use crate::tools::task_tool_helpers::{required_string, require_bound_planner_task};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -50,6 +50,58 @@ impl ToolAgentDiff {
     pub fn new() -> Self {
         Self
     }
+}
+
+fn parse_card_variant_id(input: &str) -> (&str, Option<&str>) {
+    if let Some((card_id, variant)) = input.split_once('/') {
+        return (card_id, Some(variant));
+    }
+    if let Some((card_id, variant)) = input.split_once(':') {
+        return (card_id, Some(variant));
+    }
+    (input, None)
+}
+
+fn variant_key_from_request(value: Option<&str>) -> Result<Option<&'static str>, String> {
+    match value {
+        Some("a") | Some("A") => Ok(Some("a")),
+        Some("b") | Some("B") => Ok(Some("b")),
+        Some(other) => Err(format!(
+            "Invalid A/B variant '{}', expected 'a' or 'b'",
+            other
+        )),
+        None => Ok(None),
+    }
+}
+
+fn card_for_diff_target(card: &BoardCard, requested_id: &str) -> Result<BoardCard, String> {
+    let (_, requested_variant) = parse_card_variant_id(requested_id);
+    let Some(variant_key) = variant_key_from_request(requested_variant)? else {
+        return Ok(card.clone());
+    };
+    let variants = card
+        .ab_variants
+        .as_ref()
+        .ok_or_else(|| format!("Card {} has no A/B variants", card.id))?;
+    let variant = variants
+        .variant(variant_key)
+        .ok_or_else(|| format!("A/B variant {} not found", variant_key))?;
+    Ok(card_with_variant_agent(card, variant_key, variant))
+}
+
+fn card_with_variant_agent(
+    card: &BoardCard,
+    variant_key: &str,
+    variant: &AbVariantInfo,
+) -> BoardCard {
+    let mut card = card.clone();
+    card.agent_chat_id = Some(variant.chat_id.clone());
+    card.assignee = Some(variant.agent_id.clone());
+    card.agent_worktree = Some(variant.worktree.clone());
+    card.agent_worktree_name = variant.worktree_name.clone();
+    card.agent_branch = variant.branch.clone();
+    card.title = format!("{} [A/B {}]", card.title, variant_key.to_ascii_uppercase());
+    card
 }
 
 fn parse_max_lines(args: &HashMap<String, Value>) -> Result<usize, String> {
@@ -878,7 +930,8 @@ impl Tool for ToolAgentDiff {
             );
         }
 
-        let card_id = required_string(args, "card_id")?;
+        let requested_card_id = required_string(args, "card_id")?;
+        let (card_id, _) = parse_card_variant_id(&requested_card_id);
         let mode = AgentDiffMode::parse(args.get("mode"))?;
         let max_lines = parse_max_lines(args)?;
         let task_id = require_bound_planner_task(&ccx, args).await?;
@@ -886,12 +939,13 @@ impl Tool for ToolAgentDiff {
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
         let card = board
-            .get_card(&card_id)
+            .get_card(card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
-        let worktree = canonical_worktree(gcx.clone(), &task_id, card).await?;
+        let card = card_for_diff_target(card, &requested_card_id)?;
+        let worktree = canonical_worktree(gcx.clone(), &task_id, &card).await?;
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let (worktree_commit, worktree_branch) =
-            base_from_worktree_meta(gcx.clone(), &task_id, card).await;
+            base_from_worktree_meta(gcx.clone(), &task_id, &card).await;
         let base = resolve_base(
             worktree_commit,
             worktree_branch,
@@ -903,7 +957,7 @@ impl Tool for ToolAgentDiff {
             .as_ref()
             .ok_or_else(|| format!("Card {} has no agent branch", card.id))?;
         let output = run_git_diff(&worktree, mode, &base).await?;
-        let result = render_agent_diff(card, branch, &base, mode, &output, max_lines);
+        let result = render_agent_diff(&card, branch, &base, mode, &output, max_lines);
 
         Ok((
             false,

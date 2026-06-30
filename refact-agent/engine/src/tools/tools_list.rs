@@ -440,6 +440,18 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_update_plan::ToolUpdatePlan {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_get_goal::ToolGetGoal::new(
+            config_path.clone(),
+        )),
+        Box::new(crate::tools::tool_set_goal::ToolSetGoal {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_update_goal::ToolUpdateGoal {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_validate_goal::ToolValidateGoal {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_compress_chat::ToolCompressChatProbe {
             config_path: config_path.clone(),
         }),
@@ -690,6 +702,9 @@ async fn get_config_subagent_tools(gcx: Arc<GlobalContext>) -> ToolGroup {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use crate::tools::tools_description::ToolSourceType;
@@ -799,6 +814,231 @@ mod tests {
             tool_names.contains(&"web_search".to_string()),
             "{tool_names:?}"
         );
+    }
+
+    struct PromptContractVecdb;
+
+    #[async_trait::async_trait]
+    impl crate::vecdb::vdb_structs::VecdbSearch for PromptContractVecdb {
+        async fn vecdb_search(
+            &self,
+            query: String,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<crate::vecdb::vdb_structs::SearchResult, String> {
+            Ok(crate::vecdb::vdb_structs::SearchResult {
+                query_text: query,
+                results: Vec::new(),
+            })
+        }
+
+        async fn get_status(&self) -> Result<crate::vecdb::vdb_structs::VecDbStatus, String> {
+            Ok(crate::vecdb::vdb_structs::VecDbStatus {
+                files_unprocessed: 0,
+                files_total: 0,
+                requests_made_since_start: 0,
+                vectors_made_since_start: 0,
+                db_size: 0,
+                db_cache_size: 0,
+                state: "done".to_string(),
+                queue_additions: false,
+                vecdb_max_files_hit: false,
+                vecdb_errors: Default::default(),
+            })
+        }
+
+        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn vectorizer_enqueue_files(
+            &self,
+            _documents: &[String],
+            _process_immediately: bool,
+        ) {
+        }
+
+        fn current_constants(&self) -> (crate::vecdb::vdb_structs::EmbeddingModelConfig, usize) {
+            (
+                crate::vecdb::vdb_structs::EmbeddingModelConfig {
+                    endpoint: String::new(),
+                    endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
+                    api_key: String::new(),
+                    model_name: String::new(),
+                    embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
+                    rejection_threshold: 0.0,
+                    embedding_batch: 1,
+                    n_ctx: 0,
+                },
+                0,
+            )
+        }
+
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn vecdb_search_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<Vec<crate::vecdb::vdb_structs::VecdbRecord>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn task_prompt_contract_gcx() -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+            &gcx.config_dir,
+        )
+        .await
+        .unwrap();
+        *gcx.ast_service.lock().unwrap() =
+            Some(crate::ast::ast_indexer_thread::ast_service_init(String::new(), 100).await);
+        *gcx.vec_db.lock().await = Some(Arc::new(PromptContractVecdb));
+        gcx
+    }
+
+    fn read_default_task_mode(
+        mode_id: &str,
+    ) -> crate::yaml_configs::customization_types::ModeConfig {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("refact-yaml-configs")
+            .join("src")
+            .join("defaults")
+            .join("modes")
+            .join(format!("{mode_id}.yaml"));
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        serde_yaml::from_str(&raw)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()))
+    }
+
+    fn task_prompt_tool_references(prompt: &str) -> HashSet<String> {
+        let mut refs = HashSet::new();
+        let call_re = regex::Regex::new(r"\b([a-z][a-z0-9_]*)\(").unwrap();
+        for caps in call_re.captures_iter(prompt) {
+            refs.insert(caps[1].to_string());
+        }
+
+        let non_tool_code_terms = HashSet::from([
+            "agent_branch",
+            "cache_control",
+            "content",
+            "description",
+            "executing_tools",
+            "exit_code",
+            "files_changed",
+            "followup_cards",
+            "node_modules",
+            "output_tail",
+            "path",
+            "relevant_documents",
+            "retain_worktree",
+            "run_in_background",
+            "suggested_steps",
+            "t_shell",
+            "target_files",
+            "test_name",
+            "test_pattern",
+            "tests_added_or_updated",
+            "worktree_path",
+        ]);
+        let code_span_re = regex::Regex::new(r"`([^`]+)`").unwrap();
+        let snake_re = regex::Regex::new(r"\b[a-z][a-z0-9_]*_[a-z0-9_]+\b").unwrap();
+        let toolish_span_re = regex::Regex::new(r"^([a-z][a-z0-9_]*)(?:\s*\(|$)").unwrap();
+        for caps in code_span_re.captures_iter(prompt) {
+            let span = &caps[1];
+            if span.contains('\n') {
+                continue;
+            }
+            if span.trim() != span {
+                continue;
+            }
+            if span.contains(" / ") {
+                for token in snake_re.find_iter(span) {
+                    let token = token.as_str();
+                    if !non_tool_code_terms.contains(token) {
+                        refs.insert(token.to_string());
+                    }
+                }
+                continue;
+            }
+            let span = span.trim();
+            if let Some(caps) = toolish_span_re.captures(span) {
+                let token = caps[1].to_string();
+                if !non_tool_code_terms.contains(token.as_str()) {
+                    refs.insert(token);
+                }
+            }
+        }
+
+        refs
+    }
+
+    async fn assert_task_mode_prompt_tool_contract(mode_id: &str) {
+        let mode = read_default_task_mode(mode_id);
+        let gcx = task_prompt_contract_gcx().await;
+        let registered_tools = get_available_tools(gcx.clone())
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        let mode_tools = get_tools_for_mode(gcx, mode_id, None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+
+        let missing_registered = mode
+            .tools
+            .iter()
+            .filter(|name| !registered_tools.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing_registered.is_empty(),
+            "{mode_id} tools list references unregistered tools: {missing_registered:?}"
+        );
+
+        let missing_from_mode = mode
+            .tools
+            .iter()
+            .filter(|name| !mode_tools.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing_from_mode.is_empty(),
+            "{mode_id} tools list contains tools unavailable in the mode: {missing_from_mode:?}; available={mode_tools:?}"
+        );
+
+        let prompt_refs = task_prompt_tool_references(&mode.prompt);
+        let missing_prompt_refs = prompt_refs
+            .iter()
+            .filter(|name| !mode_tools.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing_prompt_refs.is_empty(),
+            "{mode_id} prompt references tools unavailable in the mode: {missing_prompt_refs:?}; refs={prompt_refs:?}; available={mode_tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_planner_prompt_references_only_available_tools() {
+        assert_task_mode_prompt_tool_contract("task_planner").await;
+    }
+
+    #[tokio::test]
+    async fn task_agent_prompt_references_only_available_tools() {
+        assert_task_mode_prompt_tool_contract("task_agent").await;
     }
 }
 

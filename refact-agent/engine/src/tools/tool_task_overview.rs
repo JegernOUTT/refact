@@ -883,6 +883,7 @@ mod tests {
         let ts = fixed_now() - Duration::minutes(minutes_ago);
         AgentStatus {
             card_id: id.to_string(),
+            variant_key: None,
             card_title: format!("{} title", id),
             agent_chat_id: format!("agent-{}", id),
             column: "doing".to_string(),

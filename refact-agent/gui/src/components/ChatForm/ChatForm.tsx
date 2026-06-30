@@ -151,25 +151,25 @@ import {
 } from "../../features/Errors/informationSlice";
 import { InformationCallout } from "../Callout/Callout";
 import { ToolConfirmation } from "./ToolConfirmation";
-import { selectThreadConfirmation } from "../../features/Chat";
+import { selectThreadConfirmationById } from "../../features/Chat/Thread";
 import { AttachImagesButton } from "../Dropzone";
 import { MicrophoneButton, MicrophoneButtonRef } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
   selectChatErrorById,
-  selectCurrentThreadId,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectMessages,
-  selectQueuedItems,
-  selectThreadImages,
-  selectThreadMode,
-  selectManualPreviewItems,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectMessagesById,
+  selectQueuedItemsById,
+  selectThreadImagesById,
+  selectThreadModeById,
+  selectManualPreviewItemsById,
   removeManualPreviewItem,
   setThreadMode,
   DEFAULT_MODE,
   selectIsBuddyChat,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { useReportErrorMutation } from "../../services/refact/buddy";
 
 import { useUsageCounter } from "../UsageCounter/useUsageCounter";
@@ -202,15 +202,19 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   onExpandedChange,
 }) => {
   const dispatch = useAppDispatch();
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const caps = useCapsForToolUse();
   const { isMultimodalitySupportedForCurrentModel } = caps;
   const config = useConfig();
   const host = useAppSelector(selectHost);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
   const globalError = useAppSelector(getErrorMessage);
-  const chatId = useAppSelector(selectCurrentThreadId);
   const chatError = useAppSelector((state) =>
     selectChatErrorById(state, chatId),
   );
@@ -218,7 +222,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     selectIsBuddyChat(state, chatId),
   );
   const information = useAppSelector(getInformationMessage);
-  const pauseReasonsWithPause = useAppSelector(selectThreadConfirmation);
+  const pauseReasonsWithPause = useAppSelector((state) =>
+    selectThreadConfirmationById(state, chatId),
+  );
   const [reportError] = useReportErrorMutation();
   useEffect(() => {
     if (chatError) {
@@ -236,12 +242,18 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const clearComposerPointerDownRef = React.useRef<number | null>(null);
   const isOnline = useIsOnline();
   const { isContextFull } = useUsageCounter();
-  const messages = useAppSelector(selectMessages);
-  const queuedItems = useAppSelector(selectQueuedItems);
-  const threadMode = useAppSelector(selectThreadMode);
-  const manualPreviewItems = useAppSelector(selectManualPreviewItems);
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const queuedItems = useAppSelector((state) =>
+    selectQueuedItemsById(state, chatId),
+  );
+  const threadMode = useAppSelector((state) =>
+    selectThreadModeById(state, chatId),
+  );
+  const manualPreviewItems = useAppSelector((state) =>
+    selectManualPreviewItemsById(state, chatId),
+  );
   const autoFocus = useAutoFocusOnce();
-  const { abort, regenerate } = useChatActions();
+  const { abort, regenerate } = useChatActions(chatId);
   useFirstSendAutoFlip();
 
   const onSetMode = useCallback(
@@ -258,7 +270,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const isModeDisabled = useMemo(() => isStreaming, [isStreaming]);
   const attachedFiles = useAttachedFiles();
-  const attachedImages = useAppSelector(selectThreadImages);
+  const attachedImages = useAppSelector((state) =>
+    selectThreadImagesById(state, chatId),
+  );
   const microphoneRef = React.useRef<MicrophoneButtonRef>(null);
 
   const allDisabled = caps.usableModelsForPlan.every((option) => {

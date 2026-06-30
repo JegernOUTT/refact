@@ -18,6 +18,15 @@ export type MessageContent =
       | { type: "image_url"; image_url: { url: string } }
     )[];
 
+export type GoalBudgetCommand = {
+  max_turns?: number;
+  max_minutes?: number;
+  max_tokens?: number;
+  cooldown_ms?: number;
+  no_progress_token_threshold?: number;
+  no_progress_turns?: number;
+};
+
 export type ChatCommandBase =
   | {
       type: "user_message";
@@ -33,6 +42,23 @@ export type ChatCommandBase =
   | {
       type: "set_params";
       patch: Record<string, unknown>;
+    }
+  | {
+      type: "set_goal";
+      content: string;
+      budget?: GoalBudgetCommand;
+    }
+  | {
+      type: "set_goal_budget";
+      budget: GoalBudgetCommand;
+    }
+  | {
+      type: "update_goal";
+      note: string;
+    }
+  | {
+      type: "goal_control";
+      action: GoalControlAction;
     }
   | {
       type: "abort";
@@ -89,6 +115,8 @@ export type ChatCommand = ChatCommandBase & {
   client_request_id: string;
   priority?: boolean;
 };
+
+export type GoalControlAction = "pause" | "resume" | "stop";
 
 function commandUrl(connection: PortOrConnection, chatId: string): string {
   return buildApiUrl(
@@ -204,6 +232,57 @@ export async function updateChatParams(
     type: "set_params",
     patch: params,
   } as ChatCommandBase);
+}
+
+export async function setGoal(
+  chatId: string,
+  content: string,
+  connection: PortOrConnection,
+  apiKey?: string,
+  budget?: GoalBudgetCommand,
+): Promise<void> {
+  const command: ChatCommandBase = {
+    type: "set_goal",
+    content,
+    ...(budget === undefined ? {} : { budget }),
+  };
+  await sendChatCommand(chatId, connection, apiKey, command);
+}
+
+export async function setGoalBudget(
+  chatId: string,
+  budget: GoalBudgetCommand,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "set_goal_budget",
+    budget,
+  });
+}
+
+export async function updateGoal(
+  chatId: string,
+  note: string,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "update_goal",
+    note,
+  });
+}
+
+export async function goalControl(
+  chatId: string,
+  action: GoalControlAction,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "goal_control",
+    action,
+  });
 }
 
 export async function abortGeneration(

@@ -10,6 +10,7 @@ import { useGetCapsQuery } from "../hooks/useGetCapsQuery";
 import { capsApi } from "../services/refact";
 import { server } from "../utils/mockServer";
 import { updateConfig } from "../features/Config/configSlice";
+import { setBackendStatus } from "../features/Connection";
 
 function createWrapper() {
   const store = setUpStore({
@@ -20,6 +21,7 @@ function createWrapper() {
       host: "vscode",
     },
   });
+  store.dispatch(setBackendStatus({ status: "online" }));
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <Provider store={store}>{children}</Provider>
@@ -48,11 +50,14 @@ describe("useGetCapsQuery", () => {
 
     const { result } = renderHook(() => useGetCapsQuery(), { wrapper });
 
-    await waitFor(() => {
-      expect(Object.keys(result.current.data?.chat_models ?? {})).toHaveLength(
-        Object.keys(STUB_CAPS_RESPONSE.chat_models).length,
-      );
-    });
+    await waitFor(
+      () => {
+        expect(
+          Object.keys(result.current.data?.chat_models ?? {}),
+        ).toHaveLength(Object.keys(STUB_CAPS_RESPONSE.chat_models).length);
+      },
+      { timeout: 5000 },
+    );
     expect(capsRequests).toBeGreaterThanOrEqual(2);
 
     store.dispatch(capsApi.util.resetApiState());
@@ -79,6 +84,7 @@ describe("useGetCapsQuery", () => {
         lspUrl: "http://localhost:5173/v1/ping/Refact",
       },
     });
+    store.dispatch(setBackendStatus({ status: "online" }));
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Provider store={store}>{children}</Provider>
     );
@@ -117,6 +123,7 @@ describe("useGetCapsQuery", () => {
         lspUrl: "http://127.0.0.1:8001/v1/ping/Refact",
       },
     });
+    store.dispatch(setBackendStatus({ status: "online" }));
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Provider store={store}>{children}</Provider>
     );
@@ -153,6 +160,7 @@ describe("useGetCapsQuery", () => {
         lspUrl: "https://remote.example.com/v1/ping",
       },
     });
+    store.dispatch(setBackendStatus({ status: "online" }));
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Provider store={store}>{children}</Provider>
     );

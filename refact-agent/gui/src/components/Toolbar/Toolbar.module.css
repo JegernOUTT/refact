@@ -28,6 +28,12 @@
   gap: var(--rf-space-1);
 }
 
+.toolbarSpacer {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
 .engineUrl {
   display: inline-block;
   max-width: 180px;
@@ -74,228 +80,13 @@
   background: var(--rf-border);
 }
 
-.tabsContainer {
-  display: flex;
-  align-items: center;
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.tabsContainer::-webkit-scrollbar {
-  display: none;
-}
-
-.tabList {
-  display: flex;
-  align-items: center;
-  width: max-content;
-  min-width: min-content;
-  height: calc(100% - var(--rf-space-1));
-  padding: 0;
-  overflow: visible;
-  background: color-mix(in oklab, var(--rf-surface-glass), transparent 36%);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: inset 0 var(--rf-hairline) 0 var(--rf-border);
-}
-
-.tabList > span[aria-hidden="true"] {
-  display: none;
-}
-
-.tabWrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 0 1 180px;
-  min-width: 48px;
-  max-width: 240px;
-  height: 100%;
-  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.tabWrapDragging {
-  opacity: 0.5;
-}
-
-.tabButton {
-  position: relative;
-  z-index: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
-  width: 100%;
-  min-width: 0;
-  height: calc(100% - var(--rf-space-2));
-  padding: 0 var(--rf-space-2);
-  padding-right: 26px;
-  margin: var(--rf-space-1) var(--rf-hairline);
-  overflow: hidden;
-  color: var(--rf-color-muted);
-  background: transparent;
-  border: 0;
-  border-radius: var(--rf-radius-ctl);
-  cursor: pointer;
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
-  text-align: left;
-  transition:
-    color var(--rf-dur-fast) var(--rf-ease-standard),
-    background-color var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.tabButton:hover {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-}
-
-.tabButton:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: calc(-1 * var(--rf-hairline));
-}
-
-.tabButtonActive,
-.tabButton[data-state="active"] {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-}
-
-.tabButtonActive:hover,
-.tabButton[data-state="active"]:hover {
-  background: var(--rf-surface-2);
-}
-
-.tabStatus {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.tabTitle {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tabModeBadge {
-  flex-shrink: 0;
-  min-height: 16px;
-  padding: 0 var(--rf-space-1);
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-  text-transform: lowercase;
-  white-space: nowrap;
-}
-
-.tabNotificationBadge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 var(--rf-space-1);
-  color: var(--rf-color-danger);
-  background: transparent;
-  border: var(--rf-hairline) solid currentColor;
-  border-radius: var(--rf-radius-pill);
-  font: 650 var(--rf-text-1) / 16px var(--rf-font-ui);
-  text-align: center;
-}
-
-.tabClose {
-  position: absolute;
-  z-index: 2;
-  right: var(--rf-space-2);
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  color: var(--rf-color-muted);
-  background: transparent;
-  border: 0;
-  border-radius: var(--rf-radius-chip);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition:
-    opacity var(--rf-dur-fast) var(--rf-ease-standard),
-    background-color var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.tabWrap:hover .tabClose,
-.tabButton:focus-visible ~ .tabClose,
-.tabClose:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.tabClose:hover {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-2);
-}
-
-.tabButtonActive ~ .tabClose,
-.tabButton[data-state="active"] ~ .tabClose {
-  opacity: 0.72;
-  pointer-events: auto;
-}
-
-.tabButtonActive ~ .tabClose:hover,
-.tabButton[data-state="active"] ~ .tabClose:hover {
-  opacity: 1;
-}
-
-.RenameInput {
-  --rf-input-max: none;
-
-  flex: 1;
-  min-width: 0;
-  min-height: calc(100% - var(--rf-space-2));
-  height: calc(100% - var(--rf-space-2));
-  margin: var(--rf-space-1) var(--rf-hairline);
-  padding: 0 var(--rf-space-2);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
-}
-
-@media (hover: none) {
-  .tabClose {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-
-@supports not (background: color-mix(in oklab, black, transparent)) {
-  .tabList {
-    background: var(--rf-surface-glass);
-  }
-}
-
 @media (prefers-reduced-transparency: reduce) {
-  .toolbar,
-  .RenameInput {
+  .toolbar {
     backdrop-filter: none;
   }
 }
 
-:global(.radix-themes[data-host="jetbrains"]) .toolbar,
-:global(.radix-themes[data-host="jetbrains"]) .RenameInput {
+:global(.radix-themes[data-host="jetbrains"]) .toolbar {
   backdrop-filter: none;
 }
 
@@ -305,25 +96,9 @@
   }
 }
 
-@container toolbar (max-width: 640px) {
-  .tabWrap {
-    flex-basis: 148px;
-    max-width: 180px;
-  }
-}
-
 @container toolbar (max-width: 520px) {
   .toolbarDivider {
     margin: 0 var(--rf-space-1);
-  }
-
-  .tabWrap {
-    flex-basis: 120px;
-    max-width: 148px;
-  }
-
-  .tabModeBadge {
-    display: none;
   }
 }
 
@@ -341,34 +116,8 @@
   }
 }
 
-@container toolbar (max-width: 260px) {
-  .tabWrap {
-    flex-basis: 96px;
-    min-width: 40px;
-  }
-
-  .tabStatus,
-  .tabNotificationBadge {
-    display: none;
-  }
-}
-
 @media (max-width: 360px) {
   .toolbar {
     padding: 0 var(--rf-space-1);
-  }
-}
-
-.homeButtonWrapper {
-  display: none;
-}
-
-.scrollContainer {
-  display: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tabWrap {
-    transition: none;
   }
 }

@@ -12,10 +12,37 @@ import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.util.application
 import com.smallcloud.refactai.lsp.LSPProcessHolder
+import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
 import com.smallcloud.refactai.panes.sharedchat.browser.getActionKeybinding
 import com.smallcloud.refactai.settings.AppSettingsState
 import java.io.File
+import java.net.URI
 import java.nio.file.Paths
+
+
+internal fun ensureBackendStartedForConfig(
+    backendReady: Boolean,
+    connectionStatus: LSPBackendConnectionStatus,
+    ensureStarted: () -> Unit,
+) {
+    val shouldStart = !backendReady &&
+        (connectionStatus == LSPBackendConnectionStatus.CONNECTING ||
+            connectionStatus == LSPBackendConnectionStatus.FAILED)
+    if (shouldStart) {
+        ensureStarted()
+    }
+}
+
+internal data class BackendConfigUrls(val lspUrl: String?, val browserUrl: String?)
+
+internal fun backendConfigUrls(
+    backendReady: Boolean,
+    baseUrl: URI?,
+    browserUrl: URI?,
+): BackendConfigUrls {
+    if (!backendReady) return BackendConfigUrls(null, null)
+    return BackendConfigUrls(baseUrl?.toString(), browserUrl?.toString())
+}
 
 
 class Editor (val project: Project) {
@@ -107,15 +134,26 @@ class Editor (val project: Project) {
         val mode = if (isDarkMode) "dark" else "light"
         val themeProps = Events.Config.ThemeProps(mode)
         val lspHolder = LSPProcessHolder.getInstance(project)
-        val rawPort = lspHolder?.baseUrlOrNull()?.port ?: 0
-        if (rawPort <= 0) {
+        val connectionStatus = lspHolder?.backendConnectionStatus() ?: LSPBackendConnectionStatus.CONNECTING
+        val backendReady = lspHolder?.backendReady() ?: false
+        val rawPort = if (backendReady) lspHolder?.baseUrlOrNull()?.port ?: 0 else 0
+        ensureBackendStartedForConfig(backendReady, connectionStatus) {
             lspHolder?.ensureStartedAsync("editor-config-request")
         }
         val lspPort = if (rawPort > 0) rawPort else 0
-        val lspUrl = lspHolder?.browserUrlOrNull()?.toString()
+        val urls = backendConfigUrls(backendReady, lspHolder?.baseUrlOrNull(), lspHolder?.browserUrlOrNull())
         val keyBindings = Events.Config.KeyBindings(getActionKeybinding("ForceCompletionAction"))
 
-        return Events.Config.UpdatePayload(features, themeProps, lspPort, keyBindings, lspUrl)
+        return Events.Config.UpdatePayload(
+            features = features,
+            themeProps = themeProps,
+            lspPort = lspPort,
+            keyBindings = keyBindings,
+            lspUrl = urls.lspUrl,
+            backendReady = backendReady,
+            connectionStatus = connectionStatus.wireName,
+            browserUrl = urls.browserUrl,
+        )
     }
 
     fun getActiveFileInfo(cb: (Events.ActiveFile.FileInfo) -> Unit) {

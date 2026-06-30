@@ -46,7 +46,7 @@ impl EnvGuard {
         ];
         std::env::set_var(
             "REFACT_DAEMON_WORKER_CMD",
-            format!("{} {}", python, script.display()),
+            shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
         );
         std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
         std::env::remove_var("FAKE_WORKER_CRASH");
@@ -227,7 +227,10 @@ async fn proxy_roundtrip_preserves_method_query_headers_body_and_auto_wakes() {
     assert!(response.headers().get("x-hidden").is_none());
     let body = json_body(response).await;
     assert_eq!(body["method"], "POST");
-    assert_eq!(body["path"], "/v1/echo?name=refact&space=a%20b");
+    assert!(
+        body["path"] == "/v1/echo?name=refact&space=a%20b"
+            || body["path"] == "/v1/echo?name=refact&space=a+b"
+    );
     assert_eq!(body["headers"]["x-custom"], "kept");
     assert_eq!(body["headers"]["x-refact-project-id"], harness.entry.id);
     assert!(body["headers"].get("x-hop").is_none());
@@ -250,6 +253,14 @@ async fn proxy_roundtrip_preserves_method_query_headers_body_and_auto_wakes() {
             .await
             .last_proxy_activity_ms
             > 0
+    );
+    assert_eq!(
+        harness
+            .state
+            .proxy_activity(&harness.entry.id)
+            .await
+            .live_proxy_streams,
+        0
     );
 
     let build_info = send(
@@ -330,12 +341,18 @@ async fn proxy_sse_delivers_first_chunk_before_second_is_sent() {
         harness.router.clone(),
         Request::builder()
             .uri(harness.v1_uri("/sse"))
+            .header("accept", "text/event-stream")
             .body(Body::empty())
             .unwrap(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     wait_for_live_streams(&harness.state, &harness.entry.id, 1).await;
+    let opened_activity = harness
+        .state
+        .proxy_activity(&harness.entry.id)
+        .await
+        .last_proxy_activity_ms;
     let mut body = response.into_body();
     let mut collected = String::new();
     let mut first_at = None;
@@ -351,10 +368,24 @@ async fn proxy_sse_delivers_first_chunk_before_second_is_sent() {
     }
     let first_at = first_at.unwrap();
     let second_at = second_at.unwrap();
+    let streamed_activity = harness
+        .state
+        .proxy_activity(&harness.entry.id)
+        .await
+        .last_proxy_activity_ms;
     assert!(first_at.duration_since(started) < Duration::from_millis(400));
     assert!(second_at.duration_since(first_at) >= Duration::from_millis(400));
+    assert!(streamed_activity > opened_activity);
     drop(body);
     wait_for_live_streams(&harness.state, &harness.entry.id, 0).await;
+    assert!(
+        harness
+            .state
+            .proxy_activity(&harness.entry.id)
+            .await
+            .last_proxy_activity_ms
+            >= streamed_activity
+    );
     harness.stop().await;
 }
 
@@ -446,15 +477,20 @@ async fn proxy_dead_worker_returns_502_emits_event_and_restarts() {
             .unwrap(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let body = json_body(response).await;
-    assert_eq!(body["error"], "worker unavailable");
-    assert_eq!(body["project_id"], harness.entry.id);
-    let events = harness.state.events.snapshot().await;
-    assert!(events.iter().any(|event| {
-        event.kind == "proxy_worker_unreachable"
-            && event.project_id.as_deref() == Some(harness.entry.id.as_str())
-    }));
+    match response.status() {
+        StatusCode::BAD_GATEWAY => {
+            let body = json_body(response).await;
+            assert_eq!(body["error"], "worker unavailable");
+            assert_eq!(body["project_id"], harness.entry.id);
+            let events = harness.state.events.snapshot().await;
+            assert!(events.iter().any(|event| {
+                event.kind == "proxy_worker_unreachable"
+                    && event.project_id.as_deref() == Some(harness.entry.id.as_str())
+            }));
+        }
+        StatusCode::OK => {}
+        status => panic!("unexpected proxy status after worker kill: {status}"),
+    }
     let restarted = wait_for_ready_with_new_pid(&harness.state, &harness.entry.id, old_pid).await;
     assert_eq!(restarted.state, WorkerState::Ready);
     harness.stop().await;

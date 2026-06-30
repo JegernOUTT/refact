@@ -19,10 +19,11 @@ import { ScrollArea } from "../ScrollArea";
 import { useUsageCounter } from "./useUsageCounter";
 
 import {
-  selectThreadCurrentMessageTokens,
-  selectThreadImages,
-  selectEffectiveMaxContextTokens,
-} from "../../features/Chat";
+  selectThreadCurrentMessageTokensById,
+  selectThreadImagesById,
+  selectEffectiveMaxContextTokensById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { TokensMapContent } from "./TokensMapContent";
 import { useTokenMap } from "./useTokenMap";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
@@ -111,8 +112,9 @@ const TokenDisplay: React.FC<{ label: string; value: number }> = ({
 const InlineHoverCard: React.FC<{ messageTokens: number }> = ({
   messageTokens,
 }) => {
-  const maximumThreadContextTokens = useAppSelector(
-    selectEffectiveMaxContextTokens,
+  const chatId = useThreadId();
+  const maximumThreadContextTokens = useAppSelector((state) =>
+    selectEffectiveMaxContextTokensById(state, chatId),
   );
 
   return (
@@ -359,10 +361,15 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
   isMessageEmpty,
 }) => {
   const [open, setOpen] = useState(false);
-  const maybeAttachedImages = useAppSelector(selectThreadImages);
+  const chatId = useThreadId();
+  const maybeAttachedImages = useAppSelector((state) =>
+    selectThreadImagesById(state, chatId),
+  );
   const { currentThreadUsage, isOverflown, isWarning, currentSessionTokens } =
     useUsageCounter();
-  const currentMessageTokens = useAppSelector(selectThreadCurrentMessageTokens);
+  const currentMessageTokens = useAppSelector((state) =>
+    selectThreadCurrentMessageTokensById(state, chatId),
+  );
   const meteringTokens = useTotalTokenMeteringForChat();
   const usdCost = useTotalUsdForChat();
   const tokenMap = useTokenMap();
@@ -423,7 +430,10 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
     return getCacheCreationTokens(currentThreadUsage);
   }, [meteringTokens, currentThreadUsage]);
 
-  const maxContextTokens = useAppSelector(selectEffectiveMaxContextTokens) ?? 0;
+  const maxContextTokens =
+    useAppSelector((state) =>
+      selectEffectiveMaxContextTokensById(state, chatId),
+    ) ?? 0;
 
   const shouldUsageBeHidden = useMemo(() => {
     if (isInline) return false;

@@ -2,6 +2,13 @@ import { createReducer, createAction, createSelector } from "@reduxjs/toolkit";
 import { type ThemeProps } from "../../components/Theme";
 import { RootState } from "../../app/store";
 
+export type RefactBackendConnectionStatus =
+  | "connecting"
+  | "starting"
+  | "installing"
+  | "ready"
+  | "failed";
+
 export type Config = {
   host: "web" | "ide" | "vscode" | "jetbrains";
   lspPort: number;
@@ -10,6 +17,8 @@ export type Config = {
   browserUrl?: string;
   dev?: boolean;
   engineServed?: boolean;
+  backendReady?: boolean;
+  connectionStatus?: RefactBackendConnectionStatus;
   // todo: handle light / darkmode
   themeProps: Omit<ThemeProps, "children">;
   features?: {
@@ -42,7 +51,12 @@ const initialState: Config = {
   shiftEnterToSubmit: false,
 };
 
-export const updateConfig = createAction<Partial<Config>>("config/update");
+export type ConfigUpdate = Omit<Partial<Config>, "lspUrl" | "browserUrl"> & {
+  lspUrl?: string | null;
+  browserUrl?: string | null;
+};
+
+export const updateConfig = createAction<ConfigUpdate>("config/update");
 
 export const setThemeMode = createAction<"light" | "dark" | "inherit">(
   "config/setThemeMode",
@@ -54,19 +68,58 @@ export const changeFeature = createAction<{
   value: boolean;
 }>("config/feature/change");
 
+function hasConfigProperty(
+  config: Partial<Record<keyof Config, unknown>>,
+  key: keyof Config,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(config, key);
+}
+
 export const reducer = createReducer<Config>(initialState, (builder) => {
   // TODO: toggle darkmode for web host?
   builder.addCase(updateConfig, (state, action) => {
     state.dev = action.payload.dev ?? state.dev;
     state.engineServed = action.payload.engineServed ?? state.engineServed;
+    if (hasConfigProperty(action.payload, "backendReady")) {
+      if (action.payload.backendReady === undefined) {
+        delete state.backendReady;
+      } else {
+        state.backendReady = action.payload.backendReady;
+      }
+    }
+    if (hasConfigProperty(action.payload, "connectionStatus")) {
+      if (action.payload.connectionStatus === undefined) {
+        delete state.connectionStatus;
+      } else {
+        state.connectionStatus = action.payload.connectionStatus;
+      }
+    }
 
     state.features = action.payload.features
       ? { ...state.features, ...action.payload.features }
       : state.features;
 
     state.host = action.payload.host ?? state.host;
-    state.lspUrl = action.payload.lspUrl ?? state.lspUrl;
-    state.browserUrl = action.payload.browserUrl ?? state.browserUrl;
+    if (hasConfigProperty(action.payload, "lspUrl")) {
+      if (
+        action.payload.lspUrl === undefined ||
+        action.payload.lspUrl === null
+      ) {
+        delete state.lspUrl;
+      } else {
+        state.lspUrl = action.payload.lspUrl;
+      }
+    }
+    if (hasConfigProperty(action.payload, "browserUrl")) {
+      if (
+        action.payload.browserUrl === undefined ||
+        action.payload.browserUrl === null
+      ) {
+        delete state.browserUrl;
+      } else {
+        state.browserUrl = action.payload.browserUrl;
+      }
+    }
     state.tabbed = action.payload.tabbed ?? state.tabbed;
     state.themeProps = action.payload.themeProps
       ? { ...state.themeProps, ...action.payload.themeProps }

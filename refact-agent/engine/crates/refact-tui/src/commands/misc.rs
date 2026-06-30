@@ -1,4 +1,6 @@
 use super::{CommandAction, CommandAvailability, CommandDef, InfoTopic, LocalToggle};
+use std::path::Path;
+
 use crate::pickers::PickerItem;
 use crate::theme::TuiTheme;
 
@@ -307,13 +309,28 @@ const fn unavailable(
     }
 }
 
-pub fn theme_picker_items() -> Vec<PickerItem> {
-    TuiTheme::builtin_names()
-        .iter()
-        .map(|name| PickerItem {
-            id: (*name).to_string(),
-            title: format!("{} theme", name),
-            description: format!("Apply the built-in {} theme live", name),
+pub fn theme_picker_items(custom_dir: Option<&Path>) -> Vec<PickerItem> {
+    TuiTheme::list_available(custom_dir)
+        .into_iter()
+        .map(|entry| {
+            let title = if entry.is_custom {
+                format!("{} custom theme", entry.name)
+            } else {
+                format!("{} theme", entry.name)
+            };
+            let description = if entry.is_custom {
+                "Apply a custom syntax highlighting theme"
+            } else if TuiTheme::named(&entry.name).is_some() {
+                "Apply chrome and matching syntax highlighting"
+            } else {
+                "Apply a syntax highlighting theme"
+            }
+            .to_string();
+            PickerItem {
+                id: entry.name,
+                title,
+                description,
+            }
         })
         .collect()
 }
@@ -324,16 +341,13 @@ mod tests {
 
     #[test]
     fn theme_picker_lists_every_builtin_theme() {
-        let ids = theme_picker_items()
+        let ids = theme_picker_items(None)
             .into_iter()
             .map(|item| item.id)
             .collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            TuiTheme::builtin_names()
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect::<Vec<_>>()
-        );
+        for name in TuiTheme::builtin_names() {
+            assert!(ids.iter().any(|id| id == name));
+        }
+        assert!(ids.iter().any(|id| id == "catppuccin-mocha"));
     }
 }

@@ -16,24 +16,28 @@ import {
 } from "./TaskWorkspaceWorktree";
 import type { CardWorktreeTarget } from "./TaskWorkspaceWorktree";
 import type { PlannerInfo } from "./tasksSlice";
-import { taskSseEventReceived } from "./tasksSlice";
-import { switchToThread } from "../Chat/Thread";
+import { openTask, taskSseEventReceived } from "./tasksSlice";
+import { createChatWithId, switchToThread } from "../Chat/Thread";
+import { push } from "../Pages/pagesSlice";
 import {
   loadTaskWorkspaceTab,
   setProjectStorageNamespace,
 } from "../../utils/chatUiPersistence";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
-import type {
-  BoardCard,
-  TaskBoard,
-  TaskMeta,
-  TrajectoryInfo,
+import {
+  tasksApi,
+  type BoardCard,
+  type TaskBoard,
+  type TaskMeta,
+  type TrajectoryInfo,
 } from "../../services/refact/tasks";
 import type {
   WorktreeListResponse,
   WorktreeMeta,
   WorktreeRecordView,
 } from "../../services/refact";
+import { taskDocumentsApi } from "../../services/refact/taskDocumentsApi";
+import { taskMemoriesApi } from "../../services/refact/taskMemoriesApi";
 import { server } from "../../utils/mockServer";
 
 const TASK_ID = "task-1";
@@ -354,6 +358,7 @@ function taskWorkspaceHandlers(
     ),
     http.get("*/v1/task/:id/memories", () =>
       HttpResponse.json({
+        task_id: TASK_ID,
         since: "",
         new_count: 0,
         memories: [],
@@ -361,7 +366,14 @@ function taskWorkspaceHandlers(
       }),
     ),
     http.get("*/v1/task/:id/memories/facets", () =>
-      HttpResponse.json({ namespaces: [], tags: [] }),
+      HttpResponse.json({
+        task_id: TASK_ID,
+        namespaces: [],
+        tags: [],
+        kinds: [],
+        total_count: 0,
+        pinned_count: 0,
+      }),
     ),
     http.get("*/v1/task/:id/documents", () =>
       HttpResponse.json({ task_id: TASK_ID, documents: [] }),
@@ -1590,6 +1602,212 @@ describe("TaskWorkspace SSE invalidation", () => {
     );
 
     await screen.findByText("Planning complete! You can now spawn agents.");
+  });
+
+  it("task_updated_event_replaces_stale_planner_session_state", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_updated",
+        task_id: TASK_ID,
+        meta: { ...makeTask(), planner_session_state: "paused" },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState())
+          .data?.[0].planner_session_state,
+      ).toBe("paused"),
+    );
+
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_updated",
+        task_id: TASK_ID,
+        meta: { ...makeTask(), updated_at: "2026-04-30T00:00:01Z" },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState())
+          .data?.[0].planner_session_state,
+      ).toBeUndefined(),
+    );
+    expect(
+      tasksApi.endpoints.getTask.select(TASK_ID)(store.getState()).data
+        ?.planner_session_state,
+    ).toBeUndefined();
+  });
+
+  it("task_updated_event_refreshes_open_task_name_and_list_cache", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_updated",
+        task_id: TASK_ID,
+        meta: {
+          ...makeTask(),
+          name: "Renamed task",
+          updated_at: "2026-04-30T00:00:01Z",
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        tasksApi.endpoints.listTasks.select(undefined)(store.getState())
+          .data?.[0].name,
+      ).toBe("Renamed task"),
+    );
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.find((task) => task.id === TASK_ID)
+          ?.name,
+      ).toBe("Renamed task"),
+    );
+  });
+
+  it("task_deleted_event_clears_open_workspace_and_subresource_caches", async () => {
+    const card = makeCard();
+    let deleted = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1", () =>
+        deleted
+          ? HttpResponse.json({ error: "not found" }, { status: 404 })
+          : HttpResponse.json({ meta: makeTask() }),
+      ),
+      http.get("*/v1/tasks/task-1/board", () =>
+        deleted
+          ? HttpResponse.json({ error: "not found" }, { status: 404 })
+          : HttpResponse.json(makeBoard(card)),
+      ),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        deleted
+          ? HttpResponse.json({ error: "not found" }, { status: 404 })
+          : HttpResponse.json([]),
+      ),
+      http.get("*/v1/task/:id/documents", () =>
+        deleted
+          ? HttpResponse.json({ error: "not found" }, { status: 404 })
+          : HttpResponse.json({ task_id: TASK_ID, documents: [] }),
+      ),
+      http.get("*/v1/task/:id/memories", () =>
+        deleted
+          ? HttpResponse.json({ error: "not found" }, { status: 404 })
+          : HttpResponse.json({
+              task_id: TASK_ID,
+              since: "",
+              new_count: 0,
+              memories: [],
+              warnings: [],
+            }),
+      ),
+    );
+
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    store.dispatch(push({ name: "task workspace", taskId: TASK_ID }));
+    store.dispatch(openTask({ id: TASK_ID, name: "Task with worktree" }));
+    const taskThreadId = "agent-task-deleted";
+    store.dispatch(
+      createChatWithId({
+        id: taskThreadId,
+        title: "Deleted task agent",
+        isTaskChat: true,
+        mode: "TASK_AGENT",
+        taskMeta: {
+          task_id: TASK_ID,
+          role: "agents",
+          card_id: CARD_ID,
+        },
+      }),
+    );
+    store.dispatch(switchToThread({ id: taskThreadId, openTab: false }));
+
+    await store.dispatch(
+      tasksApi.endpoints.listTaskTrajectories.initiate({
+        taskId: TASK_ID,
+        role: "planner",
+      }),
+    );
+    await store.dispatch(
+      taskDocumentsApi.endpoints.listTaskDocuments.initiate({
+        taskId: TASK_ID,
+      }),
+    );
+    await store.dispatch(
+      taskMemoriesApi.endpoints.listTaskMemories.initiate({ taskId: TASK_ID }),
+    );
+
+    expect(
+      taskDocumentsApi.endpoints.listTaskDocuments.select({ taskId: TASK_ID })(
+        store.getState(),
+      ).status,
+    ).toBe("fulfilled");
+    expect(
+      taskMemoriesApi.endpoints.listTaskMemories.select({ taskId: TASK_ID })(
+        store.getState(),
+      ).status,
+    ).toBe("fulfilled");
+
+    deleted = true;
+    store.dispatch(
+      taskSseEventReceived({ type: "task_deleted", task_id: TASK_ID }),
+    );
+
+    await waitFor(() =>
+      expect(
+        store.getState().tasksUI.openTasks.some((task) => task.id === TASK_ID),
+      ).toBe(false),
+    );
+    expect(store.getState().pages.at(-1)).toEqual({ name: "history" });
+    expect(store.getState().chat.threads[taskThreadId]).toBeUndefined();
+    await screen.findByText("Task is no longer available.");
+    await waitFor(() =>
+      expect(
+        tasksApi.endpoints.getTask.select(TASK_ID)(store.getState()).status,
+      ).toBe("rejected"),
+    );
+    expect(
+      tasksApi.endpoints.getBoard.select(TASK_ID)(store.getState()).status,
+    ).toBe("rejected");
+    expect(
+      tasksApi.endpoints.listTaskTrajectories.select({
+        taskId: TASK_ID,
+        role: "planner",
+      })(store.getState()).status,
+    ).toBe("rejected");
+    expect(
+      taskDocumentsApi.endpoints.listTaskDocuments.select({ taskId: TASK_ID })(
+        store.getState(),
+      ).status,
+    ).toBe("rejected");
+    expect(
+      taskMemoriesApi.endpoints.listTaskMemories.select({ taskId: TASK_ID })(
+        store.getState(),
+      ).status,
+    ).toBe("rejected");
   });
 
   it("task_comments_changed_event_refetches_board_comments", async () => {

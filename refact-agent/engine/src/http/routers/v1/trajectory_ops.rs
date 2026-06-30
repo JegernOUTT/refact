@@ -12,12 +12,22 @@ use crate::chat::trajectory_ops::{
     CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select,
     sanitize_messages_for_new_thread,
 };
+use crate::call_validation::ChatMessage;
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
-use crate::agentic::mode_transition::{AgenticPathContext, analyze_mode_transition, assemble_new_chat};
+use crate::agentic::mode_transition::{
+    AgenticPathContext, GoalTransferResult, analyze_mode_transition, assemble_new_chat,
+    insert_goal_messages_before_plan, transfer_goal_ownership,
+};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
+use refact_chat_api::GoalSnapshot;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
+use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
+
+fn canonical_transition_mode(raw_mode: &str) -> String {
+    map_legacy_mode_to_id(raw_mode.trim()).to_string()
+}
 
 fn reset_transition_snapshot_identity(snapshot: &mut TrajectorySnapshot) {
     snapshot.previous_response_id = None;
@@ -25,13 +35,71 @@ fn reset_transition_snapshot_identity(snapshot: &mut TrajectorySnapshot) {
     snapshot.claude_code_identity = None;
 }
 
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn transfer_goal_into_transition_messages(
+    source_messages: &[ChatMessage],
+    source_goal: Option<&GoalSnapshot>,
+    target_existing_messages: &[ChatMessage],
+    source_chat_id: &str,
+    target_chat_id: &str,
+    target_mode: &str,
+    target_messages: &mut Vec<ChatMessage>,
+    at_ms: u64,
+) -> GoalTransferResult {
+    let transferred_goal = transfer_goal_ownership(
+        source_messages,
+        source_goal,
+        target_existing_messages,
+        source_chat_id,
+        target_chat_id,
+        target_mode,
+        at_ms,
+    );
+    if transferred_goal.transferred() {
+        insert_goal_messages_before_plan(target_messages, transferred_goal.target_messages.clone());
+    }
+    transferred_goal
+}
+
+async fn persist_live_source_goal_transfer(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    transferred_goal: &GoalTransferResult,
+) -> Result<(), String> {
+    if !transferred_goal.transferred() {
+        return Ok(());
+    }
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        {
+            let mut session = session_arc.lock().await;
+            session.replace_messages(transferred_goal.source_messages.clone());
+        }
+        crate::chat::trajectories::try_save_trajectory(
+            AppState::from_gcx(gcx.clone()).await,
+            session_arc,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn create_initial_plan_document_for_transition(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     plan_text: Option<&str>,
-) {
+) -> (Option<String>, Option<String>) {
     let Some(plan_text) = plan_text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return;
+        return (None, None);
     };
     let result = async {
         let documents_dir =
@@ -52,15 +120,19 @@ async fn create_initial_plan_document_for_transition(
             "planner",
         )
         .await?;
-        Ok::<(), String>(())
+        Ok::<String, String>(slug)
     }
     .await;
-    if let Err(error) = result {
-        tracing::warn!(
-            "failed to create initial-plan document for task {}: {}",
-            task_id,
-            error
-        );
+    match result {
+        Ok(slug) => (Some(slug), None),
+        Err(error) => {
+            tracing::warn!(
+                "failed to create initial-plan document for task {}: {}",
+                task_id,
+                error
+            );
+            (None, Some(error))
+        }
     }
 }
 
@@ -112,6 +184,12 @@ pub struct ModeTransitionApplyRequest {
 pub struct ModeTransitionApplyResponse {
     pub new_chat_id: String,
     pub messages_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_plan_document: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_plan_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -351,6 +429,7 @@ pub async fn handle_handoff_apply(
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: new_chat_id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -458,6 +537,14 @@ pub async fn handle_mode_transition_apply(
     let gcx = app.gcx.clone();
     let req: ModeTransitionApplyRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    let target_mode = canonical_transition_mode(&req.target_mode);
+    if target_mode == "task_planner" {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Use /v1/tasks/:task_id/planner-chats/from-transition for task_planner transitions"
+                .to_string(),
+        ));
+    }
 
     let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(
@@ -467,12 +554,13 @@ pub async fn handle_mode_transition_apply(
     )
     .await;
 
-    let (messages, thread, task_meta, session_state) = {
+    let (messages, thread, task_meta, source_goal, session_state) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
             session.thread.task_meta.clone(),
+            session.goal.clone(),
             session.runtime.state.clone(),
         )
     };
@@ -495,26 +583,46 @@ pub async fn handle_mode_transition_apply(
     let decisions = analyze_mode_transition(
         gcx.clone(),
         &messages,
-        &req.target_mode,
+        &target_mode,
         &req.target_mode_description,
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_chat_id = Uuid::new_v4().to_string();
+    let transferred_goal = transfer_goal_into_transition_messages(
+        &messages,
+        source_goal.as_ref(),
+        &[],
+        &chat_id,
+        &new_chat_id,
+        &target_mode,
+        &mut new_messages,
+        epoch_ms_now(),
+    );
+    persist_live_source_goal_transfer(gcx.clone(), &chat_id, &transferred_goal)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let new_messages = sanitize_messages_for_new_thread(&new_messages);
-    let new_chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    let root_chat_id = thread
+        .root_chat_id
+        .clone()
+        .or_else(|| Some(chat_id.clone()));
+
     let mut snapshot = TrajectorySnapshot {
+        goal: transferred_goal.target_goal.clone(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
-        mode: req.target_mode.clone(),
+        mode: target_mode.clone(),
         tool_use: thread.tool_use.clone(),
         messages: new_messages.clone(),
         created_at: now,
@@ -531,10 +639,7 @@ pub async fn handle_mode_transition_apply(
         worktree: thread.worktree.clone(),
         parent_id: Some(chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
-        root_chat_id: thread
-            .root_chat_id
-            .clone()
-            .or_else(|| Some(chat_id.clone())),
+        root_chat_id: root_chat_id.clone(),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -561,6 +666,9 @@ pub async fn handle_mode_transition_apply(
     let response = ModeTransitionApplyResponse {
         new_chat_id,
         messages_count: new_messages.len(),
+        root_chat_id,
+        initial_plan_document: None,
+        initial_plan_error: None,
     };
 
     let body = serde_json::to_vec(&response)
@@ -581,6 +689,20 @@ pub async fn handle_planner_from_transition(
     let req: PlannerFromTransitionRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
+    let target_mode = req
+        .target_mode
+        .clone()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "task_planner".to_string());
+    let target_mode = canonical_transition_mode(&target_mode);
+    if target_mode != "task_planner" {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Only task_planner chats can be created here".to_string(),
+        ));
+    }
+
     // Verify the task exists before doing any work
     crate::tasks::storage::load_task_meta(gcx.clone(), &task_id)
         .await
@@ -594,11 +716,12 @@ pub async fn handle_planner_from_transition(
     )
     .await;
 
-    let (messages, thread, session_state) = {
+    let (messages, thread, source_goal, session_state) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
+            session.goal.clone(),
             session.runtime.state.clone(),
         )
     };
@@ -617,19 +740,6 @@ pub async fn handle_planner_from_transition(
         ));
     }
 
-    let target_mode = req
-        .target_mode
-        .clone()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| "task_planner".to_string());
-    if target_mode.eq_ignore_ascii_case("task_agent") {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            "task_agent chats cannot be created here".to_string(),
-        ));
-    }
-
     let decisions = analyze_mode_transition(
         gcx.clone(),
         &messages,
@@ -640,15 +750,28 @@ pub async fn handle_planner_from_transition(
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let new_messages = sanitize_messages_for_new_thread(&new_messages);
 
     let new_chat_id = crate::tasks::storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let transferred_goal = transfer_goal_into_transition_messages(
+        &messages,
+        source_goal.as_ref(),
+        &[],
+        &req.source_chat_id,
+        &new_chat_id,
+        &target_mode,
+        &mut new_messages,
+        epoch_ms_now(),
+    );
+    persist_live_source_goal_transfer(gcx.clone(), &req.source_chat_id, &transferred_goal)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let new_messages = sanitize_messages_for_new_thread(&new_messages);
     let now = chrono::Utc::now().to_rfc3339();
 
     let task_meta = crate::chat::types::TaskMeta {
@@ -659,7 +782,10 @@ pub async fn handle_planner_from_transition(
         planner_chat_id: Some(new_chat_id.clone()),
     };
 
+    let root_chat_id = Some(new_chat_id.clone());
+
     let mut snapshot = TrajectorySnapshot {
+        goal: transferred_goal.target_goal.clone(),
         chat_id: new_chat_id.clone(),
         title: String::new(),
         model: thread.model.clone(),
@@ -680,10 +806,7 @@ pub async fn handle_planner_from_transition(
         worktree: thread.worktree.clone(),
         parent_id: Some(req.source_chat_id.clone()),
         link_type: Some("mode_transition".to_string()),
-        root_chat_id: thread
-            .root_chat_id
-            .clone()
-            .or_else(|| Some(req.source_chat_id.clone())),
+        root_chat_id: root_chat_id.clone(),
         reasoning_effort: thread.reasoning_effort.clone(),
         thinking_budget: thread.thinking_budget,
         temperature: thread.temperature,
@@ -713,18 +836,24 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    if target_mode == "task_planner" {
-        create_initial_plan_document_for_transition(
-            gcx.clone(),
-            &task_id,
-            decisions.initial_plan.as_deref(),
-        )
-        .await;
-    }
+    let (initial_plan_document, initial_plan_error) =
+        if target_mode.eq_ignore_ascii_case("task_planner") {
+            create_initial_plan_document_for_transition(
+                gcx.clone(),
+                &task_id,
+                decisions.initial_plan.as_deref(),
+            )
+            .await
+        } else {
+            (None, None)
+        };
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
         messages_count: new_messages.len(),
+        root_chat_id,
+        initial_plan_document,
+        initial_plan_error,
     };
 
     let body = serde_json::to_vec(&response)
@@ -739,6 +868,7 @@ pub async fn handle_planner_from_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
 
     fn sample_worktree(root: &std::path::Path) -> crate::worktrees::types::WorktreeMeta {
@@ -760,6 +890,7 @@ mod tests {
 
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: "transition-identity".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -815,6 +946,165 @@ mod tests {
         snapshot
     }
 
+    fn plan_message(content: &str) -> ChatMessage {
+        crate::chat::internal_roles::plan("task_agent", 1, content, None)
+    }
+
+    fn source_session_with_active_goal(
+        chat_id: &str,
+    ) -> (crate::chat::types::ChatSession, GoalBudget) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.thread.mode = "agent".to_string();
+        session.thread.tool_use = "agent".to_string();
+        session.thread.model = "model".to_string();
+        session.add_message(ChatMessage::new(
+            "user".to_string(),
+            "Please pursue this goal".to_string(),
+        ));
+        let budget = GoalBudget {
+            max_turns: Some(7),
+            max_minutes: Some(11),
+            max_tokens: Some(13_000),
+            cooldown_ms: 1_234,
+            no_progress_token_threshold: 55,
+            no_progress_turns: Some(3),
+            explicit: false,
+        };
+        session.install_goal("agent", "Ship the HTTP goal transfer", true, budget.clone());
+        let goal = session.goal.as_mut().expect("goal installed");
+        goal.progress = GoalProgress {
+            turns_used: 4,
+            tokens_used: 9_999,
+            started_at_ms: 42,
+            no_progress_turns: 2,
+            last_nudge_at_ms: 77,
+        };
+        goal.attempts.push(GoalAttempt {
+            at_ms: 100,
+            trigger: "finish".to_string(),
+            verdict: "retry".to_string(),
+            gaps: vec!["missing verification".to_string()],
+            verifier_reply: "Run tests".to_string(),
+        });
+        (session, budget)
+    }
+
+    #[tokio::test]
+    async fn http_mode_transition_goal_transfer_deactivates_source_and_resets_target_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let source_chat_id = "http-source-goal";
+        let target_chat_id = "http-target-goal";
+        let (source_session, budget) = source_session_with_active_goal(source_chat_id);
+        let source_messages = source_session.messages.clone();
+        let source_goal = source_session.goal.clone();
+        gcx.chat_sessions.write().await.insert(
+            source_chat_id.to_string(),
+            Arc::new(tokio::sync::Mutex::new(source_session)),
+        );
+
+        let at_ms = 123_456_789;
+        let mut target_messages = vec![plan_message("Target plan")];
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &source_messages,
+            source_goal.as_ref(),
+            &[],
+            source_chat_id,
+            target_chat_id,
+            "task_agent",
+            &mut target_messages,
+            at_ms,
+        );
+
+        assert!(transferred_goal.transferred());
+        let target_goal = transferred_goal.target_goal.as_ref().unwrap();
+        assert!(target_goal.active);
+        assert_eq!(target_goal.status, GoalStatus::Active);
+        assert_eq!(
+            target_goal.transferred_from.as_deref(),
+            Some(source_chat_id)
+        );
+        assert_eq!(target_goal.transferred_to, None);
+        assert_eq!(target_goal.budget, budget);
+        assert_eq!(target_goal.progress.started_at_ms, at_ms);
+        assert_eq!(target_goal.progress.turns_used, 0);
+        assert_eq!(target_goal.progress.tokens_used, 0);
+        assert_eq!(target_goal.progress.no_progress_turns, 0);
+        assert_eq!(target_goal.progress.last_nudge_at_ms, 0);
+        assert_eq!(target_goal.attempts.len(), 1);
+        assert_eq!(target_messages[0].role, "goal");
+        assert_eq!(target_messages[1].role, "event");
+        assert_eq!(target_messages[2].role, "plan");
+
+        persist_live_source_goal_transfer(gcx.clone(), source_chat_id, &transferred_goal)
+            .await
+            .unwrap();
+
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(source_chat_id)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        let source_goal = session.goal.as_ref().unwrap();
+        assert!(!source_goal.active);
+        assert_eq!(source_goal.status, GoalStatus::Transferred);
+        assert_eq!(source_goal.transferred_to.as_deref(), Some(target_chat_id));
+        let source_goal_message = session
+            .messages
+            .iter()
+            .find(|message| message.role == "goal")
+            .unwrap();
+        assert_eq!(source_goal_message.extra["goal"]["active"], json!(false));
+        assert_eq!(
+            source_goal_message.extra["goal"]["status"],
+            json!("transferred")
+        );
+        assert_eq!(
+            source_goal_message.extra["goal"]["transferred_to"],
+            json!(target_chat_id)
+        );
+    }
+
+    #[test]
+    fn http_mode_transition_goal_transfer_no_goal_is_noop() {
+        let source_messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        let mut target_messages = vec![plan_message("Target plan")];
+        let original_role = target_messages[0].role.clone();
+        let original_content = target_messages[0].content.content_text_only();
+
+        let transferred_goal = transfer_goal_into_transition_messages(
+            &source_messages,
+            None,
+            &[],
+            "source-chat",
+            "target-chat",
+            "task_agent",
+            &mut target_messages,
+            1,
+        );
+
+        assert!(!transferred_goal.transferred());
+        assert!(transferred_goal.target_goal.is_none());
+        assert!(transferred_goal.source_goal.is_none());
+        assert_eq!(target_messages.len(), 1);
+        assert_eq!(target_messages[0].role, original_role);
+        assert_eq!(
+            target_messages[0].content.content_text_only(),
+            original_content
+        );
+    }
+
     #[test]
     fn trajectory_ops_mode_transition_snapshot_does_not_copy_source_identity() {
         let snapshot = transition_identity_snapshot("mode_transition");
@@ -835,6 +1125,68 @@ mod tests {
         assert!(snapshot.claude_code_identity.is_none());
     }
 
+    #[test]
+    fn mode_transition_response_serializes_optional_planner_metadata() {
+        let response = ModeTransitionApplyResponse {
+            new_chat_id: "planner-chat".to_string(),
+            messages_count: 3,
+            root_chat_id: Some("planner-chat".to_string()),
+            initial_plan_document: Some("initial-plan".to_string()),
+            initial_plan_error: None,
+        };
+
+        let raw = serde_json::to_value(response).unwrap();
+        assert_eq!(raw["new_chat_id"], "planner-chat");
+        assert_eq!(raw["messages_count"], 3);
+        assert_eq!(raw["root_chat_id"], "planner-chat");
+        assert_eq!(raw["initial_plan_document"], "initial-plan");
+        assert!(raw.get("initial_plan_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_mode_transition_rejects_task_planner_target_before_session_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx).await;
+        let body = hyper::body::Bytes::from_static(br#"{"target_mode":" TASK_PLANNER "}"#);
+
+        let err = handle_mode_transition_apply(State(app), Path("missing-chat".to_string()), body)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message,
+            "Use /v1/tasks/:task_id/planner-chats/from-transition for task_planner transitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn planner_from_transition_rejects_non_planner_target_before_task_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx).await;
+        let body = hyper::body::Bytes::from_static(
+            br#"{"source_chat_id":"source-chat","target_mode":"agent"}"#,
+        );
+
+        let err =
+            handle_planner_from_transition(State(app), Path("missing-task".to_string()), body)
+                .await
+                .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "Only task_planner chats can be created here");
+    }
+
     #[tokio::test]
     async fn save_transition_snapshot_preserves_worktree_metadata() {
         let dir = tempfile::tempdir().unwrap();
@@ -847,6 +1199,7 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
+            goal: None,
             chat_id: "transition-chat".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),

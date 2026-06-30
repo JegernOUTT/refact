@@ -1,7 +1,7 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
-use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_project_dirs};
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_unscoped_project_dirs};
+use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory_document_for_path};
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
@@ -90,7 +90,7 @@ async fn resolve_patch_path(
         return resolved;
     }
 
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No workspace found".to_string());
     }
@@ -265,11 +265,7 @@ pub async fn tool_apply_patch_exec(
                     tokio::fs::remove_file(&full_path)
                         .await
                         .map_err(|e| format!("Failed to delete: {}", e))?;
-                    gcx.documents_state
-                        .memory_document_map
-                        .lock()
-                        .await
-                        .remove(&full_path);
+                    remove_memory_document_for_path(gcx.clone(), &full_path).await;
                 }
 
                 let chunk = DiffChunk {
@@ -357,11 +353,7 @@ pub async fn tool_apply_patch_exec(
                         tokio::fs::remove_file(&full_path)
                             .await
                             .map_err(|e| format!("Failed to remove: {}", e))?;
-                        gcx.documents_state
-                            .memory_document_map
-                            .lock()
-                            .await
-                            .remove(&full_path);
+                        remove_memory_document_for_path(gcx.clone(), &full_path).await;
                         sync_documents_ast(gcx.clone(), &dest_path).await?;
                     }
 

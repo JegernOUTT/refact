@@ -1,13 +1,20 @@
 import React from "react";
-import { Flex, HoverCard, Text } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import { WandSparkles } from "lucide-react";
 import { useThinking } from "../../hooks/useThinking";
 import { useAppSelector } from "../../hooks";
-import { selectThreadBoostReasoning } from "../../features/Chat";
+import {
+  selectThreadBoostReasoningById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { Button, Skeleton } from "../ui";
+import { HoverCard } from "../LongTailPrimitives";
 
 export const ThinkingButton: React.FC = () => {
-  const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
+  const chatId = useThreadId();
+  const isBoostReasoningEnabled = useAppSelector((state) =>
+    selectThreadBoostReasoningById(state, chatId),
+  );
   const {
     handleReasoningChange,
     shouldBeDisabled,
@@ -27,8 +34,8 @@ export const ThinkingButton: React.FC = () => {
 
   return (
     <Flex gap="2" align="center">
-      <HoverCard.Root>
-        <HoverCard.Trigger>
+      <HoverCard>
+        <HoverCard.Trigger asChild>
           <Button
             leftIcon={WandSparkles}
             size="sm"
@@ -41,12 +48,7 @@ export const ThinkingButton: React.FC = () => {
             Think
           </Button>
         </HoverCard.Trigger>
-        <HoverCard.Content
-          size="2"
-          maxWidth="500px"
-          width="calc(100vw - (var(--space-9) * 2.5))"
-          side="top"
-        >
+        <HoverCard.Content maxWidth="500px" side="top">
           <Text as="p" size="2">
             When enabled, the model will use enhanced reasoning capabilities
             which may improve problem-solving for complex tasks.
@@ -58,7 +60,7 @@ export const ThinkingButton: React.FC = () => {
             </Text>
           )}
         </HoverCard.Content>
-      </HoverCard.Root>
+      </HoverCard>
     </Flex>
   );
 };

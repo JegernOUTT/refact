@@ -226,17 +226,51 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release notes
+        id: release_notes
+        shell: bash
+        run: |
+          notes_path="docs/release-notes/v${{ steps.release.outputs.version }}.md"
+          if [[ -f "$GITHUB_WORKSPACE/$notes_path" ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "Release notes file $notes_path not found; using generated notes with daemon warning."
+          fi
+
       - name: Upload binaries to release
+        if: ${{ steps.release_notes.outputs.found == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: Refact Engine v${{ steps.release.outputs.version }}
+          body_path: ${{ steps.release_notes.outputs.body_path }}
           make_latest: true
           overwrite_files: true
           fail_on_unmatched_files: true
-          working_directory: refact-agent/engine
           files: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksum }}
+            refact-agent/engine/${{ steps.package.outputs.archive }}
+            refact-agent/engine/${{ steps.package.outputs.checksum }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload binaries to release with generated notes
+        if: ${{ steps.release_notes.outputs.found != 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: Refact Engine v${{ steps.release.outputs.version }}
+          body: |
+            > [!WARNING]
+            > **Breaking change — local daemon**
+            > The IDE plugins require and launch a local `refact daemon` (`127.0.0.1:8488`) that supervises per-project workers. The engine binary is downloaded on first run from GitHub releases instead of being bundled in the plugin, and the in-IDE webview connects over loopback. If you used a prior bundled-engine version, first start now downloads the engine.
+          generate_release_notes: true
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            refact-agent/engine/${{ steps.package.outputs.archive }}
+            refact-agent/engine/${{ steps.package.outputs.checksum }}
         env:
           GITHUB_TOKEN: ${{ github.token }}

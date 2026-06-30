@@ -1,45 +1,51 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ComposerMode, ProjectPickerState, SessionState};
-use crate::ask_questions::{AskQuestionType, AskQuestionsForm};
-use crate::approvals::render_modal_lines;
-use crate::events_pane::{render_event_lines, render_worker_lines};
-use crate::keymap::{HelpRow, KeyAction, KeyContext};
-use crate::overlay::PagerMode;
-use crate::pickers::PickerState;
-use crate::theme::ThemeRole;
-use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
-use crate::vendored::terminal_hyperlinks::{
-    hyperlinks_enabled_from_env, mark_buffer_hyperlinks, visible_lines, HyperlinkLine,
-};
+use crate::app::{App, ComposerMode};
 
+mod approval;
+mod ask;
+mod composer;
+pub mod events;
 pub mod footer;
+mod header;
+mod help;
+pub(crate) mod menu;
+mod overlay;
+pub mod picker;
+pub mod session_tabs;
+pub mod status_card;
 pub mod status_indicator;
+mod transcript;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.begin_frame_render();
     let area = frame.area();
-    let status_height = status_indicator::height(app);
+    let session_tabs_height = session_tabs::height(app);
+    let status_height = status_indicator::height(app, area.width);
+    let footer_height = footer::desired_height(area.width);
+    let composer_height = app
+        .ask_questions_form()
+        .map(|form| ask::desired_height(form, area.height))
+        .unwrap_or_else(|| app.composer_height(area.width));
     let main_constraints = if app.events_pane().open {
         vec![
             Constraint::Length(1),
+            Constraint::Length(session_tabs_height),
             Constraint::Percentage(62),
             Constraint::Percentage(38),
             Constraint::Length(status_height),
-            Constraint::Length(app.composer_height(area.width)),
-            Constraint::Length(1),
+            Constraint::Length(composer_height),
+            Constraint::Length(footer_height),
         ]
     } else {
         vec![
             Constraint::Length(1),
+            Constraint::Length(session_tabs_height),
             Constraint::Min(1),
             Constraint::Length(status_height),
-            Constraint::Length(app.composer_height(area.width)),
-            Constraint::Length(1),
+            Constraint::Length(composer_height),
+            Constraint::Length(footer_height),
         ]
     };
     let chunks = Layout::default()
@@ -47,656 +53,75 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .constraints(main_constraints)
         .split(area);
 
-    render_header(frame, app, chunks[0]);
-    render_transcript(frame, app, chunks[1]);
+    header::render_header(frame, app, chunks[0]);
+    if session_tabs_height > 0 {
+        session_tabs::render(frame, app, chunks[1]);
+    }
+    transcript::render_transcript(frame, app, chunks[2]);
     let composer_area = if app.events_pane().open {
-        chunks[4]
+        chunks[5]
     } else {
-        chunks[3]
+        chunks[4]
     };
     if app.events_pane().open {
-        render_events_pane(frame, app, chunks[2]);
-        status_indicator::render(frame, app, chunks[3]);
-        render_composer(frame, app, composer_area);
-        footer::render(frame, app, chunks[5]);
+        events::render_events_pane(frame, app, chunks[3]);
+        status_indicator::render(frame, app, chunks[4]);
+        render_composer_region(frame, app, composer_area);
+        footer::render(frame, app, chunks[6]);
     } else {
-        status_indicator::render(frame, app, chunks[2]);
-        render_composer(frame, app, composer_area);
-        footer::render(frame, app, chunks[4]);
+        status_indicator::render(frame, app, chunks[3]);
+        render_composer_region(frame, app, composer_area);
+        footer::render(frame, app, chunks[5]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
-        render_project_picker(frame, app.project_picker(), area);
+        picker::render_project_picker(frame, app.project_picker(), area);
     }
     if let Some(picker) = app.modal_picker() {
-        render_modal_picker(frame, picker, area, composer_area);
-    }
-    if let Some(form) = app.ask_questions_form() {
-        render_ask_questions_form(frame, form, area);
+        picker::render_modal_picker(frame, picker, area, composer_area);
     }
     if app.transcript_overlay().is_some() {
-        let overlay_height = area.height.saturating_sub(4).max(8);
-        app.set_transcript_overlay_visible_height(overlay_height.saturating_sub(3) as usize);
+        app.set_transcript_overlay_visible_height(overlay::transcript_overlay_body_height(area));
     }
     if let Some(overlay) = app.transcript_overlay() {
-        render_transcript_overlay(frame, overlay, area);
+        overlay::render_transcript_overlay(frame, overlay, area);
     }
     if let Some(modal) = app.approval_modal() {
-        render_approval_modal(frame, modal, area);
+        approval::render_approval_modal(frame, modal, area);
     }
     if app.help_open() {
-        render_help(frame, app, area);
+        help::render_help(frame, app, area);
     }
 }
 
-fn render_transcript_overlay(
-    frame: &mut Frame<'_>,
-    overlay: &crate::overlay::PagerOverlay,
-    area: Rect,
-) {
-    let width = area.width.saturating_sub(6).max(24);
-    let height = area.height.saturating_sub(4).max(8);
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let mode = match overlay.mode() {
-        PagerMode::Rendered => "rendered",
-        PagerMode::Raw => "copy/raw",
-    };
-    let block =
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} · {} ", overlay.title(), mode));
-    let inner_height = popup.height.saturating_sub(3) as usize;
-    let body = overlay
-        .visible_lines(inner_height)
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
-        popup,
-    );
-    let status_area = Rect {
-        x: popup.x.saturating_add(1),
-        y: popup.y + popup.height.saturating_sub(2),
-        width: popup.width.saturating_sub(2),
-        height: 1,
-    };
-    let status = truncate_line_with_ellipsis_if_overflow(
-        Line::from(Span::styled(
-            overlay.status(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        status_area.width as usize,
-    );
-    frame.render_widget(Paragraph::new(status), status_area);
-}
-
-fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let project = app
-        .current_project()
-        .map(|project| project.slug.as_str())
-        .unwrap_or("no project");
-    let new = app
-        .keymap()
-        .binding_label(KeyContext::Main, KeyAction::NewChat)
-        .unwrap_or_else(|| "Ctrl-N".to_string());
-    let projects = app
-        .keymap()
-        .binding_label(KeyContext::Main, KeyAction::OpenProjects)
-        .unwrap_or_else(|| "Ctrl-P".to_string());
-    let model = app
-        .keymap()
-        .binding_label(KeyContext::Main, KeyAction::OpenModels)
-        .unwrap_or_else(|| "Ctrl-M".to_string());
-    let mode = app
-        .keymap()
-        .binding_label(KeyContext::Main, KeyAction::OpenModes)
-        .unwrap_or_else(|| "Ctrl-O".to_string());
-    let help = app
-        .keymap()
-        .binding_label(KeyContext::Main, KeyAction::ShowHelp)
-        .unwrap_or_else(|| "?".to_string());
-    let vim = if app.vim_enabled() {
-        format!(" · vim {}", app.vim_mode().label())
+fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if let Some(form) = app.ask_questions_form() {
+        ask::render_ask_form(frame, form, area);
     } else {
-        String::new()
-    };
-    let line = Line::from(vec![
-        Span::styled("refact ", app.theme().style(ThemeRole::Accent)),
-        Span::raw(project),
-        Span::styled(
-            format!("  {new} new · {projects} projects · {model} model · {mode} mode · {help} help{vim}"),
-            app.theme().style(ThemeRole::Muted),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-fn render_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if app.native_scrollback() {
-        render_live_transcript(frame, app, area);
-    } else {
-        render_full_transcript(frame, app, area);
+        composer::render_composer(frame, app, area);
     }
-}
-
-fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut lines = Vec::<HyperlinkLine>::new();
-    for (idx, item) in app.visible_transcript().iter().enumerate() {
-        lines.extend(crate::history::render_transcript_item_hyperlink_lines(
-            item,
-            area.width.saturating_sub(2) as usize,
-            app.transcript_item_selected(idx, item),
-        ));
-    }
-    app.note_rendered_messages(app.visible_transcript().len());
-    if lines.is_empty() {
-        lines.push(HyperlinkLine::new(Line::from(Span::styled(
-            "History is in native scrollback. Start typing below.",
-            Style::default().fg(Color::DarkGray),
-        ))));
-    }
-    let visible = visible_lines(lines.clone());
-    frame.render_widget(
-        Paragraph::new(visible)
-            .block(Block::default().borders(Borders::BOTTOM))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-    mark_buffer_hyperlinks(
-        frame.buffer_mut(),
-        area,
-        &lines,
-        hyperlinks_enabled_from_env(),
-    );
-}
-
-fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut lines = Vec::<HyperlinkLine>::new();
-    for (idx, item) in app.visible_transcript().iter().enumerate() {
-        lines.extend(crate::history::render_transcript_item_hyperlink_lines(
-            item,
-            area.width.saturating_sub(2) as usize,
-            app.transcript_item_selected(idx, item),
-        ));
-    }
-    app.note_rendered_messages(app.visible_transcript().len());
-    if lines.is_empty() {
-        lines.push(HyperlinkLine::new(Line::from(Span::styled(
-            "Start typing. Enter sends, Shift-Enter inserts a newline.",
-            Style::default().fg(Color::DarkGray),
-        ))));
-    }
-    let total = lines.len();
-    let height = area.height as usize;
-    let start = total
-        .saturating_sub(height)
-        .saturating_sub(app.scroll_offset());
-    let end = total.saturating_sub(app.scroll_offset()).min(total);
-    let view_links = lines[start..end].to_vec();
-    let view = visible_lines(view_links.clone());
-    frame.render_widget(
-        Paragraph::new(view)
-            .block(Block::default().borders(Borders::BOTTOM))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-    mark_buffer_hyperlinks(
-        frame.buffer_mut(),
-        area,
-        &view_links,
-        hyperlinks_enabled_from_env(),
-    );
-}
-
-fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let queue_height = app.queue_preview_height().min(area.height);
-    let input_area = if queue_height > 0 {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(queue_height), Constraint::Min(1)])
-            .split(area);
-        render_queue_preview(frame, app, chunks[0]);
-        chunks[1]
-    } else {
-        area
-    };
-    let title = match app.session_state() {
-        _ if app.composer_history_search().is_some() => history_search_title(app),
-        SessionState::Generating => " message (Enter queues · Esc cancels) ".to_string(),
-        SessionState::Paused => " approval pending ".to_string(),
-        SessionState::WaitingUserInput => " waiting for input ".to_string(),
-        _ if app.vim_enabled() => format!(" message · vim {} ", app.vim_mode().label()),
-        _ => " message ".to_string(),
-    };
-    let inner_width = input_area.width.saturating_sub(2).max(1);
-    let max_rows = input_area.height.saturating_sub(2).max(1);
-    let view = app.composer_state().view(inner_width, max_rows);
-    let lines = if app.composer().is_empty() {
-        vec![Line::from(Span::styled(
-            "Ask Refact…",
-            Style::default().fg(Color::DarkGray),
-        ))]
-    } else {
-        view.lines.into_iter().map(Line::from).collect()
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title.as_str()))
-            .wrap(Wrap { trim: false }),
-        input_area,
-    );
-    if !app.composer().is_empty() {
-        let x = input_area
-            .x
-            .saturating_add(1)
-            .saturating_add(view.cursor_col.min(inner_width.saturating_sub(1)));
-        let y = input_area
-            .y
-            .saturating_add(1)
-            .saturating_add(view.cursor_row.min(max_rows.saturating_sub(1)));
-        frame.set_cursor_position((x, y));
-    }
-}
-
-fn history_search_title(app: &App) -> String {
-    let Some(search) = app.composer_history_search() else {
-        return " history search ".to_string();
-    };
-    let status = if search.total == 0 {
-        "no matches".to_string()
-    } else {
-        format!("{}/{}", search.selected, search.total)
-    };
-    let query = if search.query.is_empty() {
-        "type to filter".to_string()
-    } else {
-        search.query
-    };
-    format!(" history search: {query} · {status} · Enter accept · Esc cancel ")
-}
-
-fn render_queue_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-    let local_len = app.input_queue().len();
-    let mut spans = vec![Span::styled(
-        format!(" queued ({local_len}) "),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )];
-    for (idx, item) in app.input_queue().items().iter().enumerate().take(3) {
-        let selected = app.input_queue().selected_index() == Some(idx);
-        let editing = app.input_queue().editing_index() == Some(idx);
-        let marker = if editing {
-            "✎"
-        } else if selected {
-            "›"
-        } else {
-            "•"
-        };
-        let text = item.text.replace('\n', " ⏎ ");
-        spans.push(Span::styled(
-            format!("{marker}{} ", idx + 1),
-            Style::default().fg(if selected || editing {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            }),
-        ));
-        spans.push(Span::raw(text));
-        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
-    }
-    if local_len > 3 {
-        spans.push(Span::styled(
-            format!("+{} more  ", local_len - 3),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    if app.server_queue_size() > 0 {
-        let preview = app
-            .server_queue_previews()
-            .first()
-            .map(|value| format!(": {}", value.replace('\n', " ⏎ ")))
-            .unwrap_or_default();
-        spans.push(Span::styled(
-            format!(" server queued ({}){preview} ", app.server_queue_size()),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    let line = truncate_line_with_ellipsis_if_overflow(Line::from(spans), area.width as usize);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-fn render_project_picker(frame: &mut Frame<'_>, picker: &ProjectPickerState, area: Rect) {
-    let width = area.width.saturating_sub(8).min(80);
-    let height = area.height.saturating_sub(6).min(20);
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" projects: {} ", picker.filter));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    let items: Vec<ListItem<'_>> = picker
-        .filtered_projects()
-        .iter()
-        .enumerate()
-        .map(|(idx, project)| {
-            let marker = if idx == picker.selected { "›" } else { " " };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(
-                    project.slug.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  {}", project.root.display()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
-        .collect();
-    let list = if items.is_empty() {
-        List::new(vec![ListItem::new("No projects match")])
-    } else {
-        List::new(items)
-    };
-    frame.render_widget(list, inner);
-}
-fn render_modal_picker(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, composer: Rect) {
-    let width = area.width.saturating_sub(8).min(86);
-    let filtered = picker.filtered_items();
-    let rows = filtered.len().max(1).min(8) as u16;
-    let height = rows
-        .saturating_add(2)
-        .min(area.height.saturating_sub(2).max(1));
-    let max_y = area.y.saturating_add(area.height.saturating_sub(height));
-    let wanted_y = composer.y.saturating_sub(height);
-    let y = wanted_y.min(max_y);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, popup);
-    let title = if picker.is_multi() {
-        format!(
-            " {}: {} selected · {} ",
-            picker.title(),
-            picker.selected_count(),
-            picker.filter
-        )
-    } else {
-        format!(" {}: {} ", picker.title(), picker.filter)
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    let items: Vec<ListItem<'_>> = filtered
-        .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let cursor = if idx == picker.selected { "›" } else { " " };
-            let checked = if picker.is_multi() {
-                if picker.is_selected(&item.id) {
-                    "☑"
-                } else {
-                    "☐"
-                }
-            } else {
-                ""
-            };
-            let title = if checked.is_empty() {
-                item.title.clone()
-            } else {
-                format!("{checked} {}", item.title)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(cursor, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    format!("  {}", item.description),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
-        .collect();
-    let list = if items.is_empty() {
-        List::new(vec![ListItem::new("No entries match")])
-    } else {
-        List::new(items)
-    };
-    frame.render_widget(list, inner);
-}
-
-fn render_ask_questions_form(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect) {
-    let width = area.width.saturating_sub(6).min(96).max(24);
-    let option_count = form.current_question().choice_options().len() as u16;
-    let height = option_count
-        .saturating_add(9)
-        .min(area.height.saturating_sub(4).max(8));
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let title = format!(
-        " questions {} of {} ",
-        form.current_index() + 1,
-        form.question_count()
-    );
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(render_ask_questions_lines(form, inner.width as usize))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn render_ask_questions_lines(form: &AskQuestionsForm, width: usize) -> Vec<Line<'static>> {
-    let question = form.current_question();
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        question.text.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-    match question.question_type {
-        AskQuestionType::FreeText => {
-            let text = form.current_text().unwrap_or_default();
-            if text.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "Type your answer…",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            } else {
-                for line in text.lines() {
-                    lines.push(Line::from(line.to_string()));
-                }
-            }
-        }
-        AskQuestionType::YesNo | AskQuestionType::SingleSelect | AskQuestionType::MultiSelect => {
-            for (idx, option) in question.choice_options().iter().enumerate() {
-                let cursor = if form.current_choice_index() == Some(idx) {
-                    "›"
-                } else {
-                    " "
-                };
-                let selected = form.option_selected(idx);
-                let marker = match question.question_type {
-                    AskQuestionType::MultiSelect if selected => "☑",
-                    AskQuestionType::MultiSelect => "☐",
-                    _ if selected => "◉",
-                    _ => "○",
-                };
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(cursor, Style::default().fg(Color::Cyan)),
-                    Span::raw(" "),
-                    Span::styled(marker, style),
-                    Span::raw(" "),
-                    Span::styled(option.clone(), style),
-                ]));
-            }
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Current: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(form.current_answer_text()),
-    ]));
-    lines.push(Line::from(Span::styled(
-        ask_questions_help(question.question_type),
-        Style::default().fg(Color::DarkGray),
-    )));
-    lines
-        .into_iter()
-        .map(|line| truncate_line_with_ellipsis_if_overflow(line, width))
-        .collect()
-}
-
-fn ask_questions_help(question_type: AskQuestionType) -> &'static str {
-    match question_type {
-        AskQuestionType::YesNo => "Y/N choose · Enter next/submit · ←/→ question · Esc fallback",
-        AskQuestionType::SingleSelect => {
-            "↑/↓ choose · Enter next/submit · ←/→ question · Esc fallback"
-        }
-        AskQuestionType::MultiSelect => {
-            "↑/↓ move · Space toggle · Enter next/submit · Esc fallback"
-        }
-        AskQuestionType::FreeText => {
-            "Type answer · Ctrl-J newline · Enter next/submit · Esc fallback"
-        }
-    }
-}
-
-fn render_approval_modal(
-    frame: &mut Frame<'_>,
-    modal: &crate::approvals::ApprovalModalState,
-    area: Rect,
-) {
-    let width = area.width.saturating_sub(6).min(96);
-    let max_height = if modal.details_open() { 28 } else { 16 };
-    let height = area.height.saturating_sub(6).min(max_height);
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    let block = Block::default().borders(Borders::ALL).title(" approval ");
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(visible_approval_lines(
-            modal,
-            inner.width as usize,
-            inner.height as usize,
-        ))
-        .wrap(Wrap { trim: false }),
-        inner,
-    );
-}
-
-fn visible_approval_lines(
-    modal: &crate::approvals::ApprovalModalState,
-    width: usize,
-    height: usize,
-) -> Vec<Line<'static>> {
-    let lines = render_modal_lines(modal, width);
-    if !modal.details_open() || height == 0 {
-        return lines;
-    }
-    let fixed = lines.len().min(2);
-    let body_height = height.saturating_sub(fixed);
-    let body_start = fixed + modal.detail_scroll().min(lines.len().saturating_sub(fixed));
-    lines[..fixed]
-        .iter()
-        .cloned()
-        .chain(lines[body_start..].iter().take(body_height).cloned())
-        .collect()
-}
-
-fn render_events_pane(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(render_event_lines(app.events_pane().events()))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" daemon events "),
-            )
-            .wrap(Wrap { trim: false }),
-        columns[0],
-    );
-    frame.render_widget(
-        Paragraph::new(render_worker_lines(app.events_pane().workers()))
-            .block(Block::default().borders(Borders::ALL).title(" workers "))
-            .wrap(Wrap { trim: false }),
-        columns[1],
-    );
-}
-
-fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let rows = app.keymap_help_rows();
-    let row_count = rows.len().min(24) as u16;
-    let popup = centered(
-        area,
-        area.width.saturating_sub(8).min(92),
-        row_count.saturating_add(4).min(area.height),
-    );
-    frame.render_widget(Clear, popup);
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("Theme ", app.theme().style(ThemeRole::Muted)),
-        Span::raw(app.theme().name().to_string()),
-        Span::styled(" · vim ", app.theme().style(ThemeRole::Muted)),
-        Span::raw(if app.vim_enabled() {
-            app.vim_mode().label().to_string()
-        } else {
-            "off".to_string()
-        }),
-    ]));
-    lines.push(Line::from(""));
-    for row in rows.into_iter().take(24) {
-        lines.push(help_row_line(row, app));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" help "))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-fn help_row_line(row: HelpRow, app: &App) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{:>12} ", row.context.label()),
-            app.theme().style(ThemeRole::Muted),
-        ),
-        Span::styled(
-            format!("{:<20}", row.bindings),
-            app.theme().style(ThemeRole::Highlight),
-        ),
-        Span::raw(row.description.to_string()),
-    ])
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+pub(crate) fn popup_anchored_above(bounds: Rect, anchor_y: u16, width: u16, height: u16) -> Rect {
+    let width = width.min(bounds.width);
+    let height = height.min(bounds.height);
+    let max_y = bounds
+        .y
+        .saturating_add(bounds.height.saturating_sub(height));
+    let y = anchor_y.saturating_sub(height).clamp(bounds.y, max_y);
+    Rect {
+        x: bounds
+            .x
+            .saturating_add(bounds.width.saturating_sub(width) / 2),
+        y,
         width,
         height,
     }
@@ -725,6 +150,54 @@ mod tests {
         }
     }
 
+    fn assert_rect_inside(rect: Rect, bounds: Rect) {
+        assert!(rect.x >= bounds.x);
+        assert!(rect.y >= bounds.y);
+        assert!(rect.x.saturating_add(rect.width) <= bounds.x.saturating_add(bounds.width));
+        assert!(rect.y.saturating_add(rect.height) <= bounds.y.saturating_add(bounds.height));
+    }
+
+    #[test]
+    fn popup_anchored_above_clamps_height_to_bounds() {
+        let bounds = Rect::new(2, 4, 20, 5);
+        let rect = popup_anchored_above(bounds, 8, 12, 99);
+
+        assert_eq!(rect.height, bounds.height);
+        assert_eq!(rect.y, bounds.y);
+        assert_rect_inside(rect, bounds);
+    }
+
+    #[test]
+    fn popup_anchored_above_clamps_anchor_above_bounds() {
+        let bounds = Rect::new(5, 10, 30, 12);
+        let rect = popup_anchored_above(bounds, 3, 10, 4);
+
+        assert_eq!(rect.y, bounds.y);
+        assert_rect_inside(rect, bounds);
+    }
+
+    #[test]
+    fn popup_anchored_above_handles_empty_and_one_row_bounds() {
+        let empty = Rect::new(4, 6, 0, 0);
+        let empty_rect = popup_anchored_above(empty, 6, 20, 5);
+        assert_eq!(empty_rect, Rect::new(4, 6, 0, 0));
+        assert_rect_inside(empty_rect, empty);
+
+        let one_row = Rect::new(4, 6, 7, 1);
+        let one_row_rect = popup_anchored_above(one_row, 6, 20, 5);
+        assert_eq!(one_row_rect, Rect::new(4, 6, 7, 1));
+        assert_rect_inside(one_row_rect, one_row);
+    }
+
+    #[test]
+    fn popup_anchored_above_uses_room_above_anchor() {
+        let bounds = Rect::new(0, 0, 80, 24);
+        let rect = popup_anchored_above(bounds, 20, 30, 6);
+
+        assert_eq!(rect, Rect::new(25, 14, 30, 6));
+        assert_rect_inside(rect, bounds);
+    }
+
     #[test]
     fn help_rows_are_generated_from_active_keymap() {
         let mut app = App::new(project());
@@ -739,7 +212,7 @@ help = "f1"
         app.test_set_keymap(keymap);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|frame| render_help(frame, &app, frame.area()))
+            .draw(|frame| help::render_help(frame, &app, frame.area()))
             .unwrap();
         let text = terminal
             .backend()
@@ -796,8 +269,50 @@ help = "f1"
             .iter()
             .position(|row| row.contains("Working") && row.contains("Esc to interrupt"))
             .unwrap();
-        let composer_row = rows.iter().position(|row| row.contains("message")).unwrap();
+        let composer_row = rows
+            .iter()
+            .position(|row| row.contains("Ask Refact"))
+            .unwrap();
         assert!(status_row < composer_row);
+    }
+
+    #[test]
+    fn ask_form_replaces_composer_in_bottom_pane() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        let request = crate::ask_questions::AskQuestionsRequest::from_tool_content(
+            &serde_json::json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": [
+                    {"id":"confirm","type":"yes_no","text":"Proceed?"}
+                ],
+            })
+            .to_string(),
+            None,
+        )
+        .unwrap();
+        app.test_set_ask_questions_form(crate::ask_questions::AskQuestionsForm::new(request));
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let question_row = rows
+            .iter()
+            .position(|row| row.contains("Proceed?"))
+            .unwrap();
+        let footer_row = rows.iter().rposition(|row| row.contains("daemon")).unwrap();
+
+        assert!(!rows.join("\n").contains("Ask Refact"));
+        assert!(question_row < footer_row);
+        assert!(question_row >= footer_row.saturating_sub(8));
     }
 
     #[test]
@@ -891,7 +406,7 @@ help = "f1"
         assert!(text.contains("printf 'hi' && git diff"));
         assert!(text.contains(r#""cwd": "/tmp/demo""#));
         assert!(text.contains("apply_patch"));
-        assert!(text.contains("- old"));
-        assert!(text.contains("+ new"));
+        assert!(text.contains("-old"));
+        assert!(text.contains("+new"));
     }
 }

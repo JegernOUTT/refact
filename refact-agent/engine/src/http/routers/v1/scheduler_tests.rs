@@ -13,7 +13,7 @@ use crate::http::routers::v1::scheduler::{
     handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_patch,
     handle_v1_scheduler_cron_post, handle_v1_scheduler_cron_run,
 };
-use crate::scheduler::{Action, AgentTarget, CronRunRecord, Delivery, Job, Trigger};
+use crate::scheduler::{Action, AgentTarget, CronRunRecord, CronStore, Delivery, Job, Trigger};
 
 async fn test_app() -> (tempfile::TempDir, AppState, Router) {
     let temp = tempfile::tempdir().unwrap();
@@ -87,6 +87,7 @@ fn interval_job(id: &str, every_ms: u64) -> Job {
         fire_count: 2,
         last_status: Some("fired".to_string()),
         last_error: None,
+        last_delivery_error: None,
         recent_runs: vec![CronRunRecord {
             at_ms: 2_000,
             status: "fired".to_string(),
@@ -145,6 +146,7 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
     assert_eq!(created["human_schedule"], json!("hourly at :7"));
     assert_eq!(created["recurring"], json!(true));
     assert_eq!(created["durable"], json!(true));
+    assert_eq!(created["delivery_kind"], json!("chat"));
 
     let (status, listed) = json_request(
         app.clone(),
@@ -161,6 +163,8 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
     assert_eq!(listed_task["description"], json!("Hourly frog check"));
     assert_eq!(listed_task["prompt"], json!("Check the frogs"));
     assert_eq!(listed_task["action_kind"], json!("agent_turn"));
+    assert_eq!(listed_task["delivery_kind"], json!("chat"));
+    assert_eq!(listed_task["delivery"]["kind"], json!("chat"));
     assert_eq!(listed_task["fire_count"], json!(0));
     assert!(listed_task["next_fire_at_ms"].as_u64().unwrap() > 0);
 
@@ -191,6 +195,74 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
         .unwrap()
         .iter()
         .any(|task| task["id"] == json!(id)));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_defaults_to_durable_when_project_store_exists() {
+    let (temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "default-durable-chat").await;
+
+    let (status, created) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "11 * * * *",
+                    "prompt": "Persist me",
+                    "description": "Persist me",
+                    "chat_id": "default-durable-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["durable"], json!(true));
+    assert!(crate::scheduler::session_cron_store()
+        .get(created["id"].as_str().unwrap())
+        .await
+        .is_none());
+    let store = crate::scheduler::JsonFileCronStore::new(temp.path()).unwrap();
+    let tasks = store.list().await;
+    assert!(tasks.iter().any(|task| task.id == created["id"]));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_explicit_false_stays_session_only() {
+    let (_temp, app_state, app) = test_app().await;
+    add_open_session(&app_state, "session-only-chat").await;
+
+    let (status, created) = json_request(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "cron": "12 * * * *",
+                    "prompt": "Session only",
+                    "description": "Session only",
+                    "durable": false,
+                    "chat_id": "session-only-chat"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["durable"], json!(false));
+    assert!(crate::scheduler::session_cron_store()
+        .get(created["id"].as_str().unwrap())
+        .await
+        .is_some());
 }
 
 #[tokio::test]
@@ -280,6 +352,7 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
                     "cron": "*/5 * * * *",
                     "prompt": "Run checks",
                     "description": "Check build",
+                    "durable": false,
                     "chat_id": "active-chat",
                     "mode": "agent"
                 })
@@ -310,9 +383,8 @@ async fn scheduler_create_with_chat_id_creates_executable_task() {
 }
 
 #[tokio::test]
-async fn scheduler_cron_http_post_agent_isolated_creates_isolated_target() {
-    let (_temp, app_state, app) = test_app().await;
-    add_open_session(&app_state, "active-chat").await;
+async fn scheduler_cron_http_post_agent_isolated_creates_without_live_chat() {
+    let (_temp, _app_state, app) = test_app().await;
 
     let (status, created) = json_request(
         app.clone(),
@@ -326,7 +398,7 @@ async fn scheduler_cron_http_post_agent_isolated_creates_isolated_target() {
                     "prompt": "Run isolated checks",
                     "isolated": true,
                     "description": "Isolated check",
-                    "chat_id": "active-chat",
+                    "durable": false,
                     "mode": "agent"
                 })
                 .to_string(),
@@ -336,6 +408,7 @@ async fn scheduler_cron_http_post_agent_isolated_creates_isolated_target() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(created["action_kind"], json!("agent_turn"));
+    assert_eq!(created["delivery_kind"], json!("chat"));
     let id = created["id"].as_str().unwrap();
 
     let tasks = crate::scheduler::session_cron_store().list().await;
@@ -385,6 +458,7 @@ async fn scheduler_cron_http_post_command_creates_command_job() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "chat_id": "command-chat",
                     "cwd": ".",
                     "timeout_secs": 9
@@ -457,6 +531,7 @@ async fn scheduler_cron_http_post_command_ignores_isolated() {
                     "command": "printf 'hi frog'",
                     "isolated": true,
                     "description": "Print frog",
+                    "durable": false,
                     "chat_id": "command-chat"
                 })
                 .to_string(),
@@ -498,6 +573,7 @@ async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "delivery": {"kind": "webhook", "url": "http://127.0.0.1/hook", "token": "secret"}
                 })
                 .to_string(),
@@ -507,6 +583,7 @@ async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(created["action_kind"], json!("command"));
+    assert_eq!(created["delivery_kind"], json!("webhook"));
     assert_eq!(created["delivery"]["kind"], json!("webhook"));
     assert_eq!(created["delivery"]["url"], json!("http://127.0.0.1/hook"));
     assert_eq!(created["delivery"]["has_token"], json!(true));
@@ -563,6 +640,7 @@ async fn scheduler_cron_http_post_notifier_delivery_round_trips() {
                     "cron": "*/5 * * * *",
                     "command": "printf 'hi frog'",
                     "description": "Print frog",
+                    "durable": false,
                     "delivery": {"kind": "notifier", "integration_id": "notifier_telegram", "target": "chat-1"}
                 })
                 .to_string(),
@@ -572,6 +650,7 @@ async fn scheduler_cron_http_post_notifier_delivery_round_trips() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(created["action_kind"], json!("command"));
+    assert_eq!(created["delivery_kind"], json!("notifier"));
     assert_eq!(created["delivery"]["kind"], json!("notifier"));
     assert_eq!(
         created["delivery"]["integration_id"],
@@ -612,6 +691,73 @@ async fn scheduler_cron_http_post_notifier_delivery_round_trips() {
         json!("notifier_telegram")
     );
     assert_eq!(listed_task["delivery"]["target"], json!("chat-1"));
+}
+
+#[tokio::test]
+async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
+    let (_temp, _app_state, app) = test_app().await;
+
+    let (status, created) = json_request(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/scheduler/cron")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "trigger": {"kind": "webhook", "hook_id": "deploy"},
+                    "command": "printf 'hi frog'",
+                    "delivery": "none",
+                    "description": "Deploy hook",
+                    "durable": false
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["human_schedule"], json!("webhook"));
+    assert_eq!(created["delivery_kind"], json!("none"));
+    let id = created["id"].as_str().unwrap();
+    let tasks = crate::scheduler::session_cron_store().list().await;
+    let task = tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(
+        task.trigger,
+        Trigger::Webhook {
+            hook_id: "deploy".to_string()
+        }
+    );
+    assert_eq!(task.auto_expire_after_ms, 0);
+    assert_eq!(
+        crate::scheduler::next_run_ms(task, 1_000, chrono_tz::UTC),
+        None
+    );
+
+    let (status, listed) = json_request(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/scheduler/cron")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_task = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed_task["trigger_kind"], json!("webhook"));
+    assert_eq!(listed_task["human_schedule"], json!("webhook"));
+    assert_eq!(listed_task["hook_id"], json!("deploy"));
+    assert_eq!(listed_task["next_fire_at_ms"], json!(0));
+    assert_eq!(listed_task["action_kind"], json!("command"));
+    assert_eq!(listed_task["delivery_kind"], json!("none"));
+    assert_eq!(listed_task["delivery"]["kind"], json!("none"));
 }
 
 #[tokio::test]
@@ -708,6 +854,7 @@ async fn scheduler_cron_http_post_every_creates_interval_job() {
                     "every": "30m",
                     "prompt": "Check interval frogs",
                     "description": "Interval frog check",
+                    "durable": false,
                     "chat_id": "interval-chat"
                 })
                 .to_string(),
@@ -746,7 +893,10 @@ async fn scheduler_cron_http_post_every_creates_interval_job() {
         .find(|task| task["id"] == json!(id))
         .unwrap();
     assert_eq!(listed_task["trigger_kind"], json!("interval"));
+    assert_eq!(listed_task["human_schedule"], json!("every 30m"));
     assert_eq!(listed_task["every_ms"], json!(30 * 60_000));
+    assert_eq!(listed_task["action_kind"], json!("agent_turn"));
+    assert_eq!(listed_task["delivery_kind"], json!("chat"));
 }
 
 #[tokio::test]
@@ -765,6 +915,7 @@ async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
                     "cron": "*/15 * * * *",
                     "prompt": "Patch frogs",
                     "description": "Patch frog check",
+                    "durable": false,
                     "chat_id": "patch-chat"
                 })
                 .to_string(),

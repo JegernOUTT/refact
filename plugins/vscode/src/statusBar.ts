@@ -2,6 +2,7 @@
 import * as vscode from 'vscode';
 import * as fetchH2 from 'fetch-h2';
 import { RagStatus } from './fetchAPI';
+import { backendReadyForStatus, backendStatusLabel } from './backendStatus';
 
 
 let _website_message = "";
@@ -51,6 +52,9 @@ export class StatusBarMenu {
 
     choose_color()
     {
+        const backendStatus = global.rust_binary_blob?.backend_status?.();
+        const backendLabel = backendStatus ? backendStatusLabel(backendStatus) : "Connecting to Refact";
+        const backendReady = backendStatus ? backendReadyForStatus(backendStatus) : false;
         if (this.access_level === 0) {
             this.menu.text = `$(refact-icon-privacy) Refact.ai`;
             this.menu.backgroundColor = undefined;
@@ -60,9 +64,18 @@ export class StatusBarMenu {
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             if (this.socketerror_msg.indexOf("no model") !== -1) {
                 this.menu.tooltip = `Either an outage on the server side, or your settings might be outdated:\n${this.socketerror_msg}`;
+            } else if (backendStatus === "failed") {
+                this.menu.tooltip = `${backendLabel}:\n` + this.socketerror_msg;
             } else {
                 this.menu.tooltip = `Cannot reach the server:\n` + this.socketerror_msg;
             }
+        } else if (backendStatus && !backendReady) {
+            this.menu.text = backendStatus === "failed" ? `$(debug-disconnect) Refact.ai` : `$(sync~spin) Refact.ai`;
+            this.menu.backgroundColor = backendStatus === "failed"
+                ? new vscode.ThemeColor('statusBarItem.warningBackground')
+                : undefined;
+            let reach = global.rust_binary_blob ? global.rust_binary_blob.attemping_to_reach() : "";
+            this.menu.tooltip = reach ? `${backendLabel}\n${reach}` : backendLabel;
         } else if (!global.have_caps) {
             this.menu.text = `$(codify-logo) Refact.ai`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');

@@ -24,6 +24,7 @@ pub use refact_providers::kimi;
 pub use refact_providers::lmstudio;
 pub use refact_providers::minimax;
 pub use refact_providers::ollama;
+pub use refact_providers::opencode;
 pub use refact_providers::openai;
 pub use refact_providers::openai_codex;
 pub use refact_providers::openai_codex_oauth;

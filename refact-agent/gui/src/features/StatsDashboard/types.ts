@@ -47,6 +47,76 @@ export interface ModeStats {
   total_calls: number;
   total_tokens: number;
   total_cost_usd: number;
+  // Enriched fields (present on current engine; optional for older engines).
+  successful_calls?: number;
+  failed_calls?: number;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_cache_read_tokens?: number;
+  total_cache_creation_tokens?: number;
+  total_duration_ms?: number;
+  avg_duration_ms?: number;
+  conversations?: number;
+}
+
+export interface TaskRoleStats {
+  role: string;
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  total_duration_ms: number;
+  avg_duration_ms: number;
+  tasks: number;
+  agents: number;
+  conversations: number;
+}
+
+export interface AgentStats {
+  agent_id: string;
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  total_duration_ms: number;
+  tasks: number;
+  last_active: string;
+  primary_mode: string;
+}
+
+export interface TaskStats {
+  task_id: string;
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  agents: number;
+  cards: number;
+  last_active: string;
+}
+
+export interface HourStats {
+  hour: number;
+  total_calls: number;
+  total_tokens: number;
+}
+
+export interface CountItem {
+  key: string;
+  count: number;
+}
+
+export interface ErrorsStats {
+  failed_calls: number;
+  retried_calls: number;
+  total_retries: number;
+  by_finish_reason: CountItem[];
+  by_category: CountItem[];
 }
 
 export interface ConversationStats {
@@ -57,28 +127,42 @@ export interface ConversationStats {
   model_id: string;
 }
 
+export interface StatsTotals {
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_cache_read_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cost_usd: number | null;
+  total_duration_ms: number;
+  avg_duration_ms: number;
+  total_conversations: number;
+  total_messages_sent: number;
+  // Enriched fields (present on current engine; optional for older engines).
+  total_tasks?: number;
+  total_agents?: number;
+  retried_calls?: number;
+  total_retries?: number;
+  active_days?: number;
+}
+
 export interface StatsSummary {
   date_range: { from: string; to: string };
-  totals: {
-    total_calls: number;
-    successful_calls: number;
-    failed_calls: number;
-    total_prompt_tokens: number;
-    total_completion_tokens: number;
-    total_tokens: number;
-    total_cache_read_tokens: number;
-    total_cache_creation_tokens: number;
-    total_cost_usd: number | null;
-    total_duration_ms: number;
-    avg_duration_ms: number;
-    total_conversations: number;
-    total_messages_sent: number;
-  };
+  totals: StatsTotals;
   by_model: ModelStats[];
   by_provider: ProviderStats[];
   by_day: DayStats[];
   by_mode: ModeStats[];
   top_conversations: ConversationStats[];
+  // Enriched collections (present on current engine; optional for older engines).
+  by_task_role?: TaskRoleStats[];
+  by_agent?: AgentStats[];
+  by_task?: TaskStats[];
+  by_hour?: HourStats[];
+  errors?: ErrorsStats;
 }
 
 export interface StatsEventsParams {
@@ -129,7 +213,7 @@ export interface StatsEventsResponse {
   offset: number;
 }
 
-export type DateRangePreset = "7d" | "30d" | "all";
+export type DateRangePreset = "today" | "7d" | "30d" | "90d" | "all" | "custom";
 
 export interface DateRange {
   preset: DateRangePreset;

@@ -195,10 +195,12 @@ mod tests {
     #[test]
     fn snapshot_roundtrips_with_background_agents() {
         let event = ChatEvent::Snapshot {
+            goal: None,
             thread: ThreadParams::default(),
             runtime: RuntimeState::default(),
             messages: vec![],
             background_agents: vec![background_agent_summary()],
+            browser: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();

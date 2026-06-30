@@ -19,14 +19,13 @@ import { AssistantInput } from "./AssistantInput";
 import { PlainText } from "./PlainText";
 import { useAppDispatch, useAppSelector, useDiffFileReload } from "../../hooks";
 import {
-  selectIntegration,
+  selectIntegrationById,
   selectIsStreamingById,
   selectIsWaitingById,
   selectMessagesById,
   selectQueuedItemsById,
   selectSnapshotReceivedById,
   selectThreadById,
-  selectChatId,
   selectThreadPauseById,
   selectIsCompressingById,
   selectCompressionPhaseById,
@@ -56,6 +55,7 @@ import {
   removeMessage,
   branchFromChat,
 } from "../../services/refact/chatCommands";
+import { ChatThreadProvider, useThreadId } from "../../features/Chat/Thread";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
 import { useCollapsibleState } from "./useCollapsibleState";
@@ -102,7 +102,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   onRetry,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
   const [renderChatId, setRenderChatId] = useState(chatId);
 
   useEffect(() => {
@@ -145,7 +145,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   const isConfig = thread !== null && thread.mode === "configurator";
   const isWaiting = useAppSelector((s) => selectIsWaitingById(s, renderChatId));
-  const integrationMeta = useAppSelector(selectIntegration);
+  const integrationMeta = useAppSelector((s) =>
+    selectIntegrationById(s, renderChatId),
+  );
   const isWaitingForConfirmation = useAppSelector((s) =>
     selectThreadPauseById(s, renderChatId),
   );
@@ -406,6 +408,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               diffsByToolId={item.diffsByToolId}
               usage={item.message.usage}
               isStreaming={item.isStreaming}
+              threadId={renderChatId}
             />
           );
 
@@ -485,7 +488,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return null;
       }
     },
-    [handleBranch, handleDelete, onRetryWrapper, collapsibleState],
+    [
+      handleBranch,
+      handleDelete,
+      onRetryWrapper,
+      collapsibleState,
+      renderChatId,
+    ],
   );
 
   if (showLoading) {
@@ -519,54 +528,56 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   }
 
   return (
-    <CollapsibleStoreProvider value={collapsibleStore}>
-      <SelectionToolbar />
-      <Box className={styles.chatRoot} data-element="ChatContent">
-        <VirtualizedChatList
-          key={renderChatId}
-          items={displayItems}
-          renderItem={renderDisplayItem}
-          initialScrollIndex={initialScrollIndex}
-          footer={virtuosoFooter}
-          header={<PlanBanner threadId={renderChatId} />}
-          isStreaming={isStreaming}
-        />
+    <ChatThreadProvider chatId={renderChatId}>
+      <CollapsibleStoreProvider value={collapsibleStore}>
+        <SelectionToolbar />
+        <Box className={styles.chatRoot} data-element="ChatContent">
+          <VirtualizedChatList
+            key={renderChatId}
+            items={displayItems}
+            renderItem={renderDisplayItem}
+            initialScrollIndex={initialScrollIndex}
+            footer={virtuosoFooter}
+            header={<PlanBanner threadId={renderChatId} />}
+            isStreaming={isStreaming}
+          />
 
-        <Box className={styles.floatingLinks}>
-          <ScrollArea scrollbars="horizontal">
-            <Flex align="start" gap="3" pb="2">
-              {shouldConfigButtonBeVisible && (
-                <Button
-                  title="Return to configuration page"
-                  onClick={handleReturnToConfigurationClick}
-                  size="sm"
-                  variant="soft"
-                >
-                  Return
-                </Button>
-              )}
-              <ChatLinks />
-            </Flex>
-          </ScrollArea>
-        </Box>
-
-        {queuedItems.length > 0 && (
-          <Box className={styles.queuedMessagesContainer}>
-            <Container className={styles.queuedMessagesContent}>
-              <Flex direction="column" gap="2" align="end">
-                {queuedItems.map((item, index) => (
-                  <QueuedMessage
-                    key={item.client_request_id}
-                    queuedItem={item}
-                    position={index + 1}
-                  />
-                ))}
+          <Box className={styles.floatingLinks}>
+            <ScrollArea scrollbars="horizontal">
+              <Flex align="start" gap="3" pb="2">
+                {shouldConfigButtonBeVisible && (
+                  <Button
+                    title="Return to configuration page"
+                    onClick={handleReturnToConfigurationClick}
+                    size="sm"
+                    variant="soft"
+                  >
+                    Return
+                  </Button>
+                )}
+                <ChatLinks />
               </Flex>
-            </Container>
+            </ScrollArea>
           </Box>
-        )}
-      </Box>
-    </CollapsibleStoreProvider>
+
+          {queuedItems.length > 0 && (
+            <Box className={styles.queuedMessagesContainer}>
+              <Container className={styles.queuedMessagesContent}>
+                <Flex direction="column" gap="2" align="end">
+                  {queuedItems.map((item, index) => (
+                    <QueuedMessage
+                      key={item.client_request_id}
+                      queuedItem={item}
+                      position={index + 1}
+                    />
+                  ))}
+                </Flex>
+              </Container>
+            </Box>
+          )}
+        </Box>
+      </CollapsibleStoreProvider>
+    </ChatThreadProvider>
   );
 };
 

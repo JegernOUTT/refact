@@ -64,6 +64,10 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
         include_str!("../yaml_configs/default_providers/ollama.yaml"),
     ),
     (
+        "opencode",
+        include_str!("../yaml_configs/default_providers/opencode.yaml"),
+    ),
+    (
         "openai",
         include_str!("../yaml_configs/default_providers/openai.yaml"),
     ),

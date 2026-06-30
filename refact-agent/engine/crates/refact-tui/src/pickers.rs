@@ -134,6 +134,13 @@ impl PickerState {
         self.filtered_items().get(self.selected).cloned()
     }
 
+    pub fn select_item_id(&mut self, id: &str) {
+        let Some(index) = self.filtered_items().iter().position(|item| item.id == id) else {
+            return;
+        };
+        self.selected = index;
+    }
+
     pub fn selected_items(&self) -> Vec<PickerItem> {
         self.items
             .iter()

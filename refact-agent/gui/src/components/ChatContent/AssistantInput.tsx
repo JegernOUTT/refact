@@ -35,6 +35,7 @@ type ChatInputProps = {
   diffsByToolId?: Record<string, DiffChunk[]>;
   usage?: Usage | null;
   isStreaming?: boolean;
+  threadId?: string;
 };
 
 const _AssistantInput: React.FC<ChatInputProps> = ({
@@ -52,6 +53,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   diffsByToolId,
   usage,
   isStreaming = false,
+  threadId,
 }) => {
   // Get unique server-executed tool names for display
   const serverToolNames = useMemo(() => {
@@ -193,6 +195,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
           isActiveAssistant={isStreaming}
+          threadId={threadId}
         />
       )}
 
@@ -202,6 +205,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
           isActiveAssistant={isStreaming}
+          threadId={threadId}
         />
       )}
       <MessageFooter

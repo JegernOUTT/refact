@@ -40,11 +40,17 @@ describe("TaskPlannerDialog", () => {
       ),
     );
 
+    const chat = createDefaultChatState();
+
     const { user } = render(
-      <TaskPlannerDialog open onOpenChange={onOpenChange} />,
+      <TaskPlannerDialog
+        sourceChatId={chat.current_thread_id}
+        open
+        onOpenChange={onOpenChange}
+      />,
       {
         preloadedState: {
-          chat: createDefaultChatState(),
+          chat,
           config: {
             apiKey: "test",
             host: "web",

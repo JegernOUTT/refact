@@ -132,6 +132,17 @@ function isEdgeElement(
   );
 }
 
+function isNodeElement(
+  element: unknown,
+): element is { group: "nodes"; data: { id: string; type?: string } } {
+  return (
+    typeof element === "object" &&
+    element !== null &&
+    "group" in element &&
+    (element as { group?: unknown }).group === "nodes"
+  );
+}
+
 describe("KnowledgeGraphView", () => {
   it("renders empty state when no nodes", () => {
     render(
@@ -437,5 +448,35 @@ describe("KnowledgeGraphView", () => {
 
     // Should have 2 nodes + 1 edge = 3 elements
     expect(screen.getByText("3 elements")).toBeInTheDocument();
+  });
+
+  it("derives node color kind from explicit kind, then node_type", () => {
+    const nodes: KnowledgeGraphNode[] = [
+      { id: "m1", node_type: "doc", label: "Memory", kind: "memory" },
+      { id: "c1", node_type: "doc_code", label: "Code" },
+      { id: "d1", node_type: "doc", label: "Plain Doc" },
+    ];
+
+    render(
+      <KnowledgeGraphView
+        nodes={nodes}
+        edges={[]}
+        selectedId={null}
+        onSelectId={vi.fn()}
+      />,
+    );
+
+    const typeById = new Map(
+      cytoscapeMock.elements
+        .filter(isNodeElement)
+        .map((node) => [node.data.id, node.data.type]),
+    );
+
+    // Explicit frontmatter kind wins even when node_type is plain "doc".
+    expect(typeById.get("m1")).toBe("memory");
+    // Otherwise the "doc_" prefix is stripped to recover the kind.
+    expect(typeById.get("c1")).toBe("code");
+    // Plain "doc" without a kind stays "doc" (uses the default color).
+    expect(typeById.get("d1")).toBe("doc");
   });
 });

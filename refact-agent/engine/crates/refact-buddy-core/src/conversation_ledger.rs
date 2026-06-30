@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::warn;
 
@@ -407,6 +408,137 @@ pub async fn list_all_buddy_conversations(
     }
 
     entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    entries
+}
+
+fn conversation_entry_from_value(val: &serde_json::Value, id: String) -> BuddyConversationEntry {
+    let kind = conversation_kind(val);
+    let title = val
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled")
+        .to_string();
+    let created = val
+        .get("created_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let updated = val
+        .get("last_message_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&created)
+        .to_string();
+    let message_count = val
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u32)
+        .unwrap_or(0);
+    let badge = conversation_badge(val);
+    let icon = conversation_icon(val, &kind);
+    BuddyConversationEntry {
+        id,
+        kind,
+        title,
+        created_at: created,
+        updated_at: updated,
+        status: "active".to_string(),
+        message_count,
+        icon,
+        badge,
+    }
+}
+
+fn workflow_entry_from_value(stem: String, val: &serde_json::Value) -> BuddyConversationEntry {
+    let mapping = workflow_id_to_mapping(&stem);
+    let entry_count = val
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u32)
+        .unwrap_or(0);
+    let last_ts = val
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|e| e.get("timestamp"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    BuddyConversationEntry {
+        id: stem.clone(),
+        kind: mapping.kind.to_string(),
+        title: format!(
+            "{}{}",
+            stem.replace('_', " "),
+            mapping
+                .badge
+                .map(|b| format!(" ({})", b))
+                .unwrap_or_default()
+        ),
+        created_at: last_ts.clone(),
+        updated_at: last_ts,
+        status: "completed".to_string(),
+        message_count: entry_count,
+        icon: mapping.icon.to_string(),
+        badge: mapping.badge.map(|s| s.to_string()),
+    }
+}
+
+pub async fn list_recent_buddy_conversations(
+    project_root: &Path,
+    max_items: usize,
+) -> Vec<BuddyConversationEntry> {
+    if max_items == 0 {
+        return Vec::new();
+    }
+    let conv_dir = project_root.join(".refact/buddy/chats/conversations");
+    let wf_dir = project_root.join(".refact/buddy/chats/workflows");
+
+    let mut candidates: Vec<(SystemTime, PathBuf, bool)> = Vec::new();
+    for (dir, is_workflow) in [(conv_dir, false), (wf_dir, true)] {
+        let Ok(mut rd) = fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            if !path.extension().map(|e| e == "json").unwrap_or(false) {
+                continue;
+            }
+            let mtime = match entry.metadata().await {
+                Ok(meta) => meta.modified().unwrap_or(UNIX_EPOCH),
+                Err(_) => UNIX_EPOCH,
+            };
+            candidates.push((mtime, path, is_workflow));
+        }
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.truncate(max_items.saturating_mul(4).max(max_items));
+
+    let mut entries = Vec::new();
+    for (_, path, is_workflow) in candidates {
+        let label = if is_workflow {
+            "workflow"
+        } else {
+            "conversation"
+        };
+        let val = match read_buddy_ledger_json(&path, label).await {
+            LedgerReadOutcome::Value(val) => val,
+            _ => continue,
+        };
+        if is_workflow {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            entries.push(workflow_entry_from_value(stem, &val));
+        } else if let Some((id, _)) = conversation_id(&val) {
+            entries.push(conversation_entry_from_value(&val, id));
+        }
+    }
+
+    entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    entries.truncate(max_items);
     entries
 }
 

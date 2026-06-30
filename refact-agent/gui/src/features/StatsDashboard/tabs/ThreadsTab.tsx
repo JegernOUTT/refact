@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Surface } from "../../../components/ui";
+import { Badge, Surface } from "../../../components/ui";
 import { useAppDispatch } from "../../../hooks";
 import {
   trajectoriesApi,
@@ -23,7 +23,10 @@ type SortKey =
   | "total_tokens"
   | "message_count"
   | "total_cost_usd"
-  | "updated_at";
+  | "updated_at"
+  | "total_lines_added";
+
+type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
 
 type PagingState = {
   items: TrajectoryMeta[];
@@ -39,6 +42,31 @@ function rangeCovered(
   if (!hasMore) return true;
   if (!from) return false;
   return rows.some((row) => row.updated_at < from);
+}
+
+function getProvider(model: string) {
+  return model.includes("/") ? model.split("/")[0] : "—";
+}
+
+function getModelName(model: string) {
+  return model.includes("/") ? model.split("/").slice(1).join("/") : model;
+}
+
+function getStatusTone(status: NonNullable<TrajectoryMeta["session_state"]>) {
+  if (status === "completed") return "success" satisfies BadgeTone;
+  if (status === "error") return "danger" satisfies BadgeTone;
+  if (
+    status === "paused" ||
+    status === "waiting_ide" ||
+    status === "waiting_user_input"
+  ) {
+    return "warning" satisfies BadgeTone;
+  }
+  return "default" satisfies BadgeTone;
+}
+
+function formatStatus(status: TrajectoryMeta["session_state"]) {
+  return status ? status.replace(/_/g, " ") : "—";
 }
 
 export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
@@ -137,12 +165,11 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
 
   const items = useMemo(() => {
     let rows = rawItems.filter((item) => {
-      if (dateArgs.from) {
-        if (item.updated_at < dateArgs.from) return false;
-      }
-      if (dateArgs.to) {
-        if (item.updated_at > dateArgs.to) return false;
-      }
+      // `updated_at` is a full ISO timestamp; the bounds are calendar days, so
+      // compare on the day prefix to keep the end day inclusive.
+      const day = item.updated_at.slice(0, 10);
+      if (dateArgs.from && day < dateArgs.from) return false;
+      if (dateArgs.to && day > dateArgs.to) return false;
       return true;
     });
     const q = search.trim().toLowerCase();
@@ -163,6 +190,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       } else if (sort.key === "message_count") {
         av = a.message_count;
         bv = b.message_count;
+      } else if (sort.key === "total_lines_added") {
+        av = a.total_lines_added;
+        bv = b.total_lines_added;
       } else {
         av = a[sort.key] ?? 0;
         bv = b[sort.key] ?? 0;
@@ -231,7 +261,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
                 <th className={styles.th}>Title</th>
                 <th className={styles.th}>Model</th>
+                <th className={styles.th}>Provider</th>
                 <th className={styles.th}>Mode</th>
+                <th className={styles.th}>Status</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -252,6 +284,7 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
                 <th className={styles.th}>Prompt</th>
                 <th className={styles.th}>Completion</th>
+                <th className={styles.th}>Cache</th>
                 <th className={styles.th}>
                   <button
                     type="button"
@@ -259,6 +292,15 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                     onClick={() => toggleSort("total_cost_usd")}
                   >
                     Cost{indicator("total_cost_usd")}
+                  </button>
+                </th>
+                <th className={styles.th}>
+                  <button
+                    type="button"
+                    className={`${styles.sortButton} rf-pressable`}
+                    onClick={() => toggleSort("total_lines_added")}
+                  >
+                    Lines{indicator("total_lines_added")}
                   </button>
                 </th>
               </tr>
@@ -270,8 +312,18 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                   <td className={`${styles.td} ${styles.titleCell}`}>
                     {c.title || c.id}
                   </td>
-                  <td className={styles.td}>{c.model}</td>
+                  <td className={styles.td}>{getModelName(c.model)}</td>
+                  <td className={styles.td}>{getProvider(c.model)}</td>
                   <td className={styles.td}>{c.mode}</td>
+                  <td className={styles.td}>
+                    {c.session_state ? (
+                      <Badge tone={getStatusTone(c.session_state)}>
+                        {formatStatus(c.session_state)}
+                      </Badge>
+                    ) : (
+                      <span className={styles.mutedText}>—</span>
+                    )}
+                  </td>
                   <td className={styles.td}>{c.message_count}</td>
                   <td className={styles.td}>
                     {formatTokenCount(c.total_tokens ?? 0)}
@@ -283,7 +335,26 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                     {formatTokenCount(c.total_completion_tokens ?? 0)}
                   </td>
                   <td className={styles.td}>
+                    {formatTokenCount(c.total_cache_read_tokens ?? 0)}
+                  </td>
+                  <td className={styles.td}>
                     {formatCostDisplay(c.total_cost_usd ?? null)}
+                  </td>
+                  <td className={`${styles.td} ${styles.linesCell}`}>
+                    {c.total_lines_added === 0 &&
+                    c.total_lines_removed === 0 ? (
+                      <span className={styles.mutedText}>—</span>
+                    ) : (
+                      <>
+                        <span className={styles.linesAdded}>
+                          +{c.total_lines_added}
+                        </span>{" "}
+                        /{" "}
+                        <span className={styles.linesRemoved}>
+                          -{c.total_lines_removed}
+                        </span>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}

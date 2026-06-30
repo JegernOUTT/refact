@@ -17,8 +17,8 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, DaemonClient, DaemonStatus,
-    CompetitorImportInfoResponse, CompetitorImportRunResponse, HooksResponse,
+    worker_state_label, ChatEvent, ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient,
+    DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse, HooksResponse,
     KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry, ProviderListResponse,
     ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision, WorkerInfo,
 };
@@ -29,8 +29,14 @@ use crate::commands::{
 use crate::composer::queue::{InputQueue, QueuedInput};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
-use crate::history::cells::{synthesize_plan_content, ApprovalOutcome, PlanCellData};
-use crate::history::{insert_history, HistoryBuffer, HistoryInsertion, RESIZE_REFLOW_PENDING_CELL_CAP};
+use crate::history::cells::{
+    synthesize_goal_content, synthesize_plan_content, ApprovalOutcome, GoalCellData,
+    HistoryCellKind, HistoryRenderMode, PlanCellData,
+};
+use crate::history::{
+    insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
+    ResizeReflowState, RESIZE_REFLOW_PENDING_CELL_CAP,
+};
 use crate::keymap::{
     HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
 };
@@ -45,11 +51,18 @@ use crate::read_only_views::{
     hooks_overlay, import_run_notice, import_run_overlay, import_sources_overlay, mcp_overlay,
     memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
 };
+use crate::render::highlight;
 use crate::sessions::{
-    last_branch_message_id, session_items_from_trajectories, session_subtitle, TrajectoryMeta,
+    last_branch_message_id, session_items_from_trajectories, session_tab_from_picker_item,
+    SessionTab, TrajectoryMeta,
 };
-use crate::streaming::{run_commit_tick, StreamController};
-use crate::terminal::{terminal_title, TerminalSession, TerminalTitleConfig};
+use crate::streaming::{
+    run_commit_tick, AdaptiveChunkingPolicy, CommitTickScope, PlanStreamController,
+    StreamController,
+};
+use crate::terminal::{
+    terminal_title, FrameRequester, TerminalSession, TerminalTitleConfig, TARGET_FRAME_INTERVAL,
+};
 use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text, truncate_graphemes};
 use crate::theme::TuiTheme;
 use crate::tools::{
@@ -79,6 +92,8 @@ const ABORT_BEFORE_QUIT_TIMEOUT: Duration = Duration::from_secs(1);
 const LIVE_TRANSCRIPT_ITEM_LIMIT: usize = 10_000;
 const LIVE_TRANSCRIPT_RETENTION_NOTICE: &str =
     "Older live transcript items dropped after reaching 10000 live items";
+const WORKING_ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
+const ASSISTANT_STREAM_RESERVED_COLS: u16 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -102,6 +117,12 @@ struct HistorySaveRequest {
     entries: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ThemePickerSnapshot {
+    theme: TuiTheme,
+    syntax_theme: syntect::highlighting::Theme,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorCommand {
     program: String,
@@ -115,11 +136,14 @@ pub enum TranscriptItem {
     Reasoning(String, bool),
     Tool(ToolCard),
     Plan(PlanCellData),
+    Goal(GoalCellData),
+    PlanStream(Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>),
     Citation(String),
     ServerContentBlock(String),
     Diff(String),
     Notice(String),
     Info(Vec<String>),
+    Status(session::StatusSnapshot, TuiTheme),
     Approval(ApprovalModalState, Option<ApprovalOutcome>),
     Session {
         title: String,
@@ -132,6 +156,8 @@ impl TranscriptItem {
         matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
             || matches!(self, Self::Approval(_, None))
             || matches!(self, Self::Plan(_))
+            || matches!(self, Self::Goal(_))
+            || matches!(self, Self::PlanStream(_))
     }
 
     fn can_enter_history(&self) -> bool {
@@ -379,9 +405,11 @@ pub struct App {
     pending_history_save: Option<HistorySaveRequest>,
     history_save_in_flight: bool,
     history_failure_notified: bool,
+    tui_config_path: Option<PathBuf>,
     composer_mode: ComposerMode,
     picker: ProjectPickerState,
     modal_picker: Option<PickerState>,
+    theme_picker_snapshot: Option<ThemePickerSnapshot>,
     approval_queue: ApprovalQueue,
     ask_questions_form: Option<AskQuestionsForm>,
     pending_manual_ask_questions: Option<AskQuestionsRequest>,
@@ -391,6 +419,7 @@ pub struct App {
     current_project: Option<OpenProjectResponse>,
     chat_id: String,
     session_title: Option<String>,
+    recent_sessions: Vec<PickerItem>,
     show_session_header: bool,
     model: Option<String>,
     mode: Option<String>,
@@ -425,10 +454,17 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     working_started_at_ms: Option<u64>,
     working_tick: u64,
+    working_last_tick_at_ms: Option<u64>,
     working_detail: Option<String>,
     stream_controller: StreamController,
+    reasoning_stream_active: bool,
+    plan_stream_controller: Option<PlanStreamController>,
+    stream_chunking_policy: AdaptiveChunkingPolicy,
+    history_render_mode: HistoryRenderMode,
     notifications: NotificationManager,
     history: HistoryBuffer,
+    resize_reflow: ResizeReflowState,
+    resize_reflow_row_cap: usize,
     native_scrollback: bool,
     rendered_message_count: usize,
     rendered_state_cursor: usize,
@@ -447,6 +483,9 @@ impl App {
             .unwrap_or_default();
         let keymap = KeymapRegistry::default();
         let vim = VimState::new(keymap.vim_mode_enabled());
+        let tui_config_path = default_tui_config_path();
+        let theme = TuiTheme::default();
+        initialize_syntax_theme(&theme, tui_config_path.as_deref());
         Self {
             transcript: vec![TranscriptItem::Notice(format!(
                 "Opened project {} at {}",
@@ -461,7 +500,7 @@ impl App {
             composer: ComposerState::new(history_entries),
             keymap,
             vim,
-            theme: TuiTheme::default(),
+            theme,
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -469,9 +508,11 @@ impl App {
             pending_history_save: None,
             history_save_in_flight: false,
             history_failure_notified: false,
+            tui_config_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
+            theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
             pending_manual_ask_questions: None,
@@ -481,6 +522,7 @@ impl App {
             current_project: Some(project),
             chat_id: uuid::Uuid::new_v4().to_string(),
             session_title: None,
+            recent_sessions: Vec::new(),
             show_session_header: false,
             model: None,
             mode: None,
@@ -515,10 +557,17 @@ impl App {
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
+            working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            reasoning_stream_active: false,
+            plan_stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            history_render_mode: HistoryRenderMode::Rich,
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
+            resize_reflow: ResizeReflowState::default(),
+            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
             native_scrollback: false,
             rendered_message_count: 0,
             rendered_state_cursor: 0,
@@ -528,13 +577,16 @@ impl App {
 
     fn notice_only(notice: impl Into<String>) -> Self {
         let notice = notice.into();
+        let tui_config_path = default_tui_config_path();
+        let theme = TuiTheme::default();
+        initialize_syntax_theme(&theme, tui_config_path.as_deref());
         Self {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             composer: ComposerState::new(Vec::new()),
             keymap: KeymapRegistry::default(),
             vim: VimState::new(false),
-            theme: TuiTheme::default(),
+            theme,
             input_queue: InputQueue::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
@@ -542,9 +594,11 @@ impl App {
             pending_history_save: None,
             history_save_in_flight: false,
             history_failure_notified: false,
+            tui_config_path,
             composer_mode: ComposerMode::Chat,
             picker: ProjectPickerState::new(Vec::new()),
             modal_picker: None,
+            theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
             ask_questions_form: None,
             pending_manual_ask_questions: None,
@@ -554,6 +608,7 @@ impl App {
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
             session_title: None,
+            recent_sessions: Vec::new(),
             show_session_header: false,
             model: None,
             mode: None,
@@ -588,10 +643,17 @@ impl App {
             last_ctrl_c: None,
             working_started_at_ms: None,
             working_tick: 0,
+            working_last_tick_at_ms: None,
             working_detail: None,
             stream_controller: StreamController::new(None, std::path::Path::new(".")),
+            reasoning_stream_active: false,
+            plan_stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            history_render_mode: HistoryRenderMode::Rich,
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
+            resize_reflow: ResizeReflowState::default(),
+            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
             native_scrollback: false,
             rendered_message_count: 0,
             rendered_state_cursor: 0,
@@ -642,8 +704,12 @@ impl App {
             }
             Err(error) => self.add_notice(format!("Failed to load TUI keymap config: {error}")),
         }
-        match TuiTheme::from_config_file_content(Some(content)) {
-            Ok(theme) => self.theme = theme,
+        let theme_home = self.tui_theme_home();
+        match TuiTheme::from_config_file_content_with_custom_dir(
+            Some(content),
+            theme_home.as_deref(),
+        ) {
+            Ok(theme) => self.set_theme(theme),
             Err(error) => self.add_notice(format!("Failed to load TUI theme config: {error}")),
         }
         match NotificationConfig::from_config_file_content(Some(content)) {
@@ -694,13 +760,16 @@ impl App {
         self.session_title.as_deref()
     }
 
+    pub fn session_tabs(&self) -> Vec<SessionTab> {
+        self.recent_sessions
+            .iter()
+            .cloned()
+            .map(|item| session_tab_from_picker_item(item, &self.chat_id))
+            .collect()
+    }
+
     pub fn session_header_subtitle(&self) -> String {
-        session_subtitle(
-            self.current_project().map(|project| project.slug.as_str()),
-            self.model(),
-            self.mode(),
-            self.chat_id(),
-        )
+        session_header_subtitle(self.model(), self.current_project_root().as_deref())
     }
 
     pub fn model(&self) -> Option<&str> {
@@ -770,6 +839,7 @@ impl App {
             (false, true) => {
                 self.working_started_at_ms = Some(now_ms());
                 self.working_tick = 0;
+                self.working_last_tick_at_ms = None;
                 self.working_detail = self.latest_tool_detail();
             }
             (true, false) => self.clear_working_indicator(),
@@ -780,6 +850,7 @@ impl App {
     fn clear_working_indicator(&mut self) {
         self.working_started_at_ms = None;
         self.working_tick = 0;
+        self.working_last_tick_at_ms = None;
         self.working_detail = None;
     }
 
@@ -790,6 +861,13 @@ impl App {
         if self.working_started_at_ms.is_none() {
             self.working_started_at_ms = Some(now_ms());
         }
+        let now = now_ms();
+        if self.working_last_tick_at_ms.is_some_and(|last| {
+            now.saturating_sub(last) < WORKING_ANIMATION_INTERVAL.as_millis() as u64
+        }) {
+            return;
+        }
+        self.working_last_tick_at_ms = Some(now);
         self.working_tick = self.working_tick.wrapping_add(1);
     }
 
@@ -797,6 +875,13 @@ impl App {
         if self.session_state.shows_working_indicator() && !detail.is_empty() {
             self.working_detail = Some(detail);
         }
+    }
+
+    fn clear_stream_controllers(&mut self) {
+        self.stream_controller.clear();
+        self.reasoning_stream_active = false;
+        self.plan_stream_controller = None;
+        self.stream_chunking_policy.reset();
     }
 
     fn latest_tool_detail(&self) -> Option<String> {
@@ -837,6 +922,104 @@ impl App {
             .drain_pending_capped(width, RESIZE_REFLOW_PENDING_CELL_CAP)
     }
 
+    fn resize_reflow_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
+        self.history
+            .reflow_insertions(width, self.resize_reflow_row_cap)
+    }
+
+    fn note_terminal_resize_width(&mut self, width: u16) -> bool {
+        self.update_stream_width_for_terminal(width);
+        if !self.native_scrollback {
+            self.resize_reflow.clear();
+            return false;
+        }
+        let width_change = self.resize_reflow.note_width(width);
+        if !width_change.changed || self.history.source_cell_count() == 0 {
+            return false;
+        }
+        if self.should_mark_resize_reflow_as_stream_time() {
+            self.resize_reflow.mark_resize_requested_during_stream();
+        }
+        self.resize_reflow.schedule_debounced(Some(width));
+        true
+    }
+
+    fn update_stream_width_for_terminal(&mut self, width: u16) {
+        let should_sync_assistant =
+            self.stream_controller.has_live_tail() || self.stream_controller.stable_lines_ready();
+        let should_sync_plan = self
+            .plan_stream_controller
+            .as_ref()
+            .is_some_and(|controller| {
+                controller.has_live_tail() || controller.stable_lines_ready()
+            });
+        let should_sync = should_sync_assistant || should_sync_plan;
+        if self.session_state != SessionState::Generating && !should_sync {
+            return;
+        }
+        self.stream_controller
+            .set_width(assistant_stream_width(width));
+        if let Some(controller) = &mut self.plan_stream_controller {
+            controller.set_width(assistant_stream_width(width));
+        }
+        if should_sync {
+            if should_sync_assistant && self.native_scrollback {
+                self.sync_assistant_stream_tail_item();
+            } else if should_sync_assistant {
+                self.sync_assistant_stream_item();
+            }
+            if should_sync_plan {
+                self.sync_plan_stream_tail_item();
+            }
+        }
+    }
+
+    fn note_terminal_height_resize(&mut self) -> bool {
+        if !self.native_scrollback || self.history.source_cell_count() == 0 {
+            return false;
+        }
+        if self.should_mark_resize_reflow_as_stream_time() {
+            self.resize_reflow.mark_resize_requested_during_stream();
+        }
+        self.resize_reflow.schedule_debounced(None);
+        true
+    }
+
+    fn resize_reflow_is_due(&self) -> bool {
+        self.resize_reflow.pending_is_due(Instant::now())
+    }
+
+    fn resize_reflow_delay(&self) -> Option<Duration> {
+        self.resize_reflow
+            .pending_until()
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+    }
+
+    fn finish_resize_reflow(&mut self, width: u16, ran_during_stream: bool) {
+        self.resize_reflow.clear_pending_reflow();
+        self.resize_reflow.mark_reflowed_width(width);
+        if ran_during_stream {
+            self.resize_reflow.mark_ran_during_stream();
+        }
+    }
+
+    fn schedule_final_stream_resize_reflow(&mut self) {
+        if self.native_scrollback
+            && self.history.source_cell_count() > 0
+            && self.resize_reflow.take_stream_finish_reflow_needed()
+        {
+            self.resize_reflow.schedule_immediate();
+        }
+    }
+
+    fn should_mark_resize_reflow_as_stream_time(&self) -> bool {
+        self.session_state.shows_working_indicator()
+            || self
+                .transcript
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Assistant(_)))
+    }
+
     pub fn history_pending_count(&self) -> usize {
         self.history.pending_cell_count()
     }
@@ -851,6 +1034,10 @@ impl App {
 
     pub fn flush_pending_paste(&mut self) -> bool {
         self.composer.flush_pending_paste(Instant::now())
+    }
+
+    fn pending_paste_delay(&self) -> Option<Duration> {
+        self.composer.pending_paste_delay(Instant::now())
     }
 
     pub fn set_native_scrollback(&mut self, enabled: bool) {
@@ -902,6 +1089,10 @@ impl App {
 
     pub fn stream_has_committable_lines(&self) -> bool {
         self.stream_controller.stable_lines_ready()
+            || self
+                .plan_stream_controller
+                .as_ref()
+                .is_some_and(PlanStreamController::stable_lines_ready)
     }
 
     pub fn active_stream_committed(&self) -> &str {
@@ -926,6 +1117,12 @@ impl App {
 
     pub fn ask_questions_form(&self) -> Option<&AskQuestionsForm> {
         self.ask_questions_form.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn test_set_ask_questions_form(&mut self, form: AskQuestionsForm) {
+        self.ask_questions_form = Some(form);
+        self.set_session_state(SessionState::WaitingUserInput);
     }
 
     #[cfg(test)]
@@ -962,7 +1159,10 @@ impl App {
     }
 
     pub fn composer_height(&self, width: u16) -> u16 {
-        self.composer.height(width.saturating_sub(2).max(1), 8) + self.queue_preview_height()
+        let text_width = width
+            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 1)
+            .max(1);
+        self.composer.height(text_width, 8) + 1 + self.queue_preview_height()
     }
 
     pub fn queue_preview_height(&self) -> u16 {
@@ -985,7 +1185,17 @@ impl App {
         if items.is_empty() {
             self.add_notice("No models returned by caps");
         } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::Model, items));
+            let mut picker = PickerState::new(PickerKind::Model, items);
+            if let Some(model) = self
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                let selected =
+                    resolve_chat_model_id(&caps, model).unwrap_or_else(|| model.to_string());
+                picker.select_item_id(&selected);
+            }
+            self.modal_picker = Some(picker);
             self.composer_mode = ComposerMode::Chat;
         }
     }
@@ -995,6 +1205,22 @@ impl App {
         self.model_reasoning_caps = model_reasoning_caps(caps);
         self.default_context_window_tokens =
             default_context_window(caps, &self.model_context_windows);
+        let mut changed = false;
+        if empty_optional_str(self.model.as_deref()) {
+            if let Some(model) = resolved_default_chat_model(caps) {
+                self.model = Some(model);
+                changed = true;
+            }
+        }
+        if empty_optional_str(self.mode.as_deref()) {
+            if let Some(mode) = default_chat_mode(caps) {
+                self.mode = Some(mode.to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_session_header_item();
+        }
     }
 
     fn open_mode_picker(&mut self, modes: Value) {
@@ -1002,7 +1228,14 @@ impl App {
         if items.is_empty() {
             self.add_notice("No modes returned by worker");
         } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::Mode, items));
+            let mut picker = PickerState::new(PickerKind::Mode, items);
+            let current = self
+                .mode
+                .as_deref()
+                .filter(|mode| !mode.trim().is_empty())
+                .unwrap_or("agent");
+            picker.select_item_id(current);
+            self.modal_picker = Some(picker);
             self.composer_mode = ComposerMode::Chat;
         }
     }
@@ -1034,6 +1267,7 @@ impl App {
     }
 
     fn open_session_picker(&mut self, items: Vec<PickerItem>) {
+        self.set_recent_sessions(items.clone());
         if items.is_empty() {
             self.add_notice("No recent chats for this project yet. Continue this new chat or press Ctrl-N for another fresh one.");
             self.modal_picker = None;
@@ -1048,6 +1282,72 @@ impl App {
         let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
         self.open_session_picker(items);
     }
+
+    fn refresh_recent_sessions_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
+        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
+        self.set_recent_sessions(items);
+    }
+
+    fn set_recent_sessions(&mut self, mut items: Vec<PickerItem>) {
+        items.retain(|item| !item.id.trim().is_empty());
+        if !items.iter().any(|item| item.id == self.chat_id) {
+            items.insert(
+                0,
+                PickerItem {
+                    id: self.chat_id.clone(),
+                    title: self.session_header_title(),
+                    description: self.session_header_subtitle(),
+                },
+            );
+        }
+        let mut seen = HashSet::new();
+        items.retain(|item| seen.insert(item.id.clone()));
+        self.recent_sessions = items;
+    }
+
+    fn sync_current_session_in_recent(&mut self) {
+        let title = self.session_header_title();
+        let description = self.session_header_subtitle();
+        if let Some(item) = self
+            .recent_sessions
+            .iter_mut()
+            .find(|item| item.id == self.chat_id)
+        {
+            item.title = title;
+            item.description = description;
+        } else {
+            self.recent_sessions.insert(
+                0,
+                PickerItem {
+                    id: self.chat_id.clone(),
+                    title,
+                    description,
+                },
+            );
+        }
+    }
+
+    fn switch_recent_session(&mut self, delta: isize) -> AppAction {
+        self.sync_current_session_in_recent();
+        if self.recent_sessions.len() <= 1 {
+            self.add_notice("No other recent chats for this project yet");
+            return AppAction::RefreshRecentSessions;
+        }
+        let len = self.recent_sessions.len();
+        let current = self
+            .recent_sessions
+            .iter()
+            .position(|item| item.id == self.chat_id)
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            current.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (current + 1) % len
+        };
+        let item = self.recent_sessions[next].clone();
+        self.resume_chat(item.id, item.title, Some(item.description))
+    }
+
     fn open_permissions_picker(&mut self) {
         self.modal_picker = Some(PickerState::multi_with_selected(
             PickerKind::Permissions,
@@ -1071,11 +1371,79 @@ impl App {
     }
 
     fn open_theme_picker(&mut self) {
-        self.modal_picker = Some(PickerState::new(
+        self.theme_picker_snapshot = Some(ThemePickerSnapshot {
+            theme: self.theme.clone(),
+            syntax_theme: highlight::current_syntax_theme(),
+        });
+        let theme_home = self.tui_theme_home();
+        let mut picker = PickerState::new(
             PickerKind::Theme,
-            misc::theme_picker_items(),
-        ));
+            misc::theme_picker_items(theme_home.as_deref()),
+        );
+        if let Some(index) = picker
+            .filtered_items()
+            .iter()
+            .position(|item| item.id == self.theme.name())
+        {
+            picker.selected = index;
+        }
+        self.modal_picker = Some(picker);
         self.composer_mode = ComposerMode::Chat;
+    }
+
+    fn set_theme(&mut self, theme: TuiTheme) {
+        let syntax_name = theme.syntax_theme_name().to_string();
+        let warning = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
+        self.theme = theme;
+        if let Some(warning) = warning {
+            self.add_notice(warning);
+        }
+    }
+
+    fn preview_theme_name(&mut self, name: &str) {
+        if let Some(theme) = TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
+            self.set_theme(theme);
+        }
+    }
+
+    fn tui_theme_home(&self) -> Option<PathBuf> {
+        self.tui_config_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+    }
+
+    fn preview_current_theme_picker_selection(&mut self) {
+        let Some(picker) = self.modal_picker.as_ref() else {
+            return;
+        };
+        if picker.kind != PickerKind::Theme {
+            return;
+        }
+        let Some(item) = picker.selected_item() else {
+            return;
+        };
+        self.preview_theme_name(&item.id);
+    }
+
+    fn cancel_modal_picker(&mut self) {
+        if self
+            .modal_picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == PickerKind::Theme)
+        {
+            self.restore_theme_picker_snapshot();
+        }
+        self.modal_picker = None;
+    }
+
+    fn restore_theme_picker_snapshot(&mut self) {
+        if let Some(snapshot) = self.theme_picker_snapshot.take() {
+            let syntax_name = snapshot.theme.syntax_theme_name().to_string();
+            self.theme = snapshot.theme;
+            let _ = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
+            highlight::set_syntax_theme(snapshot.syntax_theme);
+        }
     }
 
     fn update_slash_picker_filter(&mut self) {
@@ -1131,6 +1499,15 @@ impl App {
         match current_plan_cell_data(self.transcript_state.messages()) {
             Some(plan) => self.push_history_item(TranscriptItem::Plan(plan)),
             None => self.add_notice("No current plan is installed for this chat"),
+        }
+        AppAction::None
+    }
+
+    fn show_current_goal(&mut self) -> AppAction {
+        self.composer.clear();
+        match current_goal_cell_data(self.transcript_state.messages()) {
+            Some(goal) => self.push_history_item(TranscriptItem::Goal(goal)),
+            None => self.add_notice("No current goal is installed for this chat"),
         }
         AppAction::None
     }
@@ -1204,7 +1581,8 @@ impl App {
                 }
             }
             (PickerKind::Theme, PickerAccept::Single(Some(item))) => {
-                self.apply_theme_name(&item.id);
+                self.theme_picker_snapshot = None;
+                self.apply_theme_name(&item.id, true);
                 AppAction::None
             }
             (PickerKind::ProviderLogout, PickerAccept::Single(Some(item))) => {
@@ -1433,9 +1811,7 @@ impl App {
     fn execute_workflow_command(&mut self, command: workflow::WorkflowCommand) -> AppAction {
         match command {
             workflow::WorkflowCommand::ShowPlan => self.show_current_plan(),
-            workflow::WorkflowCommand::GoalPrompt => {
-                self.submit_structured_prompt(workflow::goal_prompt())
-            }
+            workflow::WorkflowCommand::ShowGoal => self.show_current_goal(),
             workflow::WorkflowCommand::AgentMode => self.switch_to_agent_mode(),
             workflow::WorkflowCommand::GitDiff => {
                 self.composer.clear();
@@ -1463,7 +1839,7 @@ impl App {
                 if args.trim().is_empty() {
                     self.open_theme_picker();
                 } else {
-                    self.apply_theme_name(args.trim());
+                    self.apply_theme_name(args.trim(), true);
                 }
                 AppAction::None
             }
@@ -1565,11 +1941,10 @@ impl App {
         } else {
             overlay.raw_lines
         };
-        self.transcript_overlay = Some(PagerOverlay::new(
-            overlay.title,
-            overlay.rendered_lines,
-            raw_lines,
-        ));
+        self.transcript_overlay = Some(
+            PagerOverlay::new(overlay.title, overlay.rendered_lines, raw_lines)
+                .with_surface(overlay.surface),
+        );
     }
 
     fn handle_mcp_view_loaded(&mut self, result: Result<McpViewData, String>) {
@@ -1754,6 +2129,7 @@ impl App {
             title: view.title().to_string(),
             rendered_lines: lines.clone(),
             raw_lines: lines,
+            surface: None,
         });
     }
 
@@ -1794,23 +2170,43 @@ impl App {
         }
     }
 
-    fn apply_theme_name(&mut self, name: &str) {
-        match TuiTheme::named(name) {
+    fn apply_theme_name(&mut self, name: &str, persist: bool) {
+        match TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
             Some(theme) => {
                 let theme_name = theme.name().to_string();
-                self.theme = theme;
+                self.set_theme(theme);
                 self.add_notice(format!("Theme set to {theme_name}"));
+                if persist {
+                    match self.persist_theme_name(&theme_name) {
+                        Ok(path) => self.add_notice(format!("Theme saved to {}", path.display())),
+                        Err(error) => self.add_notice(error),
+                    }
+                }
             }
             None => self.add_notice(format!(
                 "Unknown theme `{}`; available: {}",
                 name,
-                TuiTheme::builtin_names().join(", ")
+                TuiTheme::list_available(self.tui_theme_home().as_deref())
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
 
+    fn persist_theme_name(&mut self, name: &str) -> Result<PathBuf, String> {
+        let Some(path) = self.tui_config_path.clone() else {
+            return Err("Cannot persist TUI theme; config path is unavailable".to_string());
+        };
+        persist_theme_name_to_path(&path, name)?;
+        Ok(path)
+    }
+
     fn show_debug_config_card(&mut self) {
-        let config_path = KeymapRegistry::default_config_path()
+        let config_path = self
+            .tui_config_path
+            .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "unavailable".to_string());
         self.push_history_item(TranscriptItem::Info(vec![
@@ -1834,10 +2230,9 @@ impl App {
     }
 
     fn show_status_card(&mut self) {
-        let snapshot = self.status_snapshot();
-        let text = session::status_card_text(&snapshot);
-        self.push_history_item(TranscriptItem::Info(
-            text.lines().map(str::to_string).collect(),
+        self.push_history_item(TranscriptItem::Status(
+            self.status_snapshot(),
+            self.theme.clone(),
         ));
     }
 
@@ -1939,6 +2334,7 @@ impl App {
             model: self.model().unwrap_or("default").to_string(),
             mode: self.mode().unwrap_or("agent").to_string(),
             reasoning: self.reasoning_effort_label().to_string(),
+            permission_policy: self.permission_policy,
             session_id: self.chat_id.clone(),
             usage: self.usage().map(|usage| session::StatusUsage {
                 prompt_tokens: usage.prompt_tokens,
@@ -1946,6 +2342,7 @@ impl App {
                 total_tokens: usage.tokens_used(),
                 context_window_tokens: self.context_window_tokens(),
             }),
+            retry_hint: self.retry_hint.clone(),
         }
     }
 
@@ -1978,6 +2375,7 @@ impl App {
         self.current_project = Some(project.clone());
         self.chat_id = uuid::Uuid::new_v4().to_string();
         self.session_title = None;
+        self.recent_sessions.clear();
         self.show_session_header = true;
         self.set_session_state(SessionState::Idle);
         self.replace_with_notice(format!(
@@ -1985,7 +2383,7 @@ impl App {
             project.slug,
             project.root.display()
         ));
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
         self.composer_mode = ComposerMode::Chat;
@@ -2002,6 +2400,7 @@ impl App {
         self.clear_ask_questions_state();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
     }
 
     fn new_chat(&mut self) {
@@ -2012,7 +2411,7 @@ impl App {
         );
     }
 
-    fn open_chat_shell(&mut self, chat_id: String, title: Option<String>, notice: String) {
+    fn open_chat_shell(&mut self, chat_id: String, title: Option<String>, _notice: String) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
         self.chat_id = chat_id;
@@ -2025,23 +2424,27 @@ impl App {
         self.mode = None;
         self.clear_pending_target_params();
         self.clear_reasoning_level();
-        self.replace_with_session(notice, Some(self.session_header_subtitle()));
+        self.replace_with_session(
+            self.session_header_title(),
+            Some(self.session_header_subtitle()),
+        );
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.rendered_state_keys.truncate(1);
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
         self.clear_ask_questions_state();
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
     }
 
     fn resume_chat(
         &mut self,
         chat_id: String,
         title: String,
-        subtitle: Option<String>,
+        _subtitle: Option<String>,
     ) -> AppAction {
         self.cancel_backtrack();
         self.transcript_overlay = None;
@@ -2055,16 +2458,20 @@ impl App {
         self.mode = None;
         self.clear_reasoning_level();
         self.clear_pending_target_params();
-        self.replace_with_session(format!("Resuming {title}"), subtitle);
+        self.replace_with_session(
+            self.session_header_title(),
+            Some(self.session_header_subtitle()),
+        );
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.rendered_state_keys.truncate(1);
         self.clear_approvals();
         self.selected_tool_index = None;
         self.usage = None;
         self.clear_ask_questions_state();
         self.retry_hint = None;
+        self.sync_current_session_in_recent();
         AppAction::SubscribeCurrent
     }
 
@@ -2115,6 +2522,7 @@ impl App {
     fn apply_renamed_chat(&mut self, title: String) {
         self.session_title = Some(title);
         self.show_session_header = true;
+        self.sync_current_session_in_recent();
     }
 
     fn archive_chat(&mut self) -> AppAction {
@@ -2180,7 +2588,7 @@ impl App {
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.set_session_state(SessionState::Generating);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.usage = None;
         self.retry_hint = None;
         self.clear_backtrack_selection();
@@ -2197,7 +2605,7 @@ impl App {
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.set_session_state(SessionState::Generating);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.usage = None;
         self.retry_hint = None;
         AppAction::SendMessage { prompt, params }
@@ -2323,7 +2731,7 @@ impl App {
         error: &str,
     ) -> AppAction {
         self.set_session_state(SessionState::Idle);
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         self.rollback_failed_send_transcript(&prompt);
         self.restore_failed_prompt(prompt, params);
         self.add_notice(format!("Command failed: {error}"));
@@ -2701,7 +3109,10 @@ impl App {
                 TranscriptRole::Notice => {
                     items.push(TranscriptItem::Notice(message.content.clone()))
                 }
-                TranscriptRole::Plan | TranscriptRole::Event | TranscriptRole::Other(_) => {}
+                TranscriptRole::Plan
+                | TranscriptRole::Goal
+                | TranscriptRole::Event
+                | TranscriptRole::Other(_) => {}
             }
         }
         items
@@ -2775,8 +3186,54 @@ impl App {
     }
 
     fn append_assistant(&mut self, text: &str) {
-        self.stream_controller.push_delta(text);
+        self.stream_controller.push_sanitized_delta(text);
         self.sync_assistant_stream_item();
+    }
+
+    fn append_plan_stream(&mut self, key: String, text: &str) {
+        if !self.record_state_history_key(key) && self.plan_stream_controller.is_some() {
+            self.sync_plan_stream_item();
+            return;
+        }
+        if self.plan_stream_controller.is_none() {
+            let mut controller = PlanStreamController::new(None, std::path::Path::new("."));
+            controller.set_render_mode(self.history_render_mode);
+            self.plan_stream_controller = Some(controller);
+        }
+        if let Some(controller) = &mut self.plan_stream_controller {
+            controller.push_sanitized_delta(text);
+        }
+        self.sync_plan_stream_item();
+    }
+
+    fn sync_plan_stream_item(&mut self) {
+        let Some(controller) = self.plan_stream_controller.as_ref() else {
+            return;
+        };
+        let lines = controller.visible_display_lines();
+        self.sync_plan_stream_lines(lines);
+    }
+
+    fn sync_plan_stream_tail_item(&mut self) {
+        let Some(controller) = self.plan_stream_controller.as_ref() else {
+            return;
+        };
+        let lines = controller.current_tail_display_lines();
+        self.sync_plan_stream_lines(lines);
+    }
+
+    fn sync_plan_stream_lines(
+        &mut self,
+        lines: Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>,
+    ) {
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::PlanStream(_)) if lines.is_empty() => {
+                self.transcript.pop();
+            }
+            Some(TranscriptItem::PlanStream(value)) => *value = lines,
+            _ if !lines.is_empty() => self.push_live_item(TranscriptItem::PlanStream(lines)),
+            _ => {}
+        }
     }
 
     fn sync_assistant_stream_item(&mut self) {
@@ -2790,11 +3247,40 @@ impl App {
         }
     }
 
+    fn sync_assistant_stream_tail_item(&mut self) {
+        let tail = self.stream_controller.live();
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::Assistant(_)) if tail.is_empty() => {
+                self.transcript.pop();
+            }
+            Some(TranscriptItem::Assistant(value)) => *value = tail,
+            _ if !tail.is_empty() => self.push_live_item(TranscriptItem::Assistant(tail)),
+            _ => {}
+        }
+    }
+
     fn push_state_history_item(&mut self, key: String, item: TranscriptItem) {
         if !self.record_state_history_key(key) {
             return;
         }
-        self.push_history_item(item);
+        self.push_recorded_state_history_item(item);
+    }
+
+    fn push_state_reasoning_item(
+        &mut self,
+        key: String,
+        text: String,
+        collapsed: bool,
+        replace_live: bool,
+    ) {
+        if !self.record_state_history_key(key) {
+            return;
+        }
+        if replace_live {
+            self.replace_reasoning_stream_with_final(text, collapsed);
+        } else {
+            self.push_recorded_state_history_item(TranscriptItem::Reasoning(text, collapsed));
+        }
     }
 
     fn record_state_history_key(&mut self, key: String) -> bool {
@@ -2806,6 +3292,13 @@ impl App {
             self.rendered_state_cursor += 1;
             return false;
         }
+        if state_key_has_stable_identity(&key)
+            && self.rendered_state_keys[..self.rendered_state_cursor]
+                .iter()
+                .any(|existing| existing == &key)
+        {
+            return false;
+        }
         self.rendered_state_keys
             .truncate(self.rendered_state_cursor);
         self.rendered_state_keys.push(key);
@@ -2813,11 +3306,105 @@ impl App {
         true
     }
 
+    fn push_recorded_state_history_item(&mut self, item: TranscriptItem) {
+        match item {
+            TranscriptItem::Assistant(text) if self.assistant_stream_active() => {
+                self.replace_assistant_stream_with_final(text);
+            }
+            item => self.push_history_item(item),
+        }
+    }
+
+    fn assistant_stream_active(&self) -> bool {
+        !self.stream_controller.visible().is_empty()
+            || self.stream_controller.has_live_tail()
+            || self.stream_controller.stable_lines_ready()
+    }
+
+    fn replace_assistant_stream_with_final(&mut self, text: String) {
+        self.stream_controller.clear();
+        self.stream_chunking_policy.reset();
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Assistant)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+            self.history.enqueue(TranscriptItem::Assistant(text));
+            return;
+        }
+        if let Some(existing) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Assistant(existing) => Some(existing),
+                _ => None,
+            })
+        {
+            *existing = text;
+        } else {
+            self.push_history_item(TranscriptItem::Assistant(text));
+        }
+    }
+
+    fn replace_reasoning_stream_with_final(&mut self, text: String, collapsed: bool) {
+        let collapsed = self
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Reasoning(_, collapsed) => Some(*collapsed),
+                _ => None,
+            })
+            .unwrap_or(collapsed);
+        self.reasoning_stream_active = false;
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Reasoning(_, _)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Reasoning)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+            self.history
+                .enqueue(TranscriptItem::Reasoning(text, collapsed));
+            return;
+        }
+        if let Some((existing, existing_collapsed)) =
+            self.transcript
+                .iter_mut()
+                .rev()
+                .find_map(|item| match item {
+                    TranscriptItem::Reasoning(existing, existing_collapsed) => {
+                        Some((existing, existing_collapsed))
+                    }
+                    _ => None,
+                })
+        {
+            *existing = text;
+            *existing_collapsed = collapsed;
+        } else {
+            self.push_history_item(TranscriptItem::Reasoning(text, collapsed));
+        }
+    }
+
     fn replace_live_region_from_snapshot(&mut self, next_keys: &[String]) {
         self.transcript.clear();
-        self.stream_controller.clear();
+        self.clear_stream_controllers();
         if self.rendered_state_keys != next_keys {
+            let inserted = self.native_scrollback && self.history.inserted_cell_count() > 0;
             self.history.clear_pending();
+            self.rendered_state_keys.clear();
+            if inserted {
+                self.resize_reflow.schedule_immediate();
+            }
         }
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
@@ -2922,39 +3509,6 @@ impl App {
         }
     }
 
-    fn flush_finalized_state_assistant_to_history(&mut self, message_id: Option<&str>) {
-        let Some((key, state_content)) =
-            self.finalized_assistant_message(message_id).map(|message| {
-                (
-                    render_message_key(
-                        message,
-                        "assistant",
-                        finalized_assistant_content_part(message),
-                    ),
-                    message.content.clone(),
-                )
-            })
-        else {
-            return;
-        };
-        let live_idx = self
-            .transcript
-            .iter()
-            .rposition(|item| matches!(item, TranscriptItem::Assistant(text) if !text.is_empty()));
-        let live_content = live_idx.and_then(|idx| match self.transcript.get(idx) {
-            Some(TranscriptItem::Assistant(text)) => Some(text.clone()),
-            _ => None,
-        });
-        let content = live_content.unwrap_or(state_content);
-        if content.is_empty() {
-            return;
-        }
-        if let Some(idx) = live_idx {
-            self.transcript.remove(idx);
-        }
-        self.push_state_history_item(key, TranscriptItem::Assistant(content));
-    }
-
     fn finalized_assistant_message(&self, message_id: Option<&str>) -> Option<&TranscriptMessage> {
         let normalized_id = message_id.filter(|value| !value.is_empty());
         if let Some(id) = normalized_id {
@@ -2978,32 +3532,81 @@ impl App {
 
     fn run_stream_commit_tick(&mut self) {
         self.tick_working_indicator();
-        if run_commit_tick(&mut self.stream_controller).is_some() {
+        let output = run_commit_tick(
+            &mut self.stream_chunking_policy,
+            Some(&mut self.stream_controller),
+            self.plan_stream_controller.as_mut(),
+            CommitTickScope::AnyMode,
+            Instant::now(),
+        );
+        if output.cells.is_empty() {
+            return;
+        }
+        if self.native_scrollback {
+            for cell in output.cells {
+                self.history.enqueue_cell(cell);
+            }
+            self.sync_assistant_stream_tail_item();
+            self.sync_plan_stream_tail_item();
+        } else {
             self.sync_assistant_stream_item();
+            self.sync_plan_stream_item();
         }
     }
 
-    fn finalize_assistant_stream(&mut self) {
+    fn finalize_assistant_stream(&mut self) -> Option<String> {
         let final_content = self.stream_controller.finalize();
-        if !final_content.is_empty() {
+        if final_content.is_empty() {
+            return None;
+        }
+        if self.native_scrollback {
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
+            if self
+                .history
+                .remove_non_final_cells(HistoryCellKind::Assistant)
+                > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+            self.history
+                .enqueue(TranscriptItem::Assistant(final_content.clone()));
+        } else {
             match self.transcript.last_mut() {
-                Some(TranscriptItem::Assistant(value)) => *value = final_content,
+                Some(TranscriptItem::Assistant(value)) => *value = final_content.clone(),
                 _ => self
                     .transcript
-                    .push(TranscriptItem::Assistant(final_content)),
+                    .push(TranscriptItem::Assistant(final_content.clone())),
             }
         }
+        Some(final_content)
+    }
+
+    fn finalize_plan_stream(&mut self) -> Option<String> {
+        let source = self
+            .plan_stream_controller
+            .as_mut()
+            .and_then(PlanStreamController::finalize);
+        if source.is_some() {
+            self.plan_stream_controller = None;
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::PlanStream(_)));
+            if self.native_scrollback
+                && self.history.remove_non_final_cells(HistoryCellKind::Plan) > 0
+            {
+                self.resize_reflow.schedule_immediate();
+            }
+        }
+        source
     }
 
     fn append_reasoning(&mut self, text: &str) {
+        self.reasoning_stream_active = true;
         match self.transcript.last_mut() {
             Some(TranscriptItem::Reasoning(value, _)) => value.push_str(text),
-            _ => self
-                .transcript
-                .push(TranscriptItem::Reasoning(text.to_string(), true)),
+            _ => self.push_live_item(TranscriptItem::Reasoning(text.to_string(), true)),
         }
     }
-
     fn add_notice(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.transcript_state.push_notice(text.clone());
@@ -3033,13 +3636,15 @@ impl App {
     fn replace_with_session(&mut self, title: String, subtitle: Option<String>) {
         self.cancel_backtrack();
         self.transcript_state.reset();
-        self.transcript_state.push_notice(title.clone());
         self.transcript.clear();
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
-        self.push_history_item(TranscriptItem::Session { title, subtitle });
+        self.push_state_history_item(
+            session_header_key(&title, subtitle.as_deref().unwrap_or_default()),
+            TranscriptItem::Session { title, subtitle },
+        );
     }
 
     fn session_header_title(&self) -> String {
@@ -3101,13 +3706,18 @@ impl App {
                 let mut part = 0usize;
                 if !message.reasoning.is_empty() {
                     if message.stream_finished {
-                        self.push_state_history_item(
+                        self.push_state_reasoning_item(
                             render_message_key(message, "reasoning", part),
-                            TranscriptItem::Reasoning(message.reasoning.clone(), true),
+                            message.reasoning.clone(),
+                            true,
+                            self.reasoning_stream_active,
                         );
                     } else {
-                        self.transcript
-                            .push(TranscriptItem::Reasoning(message.reasoning.clone(), true));
+                        self.reasoning_stream_active = true;
+                        self.push_live_item(TranscriptItem::Reasoning(
+                            message.reasoning.clone(),
+                            true,
+                        ));
                     }
                     part += 1;
                 }
@@ -3118,7 +3728,8 @@ impl App {
                             TranscriptItem::Assistant(message.content.clone()),
                         );
                     } else {
-                        self.stream_controller.replace_committed(&message.content);
+                        self.stream_controller
+                            .replace_sanitized_committed(&message.content);
                         self.transcript
                             .push(TranscriptItem::Assistant(message.content.clone()));
                     }
@@ -3150,11 +3761,30 @@ impl App {
                 );
             }
             TranscriptRole::Plan => {
-                self.upsert_current_plan_item(render_message_key(message, "plan", 0));
+                if message.stream_finished {
+                    self.upsert_current_plan_item(render_message_key(message, "plan", 0));
+                } else {
+                    self.append_plan_stream(
+                        render_message_key(message, "plan", 0),
+                        &message.content,
+                    );
+                }
+            }
+            TranscriptRole::Goal => {
+                self.upsert_current_goal_item(render_message_key(message, "goal", 0));
             }
             TranscriptRole::Event => {
                 if is_plan_delta_message(message) {
-                    self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
+                    if message.stream_finished {
+                        self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
+                    } else {
+                        self.append_plan_stream(
+                            render_message_key(message, "plan_delta", 0),
+                            &message.content,
+                        );
+                    }
+                } else if is_goal_delta_message(message) {
+                    self.upsert_current_goal_item(render_message_key(message, "goal_delta", 0));
                 } else {
                     self.push_internal_event(message);
                 }
@@ -3183,10 +3813,10 @@ impl App {
         let Some(plan) = current_plan_cell_data(self.transcript_state.messages()) else {
             return;
         };
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
-        self.rendered_state_keys.push(key);
-        self.rendered_state_cursor += 1;
+        self.finalize_plan_stream();
+        if !self.record_state_history_key(key) {
+            return;
+        }
         if let Some(existing) = self.transcript.iter_mut().find_map(|item| match item {
             TranscriptItem::Plan(existing) => Some(existing),
             _ => None,
@@ -3197,7 +3827,27 @@ impl App {
         }
     }
 
+    fn upsert_current_goal_item(&mut self, key: String) {
+        let Some(goal) = current_goal_cell_data(self.transcript_state.messages()) else {
+            return;
+        };
+        if !self.record_state_history_key(key) {
+            return;
+        }
+        if let Some(existing) = self.transcript.iter_mut().find_map(|item| match item {
+            TranscriptItem::Goal(existing) => Some(existing),
+            _ => None,
+        }) {
+            *existing = goal;
+        } else {
+            self.push_history_item(TranscriptItem::Goal(goal));
+        }
+    }
+
     fn push_internal_event(&mut self, message: &TranscriptMessage) {
+        if !self.record_state_history_key(render_message_key(message, "event", 0)) {
+            return;
+        }
         let (subkind, source, payload) = event_metadata(message);
         self.events_pane.push_event(DaemonEventRecord {
             ts_ms: now_ms(),
@@ -3378,7 +4028,7 @@ impl App {
             SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
             SseEvent::StreamStarted { message_id } => {
                 self.set_session_state(SessionState::Generating);
-                self.stream_controller.clear();
+                self.clear_stream_controllers();
                 self.transcript_state.start_assistant(message_id.as_deref());
                 self.rebuild_render_transcript_from_state();
             }
@@ -3388,13 +4038,43 @@ impl App {
             SseEvent::StreamFinished {
                 message_id, usage, ..
             } => {
-                self.finalize_assistant_stream();
                 self.transcript_state
                     .finish_assistant(message_id.as_deref(), usage.clone());
-                self.finalize_tool_cards_for_turn();
-                if self.native_scrollback {
-                    self.flush_finalized_state_assistant_to_history(message_id.as_deref());
+                let reasoning_key = self
+                    .finalized_assistant_message(message_id.as_deref())
+                    .and_then(|message| {
+                        (!message.reasoning.is_empty()).then(|| {
+                            (
+                                render_message_key(message, "reasoning", 0),
+                                message.reasoning.clone(),
+                            )
+                        })
+                    });
+                if let Some((key, reasoning)) = reasoning_key {
+                    self.push_state_reasoning_item(
+                        key,
+                        reasoning,
+                        true,
+                        self.reasoning_stream_active,
+                    );
                 }
+                let final_content = self.finalize_assistant_stream();
+                if self.native_scrollback {
+                    if final_content.is_some() {
+                        if let Some(message) =
+                            self.finalized_assistant_message(message_id.as_deref())
+                        {
+                            let key = render_message_key(
+                                message,
+                                "assistant",
+                                finalized_assistant_content_part(message),
+                            );
+                            self.record_state_history_key(key);
+                        }
+                    }
+                    self.schedule_final_stream_resize_reflow();
+                }
+                self.finalize_tool_cards_for_turn();
                 if let Some(usage) = usage {
                     self.update_usage_value(&usage);
                 } else {
@@ -3463,16 +4143,16 @@ impl App {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             };
-            self.model = thread
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            self.mode = thread
-                .get("mode")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
+            if let Some(model) = thread.get("model") {
+                if let Some(model) = model.as_str().filter(|value| !value.is_empty()) {
+                    self.model = Some(model.to_string());
+                }
+            }
+            if let Some(mode) = thread.get("mode") {
+                if let Some(mode) = mode.as_str().filter(|value| !value.is_empty()) {
+                    self.mode = Some(mode.to_string());
+                }
+            }
             self.boost_reasoning = thread
                 .get("boost_reasoning")
                 .and_then(Value::as_bool)
@@ -3498,15 +4178,19 @@ impl App {
                 for message in &messages {
                     next_keys.extend(rendered_state_keys_for_message(message));
                 }
-                self.replace_live_region_from_snapshot(&next_keys);
-                if include_header && self.rendered_state_cursor == 0 {
-                    self.push_session_header();
+                if !next_keys.is_empty() && self.rendered_state_keys == next_keys {
+                    self.rendered_state_cursor = self.rendered_state_keys.len();
+                } else {
+                    self.replace_live_region_from_snapshot(&next_keys);
+                    if include_header && self.rendered_state_cursor == 0 {
+                        self.push_session_header();
+                    }
+                    for message in &messages {
+                        self.append_render_message(message);
+                    }
+                    self.rendered_state_keys
+                        .truncate(self.rendered_state_cursor);
                 }
-                for message in &messages {
-                    self.append_render_message(message);
-                }
-                self.rendered_state_keys
-                    .truncate(self.rendered_state_cursor);
             } else {
                 self.rebuild_render_transcript_from_state();
                 if include_header {
@@ -3534,19 +4218,28 @@ impl App {
             self.show_session_header = true;
         }
         if params.get("model").is_some() {
-            self.model = params
+            if let Some(model) = params
                 .get("model")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string);
+            {
+                self.model = Some(model.to_string());
+            }
         }
         if params.get("mode").is_some() || params.get("tool_use").is_some() {
-            self.mode = params
+            if let Some(mode) = params
                 .get("mode")
-                .or_else(|| params.get("tool_use"))
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string);
+                .or_else(|| {
+                    params
+                        .get("tool_use")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+            {
+                self.mode = Some(mode.to_string());
+            }
         }
         if let Some(value) = params.get("boost_reasoning").and_then(Value::as_bool) {
             self.boost_reasoning = value;
@@ -3578,15 +4271,44 @@ impl App {
         if !include_header {
             return;
         }
-        let next = self.session_header_item();
+        let title = self.session_header_title();
+        let subtitle = self.session_header_subtitle();
+        let key = session_header_key(&title, &subtitle);
+        self.sync_session_header_render_key(&key);
+        let next = TranscriptItem::Session {
+            title,
+            subtitle: Some(subtitle),
+        };
         if let Some(existing) = self
             .transcript
             .iter_mut()
             .find(|item| matches!(item, TranscriptItem::Session { .. }))
         {
             *existing = next;
-        } else if !self.native_scrollback {
+        } else if self.native_scrollback {
+            let changed = self.history.replace_first_kind(
+                HistoryCellKind::Session,
+                crate::history::cells::cell_from_transcript_item(&next, false),
+            );
+            match changed {
+                Some(true) => self.resize_reflow.schedule_immediate(),
+                None => {
+                    self.history.enqueue(next);
+                }
+                Some(false) => {}
+            }
+        } else {
             self.transcript.insert(0, next);
+        }
+    }
+
+    fn sync_session_header_render_key(&mut self, key: &str) {
+        if let Some(existing) = self
+            .rendered_state_keys
+            .iter_mut()
+            .find(|existing| existing.starts_with("session:header:0:"))
+        {
+            *existing = key.to_string();
         }
     }
 
@@ -3761,25 +4483,70 @@ impl App {
     }
 
     fn handle_message_added_payload(&mut self, message: Option<&Value>) {
-        let Some(message) = message else {
+        let Some(raw_message) = message else {
             return;
         };
-        let added = self.transcript_state.add_message(message);
-        if !added && message.get("role").and_then(Value::as_str) == Some("assistant") {
+        let message = TranscriptMessage::from_wire(raw_message);
+        let state_keys = rendered_state_keys_for_message(&message);
+        let replayed = !state_keys.is_empty()
+            && state_keys.into_iter().all(|key| {
+                state_key_has_stable_identity(&key)
+                    && self
+                        .rendered_state_keys
+                        .iter()
+                        .any(|existing| existing == &key)
+            });
+        if replayed {
             return;
         }
-        match message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-        {
-            "tool" => self.handle_tool_message(message),
-            "assistant" | "user" | "plan" | "event" => {
-                let message = TranscriptMessage::from_wire(message);
-                self.append_render_message(&message);
-            }
+        if message.role == TranscriptRole::Tool && self.replace_state_tool_message(&message) {
+            self.rebuild_remote_transcript_from_state();
+            return;
+        }
+        let replaces_active_stream = message.role == TranscriptRole::Assistant
+            && (self.assistant_stream_active() || self.reasoning_stream_active)
+            && self
+                .transcript_state
+                .messages()
+                .iter()
+                .any(|existing| active_assistant_matches_message(existing, &message));
+        let added = self.transcript_state.add_message(raw_message);
+        if !added && !replaces_active_stream {
+            self.rebuild_remote_transcript_from_state();
+            return;
+        }
+        match message.role {
+            TranscriptRole::Tool => self.push_state_tool_result(&message),
+            TranscriptRole::Assistant
+            | TranscriptRole::User
+            | TranscriptRole::Plan
+            | TranscriptRole::Goal
+            | TranscriptRole::Event => self.append_render_message(&message),
             _ => {}
         }
+    }
+
+    fn replace_state_tool_message(&mut self, message: &TranscriptMessage) -> bool {
+        let Some(tool_call_id) = message
+            .tool_call_id
+            .as_deref()
+            .filter(|tool_call_id| !tool_call_id.is_empty())
+        else {
+            return false;
+        };
+        let Some(existing) = self
+            .transcript_state
+            .messages_mut()
+            .iter_mut()
+            .find(|existing| {
+                existing.role == TranscriptRole::Tool
+                    && existing.tool_call_id.as_deref() == Some(tool_call_id)
+            })
+        else {
+            return false;
+        };
+        *existing = message.clone();
+        true
     }
 
     fn handle_message_updated_payload(
@@ -3803,11 +4570,6 @@ impl App {
     fn handle_messages_truncated(&mut self, from_index: usize) {
         self.transcript_state.truncate_messages(from_index);
         self.rebuild_remote_transcript_from_state();
-    }
-
-    fn handle_tool_message(&mut self, message: &Value) {
-        let message = TranscriptMessage::from_wire(message);
-        self.push_state_tool_result(&message);
     }
 
     fn maybe_open_ask_questions_form(&mut self, message: &TranscriptMessage) {
@@ -3840,8 +4602,20 @@ impl App {
         if self.has_later_user_message_after_tool(&request.tool_call_id) {
             return;
         }
+        let tool_call_id = request.tool_call_id.clone();
         self.ask_questions_form = Some(AskQuestionsForm::new(request));
+        self.collapse_tool_card(&tool_call_id);
         self.session_state = SessionState::WaitingUserInput;
+    }
+
+    fn collapse_tool_card(&mut self, tool_call_id: &str) {
+        for item in &mut self.transcript {
+            if let TranscriptItem::Tool(card) = item {
+                if card.id == tool_call_id {
+                    card.expanded = false;
+                }
+            }
+        }
     }
 
     fn has_later_user_message_after_tool(&self, tool_call_id: &str) -> bool {
@@ -3862,18 +4636,9 @@ impl App {
     fn push_state_tool_result(&mut self, message: &TranscriptMessage) {
         let key = render_message_key(message, "tool", 0);
         self.maybe_open_ask_questions_form(message);
-        if self
-            .rendered_state_keys
-            .get(self.rendered_state_cursor)
-            .is_some_and(|existing| existing == &key)
-        {
-            self.rendered_state_cursor += 1;
+        if !self.record_state_history_key(key) {
             return;
         }
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
-        self.rendered_state_keys.push(key);
-        self.rendered_state_cursor += 1;
         self.complete_tool(
             message.tool_call_id.as_deref().unwrap_or_default(),
             message.content.clone(),
@@ -4045,6 +4810,10 @@ impl App {
         status: ToolStatus,
         completed_at_ms: u64,
     ) {
+        let active_ask_tool_id = self
+            .ask_questions_form
+            .as_ref()
+            .map(|form| form.tool_call_id().to_string());
         for (idx, item) in self.transcript.iter_mut().enumerate().rev() {
             if let TranscriptItem::Tool(card) = item {
                 if card.id == id || id.is_empty() {
@@ -4052,6 +4821,9 @@ impl App {
                     card.status = status;
                     card.subchat_active = false;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
+                        card.expanded = false;
+                    }
                     let detail = card.summary();
                     self.selected_tool_index = Some(idx);
                     if self.session_state.shows_working_indicator() && !detail.is_empty() {
@@ -4066,6 +4838,9 @@ impl App {
         card.set_result(&result);
         card.status = status;
         card.duration_ms = Some(0);
+        if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
+            card.expanded = false;
+        }
         let item = TranscriptItem::Tool(card);
         self.push_live_item(item);
         self.selected_tool_index = Some(self.transcript.len() - 1);
@@ -4181,8 +4956,11 @@ impl App {
         self.retry_hint = retry_hint_from_message(message);
     }
 
-    fn record_chat_disconnected(&mut self, message: &str) {
-        if worker_waking_message(message) {
+    fn record_chat_disconnected(&mut self, message: &str, unreachable: bool, auth_stale: bool) {
+        if auth_stale {
+            self.subscription_status = SubscriptionStatus::Offline;
+            self.daemon_online = true;
+        } else if unreachable || worker_waking_message(message) {
             self.subscription_status = SubscriptionStatus::Waking;
             self.daemon_online = true;
         } else {
@@ -4302,6 +5080,10 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return AppAction::None;
         }
+        if is_ctrl_c_key(key) {
+            return self.ctrl_c_action();
+        }
+        self.last_ctrl_c = None;
         if self.help_open {
             self.help_open = false;
             return AppAction::None;
@@ -4341,6 +5123,12 @@ impl App {
         let Some(form) = self.ask_questions_form.as_mut() else {
             return AppAction::None;
         };
+        if form.current_question().question_type == AskQuestionType::MultiSelect
+            && is_plain_space_key(key)
+        {
+            form.toggle_current_multi();
+            return AppAction::None;
+        }
         if form.current_question().question_type == AskQuestionType::FreeText {
             if let KeyCode::Char(ch) = key.code {
                 if !key
@@ -4485,6 +5273,8 @@ impl App {
                 self.new_chat();
                 AppAction::SubscribeCurrent
             }
+            Some(KeyAction::PreviousSession) => self.switch_recent_session(-1),
+            Some(KeyAction::NextSession) => self.switch_recent_session(1),
             Some(KeyAction::OpenProjects) => AppAction::LoadProjects,
             Some(KeyAction::OpenModels) => AppAction::LoadModels,
             Some(KeyAction::OpenModes) => AppAction::LoadModes,
@@ -4820,6 +5610,7 @@ impl App {
     }
 
     fn ctrl_c_action(&mut self) -> AppAction {
+        self.dismiss_interrupt_surfaces();
         if matches!(
             self.session_state,
             SessionState::Generating
@@ -4829,6 +5620,8 @@ impl App {
         ) {
             self.cancel_queue_edit();
             self.abort_in_flight = true;
+            self.clear_approvals();
+            self.clear_active_ask_questions();
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
             return AppAction::Abort;
@@ -4844,6 +5637,13 @@ impl App {
             self.last_ctrl_c = Some(now);
         }
         AppAction::None
+    }
+
+    fn dismiss_interrupt_surfaces(&mut self) {
+        self.help_open = false;
+        self.transcript_overlay = None;
+        self.cancel_modal_picker();
+        self.composer_mode = ComposerMode::Chat;
     }
 
     fn handle_project_picker_key(&mut self, key: KeyEvent) -> AppAction {
@@ -4888,7 +5688,7 @@ impl App {
         let dispatch = self.keymap.dispatch(KeyContext::ModalPicker, key);
         match dispatch.action {
             Some(KeyAction::Cancel) => {
-                self.modal_picker = None;
+                self.cancel_modal_picker();
                 AppAction::None
             }
             Some(KeyAction::Accept) => {
@@ -4901,12 +5701,14 @@ impl App {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_prev();
                 }
+                self.preview_current_theme_picker_selection();
                 AppAction::None
             }
             Some(KeyAction::MoveDown) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     picker.select_next();
                 }
+                self.preview_current_theme_picker_selection();
                 AppAction::None
             }
             Some(KeyAction::ToggleSelectedTool) => {
@@ -4930,6 +5732,7 @@ impl App {
                     self.update_slash_picker_filter();
                 } else if let Some(picker) = self.modal_picker.as_mut() {
                     picker.pop_filter();
+                    self.preview_current_theme_picker_selection();
                 }
                 AppAction::None
             }
@@ -4944,6 +5747,7 @@ impl App {
                         self.update_slash_picker_filter();
                     } else if let Some(picker) = self.modal_picker.as_mut() {
                         picker.push_filter(ch);
+                        self.preview_current_theme_picker_selection();
                     }
                 }
                 AppAction::None
@@ -4968,6 +5772,11 @@ impl App {
     #[cfg(test)]
     pub fn test_push_history_item(&mut self, item: TranscriptItem) {
         self.push_history_item(item);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_history_items(&mut self, items: Vec<TranscriptItem>) {
+        self.transcript = items;
     }
 
     #[cfg(test)]
@@ -5009,6 +5818,26 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_set_tui_config_path(&mut self, path: PathBuf) {
+        self.tui_config_path = Some(path);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_composer_text(&mut self, text: &str) {
+        self.composer.set_text(text);
+    }
+
+    #[cfg(test)]
+    pub fn test_set_recent_sessions(&mut self, items: Vec<PickerItem>) {
+        self.set_recent_sessions(items);
+    }
+
+    #[cfg(test)]
+    pub fn test_insert_paste(&mut self, text: &str) {
+        self.composer.insert_paste(text);
+    }
+
+    #[cfg(test)]
     pub fn test_execute_command_name(&mut self, name: &str) -> AppAction {
         self.execute_command_name(name)
     }
@@ -5037,6 +5866,7 @@ pub enum AppAction {
         scope: String,
     },
     LoadSessions,
+    RefreshRecentSessions,
     RefreshWorkers,
     LoadDaemonStatus,
     OpenProject(PathBuf),
@@ -5118,7 +5948,7 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
 #[derive(Debug)]
 enum RuntimeEvent {
     Input(Event),
-    Tick,
+    Frame,
     Chat {
         generation: u64,
         event: ChatEvent,
@@ -5130,6 +5960,8 @@ enum RuntimeEvent {
     ChatDisconnected {
         generation: u64,
         message: String,
+        unreachable: bool,
+        auth_stale: bool,
     },
     InputError(String),
     DaemonEvent {
@@ -5159,7 +5991,11 @@ enum RuntimeEvent {
     CompetitorImportViewLoaded(Result<CompetitorImportInfoResponse, String>),
     CompetitorImportSourcesLoaded(Result<CompetitorImportInfoResponse, String>),
     CompetitorImportFinished(Result<CompetitorImportRunResponse, String>),
-    SessionsLoaded(Result<Vec<TrajectoryMeta>, String>),
+    SessionsLoaded {
+        project_id: String,
+        open_picker: bool,
+        result: Result<Vec<TrajectoryMeta>, String>,
+    },
     DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     HistorySaved(Result<(), String>),
@@ -5377,10 +6213,11 @@ impl Drop for SubscriptionManager {
 }
 
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
-    let endpoint = match crate::client::resolve_daemon_endpoint(
+    let endpoint = match crate::client::resolve_daemon_endpoint_with_auth(
         options
             .daemon_url
             .or_else(|| std::env::var("REFACT_DAEMON_URL").ok()),
+        std::env::var("REFACT_DAEMON_TOKEN").ok(),
     ) {
         Ok(endpoint) => endpoint,
         Err(warning) => {
@@ -5408,7 +6245,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let mut subscriptions = SubscriptionManager::new();
     let mut daemon_events = DaemonEventSubscription::new();
     let mut input_task = spawn_input_task(tx.clone());
-    spawn_tick_task(tx.clone());
+    let (frame_requester, frame_rx) = FrameRequester::new();
+    let frame_task = spawn_frame_task(frame_rx, tx.clone());
     daemon_events.start(client.clone(), tx.clone());
     spawn_worker_refresh_task(client.clone(), tx.clone());
     if let Some(project_id) = app.current_project_id().map(str::to_string) {
@@ -5419,7 +6257,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             app.chat_id().to_string(),
             tx.clone(),
         );
-        load_caps(client.clone(), tx.clone(), project_id);
+        load_caps(client.clone(), tx.clone(), project_id.clone());
+        load_recent_sessions(client.clone(), tx.clone(), project_id, false);
     }
 
     loop {
@@ -5427,6 +6266,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
         if app.should_quit() {
             break;
         }
+        schedule_next_frame(&app, &frame_requester);
         let Some(event) = rx.recv().await else {
             break;
         };
@@ -5463,8 +6303,12 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
             RuntimeEvent::Input(Event::FocusGained) => app.set_terminal_focus(true),
             RuntimeEvent::Input(Event::FocusLost) => app.set_terminal_focus(false),
-            RuntimeEvent::Input(Event::Resize(_, _)) => {}
-            RuntimeEvent::Tick => {
+            RuntimeEvent::Input(Event::Resize(width, _)) => {
+                if !app.note_terminal_resize_width(width) {
+                    app.note_terminal_height_resize();
+                }
+            }
+            RuntimeEvent::Frame => {
                 app.run_stream_commit_tick();
                 app.flush_pending_paste();
             }
@@ -5491,7 +6335,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     app.add_notice(format!("SSE resync: {message}"));
                     if let Err(error) = subscriptions.reconnect_current(client.clone(), tx.clone())
                     {
-                        app.record_chat_disconnected(&error);
+                        app.record_chat_disconnected(&error, true, false);
                         app.add_notice(error);
                     }
                 }
@@ -5499,11 +6343,19 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::ChatDisconnected {
                 generation,
                 message,
+                unreachable,
+                auth_stale,
             } => {
                 if !subscriptions.is_current(generation) {
                     continue;
                 }
-                app.record_chat_disconnected(&message);
+                app.record_chat_disconnected(&message, unreachable, auth_stale);
+                if auth_stale {
+                    app.add_notice(format!(
+                        "SSE disconnected: {message}; daemon auth token is stale"
+                    ));
+                    continue;
+                }
                 match subscriptions.reconnect_current(client.clone(), tx.clone()) {
                     Ok(()) => app.add_notice(format!("SSE disconnected: {message}; reconnecting…")),
                     Err(error) => app.add_notice(format!("SSE disconnected: {message}; {error}")),
@@ -5538,7 +6390,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         tx.clone(),
                     );
                     daemon_events.restart(client.clone(), tx.clone());
-                    load_caps(client.clone(), tx.clone(), project_id);
+                    load_caps(client.clone(), tx.clone(), project_id.clone());
+                    load_recent_sessions(client.clone(), tx.clone(), project_id, false);
                 }
             }
             RuntimeEvent::ProjectOpened(Err(error)) => {
@@ -5587,14 +6440,23 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::CompetitorImportFinished(result) => {
                 app.handle_competitor_import_finished(result)
             }
-            RuntimeEvent::SessionsLoaded(Ok(trajectories)) => {
-                app.open_session_picker_from_trajectories(trajectories)
-            }
-            RuntimeEvent::SessionsLoaded(Err(error)) => {
-                app.retry_hint = retry_hint_from_message(&error);
-                app.add_notice(format!("Failed to load recent chats: {error}"));
-                app.open_session_picker(Vec::new());
-            }
+            RuntimeEvent::SessionsLoaded {
+                project_id,
+                open_picker,
+                result,
+            } => match result {
+                _ if app.current_project_id() != Some(project_id.as_str()) => {}
+                Ok(trajectories) if open_picker => {
+                    app.open_session_picker_from_trajectories(trajectories)
+                }
+                Ok(trajectories) => app.refresh_recent_sessions_from_trajectories(trajectories),
+                Err(error) if open_picker => {
+                    app.retry_hint = retry_hint_from_message(&error);
+                    app.add_notice(format!("Failed to load recent chats: {error}"));
+                    app.open_session_picker(Vec::new());
+                }
+                Err(error) => app.retry_hint = retry_hint_from_message(&error),
+            },
             RuntimeEvent::DaemonStatusLoaded(Ok((status, base_url))) => {
                 app.apply_daemon_status(status, base_url)
             }
@@ -5637,6 +6499,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             terminal.write_notification(&bytes)?;
         }
     }
+    frame_task.abort();
     Ok(())
 }
 
@@ -5656,8 +6519,111 @@ fn history_path_for_root(root: &std::path::Path) -> PathBuf {
 }
 
 fn load_tui_config_content() -> Option<String> {
-    let path = KeymapRegistry::default_config_path()?;
+    let path = default_tui_config_path()?;
     fs::read_to_string(path).ok()
+}
+
+fn default_tui_config_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        KeymapRegistry::default_config_path()
+    }
+}
+
+fn initialize_syntax_theme(theme: &TuiTheme, config_path: Option<&Path>) {
+    let theme_home = config_path
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
+    let _ = highlight::set_theme_override(Some(theme.syntax_theme_name().to_string()), theme_home);
+}
+
+fn persist_theme_name_to_path(path: &Path, name: &str) -> Result<(), String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read TUI config from {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let content = apply_theme_name_to_config(&content, name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create TUI config directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(path, content)
+        .map_err(|error| format!("Failed to save TUI theme to {}: {error}", path.display()))
+}
+
+fn apply_theme_name_to_config(content: &str, name: &str) -> String {
+    let name_line = format!("name = {}", toml_string(name));
+    if content.trim().is_empty() {
+        return format!("[theme]\n{name_line}\n");
+    }
+
+    let mut out = Vec::new();
+    let mut in_theme = false;
+    let mut found_theme = false;
+    let mut wrote_name = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let section = toml_section_name(trimmed);
+        if section.is_some() && in_theme && !wrote_name {
+            out.push(name_line.clone());
+            wrote_name = true;
+        }
+        if let Some(section) = section {
+            in_theme = section == "theme";
+            found_theme |= in_theme;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_theme && toml_key_name(trimmed) == Some("name") {
+            let indent = line
+                .chars()
+                .take_while(|ch| ch.is_whitespace())
+                .collect::<String>();
+            out.push(format!("{indent}{name_line}"));
+            wrote_name = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    if found_theme {
+        if in_theme && !wrote_name {
+            out.push(name_line);
+        }
+    } else {
+        out.push(String::new());
+        out.push("[theme]".to_string());
+        out.push(name_line);
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    content
+}
+
+fn toml_section_name(line: &str) -> Option<&str> {
+    Some(line.strip_prefix('[')?.strip_suffix(']')?.trim())
+}
+
+fn toml_key_name(line: &str) -> Option<&str> {
+    let (key, _) = line.split_once('=')?;
+    Some(key.trim())
+}
+
+fn toml_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn spawn_history_save_task(request: HistorySaveRequest, tx: mpsc::Sender<RuntimeEvent>) {
@@ -5698,6 +6664,16 @@ fn is_empty_live_assistant(message: &TranscriptMessage) -> bool {
         && message.server_content_blocks.is_empty()
         && message.extra.is_empty()
         && message.unknown_delta_ops.is_empty()
+}
+
+fn active_assistant_matches_message(
+    existing: &TranscriptMessage,
+    next: &TranscriptMessage,
+) -> bool {
+    existing.role == TranscriptRole::Assistant
+        && !existing.stream_finished
+        && next.role == TranscriptRole::Assistant
+        && existing.message_id == next.message_id
 }
 
 async fn run_action(
@@ -5879,15 +6855,12 @@ async fn run_action(
         }
         AppAction::LoadSessions => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
-                let client = client.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let result = client
-                        .list_trajectories(&project_id, 50)
-                        .await
-                        .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::SessionsLoaded(result)).await;
-                });
+                load_recent_sessions(client.clone(), tx.clone(), project_id, true);
+            }
+        }
+        AppAction::RefreshRecentSessions => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                load_recent_sessions(client.clone(), tx.clone(), project_id, false);
             }
         }
         AppAction::RefreshWorkers => refresh_workers(client.clone(), tx.clone()),
@@ -6339,16 +7312,44 @@ fn spawn_input_task(tx: mpsc::Sender<RuntimeEvent>) -> JoinHandle<()> {
     })
 }
 
-fn spawn_tick_task(tx: mpsc::Sender<RuntimeEvent>) {
+fn spawn_frame_task(
+    mut frame_rx: mpsc::Receiver<()>,
+    tx: mpsc::Sender<RuntimeEvent>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
-        loop {
-            interval.tick().await;
-            if tx.send(RuntimeEvent::Tick).await.is_err() {
+        while frame_rx.recv().await.is_some() {
+            if tx.send(RuntimeEvent::Frame).await.is_err() {
                 break;
             }
         }
-    });
+    })
+}
+
+fn schedule_next_frame(app: &App, frame_requester: &FrameRequester) {
+    let mut delay = None;
+    if app.stream_has_committable_lines() {
+        delay = Some(TARGET_FRAME_INTERVAL);
+    }
+    if app.session_state().shows_working_indicator() {
+        delay = Some(min_frame_delay(delay, WORKING_ANIMATION_INTERVAL));
+    }
+    if let Some(paste_delay) = app.pending_paste_delay() {
+        delay = Some(min_frame_delay(delay, paste_delay));
+    }
+    if let Some(resize_delay) = app.resize_reflow_delay() {
+        delay = Some(min_frame_delay(delay, resize_delay));
+    }
+    if let Some(delay) = delay {
+        if delay.is_zero() {
+            frame_requester.schedule_frame();
+        } else {
+            frame_requester.schedule_frame_in(delay);
+        }
+    }
+}
+
+fn min_frame_delay(current: Option<Duration>, candidate: Duration) -> Duration {
+    current.map_or(candidate, |current| current.min(candidate))
 }
 
 fn spawn_worker_refresh_task(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>) {
@@ -6381,6 +7382,27 @@ fn load_caps(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>, project_id: S
             .await
             .map_err(|error| error.to_string());
         let _ = tx.send(RuntimeEvent::CapsLoaded(result)).await;
+    });
+}
+
+fn load_recent_sessions(
+    client: DaemonClient,
+    tx: mpsc::Sender<RuntimeEvent>,
+    project_id: String,
+    open_picker: bool,
+) {
+    tokio::spawn(async move {
+        let result = client
+            .list_trajectories(&project_id, 50)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = tx
+            .send(RuntimeEvent::SessionsLoaded {
+                project_id,
+                open_picker,
+                result,
+            })
+            .await;
     });
 }
 
@@ -6531,10 +7553,14 @@ fn spawn_subscription_task(
                             }
                         },
                         Err(error) => {
+                            let unreachable = error.is_unreachable();
+                            let auth_stale = error.is_auth_stale();
                             let _ = tx
                                 .send(RuntimeEvent::ChatDisconnected {
                                     generation,
                                     message: error.to_string(),
+                                    unreachable,
+                                    auth_stale,
                                 })
                                 .await;
                             return;
@@ -6545,14 +7571,21 @@ fn spawn_subscription_task(
                     .send(RuntimeEvent::ChatDisconnected {
                         generation,
                         message: "stream ended".to_string(),
+                        unreachable: ClientError::SseDisconnect("stream ended".to_string())
+                            .is_unreachable(),
+                        auth_stale: false,
                     })
                     .await;
             }
             Err(error) => {
+                let unreachable = error.is_unreachable();
+                let auth_stale = error.is_auth_stale();
                 let _ = tx
                     .send(RuntimeEvent::ChatDisconnected {
                         generation,
                         message: error.to_string(),
+                        unreachable,
+                        auth_stale,
                     })
                     .await;
             }
@@ -6595,8 +7628,42 @@ fn current_plan_message(messages: &[TranscriptMessage]) -> Option<&TranscriptMes
         })
 }
 
+fn current_goal_cell_data(messages: &[TranscriptMessage]) -> Option<GoalCellData> {
+    let base = current_goal_message(messages)?;
+    let deltas = messages
+        .iter()
+        .filter(|message| is_goal_delta_message(message))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>();
+    let content = synthesize_goal_content(&base.content, &deltas);
+    let goal_meta = base.extra.get("goal").and_then(Value::as_object);
+    let version = goal_meta
+        .and_then(|meta| meta.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u32;
+    Some(GoalCellData::new(content, version, deltas.len()))
+}
+
+fn current_goal_message(messages: &[TranscriptMessage]) -> Option<&TranscriptMessage> {
+    messages
+        .iter()
+        .filter(|message| message.role == TranscriptRole::Goal)
+        .max_by_key(|message| {
+            message
+                .extra
+                .get("goal")
+                .and_then(|goal| goal.get("version"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+}
+
 fn is_plan_delta_message(message: &TranscriptMessage) -> bool {
     event_subkind(message) == Some("plan_delta")
+}
+
+fn is_goal_delta_message(message: &TranscriptMessage) -> bool {
+    event_subkind(message) == Some("goal_delta")
 }
 
 fn event_metadata(message: &TranscriptMessage) -> (String, String, Value) {
@@ -6800,6 +7867,15 @@ fn default_context_window(caps: &Value, windows: &HashMap<String, u64>) -> Optio
         })
 }
 
+fn resolved_default_chat_model(caps: &Value) -> Option<String> {
+    default_chat_model(caps)
+        .map(|model| resolve_chat_model_id(caps, model).unwrap_or_else(|| model.to_string()))
+        .or_else(|| {
+            let ids = chat_model_ids(caps);
+            (ids.len() == 1).then(|| ids[0].clone())
+        })
+}
+
 fn default_chat_model(caps: &Value) -> Option<&str> {
     caps.get("defaults")
         .and_then(|defaults| {
@@ -6826,10 +7902,100 @@ fn default_chat_model(caps: &Value) -> Option<&str> {
         })
 }
 
+fn default_chat_mode(caps: &Value) -> Option<&str> {
+    caps.get("defaults")
+        .and_then(|defaults| {
+            string_field(
+                defaults,
+                &[
+                    "chat_default_mode",
+                    "default_chat_mode",
+                    "chat_mode",
+                    "mode",
+                    "tool_use",
+                ],
+            )
+        })
+        .or_else(|| {
+            string_field(
+                caps,
+                &[
+                    "chat_default_mode",
+                    "default_chat_mode",
+                    "chat_mode",
+                    "mode",
+                    "tool_use",
+                ],
+            )
+        })
+}
+
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| value.get(*key)?.as_str())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn empty_optional_str(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => value.trim().is_empty(),
+        None => true,
+    }
+}
+
+fn resolve_chat_model_id(caps: &Value, model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let ids = chat_model_ids(caps);
+    if ids.iter().any(|id| id == model) {
+        return Some(model.to_string());
+    }
+    ids.into_iter()
+        .find(|id| id.rsplit('/').next().is_some_and(|suffix| suffix == model))
+}
+
+fn chat_model_ids(caps: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(models) = caps.get("chat_models") {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    if let Some(models) = caps.get("models").and_then(|models| models.get("chat")) {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    if let Some(models) = caps.get("available_models") {
+        collect_chat_model_ids(models, &mut ids);
+    }
+    ids
+}
+
+fn collect_chat_model_ids(models: &Value, ids: &mut Vec<String>) {
+    match models {
+        Value::Object(map) => {
+            for (id, model) in map {
+                push_unique_model_id(ids, id);
+                if let Some(model_id) = model.get("id").and_then(Value::as_str) {
+                    push_unique_model_id(ids, model_id);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for model in items {
+                if let Some(model_id) = model.get("id").and_then(Value::as_str) {
+                    push_unique_model_id(ids, model_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_unique_model_id(ids: &mut Vec<String>, id: &str) {
+    let id = id.trim();
+    if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+        ids.push(id.to_string());
+    }
 }
 
 fn context_window_for_model(windows: &HashMap<String, u64>, model: &str) -> Option<u64> {
@@ -7061,6 +8227,11 @@ fn apply_subchat_update_to_tool_value(
     map.insert("subchat_truncated".to_string(), Value::Bool(truncated));
 }
 
+fn assistant_stream_width(width: u16) -> Option<usize> {
+    crate::render::width::usable_content_width_u16(width, ASSISTANT_STREAM_RESERVED_COLS)
+        .or(Some(1))
+}
+
 fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
     line.spans
         .iter()
@@ -7086,6 +8257,34 @@ fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> 
     } else {
         format!("{}:{}:{}:{:016x}", id, part, index, revision)
     }
+}
+
+fn state_key_has_stable_identity(key: &str) -> bool {
+    let Some((identity, rest)) = key.split_once(':') else {
+        return false;
+    };
+    if rest.split(':').count() != 3 {
+        return false;
+    }
+    !matches!(
+        identity,
+        "user" | "assistant" | "tool" | "notice" | "plan" | "goal" | "event" | "session"
+    )
+}
+
+const SESSION_HEADER_TIPS: &str = "Tips: type /help for shortcuts; Ctrl-C twice exits";
+
+fn session_header_subtitle(model: Option<&str>, project_root: Option<&Path>) -> String {
+    let model = model
+        .filter(|value| !value.trim().is_empty())
+        .map(sanitize_tool_inline)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    let directory = project_root
+        .map(|path| sanitize_tool_inline(path.display().to_string()))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("model: {model} · /model to change\ndirectory: {directory}\n{SESSION_HEADER_TIPS}")
 }
 
 fn session_header_key(title: &str, subtitle: &str) -> String {
@@ -7267,10 +8466,13 @@ fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Vec<String> {
         TranscriptRole::Tool => vec![render_message_key(message, "tool", 0)],
         TranscriptRole::Notice => vec![render_message_key(message, "notice", 0)],
         TranscriptRole::Plan => vec![render_message_key(message, "plan", 0)],
+        TranscriptRole::Goal => vec![render_message_key(message, "goal", 0)],
         TranscriptRole::Event => vec![render_message_key(
             message,
             if is_plan_delta_message(message) {
                 "plan_delta"
+            } else if is_goal_delta_message(message) {
+                "goal_delta"
             } else {
                 "event"
             },
@@ -7288,8 +8490,18 @@ fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), Tui
     terminal.set_title(&app.terminal_title())?;
     if app.native_scrollback() {
         let width = terminal.terminal_mut().size()?.width;
-        for insertion in app.pending_history_insertions(width) {
-            insert_history(terminal.terminal_mut(), insertion)?;
+        app.note_terminal_resize_width(width);
+        if app.resize_reflow_is_due() {
+            let ran_during_stream = app.should_mark_resize_reflow_as_stream_time();
+            terminal.clear_for_resize_reflow()?;
+            for insertion in app.resize_reflow_insertions(width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
+            app.finish_resize_reflow(width, ran_during_stream);
+        } else {
+            for insertion in app.pending_history_insertions(width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
         }
     }
     terminal
@@ -7346,6 +8558,21 @@ fn composer_search_text(key: KeyEvent) -> Option<char> {
         KeyCode::Char(ch) => Some(ch),
         _ => None,
     }
+}
+
+fn is_ctrl_c_key(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn is_plain_space_key(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && matches!(key.code, KeyCode::Char(' '))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 #[cfg(test)]
@@ -7416,6 +8643,82 @@ mod tests {
             .collect::<String>()
     }
 
+    fn assistant_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Assistant(_)))
+            .count()
+    }
+
+    fn reasoning_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Reasoning(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    }
+
+    fn reasoning_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Reasoning(_, _)))
+            .count()
+    }
+
+    fn injected_model_text() -> &'static str {
+        "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
+    }
+
+    fn assert_escape_inert(text: &str) {
+        assert!(!text.as_bytes().contains(&0x1b), "raw ESC in {text:?}");
+        assert!(!text.as_bytes().contains(&0x07), "raw BEL in {text:?}");
+        assert!(!text.as_bytes().contains(&0x9b), "raw CSI byte in {text:?}");
+        assert!(!text.contains('\u{009b}'), "raw CSI char in {text:?}");
+        assert!(!text.contains("http://evil"), "raw OSC8 URL in {text:?}");
+    }
+
+    fn assert_model_text_survives(text: &str) {
+        for fragment in ["lead", "red", "clear", "bell", "csi", "TEXT", "tail"] {
+            assert!(text.contains(fragment), "missing {fragment:?} in {text:?}");
+        }
+    }
+
+    fn assert_rendered_item_escape_inert(item: &TranscriptItem) {
+        let lines = crate::history::cells::cell_from_transcript_item(item, false).render(80);
+        for line in lines {
+            for span in line.spans {
+                assert_escape_inert(span.content.as_ref());
+            }
+        }
+    }
+
+    fn stream_tail_plain_lines(app: &App) -> Vec<String> {
+        app.stream_controller
+            .current_tail_lines()
+            .iter()
+            .map(|line| line_to_plain_string(&line.line))
+            .collect()
+    }
+
+    fn plan_stream_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::PlanStream(lines) => Some(
+                    lines
+                        .iter()
+                        .map(|line| line_to_plain_string(&line.line))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn tool_cards(app: &App) -> Vec<&ToolCard> {
         app.visible_transcript()
             .iter()
@@ -7424,6 +8727,92 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn questions_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| rendered_item_plain_text(item).contains("Questions"))
+            .count()
+    }
+
+    fn session_cell_count(app: &App) -> usize {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Session { .. }))
+            .count()
+    }
+
+    fn session_text(app: &App) -> String {
+        app.visible_transcript()
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Session { .. }))
+            .map(rendered_item_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn rendered_item_plain_text(item: &TranscriptItem) -> String {
+        crate::history::cells::cell_from_transcript_item(item, false)
+            .render(80)
+            .iter()
+            .map(line_to_plain_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assistant_added_event(app: &App, id: &str, content: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": id,
+                "role": "assistant",
+                "content": content,
+                "stream_finished": true,
+            }}),
+        }
+    }
+
+    fn snapshot_event(app: &App, messages: Vec<Value>) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": messages}),
+        }
+    }
+
+    fn tool_call_delta_event(app: &App, tool_call_id: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{
+                "id": tool_call_id,
+                "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}
+            }]}]}),
+        }
+    }
+
+    fn tool_result_message(tool_call_id: &str, content: &str) -> Value {
+        json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "tool_failed": false,
+            "content": content,
+            "stream_finished": true,
+        })
+    }
+
+    fn tool_result_event(app: &App, tool_call_id: &str, content: &str) -> ChatEvent {
+        ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_result_message(tool_call_id, content)}),
+        }
     }
 
     fn ask_questions_tool_event(app: &App, tool_call_id: &str, questions: Value) -> ChatEvent {
@@ -7678,6 +9067,469 @@ mod tests {
     }
 
     #[test]
+    fn stream_added_snapshot_reconciles_to_one_assistant_cell() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_content", "text": "hello"}]}),
+        });
+        app.handle_chat_event(assistant_added_event(&app, "a1", "hello"));
+        app.handle_chat_event(snapshot_event(
+            &app,
+            vec![json!({
+                "message_id": "a1",
+                "role": "assistant",
+                "content": "hello",
+                "stream_finished": true,
+            })],
+        ));
+
+        assert_eq!(assistant_cell_count(&app), 1);
+        assert_eq!(assistant_text(&app), "hello");
+    }
+
+    #[test]
+    fn repeated_identical_message_added_does_not_duplicate_assistant() {
+        let mut app = App::new(project());
+        let event = assistant_added_event(&app, "a1", "hello");
+
+        app.handle_chat_event(event.clone());
+        app.handle_chat_event(event);
+
+        assert_eq!(assistant_cell_count(&app), 1);
+        assert_eq!(assistant_text(&app), "hello");
+    }
+
+    #[test]
+    fn new_chat_shows_codex_style_session_header() {
+        let mut app = App::new(project());
+
+        app.new_chat();
+
+        let text = session_text(&app);
+        assert_eq!(session_cell_count(&app), 1);
+        assert!(text.contains(">_ refact"));
+        assert!(text.contains("model: default · /model to change"));
+        assert!(text.contains("directory: /tmp/demo"));
+        assert!(text.contains("Tips: type /help for shortcuts"));
+    }
+
+    #[test]
+    fn new_chat_session_header_updates_model_without_duplication() {
+        let mut app = App::new(project());
+        app.new_chat();
+
+        app.apply_caps(&json!({
+            "defaults": {
+                "chat_default_model": "openai/gpt-demo",
+                "chat_default_mode": "agent"
+            },
+            "chat_models": {
+                "openai/gpt-demo": {"name": "GPT Demo"}
+            }
+        }));
+        app.handle_chat_event(snapshot_event(&app, Vec::new()));
+
+        let text = session_text(&app);
+        assert_eq!(session_cell_count(&app), 1);
+        assert!(text.contains("model: openai/gpt-demo · /model to change"));
+        assert!(!text.contains("model: default"));
+    }
+
+    #[test]
+    fn ask_questions_message_and_waiting_snapshot_keep_one_questions_cell() {
+        let mut app = App::new(project());
+        let questions = json!([
+            {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+        ]);
+        let assistant_message = json!({
+            "message_id": "a1",
+            "role": "assistant",
+            "stream_finished": true,
+            "tool_calls": [{
+                "id": "call-ask",
+                "function": {
+                    "name": "ask_questions",
+                    "arguments": json!({"questions": questions}).to_string(),
+                }
+            }]
+        });
+        let tool_message = tool_result_message(
+            "call-ask",
+            &json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": questions,
+            })
+            .to_string(),
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": assistant_message.clone()}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_message.clone()}),
+        });
+        app.handle_chat_event(waiting_user_input_event(&app));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "waiting_user_input"}, "messages": [assistant_message, tool_message]}),
+        });
+
+        assert_eq!(questions_cell_count(&app), 1);
+        assert!(app.ask_questions_form().is_some());
+    }
+
+    #[test]
+    fn active_ask_questions_cell_stays_compact() {
+        let mut app = App::new(project());
+        let questions = json!([
+            {"id": "file", "type": "free_text", "text": "Which file should I edit?"}
+        ]);
+        let assistant_message = json!({
+            "message_id": "a1",
+            "role": "assistant",
+            "stream_finished": true,
+            "tool_calls": [{
+                "id": "call-ask",
+                "function": {
+                    "name": "ask_questions",
+                    "arguments": json!({"questions": questions}).to_string(),
+                }
+            }]
+        });
+        let tool_message = tool_result_message(
+            "call-ask",
+            &json!({
+                "type": "ask_questions",
+                "tool_call_id": "call-ask",
+                "questions": questions,
+            })
+            .to_string(),
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": assistant_message}),
+        });
+        let tool_card = app
+            .visible_transcript()
+            .iter()
+            .position(|item| matches!(item, TranscriptItem::Tool(card) if card.id == "call-ask"))
+            .unwrap();
+        app.selected_tool_index = Some(tool_card);
+        app.toggle_selected_tool();
+        assert!(
+            matches!(app.visible_transcript().get(tool_card), Some(TranscriptItem::Tool(card)) if card.expanded)
+        );
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": tool_message}),
+        });
+        app.handle_chat_event(waiting_user_input_event(&app));
+
+        let rendered = app
+            .visible_transcript()
+            .iter()
+            .map(rendered_item_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(app.ask_questions_form().is_some());
+        assert!(
+            matches!(app.visible_transcript().get(tool_card), Some(TranscriptItem::Tool(card)) if !card.expanded)
+        );
+        assert_eq!(rendered.matches("Which file should I edit?").count(), 1);
+    }
+
+    #[test]
+    fn completed_tool_card_transitions_to_history_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+
+        app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
+        app.handle_chat_event(tool_result_event(&app, "call-1", "done"));
+        app.handle_chat_event(tool_result_event(&app, "call-1", "done"));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+
+        assert_eq!(tool_cards(&app).len(), 0);
+        assert_eq!(app.history_pending_count(), 1);
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+    }
+
+    #[test]
+    fn native_new_chat_session_header_updates_model_without_duplication() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        app.new_chat();
+
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(app.history_inserted_cell_count() - inserted_before, 1);
+
+        app.apply_caps(&json!({
+            "defaults": {"chat_default_model": "openai/gpt-demo"},
+            "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
+        }));
+        app.handle_chat_event(snapshot_event(&app, Vec::new()));
+
+        assert_eq!(app.history_pending_count(), 0);
+        let reflow = app.resize_reflow_insertions(80);
+        let rendered = reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("model: openai/gpt-demo · /model to change"));
+        assert!(!rendered.contains("model: default"));
+    }
+
+    #[test]
+    fn identical_snapshot_after_insertions_adds_no_history_entries() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "hi", "stream_finished": true}),
+        ];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        assert_eq!(app.history_pending_count(), 2);
+        let inserted_before = app.history_inserted_cell_count();
+        let insertions = app.pending_history_insertions(80);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.cell_ids.len())
+                .sum::<usize>(),
+            2
+        );
+        let inserted_after_first = app.history_inserted_cell_count();
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.history_pending_count(), 0);
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count(), inserted_after_first);
+        assert_eq!(inserted_after_first - inserted_before, 2);
+    }
+
+    #[test]
+    fn changed_snapshot_after_insertions_reflows_native_scrollback_region() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let initial = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "stale answer", "stream_finished": true}),
+        ];
+
+        app.handle_chat_event(snapshot_event(&app, initial));
+        assert!(app.resize_reflow_is_due());
+        let first_reflow = app.resize_reflow_insertions(80);
+        app.finish_resize_reflow(80, false);
+        let first_text = first_reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(first_text.contains("stale answer"));
+
+        let changed = vec![
+            json!({"message_id": "u1", "role": "user", "content": "hello"}),
+            json!({"message_id": "a1", "role": "assistant", "content": "fresh answer", "stream_finished": true}),
+        ];
+        app.handle_chat_event(snapshot_event(&app, changed));
+
+        assert!(app.resize_reflow_is_due());
+        let changed_reflow = app.resize_reflow_insertions(80);
+        let changed_text = changed_reflow
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(changed_text.contains("fresh answer"));
+        assert!(!changed_text.contains("stale answer"));
+        assert_eq!(app.history_pending_count(), 0);
+    }
+
+    #[test]
+    fn reasoning_stream_finished_snapshot_reconciles_to_one_reasoning_cell() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_reasoning", "text": "think"}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.handle_chat_event(snapshot_event(
+            &app,
+            vec![json!({
+                "message_id": "a1",
+                "role": "assistant",
+                "reasoning": "think",
+                "stream_finished": true,
+            })],
+        ));
+
+        assert_eq!(reasoning_cell_count(&app), 1);
+        assert_eq!(reasoning_text(&app), "think");
+    }
+
+    #[test]
+    fn in_progress_plan_snapshot_replay_preserves_history_and_live_stream_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![json!({
+            "message_id": "p1",
+            "role": "plan",
+            "content": "- one\n- two\n- three\n- four\n- five\n",
+            "stream_finished": false,
+            "extra": {"plan": {"mode": "agent", "version": 1}}
+        })];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        let visible_before = app.visible_transcript().len();
+        let stream_text_before = plan_stream_text(&app);
+        assert!(stream_text_before.contains("- five"));
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.history_pending_count(), 0);
+        assert_eq!(app.visible_transcript().len(), visible_before);
+        assert_eq!(plan_stream_text(&app), stream_text_before);
+        assert_eq!(
+            app.visible_transcript()
+                .iter()
+                .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ordinary_event_snapshot_replay_does_not_duplicate_events() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let messages = vec![json!({
+            "message_id": "e1",
+            "role": "event",
+            "content": "Process exited with code 0",
+            "extra": {"event": {"subkind": "process_completed", "source": "exec.registry", "payload": {"exit_code": 0}}}
+        })];
+
+        app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        let events_before = app.events_pane().events().len();
+        let pending_before = app.history_pending_count();
+
+        app.handle_chat_event(snapshot_event(&app, messages));
+
+        assert_eq!(app.events_pane().events().len(), events_before);
+        assert_eq!(app.history_pending_count(), pending_before);
+    }
+
+    #[test]
+    fn streaming_resize_rewraps_live_tail() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        app.note_terminal_resize_width(80);
+        let source = "intro\nalpha beta gamma delta epsilon zeta eta theta";
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "a1", "ops": [{"op": "append_content", "text": source}]}),
+        });
+        let wide_tail = stream_tail_plain_lines(&app);
+
+        app.note_terminal_resize_width(16);
+        let narrow_tail = stream_tail_plain_lines(&app);
+
+        assert_eq!(
+            wide_tail,
+            vec!["alpha beta gamma delta epsilon zeta eta theta"]
+        );
+        assert!(narrow_tail.len() > wide_tail.len());
+        assert_eq!(assistant_text(&app), source);
+        app.apply_stream_commit_tick();
+        assert_eq!(app.active_stream_committed(), "intro\n");
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "a1"}),
+        });
+        assert_eq!(assistant_text(&app), format!("{source}\n"));
+    }
+
+    #[test]
     fn native_scrollback_completed_tool_moves_to_history_once() {
         let mut app = App::new(project());
         app.set_native_scrollback(true);
@@ -7921,6 +9773,68 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn recent_session_next_key_switches_to_next_chat() {
+        let mut app = App::new(project());
+        let current = app.chat_id().to_string();
+        app.test_set_recent_sessions(vec![
+            PickerItem {
+                id: current.clone(),
+                title: "Current".to_string(),
+                description: "now".to_string(),
+            },
+            PickerItem {
+                id: "chat-next".to_string(),
+                title: "Next chat".to_string(),
+                description: "recent".to_string(),
+            },
+        ]);
+
+        let action = app.handle_key(key(KeyCode::F(7)));
+
+        assert_eq!(action, AppAction::SubscribeCurrent);
+        assert_eq!(app.chat_id(), "chat-next");
+        assert_eq!(app.session_title(), Some("Next chat"));
+        assert!(app
+            .session_tabs()
+            .iter()
+            .any(|tab| { tab.id == "chat-next" && tab.is_current }));
+    }
+
+    #[test]
+    fn recent_session_previous_key_wraps_and_switches() {
+        let mut app = App::new(project());
+        let current = app.chat_id().to_string();
+        app.test_set_recent_sessions(vec![
+            PickerItem {
+                id: current,
+                title: "Current".to_string(),
+                description: "now".to_string(),
+            },
+            PickerItem {
+                id: "chat-last".to_string(),
+                title: "Last chat".to_string(),
+                description: "recent".to_string(),
+            },
+        ]);
+
+        let action = app.handle_key(key(KeyCode::F(6)));
+
+        assert_eq!(action, AppAction::SubscribeCurrent);
+        assert_eq!(app.chat_id(), "chat-last");
+    }
+
+    #[test]
+    fn recent_session_key_with_empty_cache_requests_refresh() {
+        let mut app = App::new(project());
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::F(7))),
+            AppAction::RefreshRecentSessions
+        );
+        assert_eq!(app.session_tabs().len(), 1);
+    }
+
+    #[test]
     fn app_vim_mode_basic_motions_and_delete_line() {
         let mut app = App::new(project());
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
@@ -7976,12 +9890,25 @@ new-chat = "ctrl-x"
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        assert_eq!(app.composer(), "a\nb");
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        assert_eq!(app.composer(), "a\nb\nc");
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(
             action,
-            AppAction::SendMessage { prompt, .. } if prompt == "a\nb"
+            AppAction::SendMessage { prompt, .. } if prompt == "a\nb\nc"
         ));
+    }
+
+    #[test]
+    fn app_space_key_inserts_space_in_composer() {
+        let mut app = App::new(project());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+
+        assert_eq!(app.composer(), "a b");
     }
 
     #[test]
@@ -8333,9 +10260,10 @@ new-chat = "ctrl-x"
             app.handle_key(key(KeyCode::Enter)),
             AppAction::LoadDaemonStatus
         );
-        assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Info(lines) if lines.iter().any(|line| line.contains("Daemon:")))
-        }));
+        assert!(app
+            .visible_transcript()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Status(_, _))));
     }
 
     #[test]
@@ -8398,13 +10326,19 @@ new-chat = "ctrl-x"
 
     #[test]
     fn theme_command_applies_theme_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("tui.toml");
         let mut app = App::new(project());
+        app.test_set_tui_config_path(config_path.clone());
         assert_eq!(app.theme().name(), "dark");
         assert_eq!(app.execute_command_name("theme light"), AppAction::None);
         assert_eq!(app.theme().name(), "light");
         assert!(app.visible_transcript().iter().any(|item| {
             matches!(item, TranscriptItem::Notice(text) if text.contains("Theme set to light"))
         }));
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("name = \"light\""));
 
         let mut app = App::new(project());
         assert_eq!(app.execute_command_name("theme"), AppAction::None);
@@ -8412,8 +10346,41 @@ new-chat = "ctrl-x"
         assert_eq!(picker.kind, PickerKind::Theme);
         assert_eq!(picker.filtered_items()[0].id, "dark");
         app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.theme().name(), "light");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
         assert_eq!(app.theme().name(), "light");
+    }
+
+    #[test]
+    fn theme_picker_cancel_restores_previewed_theme() {
+        let mut app = App::new(project());
+        assert_eq!(app.execute_command_name("theme"), AppAction::None);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.theme().name(), "light");
+
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+
+        assert!(app.modal_picker().is_none());
+        assert_eq!(app.theme().name(), "dark");
+    }
+
+    #[test]
+    fn theme_config_helpers_update_or_create_theme_section() {
+        assert_eq!(
+            apply_theme_name_to_config("", "light"),
+            "[theme]\nname = \"light\"\n"
+        );
+        assert_eq!(
+            apply_theme_name_to_config("vim = true\n\n[theme]\naccent = \"cyan\"\n", "plain"),
+            "vim = true\n\n[theme]\naccent = \"cyan\"\nname = \"plain\"\n"
+        );
+        assert_eq!(
+            apply_theme_name_to_config(
+                "[theme]\nname = \"dark\"\n\n[bindings]\nsend = \"ctrl-s\"\n",
+                "light"
+            ),
+            "[theme]\nname = \"light\"\n\n[bindings]\nsend = \"ctrl-s\"\n"
+        );
     }
 
     #[test]
@@ -8813,7 +10780,7 @@ new-chat = "ctrl-x"
         assert!(app
             .visible_transcript()
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Info(_))));
+            .any(|item| matches!(item, TranscriptItem::Status(_, _))));
 
         let mut app = App::new(project());
         assert!(matches!(
@@ -8830,6 +10797,78 @@ new-chat = "ctrl-x"
         let picker = app.modal_picker().unwrap();
         assert_eq!(picker.kind, PickerKind::Model);
         assert_eq!(picker.filtered_items()[0].id, "m1");
+    }
+
+    #[test]
+    fn caps_loaded_default_model_populates_footer_model_and_mode() {
+        let mut app = App::new(project());
+
+        app.apply_caps(&json!({
+            "defaults": {
+                "chat_default_model": "openai/gpt-demo",
+                "chat_default_mode": "agent"
+            },
+            "chat_models": {
+                "openai/gpt-demo": {"name": "GPT Demo", "n_ctx": 128_000}
+            }
+        }));
+
+        assert_eq!(app.model(), Some("openai/gpt-demo"));
+        assert_eq!(app.mode(), Some("agent"));
+        let footer = crate::ui::footer::FooterData::from_app(&app);
+        assert_eq!(footer.model, "openai/gpt-demo");
+        assert_ne!(footer.model, "default");
+        assert_eq!(footer.mode, "agent");
+    }
+
+    #[test]
+    fn empty_snapshot_keeps_caps_default_but_thread_updates_still_win() {
+        let mut app = App::new(project());
+        app.apply_caps(&json!({
+            "defaults": {"chat_default_model": "openai/gpt-demo"},
+            "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
+        }));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"thread": {"model": "", "mode": ""}, "messages": []}),
+        });
+        assert_eq!(app.model(), Some("openai/gpt-demo"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "thread_updated".to_string(),
+            raw: json!({"params": {"model": "openai/gpt-other", "mode": "chat"}}),
+        });
+        assert_eq!(app.model(), Some("openai/gpt-other"));
+        assert_eq!(app.mode(), Some("chat"));
+    }
+
+    #[test]
+    fn model_and_mode_pickers_preselect_current_values() {
+        let mut app = App::new(project());
+        app.handle_thread_updated(&json!({"model": "openai/gpt-small", "mode": "task_agent"}));
+
+        app.open_model_picker(json!({"chat_models": {
+            "openai/gpt-demo": {"name": "GPT Demo"},
+            "openai/gpt-small": {"name": "GPT Small"}
+        }}));
+        assert_eq!(
+            app.modal_picker().unwrap().selected_item().unwrap().id,
+            "openai/gpt-small"
+        );
+
+        app.open_mode_picker(json!({"modes": [
+            {"id": "agent", "title": "Agent"},
+            {"id": "task_agent", "title": "Task Agent"}
+        ]}));
+        assert_eq!(
+            app.modal_picker().unwrap().selected_item().unwrap().id,
+            "task_agent"
+        );
     }
 
     #[test]
@@ -8879,22 +10918,40 @@ new-chat = "ctrl-x"
             app.execute_command_name("status"),
             AppAction::LoadDaemonStatus
         );
-        let text = app
+        let status = app
             .visible_transcript()
             .iter()
             .rev()
             .find_map(|item| match item {
-                TranscriptItem::Info(lines) => Some(lines.join("\n")),
+                TranscriptItem::Status(snapshot, theme) => Some((snapshot, theme)),
                 _ => None,
             })
             .unwrap();
-        assert_eq!(
-            text,
-            format!(
-                "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready · pid 42 · http 9000 · lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:off\nSession: {}\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left",
-                &app.chat_id()[..8]
-            )
-        );
+        let text = crate::ui::status_card::render_lines(100, status.0, status.1)
+            .iter()
+            .map(line_to_plain_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("refact (v"));
+        assert!(text.contains("Daemon:"));
+        assert!(text.contains("v1.2.3 on port 8488"));
+        assert!(text.contains("Worker:"));
+        assert!(text.contains("ready · pid 42 · http 9000 · lsp 9001"));
+        assert!(text.contains("Model:"));
+        assert!(text.contains("gpt-demo"));
+        assert!(text.contains("Mode:"));
+        assert!(text.contains("agent"));
+        assert!(text.contains("Reasoning:"));
+        assert!(text.contains("off"));
+        assert!(text.contains("Directory:"));
+        assert!(text.contains("/tmp/demo"));
+        assert!(text.contains("Permissions:"));
+        assert!(text.contains("auto_approve_editing_tools=true"));
+        assert!(text.contains("auto_approve_dangerous_commands=false"));
+        assert!(text.contains("Token usage:"));
+        assert!(text.contains("150 total (100 input + 50 output)"));
+        assert!(text.contains("Context window:"));
+        assert!(text.contains("85% left (150/1K)"));
         assert_eq!(
             app.permission_policy(),
             session::PermissionPolicy {
@@ -8928,13 +10985,30 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn goal_review_and_compact_insert_structured_prompts() {
+    fn goal_command_shows_current_goal_cell() {
         let mut app = App::new(project());
-        assert!(matches!(
-            app.execute_command_name("goal"),
-            AppAction::SendMessage { prompt, .. } if prompt.contains("clarify the current goal")
-        ));
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "goal", "content": "base goal", "extra": {"goal": {"version": 1}}}}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "event", "content": "delta one", "extra": {"event": {"subkind": "goal_delta", "payload": {"seq": 1}}}}}),
+        });
 
+        assert_eq!(app.execute_command_name("goal"), AppAction::None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Goal(data) if data.content.contains("base goal") && data.content.contains("delta one"))
+        }));
+    }
+
+    #[test]
+    fn review_and_compact_insert_structured_prompts() {
         let mut app = App::new(project());
         assert!(matches!(
             app.execute_command_name("review"),
@@ -9142,8 +11216,13 @@ new-chat = "ctrl-x"
         assert_eq!(app.session_title(), Some("Saved chat"));
         assert!(matches!(
             app.visible_transcript().first(),
-            Some(TranscriptItem::Session { title, .. }) if title == "Resuming Saved chat"
+            Some(TranscriptItem::Session { title, .. }) if title == "Saved chat"
         ));
+        assert!(session_text(&app).contains("directory: /tmp/demo"));
+        assert!(app
+            .session_tabs()
+            .iter()
+            .any(|tab| { tab.id == "chat-resume" && tab.is_current }));
     }
 
     #[test]
@@ -9633,22 +11712,31 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners crash when this test spawns cmd"
+    )]
     fn editor_round_trip_appends_with_fake_editor_script() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
-        std::fs::write(&script, "#!/bin/sh\necho extra >> \"$1\"\n").unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        #[cfg(windows)]
+        let editor = "cmd /C echo extra>>".to_string();
+        #[cfg(not(windows))]
+        let editor = {
+            let path = dir.path().join("fake-editor.sh");
+            std::fs::write(&path, "#!/bin/sh\necho extra >> \"$1\"\n").unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).unwrap();
+            }
+            path.to_string_lossy().to_string()
+        };
 
-        let text =
-            edit_text_with_editor_command(script.to_str().unwrap(), "base\n".to_string()).unwrap();
+        let text = edit_text_with_editor_command(&editor, "base\n".to_string()).unwrap();
 
-        assert_eq!(text, "base\nextra\n");
+        assert_eq!(text.replace("\r\n", "\n"), "base\nextra\n");
     }
 
     #[test]
@@ -9841,6 +11929,29 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn normal_key_between_idle_ctrl_c_presses_resets_quit_arming() {
+        let mut app = App::new(project());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.last_ctrl_c.is_some());
+        assert!(!app.should_quit());
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('x'))), AppAction::None);
+        assert_eq!(app.composer(), "x");
+        assert!(app.last_ctrl_c.is_none());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(!app.should_quit());
+        assert!(app.last_ctrl_c.is_some());
+    }
+
+    #[test]
     fn ctrl_c_during_generation_aborts_without_arming_quit_countdown() {
         let mut app = App::new(project());
         app.set_session_state(SessionState::Generating);
@@ -9865,6 +11976,87 @@ new-chat = "ctrl-x"
             AppAction::None
         );
         assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_after_completed_turn_still_aborts_active_generation() {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.composer.set_text("second");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "second"
+        ));
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.abort_in_flight);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_is_global_for_overlay_picker_approval_and_ask_form() {
+        let mut app = App::new(project());
+        app.open_transcript_overlay();
+        app.set_session_state(SessionState::Generating);
+        assert!(app.transcript_overlay().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.transcript_overlay().is_none());
+
+        let mut app = App::new(project());
+        app.open_model_picker(json!({"chat_models": {"m1": {"name": "Model One"}}}));
+        assert!(app.modal_picker().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.modal_picker().is_none());
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.should_quit());
+
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        assert!(app.approval_modal().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.approval_modal().is_none());
+
+        let mut app = App::new(project());
+        app.handle_chat_event(ask_questions_tool_event(
+            &app,
+            "call-ask",
+            json!([
+                {"id": "confirm", "type": "yes_no", "text": "Proceed?"}
+            ]),
+        ));
+        app.handle_chat_event(waiting_user_input_event(&app));
+        assert!(app.ask_questions_form().is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
+        );
+        assert!(app.ask_questions_form().is_none());
     }
 
     #[tokio::test]
@@ -10207,6 +12399,108 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn unfinished_plan_message_streams_then_finalizes_to_plan_cell() {
+        let mut app = App::new(project());
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n- one\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        let streamed = plan_stream_text(&app);
+        assert!(streamed.contains("Proposed Plan"));
+        assert!(streamed.contains("## Plan"));
+        assert!(streamed.contains("- one"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "## Plan\n- one\n",
+                "stream_finished": true,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        assert!(plan_stream_text(&app).is_empty());
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Plan(data) if data.content.contains("- one"))
+        }));
+    }
+
+    #[test]
+    fn native_plan_stream_commits_non_final_plan_cells() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n",
+                "stream_finished": false,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        app.apply_stream_commit_tick();
+        assert!(app.history_pending_count() > 0);
+        let pending_text = app
+            .pending_history_insertions(80)
+            .into_iter()
+            .flat_map(|insertion| insertion.lines)
+            .map(|line| line_to_plain_string(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pending_text.contains("Proposed Plan"));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_updated".to_string(),
+            raw: json!({"message_id": "p1", "message": {
+                "message_id": "p1",
+                "role": "plan",
+                "content": "- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n",
+                "stream_finished": true,
+                "extra": {"plan": {"mode": "agent", "version": 1}}
+            }}),
+        });
+
+        assert!(plan_stream_text(&app).is_empty());
+        assert_eq!(app.history_pending_count(), 0);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Plan(data) if data.content.contains("- eight"))
+        }));
+    }
+
+    #[test]
     fn set_tool_calls_updates_existing_card_by_id() {
         let mut app = App::new(project());
         app.handle_chat_event(ChatEvent {
@@ -10301,6 +12595,56 @@ new-chat = "ctrl-x"
             app.visible_transcript().last(),
             Some(TranscriptItem::Reasoning(text, false)) if text == "first second"
         ));
+    }
+
+    #[test]
+    fn model_text_escape_sanitization_reaches_live_transcript_and_render_cells() {
+        let mut app = App::new(project());
+        let injected = injected_model_text();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [
+                {"op": "append_reasoning", "text": injected},
+                {"op": "append_content", "text": injected}
+            ]}),
+        });
+
+        let assistant = assistant_text(&app);
+        let reasoning = reasoning_text(&app);
+        assert_escape_inert(&assistant);
+        assert_escape_inert(&reasoning);
+        assert_model_text_survives(&assistant);
+        assert_model_text_survives(&reasoning);
+        for item in app.visible_transcript() {
+            if matches!(
+                item,
+                TranscriptItem::Assistant(_) | TranscriptItem::Reasoning(_, _)
+            ) {
+                assert_rendered_item_escape_inert(item);
+            }
+        }
+    }
+
+    #[test]
+    fn user_message_escape_text_stays_raw_in_transcript_state() {
+        let mut app = App::new(project());
+        let injected = injected_model_text();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {"role": "user", "message_id": "u1", "content": injected}}),
+        });
+
+        let user = app
+            .transcript_state()
+            .messages()
+            .iter()
+            .find(|message| message.role == TranscriptRole::User)
+            .unwrap();
+        assert_eq!(user.content, injected);
     }
 
     #[test]
@@ -10484,6 +12828,39 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn modal_picker_space_still_toggles_multi_select() {
+        let mut app = App::new(project());
+
+        app.open_permissions_picker();
+        assert_eq!(app.modal_picker().unwrap().selected_count(), 0);
+        assert_eq!(app.handle_key(key(KeyCode::Char(' '))), AppAction::None);
+
+        let picker = app.modal_picker().unwrap();
+        assert_eq!(picker.selected_count(), 1);
+        assert!(picker.is_selected("editing_tools"));
+    }
+
+    #[test]
+    fn tab_cycles_tool_selection_and_enter_toggles_selected_tool() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [
+                {"id": "call-1", "function": {"name": "shell", "arguments": "{}"}},
+                {"id": "call-2", "function": {"name": "cat", "arguments": "{}"}}
+            ]}]}),
+        });
+
+        assert_eq!(app.selected_tool_index(), Some(2));
+        assert_eq!(app.handle_key(key(KeyCode::Tab)), AppAction::None);
+        assert_eq!(app.selected_tool_index(), Some(1));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert!(tool_cards(&app)[0].expanded);
+    }
+
+    #[test]
     fn caps_update_context_window_for_selected_and_default_models() {
         let mut app = App::new(project());
         app.apply_caps(&json!({
@@ -10512,14 +12889,18 @@ new-chat = "ctrl-x"
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
         assert!(app.daemon_online());
 
-        app.record_chat_disconnected("request failed with status 503: worker starting");
+        app.record_chat_disconnected(
+            "request failed with status 503: worker starting",
+            true,
+            false,
+        );
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
         assert_eq!(app.retry_hint(), Some("worker waking; retrying"));
         assert!(app.daemon_online());
 
-        app.record_chat_disconnected("connection refused");
-        assert_eq!(app.subscription_status(), SubscriptionStatus::Offline);
-        assert!(!app.daemon_online());
+        app.record_chat_disconnected("connection refused", true, false);
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
+        assert!(app.daemon_online());
 
         app.record_chat_resubscribe("request failed with status 429: retry-after: 2s");
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);

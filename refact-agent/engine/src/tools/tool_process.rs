@@ -19,7 +19,7 @@ use crate::exec::{
 use crate::exec::types::{current_timestamp_ms, normalize_workspace_path};
 use crate::files_correction::{
     canonical_path, canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_active_project_path, get_project_dirs,
+    correct_to_nearest_dir_path, get_active_project_path, get_unscoped_project_dirs,
     preprocess_path_for_normalization,
 };
 use crate::global_context::GlobalContext;
@@ -1117,7 +1117,7 @@ async fn resolve_process_workdir(
             workdir
         }
     } else {
-        let project_dirs = get_project_dirs(gcx.clone()).await;
+        let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
         let candidates = correct_to_nearest_dir_path(gcx.clone(), &path_str, false, 3).await;
         canonical_path(
             crate::at_commands::at_file::return_one_candidate_or_a_good_error(
@@ -1139,7 +1139,7 @@ async fn resolve_process_workdir(
 
 async fn workspace_containing_path(gcx: Arc<GlobalContext>, path: &Path) -> Option<PathBuf> {
     let path = normalize_workspace_path(path);
-    get_project_dirs(gcx)
+    get_unscoped_project_dirs(gcx)
         .await
         .into_iter()
         .map(|workspace| normalize_workspace_path(&workspace))

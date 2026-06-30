@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -39,23 +40,66 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/build_info":
             self.send_json({"version": "fake-worker"})
             return
+        if self.path == "/v1/scheduler/cron":
+            self.send_json([{
+                "id": "job-1",
+                "enabled": True,
+                "human_schedule": "every minute",
+                "next_fire_at_ms": 0,
+                "description": "fake job",
+                "path": self.path,
+            }])
+            return
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
         if self.path == "/v1/graceful-shutdown":
+            graceful_delay = float(os.environ.get("FAKE_WORKER_GRACEFUL_DELAY", "0") or "0")
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"success":true}')
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+            def shutdown():
+                if graceful_delay > 0:
+                    time.sleep(graceful_delay)
+                if self.server.lsp_server:
+                    self.server.lsp_server.shutdown()
+                self.server.shutdown()
+
+            threading.Thread(target=shutdown, daemon=True).start()
             return
         if self.path.startswith("/v1/echo"):
             length = int(self.headers.get("content-length", "0") or "0")
             self.send_echo(self.rfile.read(length))
             return
+        if self.path == "/v1/hooks/fire":
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
         if self.path.startswith("/v1/chats/") and self.path.endswith("/commands"):
             self.handle_chat_command()
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_PATCH(self):
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_DELETE(self):
+        if self.path.startswith("/v1/scheduler/cron"):
+            length = int(self.headers.get("content-length", "0") or "0")
+            self.send_echo(self.rfile.read(length))
             return
         self.send_response(404)
         self.end_headers()
@@ -204,12 +248,23 @@ class WorkerServer(ThreadingHTTPServer):
         self.ready_at = time.time() + float(os.environ.get("FAKE_WORKER_DELAY_READY", "0") or "0")
         self.commands = []
         self.chat_cond = threading.Condition()
+        self.lsp_server = None
 
 
-def worker_status_payload(project_id):
+class LspHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        return
+
+
+class LspServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+
+def worker_status_payload(project_id, instance_token):
     return {
         "project_id": project_id,
         "pid": os.getpid(),
+        "instance_token": instance_token,
         "lsp_clients": 0,
         "busy_chats": 0,
         "exec_running": 0,
@@ -220,6 +275,7 @@ def worker_status_payload(project_id):
 def start_status_pusher(args):
     endpoint = (args.daemon_endpoint or "").rstrip("/")
     project_id = args.project_id or ""
+    instance_token = args.ping_message or ""
     if not endpoint or not project_id:
         return
     url = endpoint + "/daemon/v1/worker-status"
@@ -229,7 +285,7 @@ def start_status_pusher(args):
 
     def run():
         while True:
-            body = json.dumps(worker_status_payload(project_id)).encode("utf-8")
+            body = json.dumps(worker_status_payload(project_id, instance_token)).encode("utf-8")
             headers = {"content-type": "application/json"}
             if token:
                 headers["Authorization"] = "Bearer " + token
@@ -241,6 +297,19 @@ def start_status_pusher(args):
             time.sleep(0.5)
 
     threading.Thread(target=run, daemon=True).start()
+
+
+def start_lsp_server(port):
+    if not port or os.environ.get("FAKE_WORKER_SKIP_LSP") == "1":
+        return None
+    server = LspServer(("127.0.0.1", int(port)), LspHandler)
+
+    def run():
+        server.serve_forever()
+        server.server_close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return server
 
 
 def main():
@@ -267,10 +336,14 @@ def main():
     if os.environ.get("FAKE_WORKER_CRASH") == "1":
         sys.exit(1)
 
+    lsp_server = start_lsp_server(args.lsp_port)
     server = WorkerServer(("127.0.0.1", args.http_port), WorkerHandler, args.ping_message)
+    server.lsp_server = lsp_server
     start_status_pusher(args)
 
     def stop(_signum, _frame):
+        if server.lsp_server:
+            server.lsp_server.shutdown()
         server.shutdown()
 
     signal.signal(signal.SIGTERM, stop)

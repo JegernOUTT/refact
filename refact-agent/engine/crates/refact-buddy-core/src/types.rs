@@ -654,11 +654,32 @@ pub struct BuddyPulse {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TaskPulse {
     pub total: u32,
     pub stuck: u32,
     pub abandoned: u32,
     pub by_status: std::collections::HashMap<String, u32>,
+    pub recent_stuck_alerts_1h: u32,
+    pub recent_abandoned_alerts_24h: u32,
+}
+
+impl TaskPulse {
+    pub fn recent_stuck_alert_count_1h(&self) -> u32 {
+        if self.recent_stuck_alerts_1h > 0 {
+            self.recent_stuck_alerts_1h
+        } else {
+            self.stuck
+        }
+    }
+
+    pub fn recent_abandoned_alert_count_24h(&self) -> u32 {
+        if self.recent_abandoned_alerts_24h > 0 {
+            self.recent_abandoned_alerts_24h
+        } else {
+            self.abandoned
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -847,5 +868,22 @@ mod tests {
             round_tripped.bubble_policy,
             Some(BuddyBubblePolicy::Ambient)
         );
+    }
+
+    #[test]
+    fn task_pulse_legacy_alert_fields_stay_compatible() {
+        let pulse: TaskPulse = serde_json::from_value(serde_json::json!({
+            "total": 3,
+            "stuck": 2,
+            "abandoned": 1,
+            "by_status": {"planning": 3}
+        }))
+        .unwrap();
+
+        assert_eq!(pulse.total, 3);
+        assert_eq!(pulse.recent_stuck_alert_count_1h(), 2);
+        assert_eq!(pulse.recent_abandoned_alert_count_24h(), 1);
+        assert_eq!(pulse.recent_stuck_alerts_1h, 0);
+        assert_eq!(pulse.recent_abandoned_alerts_24h, 0);
     }
 }

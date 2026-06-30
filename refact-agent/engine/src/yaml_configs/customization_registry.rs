@@ -37,10 +37,15 @@ impl RegistryCacheManager {
     }
 
     pub fn get(&self, project_root: &Path) -> Option<&RegistryCache> {
-        self.cache.get(project_root)
+        self.cache.get(project_root).or_else(|| {
+            let normalized =
+                crate::files_correction::canonicalize_normalized_path(project_root.to_path_buf());
+            self.cache.get(&normalized)
+        })
     }
 
     pub fn insert(&mut self, project_root: PathBuf, registry: ProjectRegistry) {
+        let project_root = crate::files_correction::canonicalize_normalized_path(project_root);
         self.cache.insert(
             project_root.clone(),
             RegistryCache {

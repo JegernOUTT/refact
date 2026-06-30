@@ -2,10 +2,11 @@ import React, { useMemo } from "react";
 import { FileText } from "lucide-react";
 import { useAppSelector } from "../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../features/Chat/Thread";
 import type { ToolCall } from "../../services/refact/types";
 import { Markdown } from "../Markdown";
 import { Badge, Icon } from "../ui";
@@ -275,10 +276,15 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const threadId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
   const content =
     maybeResult && typeof maybeResult.content === "string"

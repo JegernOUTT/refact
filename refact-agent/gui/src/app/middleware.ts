@@ -45,16 +45,24 @@ import {
   updateChatRuntimeFromSessionState,
   openBuddyChat,
   newBuddyChatAction,
+  createChatWithId,
   buildThreadParamsPatch,
   buildThreadScopePatch,
   selectCurrentThreadId,
   hydratePersistedChatTabs,
+  removeChatFromCache,
+  closeThread,
   reorderOpenThreads,
+  requestSseRefresh,
+  type TaskMeta,
 } from "../features/Chat/Thread";
 import { saveLastThreadParams } from "../utils/threadStorage";
 import {
   getProjectStorageNamespace,
+  isProjectStorageNamespaceTrusted,
+  loadPersistedWorkspace,
   savePersistedChatTabs,
+  savePersistedWorkspace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
 import { integrationsApi } from "../services/refact/integrations";
@@ -83,17 +91,30 @@ import {
   setTaskActiveChat,
   taskSseEventReceived,
 } from "../features/Tasks/tasksSlice";
-import { closeThread } from "../features/Chat/Thread";
-import { createChatWithId } from "../features/Chat/Thread/actions";
-import { push, selectCurrentPage } from "../features/Pages/pagesSlice";
+import {
+  popBackTo,
+  push,
+  selectCurrentPage,
+} from "../features/Pages/pagesSlice";
 import { cronFireReceived } from "../features/Scheduler";
+import {
+  processCompletionsRecovered,
+  type RecoveredProcessCompletion,
+} from "../features/Notifications";
 import {
   ideToolCallResponse,
   ideTaskDone,
   ideAskQuestions,
 } from "../hooks/useEventBusForIDE";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
-import { isToolMessage, modelsApi, providersApi } from "../services/refact";
+import {
+  getEventMetadata,
+  isEventMessage,
+  isToolMessage,
+  modelsApi,
+  providersApi,
+  type ChatMessage,
+} from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
@@ -102,6 +123,30 @@ import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
 } from "../services/refact/apiUrl";
+import {
+  collectTabIds,
+  findLeaf,
+  findLeafByTab,
+} from "../features/ChatPanes/panesTree";
+import {
+  addSurfaceToPane as addSurfaceToWorkspacePane,
+  closePane as closeWorkspacePane,
+  closeTab as closeWorkspaceTab,
+  focusPane as focusWorkspacePane,
+  hydrateWorkspace,
+  isChatSurface,
+  makeSurfaceKey,
+  openTab as openWorkspaceTab,
+  reconcileWorkspace,
+  reorderTabs as reorderWorkspaceTabs,
+  resizeGroupSplit,
+  selectFocusedWorkspaceChatId,
+  setActiveTab as setWorkspaceActiveTab,
+  setPaneActive as setWorkspacePaneActive,
+  splitPaneWithSurface,
+  splitTab as splitWorkspaceTab,
+  type WorkspaceState,
+} from "../features/Workspace";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -114,6 +159,7 @@ const startListening = listenerMiddleware.startListening.withTypes<
 
 function syncProjectStorageNamespace(state: RootState): boolean {
   const previous = getProjectStorageNamespace();
+  const wasTrusted = isProjectStorageNamespaceTrusted();
   const workspaceRoots = state.current_project.workspaceRoots;
   setProjectStorageNamespaceFromProjectInfo({
     workspaceRoots,
@@ -121,7 +167,10 @@ function syncProjectStorageNamespace(state: RootState): boolean {
       ? state.current_project.name
       : undefined,
   });
-  return getProjectStorageNamespace() !== previous;
+  return (
+    getProjectStorageNamespace() !== previous ||
+    isProjectStorageNamespaceTrusted() !== wasTrusted
+  );
 }
 
 function endpointConfigChanged(
@@ -134,7 +183,9 @@ function endpointConfigChanged(
     previous.dev !== next.dev ||
     previous.engineServed !== next.engineServed ||
     previous.lspPort !== next.lspPort ||
-    previous.lspUrl !== next.lspUrl
+    previous.lspUrl !== next.lspUrl ||
+    previous.backendReady !== next.backendReady ||
+    previous.connectionStatus !== next.connectionStatus
   );
 }
 
@@ -159,9 +210,122 @@ function persistOpenChatTabs(state: RootState): void {
         tool_use: runtime?.thread.tool_use,
         session_state: runtime?.session_state ?? historyItem?.session_state,
         is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
+        is_task_chat: Boolean(runtime?.thread.is_task_chat),
       };
     }),
   });
+}
+
+function persistWorkspaceLayout(state: RootState): void {
+  syncProjectStorageNamespace(state);
+  savePersistedWorkspace(state.workspace);
+}
+
+function hydratePersistedChatUi(listenerApi: {
+  dispatch: AppDispatch;
+  getState: () => RootState;
+}): void {
+  const trustedWorkspace = isProjectStorageNamespaceTrusted()
+    ? loadPersistedWorkspace()
+    : null;
+
+  listenerApi.dispatch(hydratePersistedChatTabs());
+  if (trustedWorkspace) {
+    listenerApi.dispatch(hydrateWorkspace(trustedWorkspace));
+    listenerApi.dispatch(
+      reconcileWorkspace({
+        openThreadIds: listenerApi.getState().chat.open_thread_ids,
+      }),
+    );
+    switchToFocusedWorkspaceChat(listenerApi);
+  }
+}
+
+function isWorkspaceRoutableChat(
+  state: RootState,
+  chatId: string | null | undefined,
+): chatId is string {
+  if (!chatId) return false;
+  const runtime = state.chat.threads[chatId];
+  if (!runtime) return false;
+  return state.chat.open_thread_ids.includes(chatId);
+}
+
+function switchToFocusedWorkspaceChat(listenerApi: {
+  dispatch: AppDispatch;
+  getState: () => RootState;
+}): void {
+  const state = listenerApi.getState();
+  const chatId = selectFocusedWorkspaceChatId(state);
+  if (!isWorkspaceRoutableChat(state, chatId)) return;
+  if (state.chat.current_thread_id === chatId) return;
+  listenerApi.dispatch(switchToThread({ id: chatId, openTab: false }));
+}
+
+function openChatInWorkspace(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+  chatId?: string,
+): void {
+  const state = listenerApi.getState();
+  const targetChatId = chatId ?? state.chat.current_thread_id;
+  if (!isWorkspaceRoutableChat(state, targetChatId)) return;
+  const surfaceKey = makeSurfaceKey("chat", targetChatId);
+
+  for (const [tabId, group] of Object.entries(state.workspace.groups)) {
+    if (!group || !collectTabIds(group.root).includes(surfaceKey)) continue;
+    listenerApi.dispatch(setWorkspaceActiveTab(tabId));
+    const leaf = findLeafByTab(group.root, surfaceKey);
+    if (leaf) {
+      listenerApi.dispatch(
+        setWorkspacePaneActive({ tabId, leafId: leaf.id, surfaceKey }),
+      );
+    }
+    return;
+  }
+
+  if (state.workspace.tabs.includes(surfaceKey)) {
+    listenerApi.dispatch(setWorkspaceActiveTab(surfaceKey));
+    return;
+  }
+
+  listenerApi.dispatch(openWorkspaceTab(surfaceKey));
+}
+
+function collectWorkspaceSurfaceKeys(workspace: WorkspaceState): Set<string> {
+  const surfaces = new Set(workspace.tabs);
+
+  for (const group of Object.values(workspace.groups)) {
+    if (!group) continue;
+    for (const key of collectTabIds(group.root)) {
+      surfaces.add(key);
+    }
+  }
+
+  return surfaces;
+}
+
+function closeRemovedWorkspaceChats(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+  originalSurfaceKeys: Iterable<string>,
+): void {
+  const remainingSurfaceKeys = collectWorkspaceSurfaceKeys(
+    listenerApi.getState().workspace,
+  );
+
+  // Diff against post-action workspace state so corrupt duplicates and future
+  // reducer shape changes cannot force-close a surviving chat surface.
+  for (const key of new Set(originalSurfaceKeys)) {
+    if (!isChatSurface(key) || remainingSurfaceKeys.has(key)) continue;
+    listenerApi.dispatch(
+      closeThread({ id: key.slice("chat:".length), force: true }),
+    );
+  }
 }
 
 startListening({
@@ -169,6 +333,7 @@ startListening({
     newChatAction,
     restoreChat,
     newIntegrationChat,
+    removeChatFromCache,
     closeThread,
     switchToThread,
     reorderOpenThreads,
@@ -191,6 +356,171 @@ startListening({
     }
 
     persistOpenChatTabs(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    openWorkspaceTab,
+    closeWorkspaceTab,
+    setWorkspaceActiveTab,
+    reorderWorkspaceTabs,
+    splitWorkspaceTab,
+    closeWorkspacePane,
+    setWorkspacePaneActive,
+    focusWorkspacePane,
+    addSurfaceToWorkspacePane,
+    splitPaneWithSurface,
+    resizeGroupSplit,
+    hydrateWorkspace,
+    reconcileWorkspace,
+    newChatAction,
+    restoreChat,
+    newIntegrationChat,
+    removeChatFromCache,
+    closeThread,
+    switchToThread,
+    reorderOpenThreads,
+    saveTitle,
+    createChatWithId,
+    updateChatRuntimeFromSessionState,
+    openBuddyChat,
+    newBuddyChatAction,
+    applyChatEvent,
+  ),
+  effect: (action, listenerApi) => {
+    if (
+      applyChatEvent.match(action) &&
+      action.payload.type !== "snapshot" &&
+      action.payload.type !== "thread_updated" &&
+      action.payload.type !== "runtime_updated" &&
+      action.payload.type !== "stream_finished"
+    ) {
+      return;
+    }
+
+    persistWorkspaceLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    newChatAction,
+    restoreChat,
+    newIntegrationChat,
+    openBuddyChat,
+    newBuddyChatAction,
+  ),
+  effect: (_action, listenerApi) => {
+    openChatInWorkspace(listenerApi);
+  },
+});
+
+startListening({
+  actionCreator: createChatWithId,
+  effect: (action, listenerApi) => {
+    if (action.payload.openTab === false) return;
+    openChatInWorkspace(listenerApi, action.payload.id);
+  },
+});
+
+startListening({
+  actionCreator: switchToThread,
+  effect: (action, listenerApi) => {
+    if (action.payload.openTab === false) return;
+    openChatInWorkspace(listenerApi, action.payload.id);
+  },
+});
+
+function closeWorkspaceChatTab(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+    getOriginalState: () => RootState;
+  },
+  surfaceKey: string,
+): void {
+  const originalWorkspace = listenerApi.getOriginalState().workspace;
+  if (!originalWorkspace.tabs.includes(surfaceKey)) return;
+  const group = originalWorkspace.groups[surfaceKey];
+  const surfaceKeys = group
+    ? [surfaceKey, ...collectTabIds(group.root)]
+    : [surfaceKey];
+
+  closeRemovedWorkspaceChats(listenerApi, surfaceKeys);
+}
+
+function closeWorkspacePaneChats(
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+    getOriginalState: () => RootState;
+  },
+  payload: { tabId: string; leafId: string },
+): void {
+  const originalWorkspace = listenerApi.getOriginalState().workspace;
+  const group = originalWorkspace.groups[payload.tabId];
+  if (!group) return;
+
+  const leaf = findLeaf(group.root, payload.leafId);
+  if (!leaf) return;
+
+  closeRemovedWorkspaceChats(listenerApi, leaf.tabIds);
+}
+
+startListening({
+  matcher: isAnyOf(
+    setWorkspaceActiveTab,
+    closeWorkspaceTab,
+    closeWorkspacePane,
+    setWorkspacePaneActive,
+    focusWorkspacePane,
+    addSurfaceToWorkspacePane,
+    splitPaneWithSurface,
+    hydrateWorkspace,
+    reconcileWorkspace,
+  ),
+  effect: (_action, listenerApi) => {
+    switchToFocusedWorkspaceChat(listenerApi);
+  },
+});
+
+startListening({
+  actionCreator: closeWorkspaceTab,
+  effect: (action, listenerApi) => {
+    closeWorkspaceChatTab(listenerApi, action.payload);
+  },
+});
+
+startListening({
+  actionCreator: closeWorkspacePane,
+  effect: (action, listenerApi) => {
+    closeWorkspacePaneChats(listenerApi, action.payload);
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    removeChatFromCache,
+    closeThread,
+    reorderOpenThreads,
+    hydratePersistedChatTabs,
+    applyChatEvent,
+  ),
+  effect: (action, listenerApi) => {
+    if (
+      applyChatEvent.match(action) &&
+      action.payload.type !== "snapshot" &&
+      action.payload.type !== "thread_updated"
+    ) {
+      return;
+    }
+
+    listenerApi.dispatch(
+      reconcileWorkspace({
+        openThreadIds: listenerApi.getState().chat.open_thread_ids,
+      }),
+    );
   },
 });
 
@@ -480,10 +810,15 @@ startListening({
   effect: (action, listenerApi) => {
     const previousStatus =
       listenerApi.getOriginalState().connection.backendStatus;
-    if (action.payload.status !== "online" || previousStatus === "online") {
+    if (action.payload.status === "online") {
+      if (previousStatus === "online") return;
+      listenerApi.dispatch(clearError());
+      listenerApi.dispatch(capsApi.util.resetApiState());
+      listenerApi.dispatch(modelsApi.util.resetApiState());
+      listenerApi.dispatch(providersApi.util.resetApiState());
       return;
     }
-    listenerApi.dispatch(clearError());
+    if (previousStatus !== "online") return;
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
     listenerApi.dispatch(providersApi.util.resetApiState());
@@ -493,17 +828,17 @@ startListening({
 startListening({
   actionCreator: updateConfig,
   effect: (_action, listenerApi) => {
-    listenerApi.dispatch(pingApi.util.resetApiState());
     const namespaceChanged = syncProjectStorageNamespace(
       listenerApi.getState(),
     );
     if (namespaceChanged) {
-      listenerApi.dispatch(hydratePersistedChatTabs());
+      hydratePersistedChatUi(listenerApi);
     }
 
     const previousConfig = listenerApi.getOriginalState().config;
     const nextConfig = listenerApi.getState().config;
     if (endpointConfigChanged(previousConfig, nextConfig)) {
+      listenerApi.dispatch(pingApi.util.resetApiState());
       listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
@@ -519,7 +854,7 @@ startListening({
       listenerApi.getState(),
     );
     if (namespaceChanged) {
-      listenerApi.dispatch(hydratePersistedChatTabs());
+      hydratePersistedChatUi(listenerApi);
     }
   },
 });
@@ -658,9 +993,90 @@ startListening({
     const event = action.payload;
     if (event.type !== "message_added") return;
     const message = event.message;
-    if (message.role !== "event" || message.subkind !== "cron_fire") return;
+    if (!isEventMessage(message)) return;
+    if (getEventMetadata(message)?.subkind !== "cron_fire") return;
     listenerApi.dispatch(cronFireReceived(Date.now()));
     listenerApi.dispatch(schedulerApi.util.invalidateTags(["CronTasks"]));
+  },
+});
+
+function readRecoveredProcessCompletion(
+  message: ChatMessage,
+): RecoveredProcessCompletion | null {
+  if (!isEventMessage(message)) return null;
+  const metadata = getEventMetadata(message);
+  if (!metadata || metadata.subkind !== "process_completed") return null;
+  const payload = metadata.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+  const processId = record.process_id;
+  if (typeof processId !== "string" || processId.length === 0) return null;
+  return {
+    processId,
+    status: typeof record.status === "string" ? record.status : "",
+    exitCode: typeof record.exit_code === "number" ? record.exit_code : null,
+    shortDescription:
+      typeof record.short_description === "string"
+        ? record.short_description
+        : "",
+    mode: typeof record.mode === "string" ? record.mode : "",
+  };
+}
+
+export function planProcessCompletionRecovery(
+  chatId: string,
+  currentThreadId: string | null | undefined,
+  prevSnapshotReceived: boolean,
+  prevMessages: readonly ChatMessage[],
+  snapshotMessages: readonly ChatMessage[],
+): RecoveredProcessCompletion[] {
+  if (!prevSnapshotReceived) return [];
+  if (currentThreadId === chatId) return [];
+
+  const knownProcessIds = new Set<string>();
+  for (const message of prevMessages) {
+    const completion = readRecoveredProcessCompletion(message);
+    if (completion) knownProcessIds.add(completion.processId);
+  }
+
+  const completions: RecoveredProcessCompletion[] = [];
+  const collected = new Set<string>();
+  for (const message of snapshotMessages) {
+    const completion = readRecoveredProcessCompletion(message);
+    if (!completion) continue;
+    if (knownProcessIds.has(completion.processId)) continue;
+    if (collected.has(completion.processId)) continue;
+    collected.add(completion.processId);
+    completions.push(completion);
+  }
+  return completions;
+}
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "snapshot") return;
+    const prevRuntime =
+      listenerApi.getOriginalState().chat.threads[event.chat_id];
+    if (!prevRuntime) return;
+
+    const completions = planProcessCompletionRecovery(
+      event.chat_id,
+      listenerApi.getState().chat.current_thread_id,
+      prevRuntime.snapshot_received,
+      prevRuntime.thread.messages,
+      event.messages,
+    );
+
+    if (completions.length > 0) {
+      listenerApi.dispatch(
+        processCompletionsRecovered({
+          threadId: event.chat_id,
+          completions,
+        }),
+      );
+    }
   },
 });
 
@@ -682,6 +1098,12 @@ interface HandoffToModeContent {
   target_mode?: string;
   reason?: string;
   messages_count?: number;
+  task_meta?: TaskMeta | null;
+  root_chat_id?: string | null;
+  parent_id?: string | null;
+  link_type?: string | null;
+  initial_plan_document?: string | null;
+  initial_plan_error?: string | null;
 }
 
 type ToolMessageContent =
@@ -835,22 +1257,24 @@ startListening({
     // Preserve task/browser metadata from the source thread so the new chat
     // inherits the correct context (planner, task agent, browser session, etc.)
     const sourceRuntime = state.chat.threads[event.chat_id];
-    const isTaskChat = sourceRuntime?.thread.is_task_chat ?? false;
-    const taskMeta = sourceRuntime?.thread.task_meta;
+    const taskMeta = content.task_meta ?? sourceRuntime?.thread.task_meta;
+    const isTaskChat = Boolean(taskMeta?.task_id);
     const worktree = sourceRuntime?.thread.worktree;
+    const targetMode = content.target_mode ?? sourceRuntime?.thread.mode;
+    const parentId = content.parent_id ?? event.chat_id;
+    const linkType = content.link_type ?? "handoff";
+    const rootChatId = content.root_chat_id ?? undefined;
 
     listenerApi.dispatch(
       createChatWithId({
         id: new_chat_id,
         isTaskChat,
         taskMeta,
-        parentId: event.chat_id,
-        linkType: "handoff",
+        parentId,
+        linkType,
+        rootChatId,
         worktree,
-        mode:
-          isTaskChat && taskMeta?.role === "planner"
-            ? "TASK_PLANNER"
-            : content.target_mode,
+        mode: targetMode,
       }),
     );
     // Ensure the tab is open and switched to (handles both new and cached threads)
@@ -860,8 +1284,9 @@ startListening({
     listenerApi.dispatch(
       setIsWaitingForResponse({ id: new_chat_id, value: true }),
     );
+    listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
 
-    if (isTaskChat && taskMeta?.role === "planner" && taskMeta.task_id) {
+    if (taskMeta?.role === "planner" && taskMeta.task_id) {
       const taskId = taskMeta.task_id;
       const now = new Date().toISOString();
       // Ensure the task shell exists in tasksUI before registering the planner.
@@ -880,6 +1305,7 @@ startListening({
             title: "",
             createdAt: now,
             updatedAt: now,
+            mode: targetMode,
           },
         }),
       );
@@ -919,6 +1345,9 @@ startListening({
         inFlightHandoffs.delete(key);
       }
     } else {
+      listenerApi.dispatch(
+        setIsWaitingForResponse({ id: new_chat_id, value: false }),
+      );
       if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
         const arr = Array.from(processedHandoffIds);
         arr
@@ -1146,7 +1575,14 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "boolean"
+        ? state.chat.current_thread_id
+        : action.payload.chatId;
+    const value =
+      typeof action.payload === "boolean"
+        ? action.payload
+        : action.payload.value;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
@@ -1156,7 +1592,7 @@ startListening({
       );
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
-        patch: { checkpoints_enabled: action.payload },
+        patch: { checkpoints_enabled: value },
       });
     } catch {
       // Silently ignore - backend may not support this command
@@ -1197,7 +1633,12 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "string"
+        ? state.chat.current_thread_id
+        : action.payload.chatId ?? state.chat.current_thread_id;
+    const mode =
+      typeof action.payload === "string" ? action.payload : action.payload.mode;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1209,7 +1650,7 @@ startListening({
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
-          mode: action.payload,
+          mode,
           ...buildThreadScopePatch(runtime.thread),
         },
       });
@@ -1252,7 +1693,7 @@ startListening({
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId = action.payload.chatId ?? state.chat.current_thread_id;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1280,10 +1721,13 @@ startListening({
 
 startListening({
   actionCreator: setMaxNewTokens,
-  effect: async (_action, listenerApi) => {
+  effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
-    const chatId = state.chat.current_thread_id;
+    const chatId =
+      typeof action.payload === "number"
+        ? state.chat.current_thread_id
+        : action.payload.chatId ?? state.chat.current_thread_id;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
     if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
@@ -1329,7 +1773,22 @@ startListening({
     const state = listenerApi.getState();
     const chatId = setThreadMode.match(_action)
       ? _action.payload.chatId
-      : state.chat.current_thread_id;
+      : setChatModel.match(_action)
+        ? _action.payload.chatId ?? state.chat.current_thread_id
+        : setChatMode.match(_action)
+          ? typeof _action.payload === "string"
+            ? state.chat.current_thread_id
+            : _action.payload.chatId ?? state.chat.current_thread_id
+          : setEnabledCheckpoints.match(_action) &&
+              typeof _action.payload !== "boolean"
+            ? _action.payload.chatId
+            : setIncreaseMaxTokens.match(_action) &&
+                typeof _action.payload !== "boolean"
+              ? _action.payload.chatId
+              : setMaxNewTokens.match(_action) &&
+                  typeof _action.payload !== "number"
+                ? _action.payload.chatId ?? state.chat.current_thread_id
+                : state.chat.current_thread_id;
     const runtime = state.chat.threads[chatId];
     if (!runtime) return;
 
@@ -1354,7 +1813,8 @@ startListening({
       patch.increase_max_tokens = runtime.thread.increase_max_tokens;
       patch.include_project_info = runtime.thread.include_project_info;
       patch.system_prompt = state.chat.system_prompt;
-      patch.checkpoints_enabled = state.chat.checkpoints_enabled;
+      patch.checkpoints_enabled =
+        runtime.thread.checkpoints_enabled ?? state.chat.checkpoints_enabled;
       patch.follow_ups_enabled = state.chat.follow_ups_enabled;
     }
 
@@ -1382,30 +1842,73 @@ startListening({
 // eliminating the race condition where this async listener could fire
 // after the user_message had already triggered generation.
 
+function clearDeletedTaskState(
+  taskId: string,
+  listenerApi: {
+    dispatch: AppDispatch;
+    getState: () => RootState;
+  },
+): void {
+  const state = listenerApi.getState();
+  const threads = state.chat.threads as Record<
+    string,
+    | {
+        thread: {
+          task_meta?: { task_id: string };
+        };
+      }
+    | undefined
+  >;
+
+  for (const [threadId, runtime] of Object.entries(threads)) {
+    if (!runtime) continue;
+    if (runtime.thread.task_meta?.task_id === taskId) {
+      listenerApi.dispatch(closeThread({ id: threadId, force: true }));
+    }
+  }
+
+  listenerApi.dispatch(closeTask(taskId));
+
+  const currentPage = selectCurrentPage(listenerApi.getState());
+  if (currentPage?.name === "task workspace" && currentPage.taskId === taskId) {
+    listenerApi.dispatch(popBackTo({ name: "history" }));
+  }
+}
+
+function invalidateDeletedTaskCaches(
+  taskId: string,
+  listenerApi: {
+    dispatch: AppDispatch;
+  },
+): void {
+  listenerApi.dispatch(
+    tasksApi.util.invalidateTags([
+      "Tasks",
+      { type: "Tasks", id: taskId },
+      { type: "Board", id: taskId },
+      { type: "TaskTrajectories", id: `${taskId}/planner` },
+      { type: "TaskTrajectories", id: `${taskId}/agents` },
+    ]),
+  );
+  listenerApi.dispatch(
+    taskDocumentsApi.util.invalidateTags([
+      { type: "TaskDocuments", id: taskId },
+    ]),
+  );
+  listenerApi.dispatch(
+    taskMemoriesApi.util.invalidateTags([
+      { type: "TaskMemories", id: taskId },
+      { type: "TaskMemories", id: `${taskId}:facets` },
+    ]),
+  );
+}
+
 startListening({
   matcher: tasksApi.endpoints.deleteTask.matchFulfilled,
   effect: (action, listenerApi) => {
     const taskId = action.meta.arg.originalArgs;
-    const state = listenerApi.getState();
-    const threads = state.chat.threads as Record<
-      string,
-      | {
-          thread: {
-            task_meta?: { task_id: string };
-          };
-        }
-      | undefined
-    >;
-
-    for (const [threadId, runtime] of Object.entries(threads)) {
-      if (!runtime) continue;
-      const thread = runtime.thread;
-      if (thread.task_meta?.task_id === taskId) {
-        listenerApi.dispatch(closeThread({ id: threadId, force: true }));
-      }
-    }
-
-    listenerApi.dispatch(closeTask(taskId));
+    invalidateDeletedTaskCaches(taskId, listenerApi);
+    clearDeletedTaskState(taskId, listenerApi);
   },
 });
 
@@ -1439,13 +1942,7 @@ startListening({
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
             const index = draft.findIndex((t) => t.id === event.task_id);
             if (index >= 0) {
-              const existing = draft[index];
-              draft[index] = {
-                ...event.meta,
-                planner_session_state:
-                  event.meta.planner_session_state ??
-                  existing.planner_session_state,
-              };
+              draft[index] = event.meta;
             } else {
               draft.unshift(event.meta);
             }
@@ -1461,12 +1958,7 @@ startListening({
           tasksApi.util.updateQueryData(
             "getTask",
             event.task_id,
-            (existing) => ({
-              ...event.meta,
-              planner_session_state:
-                event.meta.planner_session_state ??
-                existing.planner_session_state,
-            }),
+            () => event.meta,
           ),
         );
         break;
@@ -1480,6 +1972,8 @@ startListening({
             }
           }),
         );
+        invalidateDeletedTaskCaches(event.task_id, listenerApi);
+        clearDeletedTaskState(event.task_id, listenerApi);
         break;
       case "board_changed":
         void listenerApi.dispatch(

@@ -7,10 +7,10 @@ import { useAppSelector, useAppDispatch, useChatActions } from "../../hooks";
 import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,
-  selectIsStreaming,
-  selectPreventSend,
-  selectChatId,
+  selectIsStreamingById,
+  selectPreventSendById,
   selectIsBuddyChat,
+  useThreadId,
 } from "../../features/Chat/Thread";
 import { BuddyChatCompanion } from "../../features/Buddy";
 import { DropzoneProvider } from "../Dropzone";
@@ -24,6 +24,10 @@ import {
   selectBrowserUiOpen,
 } from "../../features/Browser/browserSlice";
 import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
+import {
+  registerVisibleChatMount,
+  unregisterVisibleChatMount,
+} from "../../features/Connection";
 
 export type ChatProps = {
   host: Config["host"];
@@ -42,9 +46,10 @@ export const Chat: React.FC<ChatProps> = ({
   const dispatch = useAppDispatch();
 
   const [isViewingRawJSON, setIsViewingRawJSON] = useState(false);
-  const isStreaming = useAppSelector(selectIsStreaming);
-
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
   );
@@ -55,11 +60,20 @@ export const Chat: React.FC<ChatProps> = ({
     selectBrowserContextOversize(state, chatId),
   );
 
-  const { submit, abort, retryFromIndex } = useChatActions();
+  const { submit, abort, retryFromIndex } = useChatActions(chatId);
 
   const { shouldCheckpointsPopupBeShown } = useCheckpoints();
 
-  const preventSend = useAppSelector(selectPreventSend);
+  useEffect(() => {
+    dispatch(registerVisibleChatMount({ chatId }));
+    return () => {
+      dispatch(unregisterVisibleChatMount({ chatId }));
+    };
+  }, [dispatch, chatId]);
+
+  const preventSend = useAppSelector((state) =>
+    selectPreventSendById(state, chatId),
+  );
   const onEnableSend = () => dispatch(enableSend({ id: chatId }));
 
   const bottomDockRef = useRef<HTMLDivElement>(null);

@@ -77,21 +77,21 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### SSE Event Types
 
-| Event                           | Purpose                                                |
-| ------------------------------- | ------------------------------------------------------ |
-| `snapshot`                      | Full state sync (resets seq to 0)                      |
-| `stream_started`                | AI response beginning                                  |
-| `stream_delta`                  | Incremental content (DeltaOp[])                        |
-| `stream_finished`               | Complete with usage stats                              |
-| `message_added/updated/removed` | Message CRUD, including hidden `event`/`plan` messages |
-| `messages_truncated`            | Messages trimmed                                       |
-| `thread_updated`                | Thread metadata changed                                |
-| `runtime_updated`               | Runtime flags changed                                  |
-| `pause_required/cleared`        | Tool confirmation                                      |
-| `ide_tool_required`             | IDE tool execution needed                              |
-| `subchat_update`                | Nested chat update                                     |
-| `queue_updated`                 | Command queue changed                                  |
-| `ack`                           | Command acknowledgment                                 |
+| Event                           | Purpose                                                       |
+| ------------------------------- | ------------------------------------------------------------- |
+| `snapshot`                      | Full state sync (resets seq to 0)                             |
+| `stream_started`                | AI response beginning                                         |
+| `stream_delta`                  | Incremental content (DeltaOp[])                               |
+| `stream_finished`               | Complete with usage stats                                     |
+| `message_added/updated/removed` | Message CRUD, including hidden `event`/`goal`/`plan` messages |
+| `messages_truncated`            | Messages trimmed                                              |
+| `thread_updated`                | Thread metadata changed                                       |
+| `runtime_updated`               | Runtime flags changed                                         |
+| `pause_required/cleared`        | Tool confirmation                                             |
+| `ide_tool_required`             | IDE tool execution needed                                     |
+| `subchat_update`                | Nested chat update                                            |
+| `queue_updated`                 | Command queue changed                                         |
+| `ack`                           | Command acknowledgment                                        |
 
 ### Delta Operations
 
@@ -99,7 +99,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### Command Types (POST /v1/chats/{chatId}/commands)
 
-`user_message` · `abort` · `regenerate` · `update_message` · `remove_message` · `tool_decision` · `tool_decisions` · `ide_tool_result` · `set_params` · `retry_from_index` · `branch_from_chat`
+`user_message` · `abort` · `regenerate` · `update_message` · `remove_message` · `tool_decision` · `tool_decisions` · `ide_tool_result` · `set_params` · `set_goal` (optional user-set `budget`; omitted/absent = unlimited) · `set_goal_budget` (user-set/clear budget) · `update_goal` · `goal_control` · `retry_from_index` · `branch_from_chat`
 
 ### Sequence Validation
 
@@ -113,7 +113,7 @@ Every event has a `seq` number. `snapshot` resets to 0, each subsequent incremen
 
 ```typescript
 state.chat.threads[id]: ChatThreadRuntime = {
-  thread: ChatThread,         // id, messages, model, title, tool_use, boost_reasoning, reasoning_effort, temperature, mode, is_task_chat, task_meta
+  thread: ChatThread,         // id, messages, model, title, tool_use, boost_reasoning, reasoning_effort, temperature, mode, is_task_chat, task_meta, goal
   streaming: boolean,
   waiting_for_response: boolean,
   prevent_send: boolean,
@@ -137,12 +137,14 @@ Always use selectors. Never access `state.chat.threads[id]` directly in componen
 
 Hidden-role selector convention:
 
-- `selectVisibleMessages(state, threadId)` excludes `event` and `plan`; use this for normal transcript rendering.
-- `selectEventLog(state, threadId)` returns normalized `EventMessage[]` for EventLog surfaces and excludes `plan_delta` events.
+- `selectVisibleMessages(state, threadId)` excludes `event`, `goal`, and `plan`; use this for normal transcript rendering.
+- `selectEventLog(state, threadId)` returns normalized `EventMessage[]` for EventLog surfaces and excludes `plan_delta`, `goal_delta`, and `goal_pursuit` events.
 - `selectCurrentPlan(state, threadId)` returns the latest base `PlanMessage` by version/index for PlanBanner.
 - `selectPlanDeltaEvents(state, threadId)` returns hidden `event(plan_delta)` messages in index order.
 - `selectSynthesizedPlanText(state, threadId)` returns base plan text plus append-only plan-delta notes using the synthesis separator.
 - `selectPlanHistory(state, threadId)` returns the current base plan followed by plan-delta events for history UI.
+- `selectGoalById(state, threadId)` / `selectGoal(state)` read `thread.goal`, the `GoalSnapshot` projection supplied by `Snapshot.goal` and runtime updates.
+- `selectGoalStatusById`, `selectGoalProgressById`, and related helpers must read the projection, not scan hidden `goal` messages in components.
 
 If a new component needs hidden-role data, add or reuse a selector first instead of filtering `thread.messages` inside the component.
 
@@ -190,19 +192,20 @@ Compression visibility rules:
 
 - `compression_report` messages render visibly as `SummarizationMessage` cards via `syntheticCompressionReportMessage()` and should not be hidden as internal roles.
 - Assistant messages with `extra.compression.kind === "llm_segment_summary"` render visibly as compression/summarization cards via `syntheticSummarizationMessage()` instead of ordinary assistant transcript text; the card now distinguishes deterministic compaction, LLM summaries, merged-history summaries, and reactive compaction labels.
-- Visible compression failure events are narrowly defined as `event` messages whose metadata is `subkind: "system_notice"`, `source: "chat.summarizer"`, and whose content starts with `Context compression failed:`; these render as visible error display items. Other hidden events, including `plan_delta`, stay out of normal transcript display.
+- Visible compression failure events are narrowly defined as `event` messages whose metadata is `subkind: "system_notice"`, `source: "chat.summarizer"`, and whose content starts with `Context compression failed:`; these render as visible error display items. Other hidden events, including `plan_delta`, `goal_delta`, and `goal_pursuit`, stay out of normal transcript display.
 - The footer compression indicator is driven only by the thread runtime `is_compressing` selector. It appears while the backend reports an active compression attempt and disappears on terminal `RuntimeUpdated`/snapshot state when `is_compressing` becomes false or is cleared.
 - Restore paths and SSE-error/reconnect cleanup must clear `is_compressing`, `compression_phase`, and `compression_reason` so stale compression progress does not survive thread restoration or subscription failures.
 
-| Role           | Component                  | Notes                                                                |
-| -------------- | -------------------------- | -------------------------------------------------------------------- |
-| `user`         | UserInput                  | Editable, checkpoints badge, images, compression hint 🗜️             |
-| `assistant`    | AssistantInput             | ReasoningContent → Markdown → ToolsContent → DiffContent → Citations |
-| `tool`         | (inline in AssistantInput) | Skipped in top-level render                                          |
-| `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                             |
-| `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                      |
-| `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns  |
-| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat      |
+| Role           | Component                  | Notes                                                                                                              |
+| -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `user`         | UserInput                  | Editable, checkpoints badge, images, compression hint 🗜️                                                           |
+| `assistant`    | AssistantInput             | ReasoningContent → Markdown → ToolsContent → DiffContent → Citations                                               |
+| `tool`         | (inline in AssistantInput) | Skipped in top-level render                                                                                        |
+| `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                                                                           |
+| `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                                                                    |
+| `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns, excluding plan/goal deltas and pursuit events |
+| `goal`         | TaskProgressWidget         | Hidden from normal transcript; projected through `thread.goal`                                                     |
+| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat                                                    |
 
 ### EventLog component pattern (src/components/ChatContent/EventLog/)
 
@@ -225,6 +228,14 @@ PlanBanner renders synthesized plan text from the latest hidden base `plan` role
 - Manual plan editing is not exposed in the banner; plan changes arrive as append-only `plan_delta` events.
 - History modal lists the current base plan followed by each delta note in index order.
 - Keep sticky styles in `PlanBanner.module.css`; avoid inline styles.
+
+### TaskProgressWidget goal pattern (src/components/TaskProgressWidget/)
+
+TaskProgressWidget is the GUI owner for goal display and controls. It reads `thread.goal` with `selectGoalById` and never scans hidden `goal`, `goal_delta`, or `goal_pursuit` messages directly. The widget shows the goal content, status, turn/token/no-progress counters, verifier attempts, pursuit events, and ownership transfer hints from `GoalSnapshot`. Goal budget hard limits are optional and unlimited by default; absent, `null`, or `0` limits render as plain usage plus `No budget limits` rather than a ratio.
+
+Goal controls dispatch chat commands through `useChatActions`: `setGoal(content, budget?)` sends `set_goal` with optional user-set hard limits, `setGoalBudget(budget)` sends `set_goal_budget` to set or clear limits on an existing goal, `updateGoal(note)` sends `update_goal`, and `controlGoal(action)` sends `goal_control` with `pause`, `resume`, or `stop`. Blank budget editor inputs are unlimited and must omit hard-limit keys. The reducer updates `thread.goal` from `Snapshot.goal`; `runtime_updated` mirrors only mutate the runtime fields on an existing projection (`goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, `goal_no_progress_turns`). Hidden `event(goal_delta)` and `event(goal_pursuit)` remain out of EventLog and the normal transcript.
+
+Status semantics mirror the backend: `active=true` means this chat owns the goal; pursuit requires `active && status === "active"`. Terminal or held states include `verifying`, `paused`, `completed`, `stopped`, `budget_exhausted`, `no_progress`, and `transferred`. Transfer surfaces should show `transferred_from` / `transferred_to` from the snapshot rather than inferring ownership from chat mode.
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
@@ -435,7 +446,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 ## Special Features
 
 - **Checkpoints**: Workspace rollback via git commits. Preview → Restore. Per-message reset button.
-- **Hidden Roles**: `event` messages feed EventLog except `plan_delta`; `plan` plus `plan_delta` messages feed PlanBanner. Both stay out of `selectVisibleMessages`.
+- **Hidden Roles**: `event` messages feed EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit`; `plan` plus `plan_delta` messages feed PlanBanner; `goal` plus goal delta/pursuit projection feeds TaskProgressWidget through `thread.goal`. All hidden roles stay out of `selectVisibleMessages`.
 - **Thinking Blocks**: `thinking_blocks: [{thinking, signature}]` on assistant messages. Collapsible UI. Signatures are opaque — never mutate.
 - **Reasoning Content**: Separate `reasoning_content` field. Collapsible.
 - **Knowledge/Memory**: `remember_how_to_use_tools` → vecdb → `context_file` messages. Knowledge graph view.
@@ -478,7 +489,7 @@ Vitest + React Testing Library + MSW + happy-dom. Custom render in `utils/test-u
 
 ## Agent Checklist
 
-**When modifying chat flow**: Check state transitions, SSE event handling in reducer, command sending via `chatCommands.ts`, sequence validation, tool confirmation logic, type guards.
+**When modifying chat flow**: Check state transitions, SSE event handling in reducer, command sending via `chatCommands.ts`, goal command dispatchers/projection updates, sequence validation, tool confirmation logic, type guards.
 
 **When adding SSE events**: Type in `chatSubscription.ts` → handler in reducer's `applyChatEvent` → update `EventEnvelope` union → add tests.
 

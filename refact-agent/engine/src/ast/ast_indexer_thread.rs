@@ -21,6 +21,30 @@ pub struct AstIndexService {
     pub ast_todo: IndexSet<String>,
 }
 
+fn is_atomic_tmp_path(cpath: &str) -> bool {
+    let file_name = std::path::Path::new(cpath)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(cpath);
+
+    if file_name.ends_with(".tmp") {
+        return true;
+    }
+
+    if !file_name.starts_with('.') {
+        return false;
+    }
+
+    let Some((_, suffix)) = file_name.split_once(".tmp.") else {
+        return false;
+    };
+
+    !suffix.is_empty()
+        && suffix
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
 async fn ast_indexer_thread(
     gcx_weak: Weak<GlobalContext>,
     ast_service: Arc<AMutex<AstIndexService>>,
@@ -72,6 +96,10 @@ async fn ast_indexer_thread(
         };
 
         if let Some(cpath) = cpath {
+            if is_atomic_tmp_path(&cpath) {
+                doc_remove(ast_index.clone(), &cpath);
+                continue;
+            }
             reported_parse_stats = false;
             reported_connect_stats = false;
             if stats_parsed_cnt == 0 {
@@ -445,13 +473,24 @@ pub async fn ast_indexer_enqueue_files(
     wake_up_indexer: bool,
 ) {
     let ast_status;
-    let nonzero = cpaths.len() > 0;
+    let ast_index;
+    let mut nonzero = false;
+    let mut tmp_paths = Vec::new();
     {
         let mut ast_service_locked = ast_service.lock().await;
         ast_status = ast_service_locked.ast_status.clone();
+        ast_index = ast_service_locked.ast_index.clone();
         for cpath in cpaths {
-            ast_service_locked.ast_todo.insert(cpath.clone());
+            if is_atomic_tmp_path(cpath) {
+                tmp_paths.push(cpath.clone());
+            } else {
+                ast_service_locked.ast_todo.insert(cpath.clone());
+                nonzero = true;
+            }
         }
+    }
+    for cpath in tmp_paths {
+        doc_remove(ast_index.clone(), &cpath);
     }
     {
         let mut status_locked = ast_status.lock().await;
@@ -465,5 +504,21 @@ pub async fn ast_indexer_enqueue_files(
     if wake_up_indexer {
         let ast_service_locked = ast_service.lock().await;
         ast_service_locked.ast_sleeping_point.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_atomic_tmp_path;
+
+    #[test]
+    fn is_atomic_tmp_path_classifies_atomic_temp_files() {
+        assert!(is_atomic_tmp_path("a/b/state.json.tmp"));
+        assert!(is_atomic_tmp_path("dir/.state.json.tmp.913.123"));
+
+        assert!(!is_atomic_tmp_path("src/template.rs"));
+        assert!(!is_atomic_tmp_path("attempt.ts"));
+        assert!(!is_atomic_tmp_path("a/b.tmp.rs"));
+        assert!(!is_atomic_tmp_path("notes.tmpl"));
     }
 }

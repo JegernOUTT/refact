@@ -8,6 +8,9 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
+use crate::render::line_utils::line_to_static;
+use crate::render::wrapping::{adaptive_wrap_line, RtOptions};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalHyperlink {
     pub columns: Range<usize>,
@@ -49,6 +52,11 @@ impl HyperlinkLine {
             }
         }
     }
+
+    pub fn style(mut self, style: ratatui::style::Style) -> Self {
+        self.line = self.line.style(style);
+        self
+    }
 }
 
 impl From<Line<'static>> for HyperlinkLine {
@@ -74,6 +82,61 @@ pub fn visible_lines(lines: Vec<HyperlinkLine>) -> Vec<Line<'static>> {
 }
 
 pub fn plain_hyperlink_lines(lines: Vec<Line<'static>>) -> Vec<HyperlinkLine> {
+    lines.into_iter().map(annotate_web_urls_in_line).collect()
+}
+
+pub fn prefix_hyperlink_lines(
+    lines: Vec<HyperlinkLine>,
+    initial_prefix: Span<'static>,
+    subsequent_prefix: Span<'static>,
+) -> Vec<HyperlinkLine> {
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut line)| {
+            let prefix = if index == 0 {
+                initial_prefix.clone()
+            } else {
+                subsequent_prefix.clone()
+            };
+            let shift = prefix.content.as_ref().width();
+            let mut spans = Vec::with_capacity(line.line.spans.len() + 1);
+            spans.push(prefix);
+            spans.extend(line.line.spans);
+            line.line = Line::from(spans).style(line.line.style);
+            for hyperlink in &mut line.hyperlinks {
+                hyperlink.columns = hyperlink.columns.start + shift..hyperlink.columns.end + shift;
+            }
+            line
+        })
+        .collect()
+}
+
+pub fn adaptive_wrap_hyperlink_lines(
+    lines: &[HyperlinkLine],
+    options: RtOptions<'static>,
+) -> Vec<HyperlinkLine> {
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let options = if index == 0 {
+            options.clone()
+        } else {
+            options
+                .clone()
+                .initial_indent(options.subsequent_indent.clone())
+        };
+        out.extend(remap_wrapped_line(
+            line,
+            adaptive_wrap_line(&line.line, options)
+                .iter()
+                .map(line_to_static)
+                .collect(),
+        ));
+    }
+    out
+}
+
+pub fn annotate_web_urls(lines: Vec<Line<'static>>) -> Vec<HyperlinkLine> {
     lines.into_iter().map(annotate_web_urls_in_line).collect()
 }
 
@@ -227,11 +290,11 @@ pub struct EnvProbe<'a> {
 }
 
 pub fn hyperlinks_enabled_from_probe(probe: EnvProbe<'_>) -> bool {
-    if probe.no_color || probe.term == Some("dumb") {
-        return false;
-    }
     if let Some(force) = probe.force {
         return force;
+    }
+    if probe.no_color || probe.term == Some("dumb") {
+        return false;
     }
     if probe.vte_version || probe.wt_session || probe.wezterm || probe.kitty {
         return true;
@@ -387,7 +450,7 @@ fn web_links_in_text(text: &str) -> Vec<TerminalHyperlink> {
     links
 }
 
-fn web_destination(destination: &str) -> Option<String> {
+pub fn web_destination(destination: &str) -> Option<String> {
     let safe_destination = destination
         .chars()
         .filter(|ch| !ch.is_control())
@@ -463,6 +526,7 @@ fn append_to_last_span(out: &mut [Span<'static>], content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::wrapping::line_to_plain;
 
     fn plain(line: &Line<'static>) -> String {
         line.spans
@@ -494,9 +558,70 @@ mod tests {
     }
 
     #[test]
+    fn annotates_punctuated_web_urls() {
+        assert_eq!(
+            annotate_web_urls_in_line(Line::from("See (https://example.com/a).")),
+            HyperlinkLine {
+                line: Line::from("See (https://example.com/a)."),
+                hyperlinks: vec![TerminalHyperlink {
+                    columns: 5..26,
+                    destination: "https://example.com/a".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn prefix_hyperlink_lines_shifts_existing_ranges() {
+        let line = annotate_web_urls_in_line(Line::from("Read https://example.com/docs"));
+
+        let lines = prefix_hyperlink_lines(vec![line], Span::raw("• "), Span::raw("  "));
+
+        assert_eq!(
+            line_to_plain(&lines[0].line),
+            "• Read https://example.com/docs"
+        );
+        assert_eq!(
+            lines[0].hyperlinks,
+            vec![TerminalHyperlink {
+                columns: 7..31,
+                destination: "https://example.com/docs".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn adaptive_wrap_hyperlink_lines_preserves_wrapped_url_destination() {
+        let source =
+            annotate_web_urls_in_line(Line::from("Read https://example.com/docs and keep going"));
+
+        let lines = adaptive_wrap_hyperlink_lines(&[source], RtOptions::new(18));
+
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line_to_plain(&line.line))
+                .collect::<Vec<_>>(),
+            vec!["Read", "https://example.com/docs", "and keep going"]
+        );
+        assert_eq!(
+            lines[1].hyperlinks,
+            vec![TerminalHyperlink {
+                columns: 0..24,
+                destination: "https://example.com/docs".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn env_probe_respects_no_color_and_known_terminals() {
         assert!(!hyperlinks_enabled_from_probe(EnvProbe {
             no_color: true,
+            term_program: Some("iTerm.app"),
+            ..EnvProbe::default()
+        }));
+        assert!(!hyperlinks_enabled_from_probe(EnvProbe {
+            term: Some("dumb"),
             term_program: Some("iTerm.app"),
             ..EnvProbe::default()
         }));
@@ -506,6 +631,8 @@ mod tests {
         }));
         assert!(hyperlinks_enabled_from_probe(EnvProbe {
             force: Some(true),
+            no_color: true,
+            term: Some("dumb"),
             ..EnvProbe::default()
         }));
         assert!(!hyperlinks_enabled_from_probe(EnvProbe {

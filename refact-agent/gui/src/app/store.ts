@@ -32,6 +32,7 @@ import {
   browserApi,
   worktreesApi,
 } from "../services/refact";
+import { daemonApi } from "../services/refact/daemon";
 import { chatModesApi } from "../services/refact/chatModes";
 import { customizationApi } from "../services/refact/customization";
 import { projectInformationApi } from "../services/refact/projectInformation";
@@ -73,6 +74,7 @@ import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
+import { reconcileWorkspaceState, workspaceSlice } from "../features/Workspace";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -118,6 +120,7 @@ const rootReducer = combineSlices(
     [taskDocumentsApi.reducerPath]: taskDocumentsApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
     [worktreesApi.reducerPath]: worktreesApi.reducer,
+    [daemonApi.reducerPath]: daemonApi.reducer,
     [skillsStatusApi.reducerPath]: skillsStatusApi.reducer,
     [mcpServerInfoApi.reducerPath]: mcpServerInfoApi.reducer,
     [chatModesApi.reducerPath]: chatModesApi.reducer,
@@ -145,6 +148,7 @@ const rootReducer = combineSlices(
   browserSlice,
   notificationsSlice,
   schedulerSlice,
+  workspaceSlice,
 );
 
 const rootPersistConfig = {
@@ -156,9 +160,25 @@ const rootPersistConfig = {
 
 const APPLY_CHAT_EVENT_ACTION = "chatThread/applyChatEvent";
 
+const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
+  const nextWorkspace = reconcileWorkspaceState(
+    state.workspace,
+    state.chat.open_thread_ids,
+  );
+
+  if (nextWorkspace === state.workspace) {
+    return state;
+  }
+
+  return {
+    ...state,
+    workspace: nextWorkspace,
+  };
+};
+
 const persistedReducer = persistReducer<ReturnType<typeof rootReducer>>(
   rootPersistConfig,
-  rootReducer,
+  (state, action) => workspaceInvariantReducer(rootReducer(state, action)),
 );
 
 export type RootState = ReturnType<typeof persistedReducer>;
@@ -225,6 +245,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           taskDocumentsApi.middleware,
           browserApi.middleware,
           worktreesApi.middleware,
+          daemonApi.middleware,
           skillsStatusApi.middleware,
           chatModesApi.middleware,
           customizationApi.middleware,

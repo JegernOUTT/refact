@@ -391,22 +391,27 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
 fn convert_messages_to_openai(messages: &[refact_core::chat_types::ChatMessage]) -> Vec<Value> {
     use super::render_extra::{
-        append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
-        render_context_message, render_event_message, render_plan_message,
+        append_text_to_tool_json, is_context_role, is_event_role, is_goal_role, is_plan_role,
+        render_context_message, render_event_message, render_goal_message, render_plan_message,
     };
 
     let mut result: Vec<Value> = Vec::new();
     let mut pending_user_content: Vec<Value> = Vec::new();
 
     for msg in messages {
-        if is_plan_role(&msg.role) {
+        if is_goal_role(&msg.role) || is_plan_role(&msg.role) {
             if !pending_user_content.is_empty() {
                 result.push(json!({
                     "role": "user",
                     "content": std::mem::take(&mut pending_user_content),
                 }));
             }
-            if let Some(text) = render_plan_message(msg) {
+            let text = if is_goal_role(&msg.role) {
+                render_goal_message(msg)
+            } else {
+                render_plan_message(msg)
+            };
+            if let Some(text) = text {
                 result.push(json!({"role": "user", "content": text}));
             }
             continue;
@@ -820,6 +825,20 @@ mod tests {
         }
     }
 
+    fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -864,6 +883,22 @@ mod tests {
         let text = converted[0]["content"].as_str().unwrap();
         assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
         assert!(text.contains("Do the thing"));
+    }
+
+    #[test]
+    fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
+        let messages = vec![
+            goal_message("agent", 1, "Reach the goal"),
+            plan_message("agent", 1, "Do the thing"),
+        ];
+
+        let converted = convert_messages_to_openai(&messages);
+        let serialized = json!({"messages": converted}).to_string();
+
+        assert_eq!(serialized.matches("<goal mode=").count(), 1);
+        assert_eq!(serialized.matches("<plan mode=").count(), 1);
+        assert!(serialized.find("<goal mode=").unwrap() < serialized.find("<plan mode=").unwrap());
+        assert!(!serialized.contains("\"role\":\"goal\""));
     }
 
     #[test]
@@ -918,6 +953,23 @@ mod tests {
 
         assert!(!body.contains("\"role\":\"event\""));
         assert!(!body.contains("\"role\":\"plan\""));
+    }
+
+    #[test]
+    fn convert_goal_pursuit_event_reaches_wire() {
+        let messages = vec![event_message(
+            "goal_pursuit",
+            "chat.goal",
+            json!({"turn": 2}),
+            "checking progress",
+        )];
+
+        let converted = convert_messages_to_openai(&messages);
+        let serialized = json!({"messages": converted}).to_string();
+
+        assert!(serialized.contains("<event subkind=\\\"goal_pursuit\\\""));
+        assert!(serialized.contains("checking progress"));
+        assert!(!serialized.contains("<goal-update"));
     }
 
     #[test]

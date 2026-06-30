@@ -18,7 +18,6 @@ use crate::custom_error::ScratchError;
 use crate::tasks::comments::{self, CreateCardComment};
 use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
 use crate::chat::trajectories::TrajectoryEvent;
-use crate::chat::types::SessionState;
 use crate::tasks::events::{TaskEvent, TaskEventEnvelope};
 use crate::tasks::storage;
 use crate::tools::tool_task_documents::{
@@ -136,63 +135,7 @@ pub enum BoardPatch {
 }
 
 async fn enrich_task_with_session_state(gcx: Arc<GlobalContext>, task: &mut TaskMeta) {
-    let planner_chat_ids = storage::list_task_trajectories(gcx.clone(), &task.id, "planner", None)
-        .await
-        .map(|trajectories| {
-            trajectories
-                .into_iter()
-                .map(|trajectory| trajectory.id)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if planner_chat_ids.is_empty() {
-        task.planner_session_state = None;
-        return;
-    }
-
-    let session_arcs = {
-        let sessions = gcx.chat_sessions.read().await;
-        planner_chat_ids
-            .iter()
-            .filter_map(|planner_chat_id| sessions.get(planner_chat_id).cloned())
-            .collect::<Vec<_>>()
-    };
-
-    let mut has_paused = false;
-    let mut has_waiting_ide = false;
-    let mut has_waiting_user_input = false;
-    let mut has_generating = false;
-    let mut has_executing_tools = false;
-    let mut has_error = false;
-    for session_arc in session_arcs {
-        let session = session_arc.lock().await;
-        match session.runtime.state {
-            SessionState::Paused => has_paused = true,
-            SessionState::WaitingIde => has_waiting_ide = true,
-            SessionState::WaitingUserInput => has_waiting_user_input = true,
-            SessionState::Generating => has_generating = true,
-            SessionState::ExecutingTools => has_executing_tools = true,
-            SessionState::Error => has_error = true,
-            SessionState::Idle | SessionState::Completed => {}
-        }
-    }
-
-    task.planner_session_state = if has_paused {
-        Some(SessionState::Paused.to_string())
-    } else if has_waiting_ide {
-        Some(SessionState::WaitingIde.to_string())
-    } else if has_waiting_user_input {
-        Some(SessionState::WaitingUserInput.to_string())
-    } else if has_generating {
-        Some(SessionState::Generating.to_string())
-    } else if has_executing_tools {
-        Some(SessionState::ExecutingTools.to_string())
-    } else if has_error {
-        Some(SessionState::Error.to_string())
-    } else {
-        None
-    };
+    crate::tasks::events::enrich_task_with_session_state(gcx, task).await;
 }
 
 pub async fn list_tasks_with_session_state(
@@ -717,14 +660,7 @@ pub async fn handle_update_task_status(
     storage::save_task_meta(gcx.clone(), &task_id, &meta)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::tasks::events::emit_task_event(
-        gcx.clone(),
-        TaskEvent::TaskUpdated {
-            task_id: task_id.clone(),
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    crate::tasks::events::emit_task_updated(gcx.clone(), task_id.clone(), meta.clone()).await;
     if old_status != meta.status {
         match meta.status {
             TaskStatus::Completed => {
@@ -786,6 +722,7 @@ pub async fn handle_update_task_status(
             _ => {}
         }
     }
+    enrich_task_with_session_state(gcx.clone(), &mut meta).await;
     Ok(Json(meta))
 }
 
@@ -831,14 +768,8 @@ pub async fn handle_update_task_meta(
     storage::save_task_meta(gcx.clone(), &task_id, &meta)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::tasks::events::emit_task_event(
-        gcx,
-        TaskEvent::TaskUpdated {
-            task_id,
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    crate::tasks::events::emit_task_updated(gcx.clone(), task_id, meta.clone()).await;
+    enrich_task_with_session_state(gcx, &mut meta).await;
     Ok(Json(meta))
 }
 
@@ -1590,6 +1521,7 @@ mod tests {
         planner_chat_id: Option<&str>,
     ) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.to_string(),
             title: chat_id.to_string(),
             model: "test-model".to_string(),
@@ -1690,7 +1622,12 @@ mod tests {
         );
     }
 
-    async fn insert_live_planner_session(gcx: Arc<GlobalContext>, task_id: &str, chat_id: &str) {
+    async fn insert_live_planner_session_with_state(
+        gcx: Arc<GlobalContext>,
+        task_id: &str,
+        chat_id: &str,
+        state: crate::chat::types::SessionState,
+    ) {
         let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
         session.thread.task_meta = Some(ChatTaskMeta {
             task_id: task_id.to_string(),
@@ -1699,10 +1636,21 @@ mod tests {
             card_id: None,
             planner_chat_id: Some(chat_id.to_string()),
         });
+        session.set_runtime_state(state, None);
         gcx.chat_sessions.write().await.insert(
             chat_id.to_string(),
             Arc::new(tokio::sync::Mutex::new(session)),
         );
+    }
+
+    async fn insert_live_planner_session(gcx: Arc<GlobalContext>, task_id: &str, chat_id: &str) {
+        insert_live_planner_session_with_state(
+            gcx,
+            task_id,
+            chat_id,
+            crate::chat::types::SessionState::Idle,
+        )
+        .await;
     }
 
     fn status<T>(result: Result<Json<T>, (StatusCode, String)>) -> StatusCode {
@@ -2567,6 +2515,48 @@ mod tests {
         assert_eq!(result.0.content, "body text");
         assert!(result.0.pinned);
         assert_eq!(result.0.version, 1);
+    }
+
+    #[tokio::test]
+    async fn update_task_meta_event_includes_live_planner_session_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_task(temp.path(), "task-meta-state").await;
+        save_planner(gcx.clone(), "task-meta-state", "planner-paused").await;
+        insert_live_planner_session_with_state(
+            gcx.clone(),
+            "task-meta-state",
+            "planner-paused",
+            crate::chat::types::SessionState::Paused,
+        )
+        .await;
+        let mut rx = gcx.task_events_tx.as_ref().unwrap().subscribe();
+
+        let Json(response) = handle_update_task_meta(
+            State(app(gcx.clone())),
+            Path("task-meta-state".to_string()),
+            Json(UpdateTaskMetaRequest {
+                name: Some("Renamed task".to_string()),
+                base_branch: None,
+                base_commit: None,
+                default_agent_model: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.planner_session_state.as_deref(), Some("paused"));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event.event {
+            TaskEvent::TaskUpdated { task_id, meta } => {
+                assert_eq!(task_id, "task-meta-state");
+                assert_eq!(meta.name, "Renamed task");
+                assert_eq!(meta.planner_session_state.as_deref(), Some("paused"));
+            }
+            other => panic!("unexpected task event: {:?}", other),
+        }
     }
 
     #[tokio::test]

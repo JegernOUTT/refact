@@ -1,7 +1,7 @@
 import React from "react";
-import { Flex, Badge, HoverCard, Text } from "@radix-ui/themes";
+import { Flex, Badge } from "@radix-ui/themes";
 import { Clock, RefreshCcw, Send, Square, Zap } from "lucide-react";
-import { Icon, IconButton } from "../ui";
+import { Icon, IconButton, Tooltip } from "../ui";
 
 type UnifiedSendButtonProps = {
   disabled?: boolean;
@@ -47,8 +47,8 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
       return (
         <Flex align="center" gap="2">
           <QueuedBadge queuedCount={queuedCount} />
-          <HoverCard.Root>
-            <HoverCard.Trigger>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
               <IconButton
                 aria-label="Stop generation"
                 icon={Square}
@@ -59,15 +59,11 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
                 size="sm"
                 variant="danger"
               />
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Stop generation
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
-          <HoverCard.Root>
-            <HoverCard.Trigger>
+            </Tooltip.Trigger>
+            <Tooltip.Content side="top">Stop generation</Tooltip.Content>
+          </Tooltip>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
               <IconButton
                 aria-label="Send immediately"
                 disabled={disabled}
@@ -79,15 +75,13 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
                 size="sm"
                 variant="primary"
               />
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Send immediately (next turn)
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
-          <HoverCard.Root>
-            <HoverCard.Trigger>
+            </Tooltip.Trigger>
+            <Tooltip.Content side="top">
+              Send immediately (next turn)
+            </Tooltip.Content>
+          </Tooltip>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
               <IconButton
                 aria-label="Queue message"
                 disabled={disabled}
@@ -99,13 +93,11 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
                 size="sm"
                 variant="soft"
               />
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Queue message (after tools complete)
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
+            </Tooltip.Trigger>
+            <Tooltip.Content side="top">
+              Queue message (after tools complete)
+            </Tooltip.Content>
+          </Tooltip>
         </Flex>
       );
     }
@@ -113,8 +105,8 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
     return (
       <Flex align="center" gap="2">
         <QueuedBadge queuedCount={queuedCount} />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <IconButton
               aria-label="Stop generation"
               icon={Square}
@@ -125,13 +117,9 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
               size="sm"
               variant="danger"
             />
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Stop generation
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content side="top">Stop generation</Tooltip.Content>
+        </Tooltip>
       </Flex>
     );
   }
@@ -140,8 +128,8 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
     return (
       <Flex align="center" gap="2">
         <QueuedBadge queuedCount={queuedCount} />
-        <HoverCard.Root>
-          <HoverCard.Trigger>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <IconButton
               aria-label="Resend last messages"
               disabled={disabled}
@@ -153,13 +141,9 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
               size="sm"
               variant="ghost"
             />
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Resend last messages
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content side="top">Resend last messages</Tooltip.Content>
+        </Tooltip>
       </Flex>
     );
   }
@@ -167,8 +151,8 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
   return (
     <Flex align="center" gap="2">
       <QueuedBadge queuedCount={queuedCount} />
-      <HoverCard.Root>
-        <HoverCard.Trigger>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
           <IconButton
             aria-label="Send message"
             disabled={disabled}
@@ -180,13 +164,9 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
             size="sm"
             variant="primary"
           />
-        </HoverCard.Trigger>
-        <HoverCard.Content size="1" side="top">
-          <Text as="p" size="2">
-            Send message
-          </Text>
-        </HoverCard.Content>
-      </HoverCard.Root>
+        </Tooltip.Trigger>
+        <Tooltip.Content side="top">Send message</Tooltip.Content>
+      </Tooltip>
     </Flex>
   );
 };

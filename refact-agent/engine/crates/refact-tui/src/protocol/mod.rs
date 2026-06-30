@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::text_safety::sanitize_tool_inline;
+use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
@@ -224,8 +224,12 @@ impl<'de> Deserialize<'de> for DeltaOp {
 impl From<KnownDeltaOp> for DeltaOp {
     fn from(value: KnownDeltaOp) -> Self {
         match value {
-            KnownDeltaOp::AppendContent { text } => Self::AppendContent { text },
-            KnownDeltaOp::AppendReasoning { text } => Self::AppendReasoning { text },
+            KnownDeltaOp::AppendContent { text } => Self::AppendContent {
+                text: sanitize_tool_text(text),
+            },
+            KnownDeltaOp::AppendReasoning { text } => Self::AppendReasoning {
+                text: sanitize_tool_text(text),
+            },
             KnownDeltaOp::SetToolCalls { tool_calls } => Self::SetToolCalls { tool_calls },
             KnownDeltaOp::SetThinkingBlocks { blocks } => Self::SetThinkingBlocks { blocks },
             KnownDeltaOp::AddCitation { citation } => Self::AddCitation { citation },
@@ -258,6 +262,7 @@ pub enum TranscriptRole {
     Tool,
     Notice,
     Plan,
+    Goal,
     Event,
     Other(String),
 }
@@ -270,6 +275,7 @@ impl TranscriptRole {
             "tool" => Self::Tool,
             "notice" => Self::Notice,
             "plan" => Self::Plan,
+            "goal" => Self::Goal,
             "event" => Self::Event,
             other => Self::Other(other.to_string()),
         }
@@ -282,6 +288,7 @@ impl TranscriptRole {
             Self::Tool => "tool",
             Self::Notice => "notice",
             Self::Plan => "plan",
+            Self::Goal => "goal",
             Self::Event => "event",
             Self::Other(role) => role.as_str(),
         }
@@ -346,11 +353,13 @@ impl TranscriptMessage {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         message.content = content_text(raw).unwrap_or_default();
-        message.reasoning = raw
-            .get("reasoning_content")
-            .or_else(|| raw.get("reasoning"))
-            .and_then(value_to_text)
-            .unwrap_or_default();
+        message.reasoning = sanitize_model_text_for_role(
+            &message.role,
+            raw.get("reasoning_content")
+                .or_else(|| raw.get("reasoning"))
+                .and_then(value_to_text)
+                .unwrap_or_default(),
+        );
         message.tool_calls = raw
             .get("tool_calls")
             .and_then(Value::as_array)
@@ -721,10 +730,23 @@ pub fn content_text(message: &Value) -> Option<String> {
             .join("\n"),
         value => value_to_compact_string(value),
     };
-    if message.get("role").and_then(Value::as_str) == Some("tool") {
-        Some(crate::text_safety::sanitize_tool_text(content))
-    } else {
-        Some(content)
+    Some(sanitize_content_for_wire_role(
+        message.get("role").and_then(Value::as_str),
+        content,
+    ))
+}
+
+fn sanitize_content_for_wire_role(role: Option<&str>, content: String) -> String {
+    match role {
+        Some("assistant" | "tool") => sanitize_tool_text(content),
+        _ => content,
+    }
+}
+
+fn sanitize_model_text_for_role(role: &TranscriptRole, content: String) -> String {
+    match role {
+        TranscriptRole::Assistant => sanitize_tool_text(content),
+        _ => content,
     }
 }
 
@@ -1028,6 +1050,61 @@ mod tests {
     }
 
     #[test]
+    fn assistant_snapshot_and_stream_deltas_sanitize_terminal_escapes() {
+        let injected = injected_model_text();
+        let thinking_blocks = vec![json!({
+            "type": "thinking",
+            "thinking": "keep raw \u{1b}[31m thinking text",
+            "signature": "sig\u{1b}]8;;http://signed\u{7}bytes",
+        })];
+        let raw_assistant = json!({
+            "role": "assistant",
+            "message_id": "a1",
+            "content": injected,
+            "reasoning_content": injected,
+            "thinking_blocks": thinking_blocks.clone(),
+        });
+
+        let message = TranscriptMessage::from_wire(&raw_assistant);
+
+        assert_escape_inert(&message.content);
+        assert_escape_inert(&message.reasoning);
+        assert_model_text_survives(&message.content);
+        assert_model_text_survives(&message.reasoning);
+        assert_eq!(message.thinking_blocks, thinking_blocks);
+
+        let ops = delta_ops_from_value(&json!([
+            {"op":"append_content","text": injected},
+            {"op":"append_reasoning","text": injected},
+            {"op":"set_thinking_blocks","blocks": thinking_blocks.clone()}
+        ]));
+        let mut state = TranscriptState::new();
+        state.apply_delta_ops(Some("a2"), &ops);
+        let streamed = &state.messages()[0];
+
+        assert_escape_inert(&streamed.content);
+        assert_escape_inert(&streamed.reasoning);
+        assert_model_text_survives(&streamed.content);
+        assert_model_text_survives(&streamed.reasoning);
+        assert_eq!(streamed.thinking_blocks, thinking_blocks);
+    }
+
+    #[test]
+    fn user_snapshot_text_is_not_sanitized() {
+        let injected = injected_model_text();
+        let raw_user = json!({
+            "role": "user",
+            "content": injected,
+            "reasoning_content": injected,
+        });
+
+        let message = TranscriptMessage::from_wire(&raw_user);
+
+        assert_eq!(message.content, injected);
+        assert_eq!(message.reasoning, injected);
+    }
+
+    #[test]
     fn content_text_keeps_multimodal_placeholders_and_text() {
         let message = json!({
             "role": "tool",
@@ -1055,5 +1132,23 @@ mod tests {
         assert!(!content.contains('\x07'));
         assert!(!content.contains("pwned"));
         assert_eq!(content, "okdone");
+    }
+
+    fn injected_model_text() -> &'static str {
+        "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
+    }
+
+    fn assert_escape_inert(text: &str) {
+        assert!(!text.as_bytes().contains(&0x1b), "raw ESC in {text:?}");
+        assert!(!text.as_bytes().contains(&0x07), "raw BEL in {text:?}");
+        assert!(!text.as_bytes().contains(&0x9b), "raw CSI byte in {text:?}");
+        assert!(!text.contains('\u{009b}'), "raw CSI char in {text:?}");
+        assert!(!text.contains("http://evil"), "raw OSC8 URL in {text:?}");
+    }
+
+    fn assert_model_text_survives(text: &str) {
+        for fragment in ["lead", "red", "clear", "bell", "csi", "TEXT", "tail"] {
+            assert!(text.contains(fragment), "missing {fragment:?} in {text:?}");
+        }
     }
 }

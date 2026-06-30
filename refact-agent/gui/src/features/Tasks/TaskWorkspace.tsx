@@ -1087,10 +1087,18 @@ interface TaskWorkspaceProps {
 export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
-  const { data: task, isLoading: taskLoading } = useGetTaskQuery(taskId, {
+  const {
+    data: task,
+    isLoading: taskLoading,
+    isError: taskError,
+  } = useGetTaskQuery(taskId, {
     pollingInterval: 0,
   });
-  const { data: board, isLoading: boardLoading } = useGetBoardQuery(taskId, {
+  const {
+    data: board,
+    isLoading: boardLoading,
+    isError: boardError,
+  } = useGetBoardQuery(taskId, {
     pollingInterval: 0,
   });
   const { data: worktreesData, isLoading: worktreesLoading } =
@@ -1264,6 +1272,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           id: traj.id,
           title: traj.title,
           isTaskChat: true,
+          openTab: false,
           mode: traj.mode ?? "TASK_PLANNER",
           taskMeta: {
             task_id: taskId,
@@ -1402,6 +1411,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         id: activeChat.chatId,
         title: formatAgentChatTitle(card.id, card.title),
         isTaskChat: true,
+        openTab: false,
         mode: "TASK_AGENT",
         taskMeta: {
           task_id: taskId,
@@ -1483,6 +1493,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               id: newChatId,
               title: "",
               isTaskChat: true,
+              openTab: false,
               mode: resolvedMode,
               taskMeta: {
                 task_id: taskId,
@@ -1586,6 +1597,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           id: chatId,
           title: formatAgentChatTitle(cardId, cardTitle),
           isTaskChat: true,
+          openTab: false,
           mode: "TASK_AGENT",
           taskMeta: {
             task_id: taskId,
@@ -1835,6 +1847,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               mergeTarget.card.title,
             ),
             isTaskChat: true,
+            openTab: false,
             mode: "TASK_AGENT",
             taskMeta: {
               task_id: taskId,
@@ -1889,6 +1902,18 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       taskId,
     ],
   );
+
+  if (taskError || boardError) {
+    return (
+      <Flex
+        align="center"
+        justify="center"
+        className={styles.fullHeightEmptyState}
+      >
+        <Text color="gray">Task is no longer available.</Text>
+      </Flex>
+    );
+  }
 
   if (taskLoading || boardLoading || savedPlannersLoading || !task || !board) {
     return <ChatLoading />;
@@ -2010,6 +2035,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                       host={config.host}
                       tabbed={false}
                       backFromChat={handleBack}
+                      chatId={activeChat.chatId}
                     />
                   </InternalLinkProvider>
                 ) : (

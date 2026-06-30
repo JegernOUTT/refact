@@ -6,7 +6,6 @@ import {
   selectBrowserContextOversize,
   clearBrowserContextOversize,
 } from "./browserSlice";
-import { selectChatId } from "../Chat/Thread";
 import {
   abortGeneration,
   sendBrowserContextDecision,
@@ -26,7 +25,6 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
     selectBrowserContextOversize(state, chatId),
   );
 
-  const currentChatId = useAppSelector(selectChatId);
   const config = useAppSelector((state) => state.config);
   const apiKey = useAppSelector((state) => state.config.apiKey);
 
@@ -149,7 +147,7 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
     dispatch(clearBrowserContextOversize({ chatId }));
   }, [chatId, config, apiKey, dispatch]);
 
-  if (!info || chatId !== currentChatId) return null;
+  if (!info) return null;
 
   return (
     <Surface className={styles.guardCard} variant="glass">

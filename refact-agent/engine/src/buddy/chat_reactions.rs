@@ -921,8 +921,9 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             persona: svc.state.personality.clone(),
             identity_name: svc.state.identity.name.clone(),
             pulse_one_liner: format!(
-                "{} pending ops, {} stuck tasks",
-                svc.pulse.memory.pending_ops, svc.pulse.tasks.stuck
+                "{} pending ops, {} recent stuck task alerts",
+                svc.pulse.memory.pending_ops,
+                svc.pulse.tasks.recent_stuck_alert_count_1h()
             ),
         };
         let phrase_bank = svc.state.chat_phrase_bank.clone();

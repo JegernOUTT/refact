@@ -63,13 +63,13 @@ pub struct ParsedSessionCommand {
     pub args: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct PermissionPolicy {
     pub auto_approve_editing_tools: bool,
     pub auto_approve_dangerous_commands: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StatusUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -77,7 +77,7 @@ pub struct StatusUsage {
     pub context_window_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StatusSnapshot {
     pub daemon_online: bool,
     pub daemon_version: Option<String>,
@@ -89,8 +89,10 @@ pub struct StatusSnapshot {
     pub model: String,
     pub mode: String,
     pub reasoning: String,
+    pub permission_policy: PermissionPolicy,
     pub session_id: String,
     pub usage: Option<StatusUsage>,
+    pub retry_hint: Option<String>,
 }
 
 pub const NEW_COMMAND: CommandDef = CommandDef {
@@ -513,6 +515,10 @@ mod tests {
             model: "gpt-demo".to_string(),
             mode: "agent".to_string(),
             reasoning: "high".to_string(),
+            permission_policy: PermissionPolicy {
+                auto_approve_editing_tools: true,
+                auto_approve_dangerous_commands: false,
+            },
             session_id: "abcdef123456".to_string(),
             usage: Some(StatusUsage {
                 prompt_tokens: 100,
@@ -520,6 +526,7 @@ mod tests {
                 total_tokens: 150,
                 context_window_tokens: Some(1000),
             }),
+            retry_hint: None,
         });
         assert_eq!(
             text,

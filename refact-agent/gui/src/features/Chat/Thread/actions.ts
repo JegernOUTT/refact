@@ -139,9 +139,12 @@ export interface TaskMeta {
 
 export const sendIdeMessagesToCurrentChat = createAsyncThunk(
   "chatThread/sendIdeMessagesToCurrentChat",
-  async (arg: { messages: ChatMessages; priority?: boolean }, api) => {
+  async (
+    arg: { chatId?: string; messages: ChatMessages; priority?: boolean },
+    api,
+  ) => {
     const state = api.getState() as RootState;
-    const chatId = selectCurrentThreadId(state);
+    const chatId = arg.chatId ?? selectCurrentThreadId(state);
     const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
     if (!chatId) return;
@@ -176,11 +179,13 @@ export const createChatWithId = createAction<{
   id: string;
   title?: string;
   isTaskChat?: boolean;
+  openTab?: boolean;
   mode?: string;
   taskMeta?: TaskMeta;
   model?: string;
   parentId?: string;
   linkType?: string;
+  rootChatId?: string;
   worktree?: WorktreeMeta | null;
 }>("chatThread/createWithId");
 
@@ -283,6 +288,7 @@ export const backUpMessages = createAction<
 >("chatThread/backUpMessages");
 
 export type SetChatModelPayload = {
+  chatId?: string;
   model: string;
   modelMaxContextTokens?: number;
   previousModelMaxContextTokens?: number;
@@ -413,9 +419,9 @@ export const setThreadWorktree = createAction<{
   worktree: WorktreeMeta | null;
 }>("chatThread/setThreadWorktree");
 
-export const setEnabledCheckpoints = createAction<boolean>(
-  "chat/setEnabledCheckpoints",
-);
+export const setEnabledCheckpoints = createAction<
+  boolean | PayloadWithChatAndBoolean
+>("chat/setEnabledCheckpoints");
 
 export const setBoostReasoning = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setBoostReasoning",
@@ -435,15 +441,19 @@ export const saveTitle = createAction<PayloadWithIdAndTitle>(
   "chatThread/saveTitle",
 );
 
-export const setSendImmediately = createAction<boolean>(
-  "chatThread/setSendImmediately",
-);
+export const setSendImmediately = createAction<
+  boolean | PayloadWithChatAndBoolean
+>("chatThread/setSendImmediately");
 
-export const setChatMode = createAction<LspChatMode>("chatThread/setChatMode");
+export const setChatMode = createAction<
+  LspChatMode | { chatId?: string; mode: LspChatMode }
+>("chatThread/setChatMode");
 
-export const setIntegrationData = createAction<Partial<IntegrationMeta> | null>(
-  "chatThread/setIntegrationData",
-);
+export const setIntegrationData = createAction<
+  | (Partial<IntegrationMeta> & { chatId?: string })
+  | { chatId?: string; value: Partial<IntegrationMeta> | null }
+  | null
+>("chatThread/setIntegrationData");
 
 export const setIsWaitingForResponse = createAction<{
   id: string;
@@ -455,9 +465,9 @@ export const markThreadSseError = createAction<{
   error: string;
 }>("chatThread/markSseError");
 
-export const setMaxNewTokens = createAction<number>(
-  "chatThread/setMaxNewTokens",
-);
+export const setMaxNewTokens = createAction<
+  number | { chatId?: string; value: number }
+>("chatThread/setMaxNewTokens");
 
 export const fixBrokenToolMessages = createAction<PayloadWithId>(
   "chatThread/fixBrokenToolMessages",
@@ -467,9 +477,9 @@ export const upsertToolCall = createAction<
   Parameters<typeof ideToolCallResponse>[0] & { replaceOnly?: boolean }
 >("chatThread/upsertToolCall");
 
-export const setIncreaseMaxTokens = createAction<boolean>(
-  "chatThread/setIncreaseMaxTokens",
-);
+export const setIncreaseMaxTokens = createAction<
+  boolean | PayloadWithChatAndBoolean
+>("chatThread/setIncreaseMaxTokens");
 
 export const setIncludeProjectInfo = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setIncludeProjectInfo",
@@ -601,6 +611,11 @@ export const setTaskWidgetExpanded = createAction<{
   id: string;
   expanded: boolean;
 }>("chatThread/setTaskWidgetExpanded");
+
+export const setTaskGoalExpanded = createAction<{
+  id: string;
+  expanded: boolean;
+}>("chatThread/setTaskGoalExpanded");
 
 export const openBuddyChat = createAction<{ chat_id: string; title?: string }>(
   "chat/openBuddyChat",

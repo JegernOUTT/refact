@@ -5881,7 +5881,7 @@ describe("restoreChat buddy_meta handling", () => {
       card_id: "T-41",
       planner_chat_id: "planner-1",
     });
-    expect(store.getState().chat.open_thread_ids).not.toContain(
+    expect(store.getState().chat.open_thread_ids).toContain(
       "task-restore-preserve",
     );
   });
@@ -6024,7 +6024,7 @@ describe("restoreChat buddy_meta handling", () => {
       content: "Stored Buddy message",
     });
     expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
-    expect(state.chat.open_thread_ids).not.toContain("buddy-refresh-1");
+    expect(state.chat.open_thread_ids).toContain("buddy-refresh-1");
     expect(state.chat.current_thread_id).toBe("buddy-refresh-1");
   });
 
@@ -6067,7 +6067,7 @@ describe("restoreChat buddy_meta handling", () => {
       workflow_id: "refact_self_critic",
     });
     expect(rt?.thread.title).toBe("Promoted Buddy Chat");
-    expect(state.chat.open_thread_ids).not.toContain("promoted-buddy-1");
+    expect(state.chat.open_thread_ids).toContain("promoted-buddy-1");
   });
 
   test("openExistingBuddyChat requests trajectory with non-subscribed query", async () => {
@@ -6292,7 +6292,7 @@ describe("restoreChat buddy_meta handling", () => {
     const rt = state.chat.threads["buddy-restore-1"];
     expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
     expect(rt?.thread.buddy_meta?.buddy_chat_kind).toBe("chat");
-    expect(state.chat.open_thread_ids).not.toContain("buddy-restore-1");
+    expect(state.chat.open_thread_ids).toContain("buddy-restore-1");
     expect(state.chat.current_thread_id).toBe("buddy-restore-1");
   });
 
@@ -6343,7 +6343,7 @@ describe("restoreChat buddy_meta handling", () => {
     const state = store.getState();
     const rt = state.chat.threads["buddy-workflow-1"];
     expect(rt?.thread.buddy_meta?.workflow_id).toBe("refact_self_critic");
-    expect(state.chat.open_thread_ids).not.toContain("buddy-workflow-1");
+    expect(state.chat.open_thread_ids).toContain("buddy-workflow-1");
   });
 });
 

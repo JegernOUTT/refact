@@ -12,7 +12,9 @@ plugins {
 }
 
 group = providers.gradleProperty("pluginGroup").get()
-version = getVersionString(providers.gradleProperty("pluginVersion").get())
+version = providers.environmentVariable("REFACT_BUILD_VERSION").orNull
+    ?.takeIf { it.isNotBlank() }
+    ?: getVersionString(providers.gradleProperty("pluginVersion").get())
 
 val javaCompilerVersion = "17"
 kotlin {
@@ -63,7 +65,10 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = providers.gradleProperty("pluginSinceBuild")
-            untilBuild = providers.gradleProperty("pluginUntilBuild")
+            val pluginUntilBuild = providers.gradleProperty("pluginUntilBuild").orNull
+            if (!pluginUntilBuild.isNullOrBlank()) {
+                untilBuild = pluginUntilBuild
+            }
         }
     }
 
@@ -79,8 +84,10 @@ intellijPlatform {
     }
 
     pluginVerification {
+        // INTERNAL_API_USAGES is reported as a warning (not a failure) so the plugin can
+        // declare an unbounded until-build and stay available on future IDEs (262+). Real
+        // breakage is still caught by COMPATIBILITY_PROBLEMS / INVALID_PLUGIN.
         failureLevel = listOf(
-            VerifyPluginTask.FailureLevel.INTERNAL_API_USAGES,
             VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
             VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
         )
@@ -162,7 +169,7 @@ fun getVersionString(baseVersion: String): String {
         .ifEmpty { "unknown" }
         .replace("/", "-")
     val numberOfCommits = if (branch == "main") {
-        val lastTag = runCommandOrNull("git describe --tags --abbrev=0 @^")
+        val lastTag = runCommandOrNull("git describe --tags --abbrev=0 --match v* @^")
         if (lastTag != null) {
             runCommand("git rev-list ${lastTag}..HEAD --count")
         } else {

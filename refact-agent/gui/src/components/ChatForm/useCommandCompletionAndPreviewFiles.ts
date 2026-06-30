@@ -15,12 +15,12 @@ import {
 } from "../../services/refact/types";
 import type { LspChatMessage } from "../../services/refact";
 import {
-  getSelectedChatModel,
-  selectChatId,
-  selectMessages,
-  selectThreadMode,
-  selectThreadImages,
-} from "../../features/Chat";
+  selectModelById,
+  selectMessagesById,
+  selectThreadModeById,
+  selectThreadImagesById,
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { formatMessagesForLsp } from "../../features/Chat/Thread/utils";
 
 function useGetCommandCompletionQuery(
@@ -81,12 +81,18 @@ function useGetCommandPreviewQuery(
   query: string,
 ): (ChatContextFile | string)[] {
   const hasCaps = useHasCaps();
-  const attachedImages = useAppSelector(selectThreadImages);
+  const chatId = useThreadId();
+  const attachedImages = useAppSelector((state) =>
+    selectThreadImagesById(state, chatId),
+  );
 
-  const messages = useAppSelector(selectMessages);
-  const chatId = useAppSelector(selectChatId);
-  const currentThreadMode = useAppSelector(selectThreadMode);
-  const currentModel = useAppSelector(getSelectedChatModel);
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const currentThreadMode = useAppSelector((state) =>
+    selectThreadModeById(state, chatId),
+  );
+  const currentModel = useAppSelector((state) =>
+    selectModelById(state, chatId),
+  );
 
   const userMessage: UserMessage = useMemo(() => {
     if (attachedImages.length === 0) {

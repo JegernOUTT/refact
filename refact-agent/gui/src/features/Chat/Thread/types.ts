@@ -7,6 +7,7 @@ import type {
 import {
   BackgroundAgentSummary,
   ChatMessages,
+  GoalSnapshot,
 } from "../../../services/refact/types";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { parseOrElse } from "../../../utils/parseOrElse";
@@ -149,6 +150,7 @@ export type ChatThread = {
   auto_enrichment_enabled?: boolean;
   auto_compact_enabled?: boolean;
   worktree?: WorktreeMeta | null;
+  goal?: GoalSnapshot | null;
 
   parent_id?: string;
   link_type?: string;
@@ -221,8 +223,8 @@ export type ChatThreadRuntime = {
   /** Latest structured compression skip/failure reason from the engine */
   compression_reason?: CompressionReason;
   compression_pulse_seq?: string;
-  /** Task progress widget expanded/collapsed state */
   task_widget_expanded: boolean;
+  task_goal_expanded?: boolean;
   /** Actual session state from backend (for waiting_user_input, completed, etc.) */
   session_state?: string;
   /** Last applied chat SSE event seq for duplicate/out-of-order protection */

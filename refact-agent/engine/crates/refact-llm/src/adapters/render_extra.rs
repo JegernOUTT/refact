@@ -12,6 +12,7 @@
 use refact_core::chat_types::{ChatContent, ChatMessage};
 
 pub const PLAN_META_KEY: &str = "plan";
+pub const GOAL_META_KEY: &str = "goal";
 
 /// Returns `true` for message roles that carry supplemental context and must
 /// be rendered into wire messages by each adapter rather than silently dropped.
@@ -91,6 +92,10 @@ pub fn is_plan_role(role: &str) -> bool {
     role == "plan"
 }
 
+pub fn is_goal_role(role: &str) -> bool {
+    role == "goal"
+}
+
 pub fn render_event_message(msg: &ChatMessage) -> String {
     let meta = msg.extra.get("event");
     let subkind = meta
@@ -98,16 +103,23 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let content = msg.content.content_text_only();
-    if subkind == "plan_delta" {
+    if subkind == "plan_delta" || subkind == "goal_delta" {
         let seq = meta
             .and_then(|m| m.get("payload"))
             .and_then(|payload| payload.get("seq"))
             .and_then(|seq| seq.as_u64())
             .unwrap_or(0);
+        let tag = if subkind == "goal_delta" {
+            "goal-update"
+        } else {
+            "plan-update"
+        };
         return format!(
-            "<plan-update seq=\"{}\">{}</plan-update>",
+            "<{} seq=\"{}\">{}</{}>",
+            tag,
             seq,
-            escape_xml_text(&content)
+            escape_xml_text(&content),
+            tag
         );
     }
     let source = meta
@@ -145,11 +157,33 @@ pub fn render_plan_message(msg: &ChatMessage) -> Option<String> {
         "<plan mode=\"{}\" version=\"{}\">\n{}\n</plan>",
         escape_xml_attr(mode),
         version,
-        render_plan_content(&msg.content.content_text_only())
+        render_block_content(&msg.content.content_text_only())
     ))
 }
 
-fn render_plan_content(content: &str) -> String {
+pub fn render_goal_message(msg: &ChatMessage) -> Option<String> {
+    if !is_goal_role(&msg.role) {
+        return None;
+    }
+    let meta = msg.extra.get(GOAL_META_KEY);
+    let mode = meta
+        .and_then(|m| m.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let version = meta
+        .and_then(|m| m.get("version"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    Some(format!(
+        "<goal mode=\"{}\" version=\"{}\">\n{}\n</goal>",
+        escape_xml_attr(mode),
+        version,
+        render_block_content(&msg.content.content_text_only())
+    ))
+}
+
+fn render_block_content(content: &str) -> String {
     if content.contains('<') || content.contains('>') {
         format!("<![CDATA[{}]]>", content.replace("]]>", "]]]]><![CDATA[>"))
     } else {
@@ -193,6 +227,20 @@ mod tests {
         }
     }
 
+    fn goal(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            GOAL_META_KEY.to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn render_plan_update_event_emits_plan_update_block() {
         let msg = event("plan_delta", json!({"seq": 5}), "use <new> & better plan");
@@ -201,5 +249,35 @@ mod tests {
             render_event_message(&msg),
             "<plan-update seq=\"5\">use &lt;new&gt; &amp; better plan</plan-update>"
         );
+    }
+
+    #[test]
+    fn render_goal_message_emits_goal_block_with_escaped_attrs_and_cdata() {
+        let msg = goal("agent <mode>", 3, "ship <goal> & split ]]> safely");
+
+        assert_eq!(
+            render_goal_message(&msg).unwrap(),
+            "<goal mode=\"agent &lt;mode&gt;\" version=\"3\">\n<![CDATA[ship <goal> & split ]]]]><![CDATA[> safely]]>\n</goal>"
+        );
+    }
+
+    #[test]
+    fn render_goal_update_event_emits_goal_update_block() {
+        let msg = event("goal_delta", json!({"seq": 7}), "use <new> & better goal");
+
+        assert_eq!(
+            render_event_message(&msg),
+            "<goal-update seq=\"7\">use &lt;new&gt; &amp; better goal</goal-update>"
+        );
+    }
+
+    #[test]
+    fn render_goal_pursuit_event_stays_generic_event() {
+        let msg = event("goal_pursuit", json!({"turn": 2}), "still pursuing");
+        let rendered = render_event_message(&msg);
+
+        assert!(rendered.contains("<event subkind=\"goal_pursuit\""));
+        assert!(rendered.contains("<message>still pursuing</message>"));
+        assert!(!rendered.contains("<goal-update"));
     }
 }

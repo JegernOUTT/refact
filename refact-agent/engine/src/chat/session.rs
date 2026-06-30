@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::agents::types::AgentListFilter;
 use crate::app_state::AppState;
-use crate::call_validation::{ChatContent, ChatMessage};
+use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
 use crate::chat::diagnostics::make_ui_only_error_message;
-use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::internal_roles::{event, EventSubkind, GOAL_ROLE};
 use crate::exec::{ExecMode, ExecProcessFilter, ExecProcessSnapshot, ExecStatusKind};
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
@@ -74,6 +74,190 @@ fn is_active_compression_phase(phase: Option<CompressionPhase>) -> bool {
         phase,
         Some(CompressionPhase::Checking | CompressionPhase::Running)
     )
+}
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn goal_event_subkind(message: &ChatMessage) -> Option<&str> {
+    if message.role != crate::chat::internal_roles::EVENT_ROLE {
+        return None;
+    }
+    message
+        .extra
+        .get("event")
+        .and_then(|event| event.get("subkind"))
+        .and_then(|subkind| subkind.as_str())
+}
+
+fn is_goal_projection_event(message: &ChatMessage) -> bool {
+    matches!(
+        goal_event_subkind(message),
+        Some("goal_delta" | "goal_pursuit")
+    )
+}
+
+fn message_affects_goal_projection(message: &ChatMessage) -> bool {
+    message.role == GOAL_ROLE || is_goal_projection_event(message)
+}
+
+fn goal_runtime_projection(
+    goal: Option<&GoalSnapshot>,
+) -> (bool, Option<GoalStatus>, u32, u64, u32) {
+    goal.map(|goal| {
+        (
+            goal.active,
+            Some(goal.status),
+            goal.progress.turns_used,
+            goal.progress.tokens_used,
+            goal.progress.no_progress_turns,
+        )
+    })
+    .unwrap_or((false, None, 0, 0, 0))
+}
+
+fn apply_goal_runtime_projection(runtime: &mut RuntimeState, goal: Option<&GoalSnapshot>) {
+    let (goal_active, goal_status, goal_turns_used, goal_tokens_used, goal_no_progress_turns) =
+        goal_runtime_projection(goal);
+    runtime.goal_active = goal_active;
+    runtime.goal_status = goal_status;
+    runtime.goal_turns_used = goal_turns_used;
+    runtime.goal_tokens_used = goal_tokens_used;
+    runtime.goal_no_progress_turns = goal_no_progress_turns;
+}
+
+fn synthesized_goal_content(messages: &[ChatMessage], base: &ChatMessage) -> String {
+    let base = base.content.content_text_only();
+    let notes = messages
+        .iter()
+        .filter(|message| goal_event_subkind(message) == Some("goal_delta"))
+        .map(|message| message.content.content_text_only())
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        base
+    } else {
+        format!("{base}\n\n---\n\n## Goal updates\n\n{}", notes.join("\n\n"))
+    }
+}
+
+fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let subkind = goal_event_subkind(message)?;
+            if !matches!(subkind, "goal_delta" | "goal_pursuit") {
+                return None;
+            }
+            let payload = message
+                .extra
+                .get("event")
+                .and_then(|event| event.get("payload"));
+            let at_ms = payload
+                .and_then(|payload| payload.get("at_ms"))
+                .or_else(|| payload.and_then(|payload| payload.get("created_at_ms")))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            Some(GoalEvent {
+                at_ms,
+                kind: subkind.to_string(),
+                text: message.content.content_text_only(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn goal_snapshot_from_messages(
+    messages: &[ChatMessage],
+    existing: Option<&GoalSnapshot>,
+) -> Option<GoalSnapshot> {
+    let (base_index, version, base) = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            crate::chat::goal_role::goal_version(message).map(|version| (index, version, message))
+        })
+        .max_by_key(|(index, version, _)| (*version, *index))?;
+    let _ = base_index;
+    let meta = base.extra.get("goal");
+    let prior = existing.filter(|goal| goal.version == version);
+    let has_prior = prior.is_some();
+    let active = meta
+        .and_then(|meta| meta.get("active"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| prior.map(|goal| goal.active))
+        .unwrap_or(true);
+    let meta_status = meta
+        .and_then(|meta| meta.get("status"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let status = meta_status
+        .or_else(|| prior.map(|goal| goal.status))
+        .unwrap_or(if active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        });
+    let budget = meta
+        .and_then(|meta| meta.get("budget"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.budget.clone()))
+        .unwrap_or_default();
+    let budget = budget.migrate_legacy_default_hard_limits();
+    let progress = meta
+        .and_then(|meta| meta.get("progress"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.progress.clone()))
+        .unwrap_or_default();
+    let derived_events = goal_events_from_messages(messages);
+    let events = meta
+        .and_then(|meta| meta.get("events"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| prior.map(|goal| goal.events.clone()))
+        .filter(|events: &Vec<GoalEvent>| !events.is_empty())
+        .unwrap_or(derived_events);
+    let mut snapshot = GoalSnapshot {
+        content: synthesized_goal_content(messages, base),
+        version,
+        active,
+        status,
+        budget,
+        progress,
+        attempts: meta
+            .and_then(|meta| meta.get("attempts"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .or_else(|| prior.map(|goal| goal.attempts.clone()))
+            .unwrap_or_default(),
+        events,
+        transferred_from: meta
+            .and_then(|meta| meta.get("transferred_from"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| prior.and_then(|goal| goal.transferred_from.clone())),
+        transferred_to: meta
+            .and_then(|meta| meta.get("transferred_to"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| prior.and_then(|goal| goal.transferred_to.clone())),
+    };
+    if (meta_status.is_some() || !has_prior)
+        && matches!(
+            snapshot.status,
+            GoalStatus::BudgetExhausted | GoalStatus::NoProgress
+        )
+        && snapshot
+            .goal_budget_exhaustion_status_at(epoch_ms_now())
+            .is_none()
+    {
+        snapshot.status = if snapshot.active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        };
+    }
+    Some(snapshot)
 }
 
 fn should_replace_background_agent(
@@ -185,6 +369,12 @@ impl ChatSession {
             },
             messages: Vec::new(),
             runtime: RuntimeState::default(),
+            goal: None,
+            goal_active: false,
+            goal_status: None,
+            goal_turns_used: 0,
+            goal_tokens_used: 0,
+            goal_no_progress_turns: 0,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -249,17 +439,33 @@ impl ChatSession {
         created_at: String,
         wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
         waiting_for_card_ids: Vec<String>,
+        goal: Option<GoalSnapshot>,
     ) -> Self {
         // active_skill is runtime state — if the server restarted mid-skill, the compaction
         // anchor (started_at_index) is lost. Clear it so the session starts cleanly rather
         // than leaving the user locked into a ghost skill that can never be deactivated.
         thread.active_skill = None;
+        let goal = goal_snapshot_from_messages(&messages, goal.as_ref()).or(goal);
+        let (goal_active, goal_status, goal_turns_used, goal_tokens_used, goal_no_progress_turns) =
+            goal_runtime_projection(goal.as_ref());
+        let mut runtime = RuntimeState::default();
+        runtime.goal_active = goal_active;
+        runtime.goal_status = goal_status;
+        runtime.goal_turns_used = goal_turns_used;
+        runtime.goal_tokens_used = goal_tokens_used;
+        runtime.goal_no_progress_turns = goal_no_progress_turns;
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id,
             thread,
             messages,
-            runtime: RuntimeState::default(),
+            runtime,
+            goal,
+            goal_active,
+            goal_status,
+            goal_turns_used,
+            goal_tokens_used,
+            goal_no_progress_turns,
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
@@ -325,6 +531,177 @@ impl ChatSession {
         }
     }
 
+    pub(crate) fn refresh_goal_runtime_mirror(&mut self) {
+        let (goal_active, goal_status, goal_turns_used, goal_tokens_used, goal_no_progress_turns) =
+            goal_runtime_projection(self.goal.as_ref());
+        self.goal_active = goal_active;
+        self.goal_status = goal_status;
+        self.goal_turns_used = goal_turns_used;
+        self.goal_tokens_used = goal_tokens_used;
+        self.goal_no_progress_turns = goal_no_progress_turns;
+        apply_goal_runtime_projection(&mut self.runtime, self.goal.as_ref());
+    }
+
+    pub(crate) fn set_goal_projection(&mut self, goal: Option<GoalSnapshot>) {
+        self.goal = goal;
+        self.refresh_goal_runtime_mirror();
+    }
+
+    pub fn goal_budget_exhausted(&self) -> bool {
+        self.goal
+            .as_ref()
+            .is_some_and(GoalSnapshotBudgetExt::goal_budget_exhausted)
+    }
+
+    pub fn goal_can_pursue(&self) -> bool {
+        self.goal
+            .as_ref()
+            .is_some_and(GoalSnapshotBudgetExt::goal_can_pursue)
+    }
+
+    pub fn goal_nudge_ready_at(&self, now_ms: u64) -> bool {
+        self.goal
+            .as_ref()
+            .is_some_and(|goal| goal.goal_nudge_ready_at(now_ms))
+    }
+
+    pub fn goal_record_progress(&mut self, tokens: u64, made_progress: bool) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_record_progress(tokens, made_progress);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_record_progress_from_usage(&mut self, usage: &ChatUsage) -> bool {
+        let Some(goal) = self.goal.as_ref() else {
+            return false;
+        };
+        let made_progress =
+            usage.completion_tokens as u64 >= goal.budget.no_progress_token_threshold;
+        self.goal_record_progress(usage.total_tokens as u64, made_progress)
+    }
+
+    pub fn goal_record_verifier_attempt(&mut self, tokens: u64) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_record_verifier_attempt(tokens);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_note_no_progress_turn(&mut self) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_note_no_progress_turn();
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_record_nudge(&mut self, at_ms: u64) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_record_nudge(at_ms);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_reset_no_progress(&mut self) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        let before = (goal.progress.no_progress_turns, goal.status);
+        goal.goal_reset_no_progress();
+        if before == (goal.progress.no_progress_turns, goal.status) {
+            return false;
+        }
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_set_status(&mut self, status: GoalStatus) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        if goal.status == status {
+            self.emit_goal_status();
+            return true;
+        }
+        goal.status = status;
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_push_attempt(&mut self, attempt: GoalAttempt) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_push_attempt(attempt);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub fn goal_push_event(&mut self, event: GoalEvent) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        goal.goal_push_event(event);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    pub(crate) fn rebuild_goal_projection_from_messages(&mut self) {
+        let existing = self.goal.clone();
+        self.goal = goal_snapshot_from_messages(&self.messages, existing.as_ref());
+        self.refresh_goal_runtime_mirror();
+    }
+
+    pub(crate) fn runtime_update_event(
+        &self,
+        state: SessionState,
+        error: Option<String>,
+        is_compressing: bool,
+        compression_phase: Option<CompressionPhase>,
+        compression_reason: Option<CompressionReason>,
+    ) -> ChatEvent {
+        ChatEvent::RuntimeUpdated {
+            goal_active: self.goal_active,
+            goal_status: self.goal_status,
+            goal_turns_used: self.goal_turns_used,
+            goal_tokens_used: self.goal_tokens_used,
+            goal_no_progress_turns: self.goal_no_progress_turns,
+            state,
+            error,
+            is_compressing,
+            compression_phase,
+            compression_reason,
+        }
+    }
+
+    pub(crate) fn emit_goal_status(&mut self) {
+        self.refresh_goal_runtime_mirror();
+        let event = self.runtime_update_event(
+            self.runtime.state,
+            self.runtime.error.clone(),
+            self.is_compressing,
+            self.compression_phase,
+            self.compression_reason,
+        );
+        self.emit(event);
+    }
+
     pub fn reset_compaction_runtime_state(&mut self) {
         self.last_prompt_messages.clear();
         self.tier1_compact_attempts = 0;
@@ -343,10 +720,12 @@ impl ChatSession {
         self.runtime.compression_reason = None;
         self.active_compression_attempt = None;
         self.compression_attempt_started_at_ms = None;
+        self.refresh_goal_runtime_mirror();
     }
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
+        self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
         self.increment_version();
         self.touch();
@@ -480,15 +859,18 @@ impl ChatSession {
         }
         let mut runtime = self.runtime.clone();
         runtime.queue_size = self.command_queue.len();
+        apply_goal_runtime_projection(&mut runtime, self.goal.as_ref());
         runtime.is_compressing = self.is_compressing;
         runtime.compression_phase = self.compression_phase;
         runtime.compression_reason = self.compression_reason;
         runtime.queued_items = self.build_queued_items();
         ChatEvent::Snapshot {
+            goal: self.goal.clone(),
             thread: self.thread.clone(),
             runtime,
             messages,
             background_agents,
+            browser: None,
         }
     }
 
@@ -502,6 +884,11 @@ impl ChatSession {
             session.background_agents.clone();
         let mut snapshot = session.snapshot();
         async move {
+            let browser = crate::integrations::browser_runtime::browser_snapshot_for_chat(
+                app.clone(),
+                &chat_id,
+            )
+            .await;
             let mut background_agents = base_background_agents;
             let agents = app
                 .agents
@@ -520,10 +907,12 @@ impl ChatSession {
             });
             if let ChatEvent::Snapshot {
                 background_agents: snapshot_background_agents,
+                browser: snapshot_browser,
                 ..
             } = &mut snapshot
             {
                 *snapshot_background_agents = background_agents.clone();
+                *snapshot_browser = browser;
             }
             (snapshot, background_agents)
         }
@@ -623,8 +1012,12 @@ impl ChatSession {
         if message.message_id.is_empty() {
             message.message_id = Uuid::new_v4().to_string();
         }
+        let affects_goal = message_affects_goal_projection(&message);
         let index = self.messages.len();
         self.messages.push(message.clone());
+        if affects_goal {
+            self.rebuild_goal_projection_from_messages();
+        }
         self.tier1_compact_attempts = 0;
         self.tier1_compaction_disabled = false;
         self.emit(ChatEvent::MessageAdded { message, index });
@@ -670,7 +1063,8 @@ impl ChatSession {
                 role if role == "assistant"
                     || role == "user"
                     || role == crate::chat::internal_roles::EVENT_ROLE
-                    || role == crate::chat::internal_roles::PLAN_ROLE =>
+                    || role == crate::chat::internal_roles::PLAN_ROLE
+                    || role == crate::chat::internal_roles::GOAL_ROLE =>
                 {
                     break;
                 }
@@ -758,12 +1152,29 @@ impl ChatSession {
         crate::chat::plan_role::install_plan(self, mode, body)
     }
 
+    pub fn install_goal(
+        &mut self,
+        mode: &str,
+        body: &str,
+        active: bool,
+        budget: GoalBudget,
+    ) -> crate::chat::goal_role::GoalInstallReport {
+        let report = crate::chat::goal_role::install_goal(self, mode, body, active, budget);
+        self.rebuild_goal_projection_from_messages();
+        self.emit_goal_status();
+        report
+    }
+
     pub fn insert_message(&mut self, index: usize, mut message: ChatMessage) {
         if message.message_id.is_empty() {
             message.message_id = Uuid::new_v4().to_string();
         }
+        let affects_goal = message_affects_goal_projection(&message);
         let insert_idx = index.min(self.messages.len());
         self.messages.insert(insert_idx, message.clone());
+        if affects_goal {
+            self.rebuild_goal_projection_from_messages();
+        }
         self.tier1_compact_attempts = 0;
         self.tier1_compaction_disabled = false;
         self.emit(ChatEvent::MessageAdded {
@@ -780,7 +1191,12 @@ impl ChatSession {
             .iter()
             .position(|m| m.message_id == message_id)
         {
+            let affects_goal = message_affects_goal_projection(&self.messages[idx])
+                || message_affects_goal_projection(&message);
             self.messages[idx] = message.clone();
+            if affects_goal {
+                self.rebuild_goal_projection_from_messages();
+            }
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
@@ -789,6 +1205,7 @@ impl ChatSession {
                 message_id: message_id.to_string(),
                 message,
             });
+            self.goal_reset_no_progress();
             self.invalidate_summaries_referencing(message_id);
             self.increment_version();
             self.touch();
@@ -895,6 +1312,7 @@ impl ChatSession {
             .position(|m| m.message_id == message_id)
         {
             let msg = &self.messages[idx];
+            let affects_goal = message_affects_goal_projection(msg);
             let role = msg.role.clone();
             let tool_call_ids: Vec<String> = msg
                 .tool_calls
@@ -903,6 +1321,9 @@ impl ChatSession {
                 .unwrap_or_default();
 
             self.messages.remove(idx);
+            if affects_goal {
+                self.rebuild_goal_projection_from_messages();
+            }
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
@@ -937,7 +1358,13 @@ impl ChatSession {
 
     pub fn truncate_messages(&mut self, from_index: usize) {
         if from_index < self.messages.len() {
+            let affects_goal = self.messages[from_index..]
+                .iter()
+                .any(message_affects_goal_projection);
             self.messages.truncate(from_index);
+            if affects_goal {
+                self.rebuild_goal_projection_from_messages();
+            }
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
@@ -1049,6 +1476,7 @@ impl ChatSession {
         self.runtime.is_compressing = self.is_compressing;
         self.runtime.compression_phase = self.compression_phase;
         self.runtime.compression_reason = self.compression_reason;
+        self.refresh_goal_runtime_mirror();
         self.touch();
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
@@ -1074,13 +1502,14 @@ impl ChatSession {
             }
         }
 
-        self.emit(ChatEvent::RuntimeUpdated {
+        let event = self.runtime_update_event(
             state,
-            error: error.clone(),
-            is_compressing: self.is_compressing,
-            compression_phase: self.compression_phase,
-            compression_reason: self.compression_reason,
-        });
+            error.clone(),
+            self.is_compressing,
+            self.compression_phase,
+            self.compression_reason,
+        );
+        self.emit(event);
         self.emit_trajectory_state_change();
     }
 
@@ -1398,6 +1827,7 @@ impl ChatSession {
         self.abort_flag.store(true, Ordering::SeqCst);
         self.user_interrupt_flag.store(true, Ordering::SeqCst);
         self.abort_notify.notify_waiters();
+        self.refresh_goal_runtime_mirror();
         if let Some(draft) = self.draft_message.take() {
             self.emit(ChatEvent::StreamFinished {
                 message_id: draft.message_id.clone(),
@@ -1601,13 +2031,14 @@ impl ChatSession {
                 self.emit(ChatEvent::PauseRequired {
                     reasons: self.runtime.pause_reasons.clone(),
                 });
-                self.emit(ChatEvent::RuntimeUpdated {
-                    state: self.runtime.state,
-                    error: self.runtime.error.clone(),
-                    is_compressing: self.is_compressing,
-                    compression_phase: self.compression_phase,
-                    compression_reason: self.compression_reason,
-                });
+                let event = self.runtime_update_event(
+                    self.runtime.state,
+                    self.runtime.error.clone(),
+                    self.is_compressing,
+                    self.compression_phase,
+                    self.compression_reason,
+                );
+                self.emit(event);
             }
         }
 
@@ -1697,6 +2128,7 @@ pub async fn get_or_create_session_with_trajectory(
             loaded.created_at,
             loaded.wake_up_at,
             loaded.waiting_for_card_ids,
+            loaded.goal,
         );
         if transition_identity_repaired {
             session.increment_version();
@@ -2086,6 +2518,236 @@ mod tests {
         ChatSession::new("test-chat".to_string())
     }
 
+    mod goal_budget {
+        use super::*;
+
+        fn budget() -> GoalBudget {
+            GoalBudget {
+                max_turns: Some(5),
+                max_minutes: Some(2),
+                max_tokens: Some(100),
+                cooldown_ms: 1_500,
+                no_progress_token_threshold: 10,
+                no_progress_turns: Some(2),
+                explicit: false,
+            }
+        }
+
+        fn snapshot() -> GoalSnapshot {
+            GoalSnapshot {
+                content: "ship it".to_string(),
+                version: 1,
+                active: true,
+                status: GoalStatus::Active,
+                budget: budget(),
+                progress: GoalProgress {
+                    started_at_ms: 1_000,
+                    ..Default::default()
+                },
+                attempts: Vec::new(),
+                events: Vec::new(),
+                transferred_from: None,
+                transferred_to: None,
+            }
+        }
+
+        fn usage(total_tokens: usize, completion_tokens: usize) -> ChatUsage {
+            ChatUsage {
+                prompt_tokens: total_tokens.saturating_sub(completion_tokens),
+                completion_tokens,
+                total_tokens,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                metering_usd: None,
+            }
+        }
+
+        #[test]
+        fn budget_exhaustion_by_turns_tokens_minutes_and_no_progress() {
+            let mut by_turns = snapshot();
+            by_turns.progress.turns_used = by_turns.budget.max_turns.unwrap();
+            assert_eq!(
+                by_turns.goal_budget_exhaustion_status_at(1_000),
+                Some(GoalStatus::BudgetExhausted)
+            );
+
+            let mut by_tokens = snapshot();
+            by_tokens.progress.tokens_used = by_tokens.budget.max_tokens.unwrap();
+            assert_eq!(
+                by_tokens.goal_budget_exhaustion_status_at(1_000),
+                Some(GoalStatus::BudgetExhausted)
+            );
+
+            let by_minutes = snapshot();
+            assert_eq!(
+                by_minutes.goal_budget_exhaustion_status_at(121_000),
+                Some(GoalStatus::BudgetExhausted)
+            );
+
+            let mut by_no_progress = snapshot();
+            by_no_progress.progress.no_progress_turns =
+                by_no_progress.budget.no_progress_turns.unwrap();
+            assert_eq!(
+                by_no_progress.goal_budget_exhaustion_status_at(1_000),
+                Some(GoalStatus::NoProgress)
+            );
+        }
+
+        #[test]
+        fn default_budget_never_exhausts() {
+            let mut goal = snapshot();
+            goal.budget = GoalBudget::default();
+            goal.progress.turns_used = u32::MAX;
+            goal.progress.tokens_used = u64::MAX;
+            goal.progress.no_progress_turns = u32::MAX;
+            goal.progress.started_at_ms = 1;
+
+            assert_eq!(goal.goal_budget_exhaustion_status_at(u64::MAX), None);
+            assert!(goal.goal_can_pursue_at(u64::MAX));
+        }
+
+        #[test]
+        fn zero_budget_limits_are_disabled() {
+            let mut goal = snapshot();
+            goal.budget.max_turns = Some(0);
+            goal.budget.max_minutes = Some(0);
+            goal.budget.max_tokens = Some(0);
+            goal.budget.no_progress_turns = Some(0);
+            goal.progress.turns_used = u32::MAX;
+            goal.progress.tokens_used = u64::MAX;
+            goal.progress.no_progress_turns = u32::MAX;
+            goal.progress.started_at_ms = 1;
+
+            assert_eq!(goal.goal_budget_exhaustion_status_at(u64::MAX), None);
+            assert!(goal.goal_can_pursue_at(u64::MAX));
+        }
+
+        #[test]
+        fn cooldown_gate_uses_last_nudge_plus_budget_cooldown() {
+            let mut goal = snapshot();
+            assert!(goal.goal_nudge_ready_at(1_000));
+
+            goal.goal_record_nudge(2_000);
+
+            assert!(!goal.goal_nudge_ready_at(3_499));
+            assert!(goal.goal_nudge_ready_at(3_500));
+        }
+
+        #[test]
+        fn goal_can_pursue_matrix_across_statuses() {
+            let mut goal = snapshot();
+            assert!(goal.goal_can_pursue_at(1_000));
+
+            for status in [
+                GoalStatus::Verifying,
+                GoalStatus::Paused,
+                GoalStatus::Completed,
+                GoalStatus::Stopped,
+                GoalStatus::BudgetExhausted,
+                GoalStatus::NoProgress,
+                GoalStatus::Transferred,
+            ] {
+                goal.status = status;
+                assert!(!goal.goal_can_pursue_at(1_000), "{status:?}");
+            }
+
+            goal.status = GoalStatus::Active;
+            goal.active = false;
+            assert!(!goal.goal_can_pursue_at(1_000));
+
+            goal.active = true;
+            goal.progress.turns_used = goal.budget.max_turns.unwrap();
+            assert!(!goal.goal_can_pursue_at(1_000));
+        }
+
+        #[test]
+        fn no_progress_counts_low_output_and_resets_on_progress_or_edit() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+
+            assert!(session.goal_record_progress_from_usage(&usage(20, 3)));
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+            assert_eq!(session.goal_status, Some(GoalStatus::Active));
+
+            session.goal_record_progress_from_usage(&usage(20, 4));
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 2);
+            assert_eq!(session.goal_status, Some(GoalStatus::NoProgress));
+            assert!(!session.goal_can_pursue());
+
+            session.goal_record_progress_from_usage(&usage(20, 12));
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+            assert_eq!(session.goal_status, Some(GoalStatus::Active));
+
+            session.goal_record_progress_from_usage(&usage(20, 1));
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 1);
+            let user = ChatMessage {
+                message_id: "user-edit".to_string(),
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("before".to_string()),
+                ..Default::default()
+            };
+            session.add_message(user.clone());
+            let mut updated = user;
+            updated.content = ChatContent::SimpleText("after".to_string());
+            session.update_message("user-edit", updated);
+
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+        }
+
+        #[test]
+        fn manual_no_progress_reset_restores_active_gate() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+            session.goal_record_progress_from_usage(&usage(20, 1));
+            session.goal_record_progress_from_usage(&usage(20, 1));
+            assert_eq!(session.goal_status, Some(GoalStatus::NoProgress));
+
+            assert!(session.goal_reset_no_progress());
+
+            assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+            assert_eq!(session.goal_status, Some(GoalStatus::Active));
+            assert!(session.goal_can_pursue());
+        }
+
+        #[test]
+        fn verifier_attempt_counts_turn_and_tokens_without_no_progress() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+
+            assert!(session.goal_record_verifier_attempt(42));
+
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.progress.turns_used, 1);
+            assert_eq!(goal.progress.tokens_used, 42);
+            assert_eq!(goal.progress.no_progress_turns, 0);
+        }
+
+        #[test]
+        fn attempts_and_events_append_through_helpers() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+
+            session.goal_push_attempt(GoalAttempt {
+                at_ms: 10,
+                trigger: "done".to_string(),
+                verdict: "needs_work".to_string(),
+                gaps: vec!["tests".to_string()],
+                verifier_reply: "run tests".to_string(),
+            });
+            session.goal_push_event(GoalEvent {
+                at_ms: 11,
+                kind: "nudge".to_string(),
+                text: "keep going".to_string(),
+            });
+
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.attempts.len(), 1);
+            assert_eq!(goal.events.len(), 1);
+            assert_eq!(goal.attempts[0].gaps, vec!["tests".to_string()]);
+            assert_eq!(goal.events[0].text, "keep going");
+        }
+    }
+
     /// Creates a session with a small broadcast channel capacity, useful for
     /// triggering `RecvError::Lagged` quickly in tests without emitting
     /// thousands of events.
@@ -2148,11 +2810,212 @@ mod tests {
             "2024-01-01T00:00:00Z".into(),
             None,
             Vec::new(),
+            None,
         );
         assert_eq!(session.chat_id, "traj-1");
         assert_eq!(session.thread.title, "Old Chat");
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.created_at, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn install_goal_populates_snapshot_and_runtime_fields() {
+        let mut session = make_session();
+        let budget = GoalBudget {
+            max_turns: Some(7),
+            max_minutes: Some(8),
+            max_tokens: Some(9),
+            cooldown_ms: 10,
+            no_progress_token_threshold: 11,
+            no_progress_turns: Some(12),
+            explicit: false,
+        };
+
+        session.install_goal("agent", "ship the card", true, budget.clone());
+
+        let goal = session.goal.clone().expect("goal projection");
+        assert_eq!(goal.content, "ship the card");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.budget, budget);
+        assert!(session.goal_active);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.goal_turns_used, 0);
+        match session.snapshot() {
+            ChatEvent::Snapshot {
+                goal: snapshot_goal,
+                runtime,
+                ..
+            } => {
+                assert_eq!(snapshot_goal, Some(goal));
+                assert!(runtime.goal_active);
+                assert_eq!(runtime.goal_status, Some(GoalStatus::Active));
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_with_trajectory_rehydrates_goal_without_transfer() {
+        let goal_message = crate::chat::internal_roles::goal(
+            "agent",
+            1,
+            "finish the migration",
+            None,
+            true,
+            GoalBudget::default(),
+        );
+        let persisted_goal = GoalSnapshot {
+            content: "persisted content".to_string(),
+            version: 1,
+            active: true,
+            status: GoalStatus::Active,
+            budget: GoalBudget::default(),
+            progress: GoalProgress {
+                turns_used: 4,
+                tokens_used: 1234,
+                started_at_ms: 55,
+                no_progress_turns: 1,
+                last_nudge_at_ms: 77,
+            },
+            attempts: Vec::new(),
+            events: Vec::new(),
+            transferred_from: None,
+            transferred_to: None,
+        };
+
+        let session = ChatSession::new_with_trajectory(
+            "goal-reload".to_string(),
+            vec![goal_message],
+            ThreadParams::default(),
+            "2024-01-01T00:00:00Z".to_string(),
+            None,
+            Vec::new(),
+            Some(persisted_goal.clone()),
+        );
+
+        let goal = session.goal.expect("goal projection");
+        assert_eq!(goal.content, "finish the migration");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.progress, persisted_goal.progress);
+        assert_eq!(goal.transferred_from, None);
+        assert_eq!(goal.transferred_to, None);
+        assert!(session.goal_active);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.goal_turns_used, 4);
+        assert_eq!(session.goal_tokens_used, 1234);
+        assert_eq!(session.goal_no_progress_turns, 1);
+        assert_eq!(session.event_seq, 0);
+    }
+
+    #[test]
+    fn restored_active_goal_without_progress_keeps_unstarted_clock() {
+        let goal_message = crate::chat::internal_roles::goal(
+            "agent",
+            1,
+            "finish the migration",
+            None,
+            true,
+            GoalBudget::default(),
+        );
+
+        let session = ChatSession::new_with_trajectory(
+            "goal-unstarted-reload".to_string(),
+            vec![goal_message],
+            ThreadParams::default(),
+            "2024-01-01T00:00:00Z".to_string(),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let goal = session.goal.expect("goal projection");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.progress.started_at_ms, 0);
+    }
+
+    #[test]
+    fn restored_legacy_default_budget_heals_terminal_status() {
+        let mut goal_message = crate::chat::internal_roles::goal(
+            "agent",
+            1,
+            "finish the migration",
+            None,
+            true,
+            GoalBudget::legacy_default_hard_limits(),
+        );
+        let goal_meta = goal_message.extra.get_mut("goal").unwrap();
+        goal_meta["status"] = json!(GoalStatus::BudgetExhausted);
+
+        let session = ChatSession::new_with_trajectory(
+            "goal-legacy-budget-reload".to_string(),
+            vec![goal_message],
+            ThreadParams::default(),
+            "2024-01-01T00:00:00Z".to_string(),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let goal = session.goal.expect("goal projection");
+        assert_eq!(goal.budget, GoalBudget::default());
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.progress.started_at_ms, 0);
+    }
+
+    #[test]
+    fn restored_explicit_finite_exhausted_goal_stays_terminal() {
+        let mut goal_message = crate::chat::internal_roles::goal(
+            "agent",
+            1,
+            "finish the migration",
+            None,
+            true,
+            GoalBudget {
+                max_turns: Some(3),
+                max_minutes: None,
+                max_tokens: None,
+                cooldown_ms: 1_500,
+                no_progress_token_threshold: 50,
+                no_progress_turns: None,
+                explicit: true,
+            },
+        );
+        let goal_meta = goal_message.extra.get_mut("goal").unwrap();
+        goal_meta["status"] = json!(GoalStatus::BudgetExhausted);
+        goal_meta["progress"] = json!(GoalProgress {
+            turns_used: 3,
+            ..Default::default()
+        });
+
+        let session = ChatSession::new_with_trajectory(
+            "goal-explicit-budget-reload".to_string(),
+            vec![goal_message],
+            ThreadParams::default(),
+            "2024-01-01T00:00:00Z".to_string(),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let goal = session.goal.expect("goal projection");
+        assert_eq!(goal.status, GoalStatus::BudgetExhausted);
+        assert_eq!(goal.budget.max_turns, Some(3));
+    }
+
+    #[test]
+    fn abort_preserves_goal_projection_and_runtime_mirror() {
+        let mut session = make_session();
+        session.install_goal("agent", "keep goal", true, GoalBudget::default());
+        session.goal.as_mut().unwrap().progress.turns_used = 2;
+        session.refresh_goal_runtime_mirror();
+
+        session.abort_stream();
+
+        assert!(session.goal.is_some());
+        assert!(session.goal_active);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(session.goal_turns_used, 2);
+        assert_eq!(session.runtime.goal_turns_used, 2);
     }
 
     #[test]
@@ -4266,6 +5129,7 @@ mod tests {
             "2024-01-01T00:00:00Z".into(),
             None,
             Vec::new(),
+            None,
         );
         assert!(session.active_command.context_fork.is_none());
         assert!(session.active_command.model_override.is_none());
@@ -4516,6 +5380,7 @@ mod tests {
             "2024-01-01T00:00:00Z".into(),
             None,
             Vec::new(),
+            None,
         );
         assert!(
             session.thread.active_skill.is_none(),

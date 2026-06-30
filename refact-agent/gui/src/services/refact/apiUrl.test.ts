@@ -104,6 +104,16 @@ describe("resolveEngineBaseUrl", () => {
       }),
     ).toBe("https://remote.example.com/refact");
   });
+
+  test("prefers JetBrains lspUrl over browserUrl for API base", () => {
+    expect(
+      resolveEngineBaseUrl({
+        host: "jetbrains",
+        lspUrl: "http://127.0.0.1:8488/p/x",
+        browserUrl: "http://myhost.local:8488/p/x",
+      }),
+    ).toBe("http://127.0.0.1:8488/p/x");
+  });
 });
 
 describe("hasUsableEngineEndpoint", () => {
@@ -133,6 +143,49 @@ describe("hasUsableEngineEndpoint", () => {
       hasUsableEngineEndpoint({
         host: "vscode",
         lspUrl: "https://remote.example.com/v1/ping",
+      }),
+    ).toBe(true);
+  });
+
+  test("blocks non-ready IDE plugin endpoints even when URL and port are present", () => {
+    expect(
+      hasUsableEngineEndpoint({
+        host: "vscode",
+        lspPort: 8001,
+        browserUrl: "http://127.0.0.1:8001",
+        lspUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "starting",
+      }),
+    ).toBe(false);
+    expect(
+      hasUsableEngineEndpoint({
+        host: "jetbrains",
+        lspPort: 8001,
+        lspUrl: "http://127.0.0.1:8001",
+        backendReady: true,
+        connectionStatus: "installing",
+      }),
+    ).toBe(false);
+    expect(
+      hasUsableEngineEndpoint({
+        host: "vscode",
+        lspPort: 8001,
+        browserUrl: "http://127.0.0.1:8001",
+        lspUrl: "http://127.0.0.1:8001",
+        backendReady: false,
+        connectionStatus: "failed",
+      }),
+    ).toBe(false);
+  });
+
+  test("keeps ready IDE plugin config usable", () => {
+    expect(
+      hasUsableEngineEndpoint({
+        host: "vscode",
+        lspPort: 8001,
+        backendReady: true,
+        connectionStatus: "ready",
       }),
     ).toBe(true);
   });

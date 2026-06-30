@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Notify, RwLock};
 
-use super::types::Job;
+use super::types::{Job, Trigger};
 
 #[async_trait]
 pub trait CronStore: Send + Sync {
@@ -14,6 +14,19 @@ pub trait CronStore: Send + Sync {
     async fn replace(&self, job: Job) -> Result<bool, String>;
     async fn remove(&self, id: &str) -> Result<bool, String>;
     async fn list(&self) -> Vec<Job>;
+    async fn jobs_by_hook_id(&self, hook_id: &str) -> Vec<Job> {
+        let hook_id = hook_id.trim();
+        if hook_id.is_empty() {
+            return Vec::new();
+        }
+        self.list()
+            .await
+            .into_iter()
+            .filter(|job| {
+                matches!(&job.trigger, Trigger::Webhook { hook_id: job_hook_id } if job_hook_id == hook_id)
+            })
+            .collect()
+    }
     async fn update_fired(
         &self,
         id: &str,
@@ -312,6 +325,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn json_file_jobs_by_hook_id_returns_matching_webhook_jobs_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JsonFileCronStore::new(temp.path()).unwrap();
+        let mut matching = test_job("cron_matching_file");
+        matching.trigger = Trigger::Webhook {
+            hook_id: "deploy".to_string(),
+        };
+        let mut nonmatching = test_job("cron_other_file");
+        nonmatching.trigger = Trigger::Webhook {
+            hook_id: "other".to_string(),
+        };
+        store.add(matching).await.unwrap();
+        store.add(nonmatching).await.unwrap();
+
+        let jobs = store.jobs_by_hook_id("deploy").await;
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "cron_matching_file");
+    }
+
+    #[tokio::test]
     async fn replace_updates_in_place() {
         let temp = tempfile::tempdir().unwrap();
         let store = JsonFileCronStore::new(temp.path()).unwrap();
@@ -328,5 +362,28 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(store.path()).unwrap()).unwrap();
         assert_eq!(serialized.as_array().unwrap().len(), 1);
         assert_eq!(serialized[0]["description"], json!(job.description));
+    }
+
+    #[tokio::test]
+    async fn jobs_by_hook_id_returns_matching_webhook_jobs_only() {
+        let store = InMemoryCronStore::new();
+        let mut matching = test_job("cron_matching");
+        matching.trigger = Trigger::Webhook {
+            hook_id: "deploy".to_string(),
+        };
+        let mut nonmatching = test_job("cron_other_hook");
+        nonmatching.trigger = Trigger::Webhook {
+            hook_id: "other".to_string(),
+        };
+        let timed = test_job("cron_timed");
+        store.add(matching).await.unwrap();
+        store.add(nonmatching).await.unwrap();
+        store.add(timed).await.unwrap();
+
+        let jobs = store.jobs_by_hook_id("deploy").await;
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "cron_matching");
+        assert!(store.jobs_by_hook_id("   ").await.is_empty());
     }
 }

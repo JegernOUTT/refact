@@ -11,10 +11,12 @@ import { useGetConfiguredProvidersQuery } from "../../../../hooks";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
   type ClaudeCodeUsageData,
   type ClaudeCodeUsageWindow,
   type OpenAICodexAdditionalRateLimit,
   type OpenAICodexRateLimit,
+  type OpenCodeUsageData,
 } from "../../../../services/refact/providers";
 import { integrationsApi } from "../../../../services/refact/integrations";
 import { useGetKnowledgeGraphQuery } from "../../../../services/refact/knowledgeGraphApi";
@@ -192,6 +194,27 @@ const CLAUDE_USAGE_WINDOWS: {
   { key: "seven_day_cowork", label: "Cowork week" },
   { key: "seven_day_omelette", label: "Omelette week" },
 ];
+
+type OpenCodeUsageWindowKey = keyof Pick<
+  OpenCodeUsageData,
+  "rolling" | "weekly" | "monthly"
+>;
+
+const OPENCODE_USAGE_WINDOWS: {
+  key: OpenCodeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "rolling", label: "Rolling" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
+function hasOpenCodeQuotaData(data: OpenCodeUsageData): boolean {
+  return (
+    typeof data.balance === "number" ||
+    OPENCODE_USAGE_WINDOWS.some(({ key }) => Boolean(data[key]))
+  );
+}
 
 function CodexRateLimitRows({
   rateLimit,
@@ -521,6 +544,99 @@ function OpenAICodexInstanceRow({
   );
 }
 
+function OpenCodeInstanceRow({
+  providerName,
+  displayName,
+  data,
+}: {
+  providerName: string;
+  displayName: string;
+  data: OpenCodeUsageData;
+}) {
+  const windows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: OpenCodeUsageWindowKey;
+      label: string;
+      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
+    } => Boolean(row.window),
+  );
+  if (!hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <div className={styles.cardSection}>
+      <Flex align="center" gap="2" mb="1">
+        <Text size="1" weight="medium">
+          {displayName}
+        </Text>
+        <Text size="1" tone="muted">
+          ({providerName})
+        </Text>
+        {data.plan_type && (
+          <Badge color="blue" size="1">
+            {data.plan_type}
+          </Badge>
+        )}
+      </Flex>
+      {data.workspace_id && (
+        <Text size="1" tone="muted">
+          Workspace: {data.workspace_id}
+        </Text>
+      )}
+      {typeof data.balance === "number" && (
+        <Text size="1" tone="muted">
+          Zen balance:{" "}
+          {data.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </Text>
+      )}
+      {windows.map(({ key, label, window }) => (
+        <WindowRow
+          key={key}
+          label={formatWindowLabel(label, window.limit_window_seconds)}
+          pct={window.used_percent}
+          resetAt={window.reset_at}
+          resetAfterSeconds={window.reset_after_seconds}
+          limitReached={window.status === "rate-limited"}
+          windowSeconds={window.limit_window_seconds}
+        />
+      ))}
+    </div>
+  );
+}
+
+function OpenCodeProviderQuotaCard({
+  providerName,
+  displayName,
+}: {
+  providerName: string;
+  displayName: string;
+}) {
+  const { data: openCodeUsage } = useGetOpenCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 5 * 60_000 },
+  );
+  const data = openCodeUsage?.data;
+  if (!data || !hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
+      <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
+        OPENCODE QUOTA
+      </Text>
+      <OpenCodeInstanceRow
+        providerName={providerName}
+        displayName={displayName}
+        data={data}
+      />
+    </div>
+  );
+}
+
 function ProviderQuotaCard() {
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const providers = useMemo(
@@ -538,7 +654,6 @@ function ProviderQuotaCard() {
       providers.filter((p) => p.base_provider === "openai_codex" && p.enabled),
     [providers],
   );
-
   if (claudeInstances.length === 0 && codexInstances.length === 0) return null;
 
   const rows: React.ReactNode[] = [];
@@ -560,7 +675,6 @@ function ProviderQuotaCard() {
       />,
     ),
   );
-
   return (
     <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
       <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
@@ -591,6 +705,13 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
 
   const providerCount =
     providersData?.providers.filter((p) => p.enabled).length ?? 0;
+  const openCodeInstances = useMemo(
+    () =>
+      providersData?.providers.filter(
+        (p) => p.base_provider === "opencode" && p.enabled,
+      ) ?? [],
+    [providersData],
+  );
   const integrationCount = integrationsData?.integrations.length ?? 0;
   const memoryCount = knowledgeData?.stats.active_docs ?? 0;
 
@@ -708,6 +829,13 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     <div className={styles.statsGrid} data-breakpoint={breakpoint}>
       <DefaultModelsCard />
       <ProviderQuotaCard />
+      {openCodeInstances.map((p) => (
+        <OpenCodeProviderQuotaCard
+          key={`opencode:${p.name}`}
+          providerName={p.name}
+          displayName={p.display_name}
+        />
+      ))}
       {/* Card 1: 7-Day Activity */}
       <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
         <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>

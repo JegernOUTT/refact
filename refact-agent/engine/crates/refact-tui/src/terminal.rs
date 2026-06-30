@@ -1,5 +1,6 @@
 use std::io::{self, IsTerminal, Write};
 use std::panic;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -9,14 +10,97 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode as crossterm_disable_raw_mode, enable_raw_mode as crossterm_enable_raw_mode,
-    EnterAlternateScreen, LeaveAlternateScreen,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde::Deserialize;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
-pub type RefactTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+pub type RefactTerminal = Terminal<StdoutBackend>;
 
+pub struct StdoutBackend {
+    inner: CrosstermBackend<io::Stdout>,
+    injected_cursor: Option<Position>,
+}
+
+impl StdoutBackend {
+    fn new(injected_cursor: Option<Position>) -> Self {
+        Self {
+            inner: CrosstermBackend::new(io::stdout()),
+            injected_cursor,
+        }
+    }
+}
+
+impl Write for StdoutBackend {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.inner)
+    }
+}
+
+impl Backend for StdoutBackend {
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        match self.injected_cursor.take() {
+            Some(position) => Ok(position),
+            None => self.inner.get_cursor_position(),
+        }
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.inner.append_lines(n)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.inner)
+    }
+}
+
+pub const TARGET_FRAME_INTERVAL: Duration = MIN_FRAME_INTERVAL;
+
+const MIN_FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 const INLINE_VIEWPORT_HEIGHT: u16 = 12;
 const FALLBACK_ENV: &str = "REFACT_TUI_ALT_SCREEN";
 const TITLE_ENV: &str = "REFACT_TUI_TERMINAL_TITLE";
@@ -24,6 +108,106 @@ const DEFAULT_TERMINAL_TITLE: &str = "refact";
 const MAX_TERMINAL_TITLE_CHARS: usize = 80;
 const PUSH_TITLE_SEQUENCE: &[u8] = b"\x1b[22;0t";
 const POP_TITLE_SEQUENCE: &[u8] = b"\x1b[23;0t";
+
+#[derive(Clone, Debug)]
+pub struct FrameRequester {
+    frame_schedule_tx: mpsc::UnboundedSender<Instant>,
+}
+
+impl FrameRequester {
+    pub fn new() -> (Self, mpsc::Receiver<()>) {
+        let (schedule_tx, schedule_rx) = mpsc::unbounded_channel();
+        let (draw_tx, draw_rx) = mpsc::channel(1);
+        tokio::spawn(FrameScheduler::new(schedule_rx, draw_tx).run());
+        (
+            Self {
+                frame_schedule_tx: schedule_tx,
+            },
+            draw_rx,
+        )
+    }
+
+    pub fn schedule_frame(&self) {
+        let _ = self.frame_schedule_tx.send(Instant::now());
+    }
+
+    pub fn schedule_frame_in(&self, delay: Duration) {
+        let _ = self.frame_schedule_tx.send(Instant::now() + delay);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FrameRateLimiter {
+    last_emitted_at: Option<Instant>,
+}
+
+impl FrameRateLimiter {
+    fn clamp_deadline(&self, requested: Instant) -> Instant {
+        let Some(last_emitted_at) = self.last_emitted_at else {
+            return requested;
+        };
+        let min_allowed = last_emitted_at
+            .checked_add(MIN_FRAME_INTERVAL)
+            .unwrap_or(last_emitted_at);
+        requested.max(min_allowed)
+    }
+
+    fn mark_emitted(&mut self, emitted_at: Instant) {
+        self.last_emitted_at = Some(emitted_at);
+    }
+}
+
+struct FrameScheduler {
+    schedule_rx: mpsc::UnboundedReceiver<Instant>,
+    draw_tx: mpsc::Sender<()>,
+    rate_limiter: FrameRateLimiter,
+}
+
+impl FrameScheduler {
+    fn new(schedule_rx: mpsc::UnboundedReceiver<Instant>, draw_tx: mpsc::Sender<()>) -> Self {
+        Self {
+            schedule_rx,
+            draw_tx,
+            rate_limiter: FrameRateLimiter::default(),
+        }
+    }
+
+    async fn run(mut self) {
+        const IDLE_SLEEP: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+        let mut next_deadline: Option<Instant> = None;
+        loop {
+            let target = next_deadline.unwrap_or_else(|| Instant::now() + IDLE_SLEEP);
+            let sleep = tokio::time::sleep_until(target.into());
+            tokio::pin!(sleep);
+            tokio::select! {
+                draw_at = self.schedule_rx.recv() => {
+                    let Some(draw_at) = draw_at else {
+                        break;
+                    };
+                    self.note_request(draw_at, &mut next_deadline);
+                    while let Ok(draw_at) = self.schedule_rx.try_recv() {
+                        self.note_request(draw_at, &mut next_deadline);
+                    }
+                }
+                _ = &mut sleep => {
+                    if next_deadline.is_some() {
+                        next_deadline = None;
+                        self.rate_limiter.mark_emitted(Instant::now());
+                        match self.draw_tx.try_send(()) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Closed(_)) => break,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn note_request(&mut self, draw_at: Instant, next_deadline: &mut Option<Instant>) {
+        let draw_at = self.rate_limiter.clamp_deadline(draw_at);
+        *next_deadline = Some(next_deadline.map_or(draw_at, |current| current.min(draw_at)));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalMode {
@@ -194,16 +378,7 @@ impl TerminalSession {
         );
         guard.initialize()?;
         install_panic_restore_hook(mode, title_config);
-        let backend = CrosstermBackend::new(io::stdout());
-        let terminal = match mode {
-            TerminalMode::Inline => Terminal::with_options(
-                backend,
-                TerminalOptions {
-                    viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-                },
-            )?,
-            TerminalMode::AlternateScreen => Terminal::new(backend)?,
-        };
+        let terminal = build_terminal(mode)?;
         Ok(Self {
             terminal,
             guard,
@@ -229,7 +404,7 @@ impl TerminalSession {
     pub fn write_notification(&mut self, bytes: &[u8]) -> io::Result<()> {
         let writer = self.terminal.backend_mut();
         writer.write_all(bytes)?;
-        writer.flush()
+        Write::flush(writer)
     }
 
     pub fn mode(&self) -> TerminalMode {
@@ -257,6 +432,20 @@ impl TerminalSession {
         self.guard.resume()?;
         self.last_title = None;
         self.terminal.clear()
+    }
+
+    pub fn clear_for_resize_reflow(&mut self) -> io::Result<()> {
+        execute!(self.terminal.backend_mut(), Clear(ClearType::Purge))?;
+        self.terminal = match self.guard.mode {
+            TerminalMode::Inline => Terminal::with_options(
+                StdoutBackend::new(None),
+                TerminalOptions {
+                    viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+                },
+            )?,
+            TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None))?,
+        };
+        Ok(())
     }
 }
 
@@ -499,6 +688,35 @@ pub fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
     )
 }
 
+fn build_terminal(mode: TerminalMode) -> io::Result<RefactTerminal> {
+    match mode {
+        TerminalMode::Inline => Terminal::with_options(
+            StdoutBackend::new(Some(probe_startup_cursor_position())),
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+            },
+        ),
+        TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None)),
+    }
+}
+
+fn probe_startup_cursor_position() -> Position {
+    match crate::terminal_probe::cursor_position(crate::terminal_probe::DEFAULT_TIMEOUT) {
+        Ok(Some(position)) => position,
+        Ok(None) => {
+            tracing::warn!(
+                "initial cursor position probe timed out after {}ms; defaulting to origin",
+                crate::terminal_probe::DEFAULT_TIMEOUT.as_millis()
+            );
+            Position { x: 0, y: 0 }
+        }
+        Err(err) => {
+            tracing::warn!("initial cursor position probe failed ({err}); defaulting to origin");
+            Position { x: 0, y: 0 }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +875,16 @@ mod tests {
     }
 
     #[test]
+    fn stdout_backend_returns_injected_cursor_once() {
+        let mut backend = StdoutBackend::new(Some(Position { x: 4, y: 9 }));
+        assert_eq!(
+            Backend::get_cursor_position(&mut backend).unwrap(),
+            Position { x: 4, y: 9 }
+        );
+        assert!(backend.injected_cursor.is_none());
+    }
+
+    #[test]
     fn terminal_title_formats_project_and_status() {
         assert_eq!(
             terminal_title(Some("demo"), "generating"),
@@ -721,5 +949,48 @@ mod tests {
         let calls = calls.lock().unwrap().clone();
         assert_eq!(calls.first(), Some(&TerminalStep::PushTitle));
         assert!(calls.contains(&TerminalStep::PopTitle));
+    }
+
+    #[test]
+    fn frame_rate_limiter_clamps_to_min_interval() {
+        let t0 = Instant::now();
+        let mut limiter = FrameRateLimiter::default();
+
+        assert_eq!(limiter.clamp_deadline(t0), t0);
+        limiter.mark_emitted(t0);
+
+        assert_eq!(
+            limiter.clamp_deadline(t0 + Duration::from_millis(1)),
+            t0 + MIN_FRAME_INTERVAL
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_requester_coalesces_immediate_requests() {
+        let (requester, mut rx) = FrameRequester::new();
+
+        requester.schedule_frame();
+        requester.schedule_frame();
+
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn frame_requester_waits_for_delayed_request() {
+        let (requester, mut rx) = FrameRequester::new();
+
+        requester.schedule_frame_in(Duration::from_millis(20));
+
+        assert!(tokio::time::timeout(Duration::from_millis(5), rx.recv())
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .is_some());
     }
 }

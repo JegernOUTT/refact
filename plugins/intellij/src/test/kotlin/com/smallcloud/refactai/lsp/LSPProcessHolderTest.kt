@@ -10,6 +10,7 @@ import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.MessageBus
 import com.smallcloud.refactai.io.AsyncConnection
 import com.smallcloud.refactai.io.HttpStatusException
+import com.smallcloud.refactai.panes.sharedchat.Events
 import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -29,39 +30,59 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class LSPProcessHolderTest : BasePlatformTestCase() {
 
     class FakeDaemonClient : RefactDaemonClient {
+        val statusCalls = AtomicInteger(0)
         val ensureDaemonCalls = AtomicInteger(0)
         val openProjectCalls = AtomicInteger(0)
         val detachProjectCalls = AtomicInteger(0)
+        val ensureDaemonPaths = Collections.synchronizedList(mutableListOf<String>())
         val detachedProjects = Collections.synchronizedList(mutableListOf<DaemonProject>())
         val openedSettings = Collections.synchronizedList(mutableListOf<LSPConfig>())
+        val openedDaemons = Collections.synchronizedList(mutableListOf<DaemonStatus>())
         val openProjectEntered = CountDownLatch(1)
         val releaseOpenProject = CountDownLatch(1)
         var blockOpenProject = false
         var port = 8488
         var projectId = "project-123"
         var baseUrlOverride: URI? = null
+        var statusVersion = "8.1.0"
+        var ensuredVersion = "8.1.0"
+        var authToken: String? = null
+        var statusError: RuntimeException? = null
+        var openProjectError: RuntimeException? = null
 
         override fun status(): DaemonStatus {
-            return DaemonStatus(version = "8.1.0", port = port)
+            statusCalls.incrementAndGet()
+            statusError?.let { throw it }
+            return DaemonStatus(version = statusVersion, port = port, authToken = authToken)
         }
 
         override fun ensureDaemon(binPath: String): DaemonStatus {
             ensureDaemonCalls.incrementAndGet()
-            return status()
+            ensureDaemonPaths.add(binPath)
+            statusError = null
+            statusVersion = ensuredVersion
+            return DaemonStatus(version = ensuredVersion, port = port, authToken = authToken)
         }
 
-        override fun openProject(root: String, settings: LSPConfig): DaemonProject {
+        override fun openProject(root: String, settings: LSPConfig, daemon: DaemonStatus): DaemonProject {
             openProjectCalls.incrementAndGet()
+            openProjectError?.let { throw it }
             openedSettings.add(settings)
+            openedDaemons.add(daemon)
             openProjectEntered.countDown()
             if (blockOpenProject) {
                 releaseOpenProject.await(2, TimeUnit.SECONDS)
             }
-            return DaemonProject(projectId, baseUrlOverride ?: URI("http://127.0.0.1:$port/p/$projectId/"), status())
+            return DaemonProject(
+                projectId,
+                baseUrlOverride ?: URI("http://127.0.0.1:${daemon.port}/p/$projectId/"),
+                daemon,
+            )
         }
 
         override fun detachProject(project: DaemonProject) {
@@ -74,9 +95,28 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         project: Project,
         private val fakeDaemonClient: FakeDaemonClient,
         private val refreshWorkerState: Boolean = false,
+        private val requiredVersion: String = "8.1.0",
     ) : LSPProcessHolder(project) {
         private val latch = CountDownLatch(1)
         val retryAttempts = mutableListOf<Int>()
+        val initializeCalls = AtomicInteger(0)
+        val initializeEntered = CountDownLatch(1)
+        val releaseInitialize = CountDownLatch(1)
+        val ensureStartedBlockingEntered = CountDownLatch(1)
+        val releaseEnsureStartedBlocking = CountDownLatch(1)
+        val binaryResolutionCalls = AtomicInteger(0)
+        private val healthClockMs = AtomicLong(0)
+        private val binaryResolutionResults = mutableListOf<String?>()
+        private val binaryResolutionResultIndex = AtomicInteger(0)
+        val binaryResolutionEntered = CountDownLatch(1)
+        val releaseBinaryResolution = CountDownLatch(1)
+        var blockEnsureStartedBlocking = false
+        var blockInitialize = false
+        var blockBinaryResolution = false
+        var signalDownloadStartDuringResolution = false
+        var initializeError: RuntimeException? = null
+        var probeResult = true
+        var binaryFailureMessage = "Failed to download the Refact engine (version 8.1.0) from GitHub releases"
 
         override val daemonClient: RefactDaemonClient
             get() = fakeDaemonClient
@@ -85,10 +125,50 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             if (refreshWorkerState) super.refreshAttachedWorkerState()
         }
 
-        override fun initializeAttachedProject() {}
+        override fun initializeAttachedProject() {
+            initializeCalls.incrementAndGet()
+            initializeEntered.countDown()
+            if (blockInitialize) {
+                releaseInitialize.await(2, TimeUnit.SECONDS)
+            }
+            initializeError?.let { throw it }
+        }
+
+        override fun requiredDaemonVersion(): String {
+            return requiredVersion
+        }
 
         override fun sleepBeforeWakeRetry(attempt: Int) {
             retryAttempts.add(attempt)
+        }
+
+        override fun probeAttachedWorker(): Boolean {
+            return probeResult
+        }
+
+        override fun healthNowMs(): Long {
+            return healthClockMs.get()
+        }
+
+        override fun resolveBinaryPathForDaemon(onDownloadStart: () -> Unit): String? {
+            binaryResolutionCalls.incrementAndGet()
+            if (signalDownloadStartDuringResolution) {
+                onDownloadStart()
+            }
+            if (blockBinaryResolution) {
+                binaryResolutionEntered.countDown()
+                releaseBinaryResolution.await(2, TimeUnit.SECONDS)
+            }
+            val index = binaryResolutionResultIndex.getAndIncrement()
+            return if (index < binaryResolutionResults.size) {
+                binaryResolutionResults[index]
+            } else {
+                LSPProcessHolder.BIN_PATH
+            }
+        }
+
+        override fun binaryResolutionFailureMessage(): String {
+            return binaryFailureMessage
         }
 
         fun simulateRaceConditionWithScheduledTask(makeProjectDisposed: () -> Unit): AlreadyDisposedException? {
@@ -110,22 +190,62 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             return caughtException
         }
 
+        override fun ensureStartedBlocking(reason: String) {
+            if (blockEnsureStartedBlocking) {
+                ensureStartedBlockingEntered.countDown()
+                releaseEnsureStartedBlocking.await(2, TimeUnit.SECONDS)
+            }
+            super.ensureStartedBlocking(reason)
+        }
+
         fun ensureStartedBlockingForTest(reason: String) {
             ensureStartedBlocking(reason)
+        }
+
+        fun runHealthCheckOnceForTest() {
+            runHealthCheckOnce()
+        }
+
+        fun advanceHealthClock(ms: Long) {
+            healthClockMs.addAndGet(ms)
+        }
+
+        fun setBinaryResolutionResults(vararg results: String?) {
+            binaryResolutionResults.clear()
+            binaryResolutionResults.addAll(results.toList())
+            binaryResolutionResultIndex.set(0)
+            binaryResolutionCalls.set(0)
+        }
+
+        fun hasBinaryResolutionFailureForTest(): Boolean {
+            val field = LSPProcessHolder::class.java.getDeclaredField("binaryResolutionFailure")
+            field.isAccessible = true
+            return field.get(this) != null
         }
     }
 
     private fun mockProject(root: String? = null): Project {
+        return mockProject(root, mock(LSPProcessHolderChangedNotifier::class.java))
+    }
+
+    private fun mockProject(root: String? = null, publisher: LSPProcessHolderChangedNotifier): Project {
         val mockProject = mock(Project::class.java)
         val mockMessageBus = mock(MessageBus::class.java)
-        val mockPublisher = mock(LSPProcessHolderChangedNotifier::class.java)
         `when`(mockProject.isDisposed).thenReturn(false)
         `when`(mockProject.messageBus).thenReturn(mockMessageBus)
-        `when`(mockMessageBus.syncPublisher(LSPProcessHolderChangedNotifier.TOPIC)).thenReturn(mockPublisher)
+        `when`(mockMessageBus.syncPublisher(LSPProcessHolderChangedNotifier.TOPIC)).thenReturn(publisher)
         if (root != null) {
             `when`(mockProject.basePath).thenReturn(root)
         }
         return mockProject
+    }
+
+    private class RecordingStatusPublisher : LSPProcessHolderChangedNotifier {
+        val statuses = Collections.synchronizedList(mutableListOf<LSPBackendConnectionStatus>())
+
+        override fun backendConnectionStatusChanged(newStatus: LSPBackendConnectionStatus) {
+            statuses.add(newStatus)
+        }
     }
 
     private fun <T> runOffEdt(block: () -> T): T {
@@ -140,6 +260,27 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             block(server)
         } finally {
             server.shutdown()
+        }
+    }
+
+    private fun waitForLifecycle(holder: TestLspProcessHolder) {
+        val deadline = System.currentTimeMillis() + 3000
+        while (holder.hasPendingLifecycleWork() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25)
+        }
+        if (holder.hasPendingLifecycleWork()) {
+            Thread.sleep(25)
+        }
+        assertFalse(holder.hasPendingLifecycleWork())
+    }
+
+    private fun withBrowserHost(host: String, block: () -> Unit) {
+        val previous = InferenceGlobalContext.browserHost
+        try {
+            InferenceGlobalContext.browserHost = host
+            block()
+        } finally {
+            InferenceGlobalContext.browserHost = previous
         }
     }
 
@@ -179,9 +320,71 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             futures.forEach { it.get(3, TimeUnit.SECONDS) }
 
             assertEquals(1, fake.openProjectCalls.get())
-            assertEquals(1, fake.ensureDaemonCalls.get())
+            assertEquals(0, fake.ensureDaemonCalls.get())
         } finally {
             executor.shutdownNow()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testConnectsToExistingDaemonWithNullBinPath() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusVersion = "8.1.0" }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("existing-daemon") }
+
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(0, fake.ensureDaemonCalls.get())
+            assertTrue(fake.statusCalls.get() >= 1)
+            assertEquals(DaemonStatus(version = "8.1.0", port = 8488), fake.openedDaemons.single())
+            assertEquals(URI("http://127.0.0.1:8488/p/project-123/"), holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testStatusFailureFallsThroughToEnsureDaemon() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            statusError = RuntimeException("daemon missing")
+            port = 9595
+            authToken = "ensured-token"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact-status-failure"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("missing-daemon") }
+
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(1, fake.ensureDaemonCalls.get())
+            assertEquals(listOf("/tmp/refact-status-failure"), fake.ensureDaemonPaths)
+            assertEquals(DaemonStatus(version = "8.1.0", port = 9595, authToken = "ensured-token"), fake.openedDaemons.single())
+            assertEquals(URI("http://127.0.0.1:9595/p/project-123/"), holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testOldDaemonFallsThroughToEnsureDaemon() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            statusVersion = "8.0.0"
+            ensuredVersion = "8.1.0"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake, requiredVersion = "8.1.0")
+        LSPProcessHolder.BIN_PATH = "/tmp/refact-upgrade"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("old-daemon") }
+
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(1, fake.ensureDaemonCalls.get())
+            assertEquals(listOf("/tmp/refact-upgrade"), fake.ensureDaemonPaths)
+        } finally {
             holder.dispose()
         }
     }
@@ -199,6 +402,43 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             runOffEdt { holder.ensureStartedBlockingForTest("base-url") }
 
             assertEquals(URI("http://127.0.0.1:9999/p/abc123/"), holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBrowserUrlDefaultsToLoopbackBaseUrlAndPreservesToken() = withBrowserHost("") {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            port = 9999
+            projectId = "abc123"
+            authToken = "token with/slash"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("browser-url") }
+
+            assertEquals(URI("http://127.0.0.1:9999/p/abc123/?daemon_token=token%20with%2Fslash"), holder.browserUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBrowserUrlUsesExplicitBrowserHost() = withBrowserHost("machine.local") {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            port = 9999
+            projectId = "abc123"
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("browser-url-override") }
+
+            assertEquals(URI("http://machine.local:9999/p/abc123/"), holder.browserUrlOrNull())
         } finally {
             holder.dispose()
         }
@@ -353,5 +593,487 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         val holder = TestLspProcessHolder(mockProject(), FakeDaemonClient())
         assertFalse(holder.hasPendingLifecycleWork())
         holder.dispose()
+    }
+
+    @Test
+    fun testBackendConnectionStatusDefaultsConnecting() {
+        val holder = TestLspProcessHolder(mockProject(), FakeDaemonClient())
+        assertEquals(LSPBackendConnectionStatus.CONNECTING, holder.backendConnectionStatus())
+        assertFalse(holder.backendReady())
+        holder.dispose()
+    }
+
+    @Test
+    fun testBackendConnectionStatusReadyAfterAttach() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient())
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-ready") }
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBinaryResolutionPublishesInstallingThenFailureAndSettingsResetRecovers() {
+        val root = createTempDir().canonicalPath
+        val publisher = RecordingStatusPublisher()
+        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val holder = TestLspProcessHolder(mockProject(root, publisher), fake).apply {
+            blockBinaryResolution = true
+            signalDownloadStartDuringResolution = true
+            setBinaryResolutionResults(null, "/tmp/refact-after-reset")
+        }
+        LSPProcessHolder.BIN_PATH = null
+        val future = ApplicationManager.getApplication().executeOnPooledThread {
+            holder.ensureStartedBlockingForTest("binary-slow-failure")
+        }
+        try {
+            assertTrue(holder.binaryResolutionEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(LSPBackendConnectionStatus.INSTALLING, holder.backendConnectionStatus())
+            holder.releaseBinaryResolution.countDown()
+            future.get(3, TimeUnit.SECONDS)
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(1, holder.binaryResolutionCalls.get())
+            assertTrue(publisher.statuses.contains(LSPBackendConnectionStatus.INSTALLING))
+            assertEquals(LSPBackendConnectionStatus.FAILED, publisher.statuses.last())
+
+            holder.settingsChanged("binary-path-changed")
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(2, holder.binaryResolutionCalls.get())
+            assertEquals(listOf("/tmp/refact-after-reset"), fake.ensureDaemonPaths)
+        } finally {
+            holder.releaseBinaryResolution.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBackendReadyWaitsForInitialize() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient()).apply {
+            blockInitialize = true
+        }
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        val future = ApplicationManager.getApplication().executeOnPooledThread {
+            holder.ensureStartedBlockingForTest("backend-ready-after-init")
+        }
+        try {
+            assertTrue(holder.initializeEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(LSPBackendConnectionStatus.STARTING, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+
+            holder.releaseInitialize.countDown()
+            future.get(3, TimeUnit.SECONDS)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+        } finally {
+            holder.releaseInitialize.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testInitializeFailureDoesNotPublishReady() {
+        val root = createTempDir().canonicalPath
+        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient()).apply {
+            initializeError = RuntimeException("init failed")
+        }
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("init-failure") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBackendConnectionStatusFailedAfterAttachError() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-failed") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.backendReady())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testFailedStateHealthCheckRetriesAndRecovers() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("first open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("transient-failure") }
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertNull(holder.baseUrlOrNull())
+
+            fake.openProjectError = null
+            holder.advanceHealthClock(1_000)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBinaryResolutionFailureBacksOffAndSettingsResetAllowsRetry() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            setBinaryResolutionResults(null, "/tmp/refact-after-reset")
+        }
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("binary-missing") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(1, holder.binaryResolutionCalls.get())
+            assertEquals(0, fake.ensureDaemonCalls.get())
+
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+            runOffEdt { holder.ensureStartedBlockingForTest("suppressed-manual-retry") }
+
+            assertEquals(1, holder.binaryResolutionCalls.get())
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            holder.settingsChanged("binary-path-changed")
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(2, holder.binaryResolutionCalls.get())
+            assertEquals(listOf("/tmp/refact-after-reset"), fake.ensureDaemonPaths)
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testBinaryResolutionFailureRetriesAfterBackoffAndSuccessClearsCache() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply { statusError = RuntimeException("daemon missing") }
+        val holder = TestLspProcessHolder(mockProject(root), fake).apply {
+            setBinaryResolutionResults(null, "/tmp/refact-after-backoff")
+        }
+        LSPProcessHolder.BIN_PATH = null
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("binary-missing") }
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(1, holder.binaryResolutionCalls.get())
+
+            holder.advanceHealthClock(999)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+            assertEquals(1, holder.binaryResolutionCalls.get())
+
+            holder.advanceHealthClock(1)
+            holder.runHealthCheckOnceForTest()
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(holder.hasBinaryResolutionFailureForTest())
+            assertEquals(2, holder.binaryResolutionCalls.get())
+            assertEquals(listOf("/tmp/refact-after-backoff"), fake.ensureDaemonPaths)
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testSingleFailedHealthProbeKeepsBackendReady() {
+        val root = createTempDir().canonicalPath
+        val publisher = RecordingStatusPublisher()
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root, publisher), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+            publisher.statuses.clear()
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(0, fake.detachProjectCalls.get())
+            assertFalse(publisher.statuses.contains(LSPBackendConnectionStatus.FAILED))
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(1, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testSuccessfulHealthProbeResetsFailedProbeCounter() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(0, fake.detachProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testSettingsChangeResetsFailedProbeCounter() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.settingsChanged("health-counter-reset")
+            waitForLifecycle(holder)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+            assertEquals(1, fake.openProjectCalls.get())
+            assertEquals(0, fake.detachProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testFailedHealthProbeClearsStateAndBacksOff() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("health-probe-start") }
+            assertNotNull(holder.baseUrlOrNull())
+
+            holder.blockEnsureStartedBlocking = true
+            holder.probeResult = false
+            holder.runHealthCheckOnceForTest()
+            holder.runHealthCheckOnceForTest()
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.isWorking)
+            assertNotNull(holder.baseUrlOrNull())
+            assertFalse(holder.hasPendingLifecycleWork())
+
+            holder.runHealthCheckOnceForTest()
+            assertTrue(holder.ensureStartedBlockingEntered.await(2, TimeUnit.SECONDS))
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+
+            holder.probeResult = true
+            holder.runHealthCheckOnceForTest()
+            assertEquals(1, fake.openProjectCalls.get())
+
+            holder.advanceHealthClock(1_000)
+            holder.releaseEnsureStartedBlocking.countDown()
+            waitForLifecycle(holder)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.releaseEnsureStartedBlocking.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testWakeRetryRunsInitialize() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-init-start") }
+            assertEquals(1, holder.initializeCalls.get())
+
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-init") }
+
+            assertTrue(recovered)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertEquals(2, holder.initializeCalls.get())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testWakeRetryDoesNotPublishInstallingWhenCachedBinaryResolves() {
+        val root = createTempDir().canonicalPath
+        val publisher = RecordingStatusPublisher()
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root, publisher), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact-wake"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-installing-start") }
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+
+            publisher.statuses.clear()
+            fake.statusError = RuntimeException("daemon missing")
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-installing") }
+
+            assertTrue(recovered)
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertFalse(publisher.statuses.contains(LSPBackendConnectionStatus.INSTALLING))
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testFailedWakeClearsAttachedWorkerState() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient()
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("wake-failure-start") }
+            assertNotNull(holder.baseUrlOrNull())
+
+            fake.openProjectError = RuntimeException("wake failed")
+            val recovered = runOffEdt { holder.wakeWorkerForRetry("wake-failure") }
+
+            assertFalse(recovered)
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertFalse(holder.isWorking)
+            assertNull(holder.baseUrlOrNull())
+        } finally {
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testHttp504IsRecoverable() {
+        assertTrue(isRecoverableHttpStatus(HttpStatusException(504, "timeout", URI("http://127.0.0.1"))))
+        assertTrue(
+            isRecoverableHttpStatus(
+                DaemonHttpStatusException(504, "timeout", URI("http://127.0.0.1"), "POST")
+            )
+        )
+        assertFalse(isRecoverableHttpStatus(HttpStatusException(499, "client closed", URI("http://127.0.0.1"))))
+    }
+
+    @Test
+    fun testEnsureStartedAsyncRetriesAfterFailedStatus() {
+        val root = createTempDir().canonicalPath
+        val fake = FakeDaemonClient().apply {
+            openProjectError = RuntimeException("first open failed")
+        }
+        val holder = TestLspProcessHolder(mockProject(root), fake)
+        LSPProcessHolder.BIN_PATH = "/tmp/refact"
+        try {
+            runOffEdt { holder.ensureStartedBlockingForTest("backend-failed") }
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            fake.openProjectError = null
+            holder.blockEnsureStartedBlocking = true
+            holder.ensureStartedAsync("failed-config-request")
+
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+            assertTrue(holder.ensureStartedBlockingEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
+
+            holder.releaseEnsureStartedBlocking.countDown()
+            waitForLifecycle(holder)
+
+            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
+            assertTrue(holder.backendReady())
+            assertEquals(2, fake.openProjectCalls.get())
+        } finally {
+            holder.releaseEnsureStartedBlocking.countDown()
+            holder.dispose()
+        }
+    }
+
+    @Test
+    fun testConfigPayloadContainsBackendReadiness() {
+        val payload = Events.Config.UpdatePayload(
+            Events.Config.Features(true, false),
+            Events.Config.ThemeProps("light"),
+            0,
+            Events.Config.KeyBindings("foo"),
+            backendReady = false,
+            connectionStatus = LSPBackendConnectionStatus.STARTING.wireName
+        )
+
+        val result = Events.stringify(Events.Config.Update(payload))
+
+        assertTrue(result.contains("\"backendReady\":false"))
+        assertTrue(result.contains("\"connectionStatus\":\"starting\""))
     }
 }

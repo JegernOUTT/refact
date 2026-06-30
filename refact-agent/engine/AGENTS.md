@@ -72,7 +72,7 @@ src/
 
 ### SSE Events
 
-Subscribe: `GET /v1/chats/subscribe?chat_id={id}`. Events have monotonic `seq: u64`.
+Subscribe: `GET /p/{project_id}/v1/chats/subscribe?chat_id={id}` (project-scoped proxy path used by daemon frontends via `daemon::chat_client::ProxyChatClient`; the worker itself serves `/v1/chats/subscribe`). Events have monotonic `seq: u64`.
 
 Key types: `Snapshot`, `StreamStarted`, `StreamDelta`, `StreamFinished`, `MessageAdded`, `MessageUpdated`, `MessageRemoved`, `MessagesTruncated`, `ThreadUpdated`, `QueueUpdated`, `RuntimeUpdated`, `PauseRequired`.
 
@@ -82,7 +82,7 @@ Background process completion is represented by a hidden `event(process_complete
 
 `POST /v1/chats/{chat_id}/commands` — queued processing.
 
-Variants: `UserMessage`, `SetParams`, `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort`, `ApproveTools`, `RejectTools`, `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`.
+Variants (Rust enum names; on the wire they are flattened JSON objects with `type` in snake_case): `UserMessage` (`user_message`), `SetParams` (`set_params`, payload under `patch`), `SetGoal` (`set_goal`, `content` plus optional user-set `budget`; omitted/absent means unlimited), `SetGoalBudget` (`set_goal_budget`, `budget`, user command path only), `UpdateGoal` (`update_goal`, `note`), `GoalControl` (`goal_control`, `action: pause|resume|stop`), `UpdateMessage`, `RemoveMessage`, `TruncateMessages`, `RetryFromIndex`, `Abort` (`abort`), `ApproveTools` / `RejectTools` (combined as `tool_decisions` with `decisions: [{tool_call_id, accepted}]`), `RestoreMessages`, `BranchFromChat`, `RestoreFromTrajectory`, `ClearDraft`, `SetDraft`, `Regenerate`. All carry `client_request_id`; optional `priority` is accepted. Goal command types are shared in `refact-chat-api`; do not import similarly named Buddy conductor goal types.
 
 ### Delta Operations
 
@@ -103,7 +103,7 @@ UserMessage → queue → prepare (system prompt, knowledge RAG, history limit) 
 Chat compression produces first-class chat messages and runtime status, not trailing instructions.
 
 - `compression_report` is a visible message role for deterministic/reactive compression reports. It stores Markdown content plus `extra.compression_report = { kind: "chat_compression_report", context_files_removed, context_messages_dropped, tool_results_truncated, tokens_before, tokens_after, estimated_tokens_saved, reduction_percent }`, uses `summarization_tier: "tier2_reactive"`, and is preserved by model-switch/new-thread sanitization.
-- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` (or the fingerprinted variant) and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after the entire leading control prefix (`system`/`event`/`plan`) and after the first user when present, and never between an assistant's tool calls and their results. Report equivalence for idempotent removal is decided by the stable `op_fingerprint` when both reports carry one (deterministic compaction hashes changed message ids, `compress_chat_apply` hashes its op lists, `compress_in_place` hashes options + affected ids); fingerprint-less legacy pairs still compare by metrics, and mixed pairs are never equivalent.
+- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` (or the fingerprinted variant) and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after the entire leading control prefix (`system`/`event`/`goal`/`plan`) and after the first user when present, and never between an assistant's tool calls and their results. Report equivalence for idempotent removal is decided by the stable `op_fingerprint` when both reports carry one (deterministic compaction hashes changed message ids, `compress_chat_apply` hashes its op lists, `compress_in_place` hashes options + affected ids); fingerprint-less legacy pairs still compare by metrics, and mixed pairs are never equivalent.
 - Runtime compression status is carried on both `ChatSession` and `RuntimeState` as `is_compressing`, `compression_phase`, and `compression_reason`, and is emitted through `RuntimeUpdated` and snapshots.
 - Active compression phases are `checking` and `running`; terminal phases are `applied`, `skipped`, and `failed`. Active phases must set/keep `is_compressing` consistently, while terminal runtime transitions clear stale active phases and preserve already-terminal phase/reason metadata.
 - Segment summarization writes compressed assistant messages with `extra.compression.kind === "llm_segment_summary"`; these summaries remain visible UI artifacts and are excluded from repeated summarization by source metadata.
@@ -111,10 +111,10 @@ Chat compression produces first-class chat messages and runtime status, not trai
 - The proactive pressure gate uses the provider-visible estimate (`estimated_provider_context_pressure_with_usage`, post-linearize) rather than the raw transcript, because source-preserving summaries keep their sources in the session and the raw estimate only grows. The provider-usage side of the pressure is also computed from the linearized view, and `ChatSession.provider_usage_stale` (set by every compression apply path and `reset_compaction_runtime_state`, cleared on the next successful generation) suppresses stale pre-compression usage records so compression does not retrigger on its own output.
 - Quiet compression status writes (`set_compression_status_quiet`) never mutate state while another reserved attempt is active, and `compression_attempt_active` treats attempts older than 15 minutes (`compression_attempt_started_at_ms`) as stale so an aborted/cancelled summarizer cannot wedge `is_compressing` forever.
 - Source-preserving summary suppression is hash-validated at linearize time: when all summarized sources are present but the recomputed `source_hash` mismatches, the summary is stale — it is dropped from the provider wire and the sources stay visible. When sources are not fully present (handoff/branch flows carry summaries without their sources on purpose), the summary stays visible as carried context and suppresses nothing. Hash-less legacy summaries keep the trust-the-ids path. `remove_message`/`truncate_messages` invalidate referencing summaries like `update_message` does (in-thread orphans are removed at mutation time), and new-thread/model-switch sanitization recomputes summary + report `source_hash` over the fully-present sanitized sources.
-- Candidates below `MIN_SOURCE_TOKENS_FOR_COMPRESSION` are skipped before any summarizer LLM call, and source hashes whose summaries produced insufficient savings are remembered per session (`compression_insufficient_hashes`, cleared on edit/remove/truncate/replace) so the same useless LLM call is never repeated.
+- Candidates below `MIN_SOURCE_TOKENS_FOR_COMPRESSION`, or larger than the summarizer's own input budget (`summarizer_input_budget_tokens`), are skipped; a summary is accepted whenever it is strictly smaller than its source (`compression_benefit_is_sufficient` = `tokens_saved > 0`). There is no minimum-reduction-percent or minimum-absolute-savings gate. Only spans whose summary fails to shrink them are remembered per session (`compression_insufficient_hashes`, cleared on edit/remove/truncate/replace) so the same useless LLM call is never repeated.
 - Applied report + summary pairs are emitted immediately as `MessageAdded` events (plus the final snapshot), so reports stay visible even if a later pass aborts.
-- The reactive context-limit breaker (`thread.reactive_compact_attempts`, max 2) is per-episode: it resets on any successful generation, on `reset_compaction_runtime_state` (manual `ctx_apply`, restores, external reloads), and trajectory load clamps persisted values to 1 so a reloaded thread always has one attempt available.
-- When LLM segment summarization cannot deliver on a context-limit error (failed, skipped, or breaker exhausted), `apply_deterministic_compaction_for_recovery` runs: it truncates old non-preserved tool outputs (keeps the most recent `4` *eligible* outputs — preserved/`srvtoolu_`/`TOOLS_TO_PRESERVE`/ui-only results neither consume the recent window nor get truncated; redacts before truncating), dedups context files, inserts a `compression_report`, resets `previous_response_id` and forces the cache guard, then generation retries. Idempotency is size-based (already-truncated outputs fall under the size threshold), so raw output that merely starts with the truncation marker is still compacted.
+- There is no per-episode segment-summary attempt cap. Once triggered (proactively at High/Critical pressure or reactively on a context-limit error), `run_reserved_segment_summarization` loops, summarizing the largest budget-fitting eligible span each pass until the chat has been reduced by at least `COMPRESSION_TARGET_REDUCTION_PERCENT` (50%) of the episode-start tokens or no eligible/fitting span remains; oversize old history is compressed as several consecutive budget-sized segments. It returns `CompactionOutcome::{Applied, NothingToCompact, LlmUnavailable}`. `thread.reactive_compact_attempts` no longer gates summarization — it only bounds the in-call context-limit retry rounds (`MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS`), resets on any successful generation and on `reset_compaction_runtime_state` (manual `ctx_apply`, restores, external reloads), and trajectory load still clamps persisted values to 1.
+- The deterministic fallback runs only when the summarizer LLM is genuinely unavailable (`CompactionOutcome::LlmUnavailable` — no usable summary model resolves, or every summarizer call failed with a provider/network error). It never runs when summarization merely had nothing eligible to compress. In that case `apply_deterministic_compaction_for_recovery` runs `tools::tool_compress_chat::deterministic_full_sweep`: a single maximal `ctx_apply` sweep over the whole transcript — dedup + drop every context file + drop all memories + drop project info + truncate every eligible tool result (preserving only the most recent `DETERMINISTIC_FULL_SWEEP_PRESERVE_TURNS` turns, redacting before truncating) — that inserts a `compression_report`, resets `previous_response_id` and forces the cache guard, then generation retries.
 - `compress_duplicate_context_files` treats a newer attachment of the same path with the same line range as superseding older copies (the file may have changed); across different ranges the largest copy still wins, with newer preferred on size ties. Wire preparation (`fix_and_limit_messages_history`) relocates stray tool results to sit contiguously after their assistant call, and history validation rejects results separated from their call by a `user`/`assistant`/`system` barrier.
 - Forced context-limit compression that still cannot apply appends a visible `event(system_notice, "chat.summarizer")` whose content starts with `Context compression failed:`; context-overflow threads must never fail without a visible explanation. The final error message points at `ctx_probe()`/`ctx_apply()`.
 - Provider length stops (`finish_reason: length`-class) are auto-recovered in `maybe_recover_after_length_stop`: empty/near-empty outputs (e.g. reasoning ate the budget) drop the dead-end assistant message, boost `max_new_tokens` once via `pending_max_new_tokens_boost` (16K, only when the user has not set `thread.max_tokens`), append a `cd_instruction` marker (`length_stop_continue`), and retry; partial cuts append a continue instruction and retry. The marker bound is checked **before** any compaction and is authoritative: recovery is bounded by marker count per user turn (max 2), every retry — including compaction-driven retries on the user-`max_tokens` partial path — appends a marker, and exhaustion appends a visible ui-only error without running compaction. High-pressure empty stops still trigger forced compaction first when the budget allows.
@@ -129,7 +129,10 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 
 | Role | Stored shape | Purpose | GUI default |
 |---|---|---|---|
-| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta` |
+| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, goal deltas, goal pursuit, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit` |
+| `goal` | `extra.goal = { mode, version, created_at_ms, supersedes, active, status?, budget, progress?, attempts?, events?, transferred_from?, transferred_to?, truncated?, original_chars? }` plus Markdown `content` | Single install-once base goal; body is capped at 96KB (`MAX_GOAL_BODY_CHARS`) and owns the active goal projection | Hidden from normal transcript; projected into `Snapshot.goal`, runtime goal fields, TUI `/goal`, and GUI TaskProgressWidget |
+| `event(goal_delta)` | `extra.event = { subkind: "goal_delta", source, payload: { seq, truncated?, original_chars?, kept_chars?, at_ms? } }` plus Markdown `content` | Append-only goal updates; note content is capped at 16KB (`MAX_GOAL_DELTA_CHARS`) | Hidden from normal transcript and EventLog; merged into the synthesized goal/get_goal |
+| `event(goal_pursuit)` | `extra.event = { subkind: "goal_pursuit", source, payload: { kind, at_ms?, gaps?, account_progress? } }` plus human-readable `content` | Internal pursuit facts such as verifier verdicts, re-arm gaps, monitor nudges, quiescence pauses, budget stops, and transfer notices | Hidden from normal transcript and EventLog; contributes to `GoalSnapshot.events` and TaskProgressWidget history |
 | `plan` | `extra.plan = { mode, version, created_at_ms, supersedes, truncated?, original_chars? }` plus Markdown `content` | Single install-once base plan; body is capped at 96KB (`MAX_PLAN_BODY_CHARS`) | Hidden from normal transcript; latest shown in PlanBanner |
 | `event(plan_delta)` | `extra.event = { subkind: "plan_delta", source, payload: { seq, summary?, truncated?, original_chars?, kept_chars? } }` plus Markdown `content` | Append-only plan updates; note content is capped at 16KB (`MAX_PLAN_DELTA_CHARS`) | Hidden from normal transcript and general EventLog; merged into PlanBanner/get_plan |
 
@@ -148,10 +151,12 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 | `cancellation_note` | cancellation paths | PreserveAnchor |
 | `system_notice` | assorted internal emitters | PreserveAnchor |
 | `plan_delta` | `tool.update_plan` | Never |
+| `goal_delta` | `tool.update_goal` / `chat.command.update_goal` | Never |
+| `goal_pursuit` | `chat.goal_verifier` / `chat.goal_monitor` / transition helpers | PreserveAnchor |
 
-Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan` and `event(plan_delta)` are `Never` and must never be compressed, truncated by compression, or dropped; non-event/non-plan roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
+Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan`, `goal`, `event(plan_delta)`, and `event(goal_delta)` are `Never` and must never be compressed, truncated by compression, or dropped; `event(goal_pursuit)` is `PreserveAnchor`; non-event/non-plan/non-goal roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
 
-Wire mapping rules: provider adapters must never send literal `event` or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps the cached base plan bytes stable while still exposing the synthesized current plan to the model. Preserve Anthropic thinking/signature block order across hidden-role lowering.
+Wire mapping rules: provider adapters must never send literal `event`, `goal`, or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `goal` lowers as `<goal mode="..." version="...">...` and must appear before `<plan>` whenever both are present; `event(goal_delta)` lowers as append-only `<goal-update seq="...">...` blocks. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps cached base goal/plan bytes stable while still exposing synthesized current goal and plan text to the model. `event(goal_pursuit)` remains a generic event block. Preserve Anthropic thinking/signature block order across hidden-role lowering.
 
 ### Plan tools
 
@@ -212,6 +217,74 @@ Schema:
 
 Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count" } }`. `content` is synthesized from the base `plan` plus append-only `plan_delta` notes; the base plan bytes are not rewritten.
 
+### Goal tools
+
+Goal state has two synchronized representations: hidden `goal` + `event(goal_delta|goal_pursuit)` messages in chat history, and the `GoalSnapshot` projection exposed on snapshots, runtime updates, trajectories, and GUI state. All shared goal API types live in `crates/refact-chat-api/src/lib.rs`.
+
+#### `set_goal`
+
+Model-facing prompt: "Install the chat's single active goal. Fails if a goal already exists — use `update_goal` to evolve it."
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "content": { "type": "string", "description": "Full goal body. Required." }
+  },
+  "required": ["content"]
+}
+```
+
+Returns `{ "version": 1, "supersedes": null }`, queues one hidden `goal`, and appends `event(system_notice, "tool.set_goal", {version}, "Goal updated to v1")`. It rejects missing/non-string/empty `content` and rejects any second install with `goal already exists; use update_goal`. The stored base goal is capped at 96KB chars and records truncation metadata when capped. Available by default in `agent`, `task_planner`, and `task_agent` modes.
+
+#### `update_goal`
+
+Model-facing prompt: "Append an incremental update to the current goal. Use when the goal evolves; it does not rewrite the original goal."
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "note": { "type": "string", "description": "Goal update note. Required." }
+  },
+  "required": ["note"]
+}
+```
+
+Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capped at 16KB chars (`MAX_GOAL_DELTA_CHARS`); when capped, the result is `{ "seq": number, "truncated": true, "original_chars": number, "kept_chars": number }`. It queues one hidden `event(goal_delta, "tool.update_goal", {seq, truncated?, original_chars?, kept_chars?}, note)`. It requires an existing or queued base goal and rejects empty `note`.
+
+#### `get_goal`
+
+Model-facing prompt: "Read the current goal installed on this chat. Returns merged goal content, status, version, delta count, budget counters, latest verifier verdict, and gaps."
+
+Schema:
+
+```json
+{ "type": "object", "properties": {}, "required": [] }
+```
+
+Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`. `content` is synthesized from the base `goal` plus append-only `goal_delta` notes; the base goal bytes are not rewritten.
+
+#### `validate_goal`
+
+Agent-facing completion check: validates the active goal against its success criteria, marks it `completed` and disables pursuit when met, or re-arms the active goal with returned gaps when unmet.
+
+### Goal pursuit contract
+
+`GoalSnapshot` fields are `content`, `version`, `active`, `status`, `budget`, `progress`, `attempts`, `events`, `transferred_from`, and `transferred_to`. `active=true` means ownership, not current execution; pursuit is allowed only when `active && status == Active`. `GoalStatus` serializes as `active`, `verifying`, `paused`, `completed`, `stopped`, `budget_exhausted`, `no_progress`, or `transferred`.
+
+`RuntimeState` and `RuntimeUpdated` mirror `goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, and `goal_no_progress_turns`. `Snapshot` carries `goal: Option<GoalSnapshot>`. `ChatCommand::{SetGoal, SetGoalBudget, UpdateGoal, GoalControl}` mutates the hidden messages/projection through the queue and persists trajectories. GUI command dispatchers send `set_goal`, `set_goal_budget`, `update_goal`, and `goal_control`; budgets are user-set only, while the `set_goal` tool remains unlimited.
+
+Verifier-on-done gates finish-like tools (`task_done`, `finish`, `agent_finish`) before the session reaches `Completed`. Active goals move to `verifying`; the verifier runs in a cache-reusing fork of the parent chat with one hidden verification prompt. `GOAL: MET` records an attempt, emits `event(goal_pursuit, kind=verified)`, marks the goal `completed`, and then completes the session. `GOAL: UNMET` or an inconclusive verifier records gaps, emits `event(goal_pursuit, kind=verification_gaps)`, re-arms the goal as `active`, and enqueues priority `Regenerate` without emitting a completed runtime or Buddy event.
+
+The goal monitor nudges stalled active goal owners with hidden `event(goal_pursuit, kind=nudge, account_progress=true)` events and priority regeneration. Nudge cadence uses escalating backoff gated by `progress.no_progress_turns`: the effective cooldown is `cooldown_ms << min(no_progress_turns, 8)` capped at 5 minutes, so a healthy stall (`no_progress_turns == 0`) keeps the base cadence while an idle/blocked goal backs off. After `QUIESCENCE_NUDGES` (3) consecutive no-progress nudges an active goal whose no-progress budget is unlimited (`budget.no_progress_turns` is `None`/`0`) goes quiescent: the monitor stops nudging, keeps `status = Active` (never auto-terminal for unlimited budgets), and emits one idempotent `event(goal_pursuit, kind=pursuit_quiescent)` per quiescent episode. When a generation ends in a non-retryable `ContextTooLarge` that compaction could not clear, `goal_monitor::mark_goal_blocked_on_context_limit` forces this same stop immediately (unlimited budgets stay `Active` but quiescent; finite no-progress budgets become terminal `no_progress`), so the chat stops auto-regenerating into the same wall and resumes on the next user message. Quiescence re-arms on real agent progress (`goal_record_progress`) or when a genuine `ChatCommand::UserMessage` resets `no_progress_turns` via `goal_reset_no_progress`. Explicit finite no-progress budgets still terminate through the existing budget-exhaustion path instead of going quiescent. Goal hard budgets are opt-in: `max_turns`, `max_minutes`, `max_tokens`, and `no_progress_turns` are `Option` fields where `None` and `Some(0)` are unlimited/disabled; cooldown and no-progress token thresholds remain concrete. Restore must not derive `progress.started_at_ms` from creation time, and old implicit defaults (`10` turns, `15` minutes, `200000` tokens, `2` no-progress turns) migrate to unlimited on load only when the budget lacks `explicit=true`; user-set budgets are stamped explicit by the command path and are never migrated. Turn-end accounting occurs after assistant output and can mark terminal `budget_exhausted` or `no_progress` status instead of completing.
+
+Ownership transfer on `handoff_to_mode` and mode-transition routes carries the current goal into the target chat before any plan messages, resets the target progress window, sets `transferred_from`, and marks the source `active=false, status=transferred, transferred_to=<target_chat_id>`. Restart/reload rehydrates the same owner from `TrajectorySnapshot.goal` and hidden goal messages; it must not synthesize a transfer event.
+
 ### Plan transitions
 
 `handoff_to_mode` and mode-transition endpoints create a pinned `initial-plan` task document when transitioning into Task Planner with an `initial_plan`. The document is created with kind `plan`, role `planner`, and `pinned=true`; failures are non-blocking and reported/logged without mutating the source chat's cached provider state.
@@ -222,7 +295,7 @@ Thinking blocks with cryptographic signatures must be preserved verbatim — no 
 
 ### Trajectories
 
-Stored: `.refact/trajectories/{chat_id}.json`. Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc.
+Stored: `.refact/trajectories/{chat_id}.json`. Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, `goal`, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc. `goal` is a serialized `GoalSnapshot` projection and is rebuilt from hidden goal messages on restore/restart when possible.
 
 OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_to_openai()`).
 
@@ -365,25 +438,137 @@ Schema:
 
 Returns `{ "slept_ms": number, "interrupted": boolean }`. If `tick_interval_ms` is set, it injects `event(tick, "tool.sleep", {elapsed_ms, remaining_ms}, "tick")` at each interval. Edge cases: duration max is 1 hour; abort returns early; description must be ≤80 chars.
 
-## Scheduler
+## Scheduler / Automation Platform
 
-The scheduler owns cron-style scheduled tasks and is spawned from background tasks only when enabled. Durable jobs are stored per project at `<project>/.refact/scheduled_tasks.json`; session jobs live in the in-memory scheduler store and disappear on engine restart.
+The scheduler is now a small automation platform built around `Job { trigger, action, delivery }`.
+Session jobs live in the in-memory `session_cron_store()` and disappear on engine restart. Durable
+jobs are project-scoped and stored at `<project>/.refact/scheduled_tasks.json`.
+
+### Job model
+
+| Field | Purpose |
+|---|---|
+| `trigger` | When work becomes due: `cron`, `interval`, `once`, `manual`, `webhook`, or reserved `on_process_exit`. |
+| `action` | What runs: an agent turn or a foreground command. |
+| `delivery` | Where command output goes: chat, outgoing webhook, notifier integration, or nowhere. |
+| `recurring` | Explicit compatibility flag. `once` forces `false`; legacy one-shot cron jobs stay one-shot. |
+| `durable` | `true` stores the job in `.refact/scheduled_tasks.json`; `false` stores it in memory. |
+| `enabled` / `paused_at_ms` | Pause/resume state. Paused jobs skip ordinary schedule fires; a queued `trigger_at_ms` still makes the job due. |
+| `trigger_at_ms` | Manual run marker set by `cron_update(run_now=true)`, HTTP run, or webhook dispatch. |
+| `last_fired_at_ms`, `fire_count` | Last successful/error firing timestamp and counter. |
+| `last_status`, `last_error`, `recent_runs` | Run history. `recent_runs` is capped by `scheduler.recent_runs_cap` (default 20). |
+| `auto_expire_after_ms` | Recurring jobs default to 30 days and emit an auto-expire notice after the final fire. |
+| `retry_attempts` | Transient retry counter for classifiable rate-limit/overload/network/timeout/5xx failures. |
+
+Serialized shapes:
+
+```json
+{
+  "id": "cron_...",
+  "description": "Nightly build",
+  "enabled": true,
+  "durable": true,
+  "created_at_ms": 1770000000000,
+  "recurring": true,
+  "trigger": { "kind": "cron", "expr": "0 2 * * *", "tz": "UTC" },
+  "action": {
+    "kind": "command",
+    "argv": ["cargo", "check"],
+    "target": { "kind": "isolated" },
+    "cwd": ".",
+    "env": null,
+    "timeout_secs": 600
+  },
+  "delivery": { "kind": "webhook", "url": "https://example.test/hook", "token": "secret" },
+  "last_fired_at_ms": null,
+  "fire_count": 0,
+  "last_status": null,
+  "last_error": null,
+  "recent_runs": [],
+  "paused_at_ms": null,
+  "trigger_at_ms": null,
+  "auto_expire_after_ms": 2592000000,
+  "retry_attempts": 0
+}
+```
+
+Back-compat: `JsonFileCronStore` deserializes the old flat
+`{ cron, prompt, chat_id, mode, ... }` shape into a nested `cron` trigger,
+`agent_turn` action, and `chat` delivery. The next write persists only the nested
+shape and drops the legacy `cron` / `prompt` top-level fields.
+
+### Triggers
+
+| Trigger | Public creation path | Runtime behavior |
+|---|---|---|
+| `Cron { expr, tz }` | `cron` plus optional `tz` | 5-field cron, evaluated in `tz` or `scheduler_timezone()`; cron fires receive deterministic jitter. |
+| `Interval { every_ms }` | `every: "30m"`, `"2h"`, `"1d"`, etc. | Repeats from `created_at_ms` / `last_fired_at_ms`; no cron jitter. |
+| `Once { at_ms }` | `at` as RFC3339 or `in 30m` | One-shot; `recurring` is forced to `false` and the job is removed after fire/error/skip unless retry is scheduled. |
+| `Manual` | Inline daemon hook agent jobs | No time-based next run; fired immediately through the manual runner. |
+| `Webhook { hook_id }` | `trigger: {kind:"webhook", hook_id}` or top-level `hook_id` | No time-based next run; fired by daemon/worker hook dispatch. |
+| `OnProcessExit { match_kind }` | Storage enum only | Reserved optional trigger; not created by public cron tools and has no time-based next run. |
+
+`parse_schedule()` requires exactly one of `cron`, `every`, or `at`. A webhook trigger is
+mutually exclusive with `cron`, `every`, `at`, and `tz`.
+
+### Actions and targets
+
+| Action | Shape | Notes |
+|---|---|---|
+| `agent_turn` | `{ kind, prompt, target, mode?, model?, tools? }` | Enqueues a `ChatCommand::UserMessage`. Existing-chat targets require an open/restorable chat id. Isolated targets create a fresh `cron_<job_id>_<fire_ms>` chat per fire. |
+| `command` | `{ kind, argv, target, cwd?, env?, timeout_secs? }` | No-agent path. Runs via the exec registry as a foreground non-PTY command. `command` input is shell-split into `argv`; `command_argv` is used verbatim. `cwd` must stay inside the active project. Default timeout is 300s, capped at 3600s. |
+
+Public `cron_create` does not expose `env`; it stores `env: null`. Command output is captured
+from stdout/stderr with exec transcript limits. Command jobs can target chat for output delivery,
+but `webhook`, `notifier`, and `none` deliveries do not require a chat target.
+
+### Delivery
+
+| Delivery | Behavior |
+|---|---|
+| `chat` | Agent turns enqueue into chat. Command jobs append `event(cron_fire)` and a `plain_text` output message; error output becomes a `system_notice`. Empty output is silent. |
+| `webhook` | Command jobs POST `{job_id, description, status, output, ts}` to `url` with optional `Authorization: Bearer <token>`. Tool/HTTP responses expose `has_token`, never the token. Timeout is 10s. |
+| `notifier` | Command jobs resolve `integration_id` through the notifier framework and call `NotifierBackend::send(target, output)`. Current built-in backend: `notifier_telegram`. |
+| `none` | Command output is discarded after run history is recorded. |
+
+Non-chat delivery is supported for command jobs only. Agent-turn jobs and inline daemon agent hooks
+must use `chat` delivery.
 
 ### Runtime behavior
 
-- Kill switches: `REFACT_DISABLE_SCHEDULER=1`, the `--no-scheduler` CLI flag, or `scheduler.enabled: false` in global config skip runner startup and cron tool effects.
-- Durable restriction: `scheduler.disable_durable: true` makes `cron_create` fall back to session-only and return the note `durable schedules disabled by config`.
-- Job cap: `scheduler.max_jobs` defaults to 50.
-- Jitter: recurring jobs use deterministic per-task jitter capped by scheduler defaults so many jobs do not fire at the same instant. One-shot jobs use the one-shot jitter path near matching minutes. Jitter only shifts fire checks; it does not change the stored cron expression.
-- REPL-idle gate: due jobs do not inject while the owning chat is `Generating`, `ExecutingTools`, or `Paused`. They defer and re-check after the runner delay.
-- Missed-task catch-up: recurring durable jobs compute their next future fire from now and do not replay a burst. Past one-shot durable jobs fire ASAP and mark the `cron_fire` payload as missed when that path is available.
-- Auto-expire: recurring jobs default to a 30-day auto-expiration window and final fires carry `final=true` before deletion.
+- Background startup spawns the session runner and, when an active project exists, a durable runner
+  over `<project>/.refact/scheduled_tasks.json`. `REFACT_DISABLE_SCHEDULER=1` suppresses runner spawn.
+  `--no-scheduler`, engine `scheduler.enabled: false`, and daemon `scheduler.enabled: false` are
+  resolved through `SchedulerConfig`; disabled daemon schedulers still scan durable schedules for
+  status/idle-stop visibility but do not wake workers.
+- `schedule::next_run_ms` is the shared dispatcher used by the runner, cron-clock wakeups, list output,
+  and create/update validation.
+- Existing-chat agent turns and chat-delivered command jobs defer while the chat is busy, paused, missing,
+  or closed. Busy defers retry after 30s; invalid targets defer after 60s for durable/recurring jobs.
+- Command jobs and isolated agent-turn jobs use the cron lane and are bounded by
+  `scheduler.max_concurrent_runs` (default 8).
+- Durable catch-up runs on runner start. Legacy one-shot cron jobs whose first scheduled time passed
+  fire ASAP when their target can be restored; recurring jobs use `recurring_missed_grace_state()`.
+- Missed recurring grace is half the schedule period clamped by `scheduler.missed_grace_min_ms` (default
+  120s) and `scheduler.missed_grace_max_ms` (default 2h). Runs outside the grace window are advanced
+  without replaying a burst.
+- Classifiable transient failures (`429`/rate-limit, overload/529, network, timeout, HTTP 5xx) schedule
+  retries using `scheduler.retry` (default delays: 60s, 120s, 300s; default max attempts: 3).
+- The runner is best-effort at-most-once per due marker: successful/error fires update
+  `last_fired_at_ms` / `fire_count`, clear due `trigger_at_ms`, and one-shot jobs are removed unless a
+  retry was scheduled. Chat and isolated jobs are counted only after their scheduled prompt is accepted
+  by the queue; command jobs are counted after the command run completes.
+- Run history status values include `fired`, `error`, `deferred`, `skipped`, and `advanced`.
+- Recurring jobs auto-expire after `auto_expire_after_ms` when set. The default for recurring jobs is
+  30 days; one-shot jobs use `0`.
 
 ### Cron tools
 
 #### `cron_create`
 
-Model-facing prompt: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Set `durable` to true when the job should survive engine restarts in the current project; leave it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier."
+Model-facing prompt: schedule an agent prompt or command for cron, interval, one-shot, or webhook
+triggering. Cron expressions are standard 5-field expressions evaluated in the local timezone unless
+`tz` is supplied. Webhook jobs never time-fire.
 
 Schema:
 
@@ -391,28 +576,80 @@ Schema:
 {
   "type": "object",
   "properties": {
-    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time." },
-    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
+    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time. Required unless every or at is set." },
+    "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
+    "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
+    "trigger": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["webhook"] },
+        "hook_id": { "type": "string", "description": "Inbound daemon hook id that fires this job." }
+      },
+      "required": ["kind", "hook_id"],
+      "description": "Webhook trigger. Mutually exclusive with cron, every, and at. Webhook jobs never time-fire."
+    },
+    "hook_id": { "type": "string", "description": "Shortcut for trigger {kind:'webhook', hook_id}." },
+    "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
+    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time. Mutually exclusive with command and command_argv." },
+    "command": { "type": "string", "description": "Command line to shell-split and run without an agent turn. Mutually exclusive with prompt and command_argv." },
+    "command_argv": { "type": "array", "items": { "type": "string" }, "description": "Command argv to run without an agent turn. Mutually exclusive with prompt and command." },
+    "cwd": { "type": "string", "description": "Optional command working directory, resolved under the active project." },
+    "timeout_secs": { "type": "integer", "description": "Optional command timeout in seconds." },
+    "delivery": {
+      "oneOf": [
+        { "type": "string", "enum": ["chat", "none"] },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["webhook"] },
+            "url": { "type": "string" },
+            "token": { "type": "string" }
+          },
+          "required": ["url"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["notifier"] },
+            "integration_id": { "type": "string" },
+            "target": { "type": "string" }
+          },
+          "required": ["integration_id"]
+        }
+      ],
+      "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
+    },
     "recurring": { "type": "boolean", "default": true },
-    "durable": { "type": "boolean", "default": false },
+    "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
+    "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
     "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
   },
-  "required": ["cron", "prompt", "description"]
+  "required": ["description"]
 }
 ```
 
-Returns `{ id, human_schedule, recurring, durable }`. Emits `event(system_notice, "scheduler.cron", {id, cron, recurring, durable}, summary)`. Edge cases: rejects invalid cron expressions, expressions with no match within a year, descriptions over 80 chars, no project root for durable jobs, and jobs beyond the configured cap.
+Validation: one schedule source (`cron` / `every` / `at` / webhook) and one action
+(`prompt` / `command` / `command_argv`) are required. Descriptions over 80 chars,
+invalid timezones, schedules with no match in the next year, and more than 50 jobs are rejected.
+`prompt` with non-chat delivery is rejected.
+
+Returns `{ id, human_schedule, recurring, durable, action_kind, delivery, isolated }` and appends a
+`system_notice` event summarizing the created job. Webhook tokens are stored for delivery but returned
+only as `has_token`.
 
 Examples:
 
 ```json
 {"cron":"0 9 * * 1-5","prompt":"Prepare the daily standup summary","recurring":true,"durable":true,"description":"Daily standup prep"}
-{"cron":"30 14 28 2 *","prompt":"Check leap-day task state","recurring":false,"description":"Leap check"}
+{"every":"30m","command":"cargo check","delivery":"none","description":"Build check"}
+{"at":"in 30m","command_argv":["python3","scripts/check.py"],"delivery":{"kind":"webhook","url":"https://example.test/hook","token":"secret"},"description":"One-shot check"}
+{"hook_id":"deploy","command":"./deploy.sh","delivery":{"kind":"notifier","integration_id":"notifier_telegram","target":"12345"},"description":"Deploy hook"}
 ```
 
 #### `cron_list`
 
-Model-facing prompt: list scheduled tasks, optionally filtering by session-only or durable scope.
+Model-facing prompt: list scheduled tasks with target chat and mode, optionally filtering by
+session-only or durable scope.
 
 Schema:
 
@@ -426,7 +663,40 @@ Schema:
 }
 ```
 
-Returns an array of `{ id, cron, human_schedule, description, prompt, recurring, durable, next_fire_at_ms, fire_count, created_at_ms }`. The prompt is truncated to the first 200 characters. Edge cases: invalid scopes are rejected; `next_fire_at_ms` can be 0 if no next run can be calculated.
+Returns an array sorted by `next_fire_at_ms` then `id`. Tool rows contain
+`{ id, cron, human_schedule, description, prompt, action_kind, delivery, chat_id, target,
+isolated, mode, recurring, durable, next_fire_at_ms, fire_count, created_at_ms }`. `prompt` is
+truncated to 200 chars; non-time triggers have `next_fire_at_ms: 0`.
+
+#### `cron_update`
+
+Model-facing prompt: update, pause, resume, or run a scheduled task by ID.
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "cron": { "type": "string" },
+    "every": { "type": "string" },
+    "at": { "type": "string" },
+    "tz": { "type": "string" },
+    "prompt": { "type": "string" },
+    "description": { "type": "string" },
+    "enabled": { "type": "boolean" },
+    "run_now": { "type": "boolean" }
+  },
+  "required": ["id"]
+}
+```
+
+Schedule updates use the same `parse_schedule()` rules as create; `tz` must accompany a cron
+schedule. Updating to `at` forces `recurring=false`. `prompt` can only change `agent_turn` jobs;
+command jobs reject prompt updates. `enabled=false` pauses and records `paused_at_ms`; `enabled=true`
+resumes. `run_now=true` sets `trigger_at_ms` and wakes the runner. Returns
+`{ id, updated: true, human_schedule }`.
 
 #### `cron_delete`
 
@@ -442,17 +712,117 @@ Schema:
 }
 ```
 
-Returns `{ "removed": boolean }` and notifies the runner to recompute wakeups. Missing IDs return `removed: false`; non-string or missing `id` is rejected.
+Removes from the session store first, then the active durable store. Returns `{ "removed": boolean }`
+and notifies the runner only when a job was removed.
 
-### Cron fire injection
+### HTTP scheduler surface
 
-On fire, the runner appends `event(cron_fire, "scheduler.cron", {task_id, cron, recurring, fire_count, final?, missed?}, prompt)` and enqueues a `ChatCommand::UserMessage` with the configured prompt so the agent actually wakes up. Keep both pieces unless the product intentionally changes autonomous scheduling semantics.
+Routes live under `/v1/scheduler/cron`:
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /v1/scheduler/cron` | none | `CronTaskResponse[]` with `enabled`, `paused`, trigger fields (`trigger_kind`, `hook_id`, `tz`, `every_ms`, `at_ms`), `last_status`, `last_error`, and `recent_runs`. |
+| `POST /v1/scheduler/cron` | `CronCreateRequest` | `{ id, human_schedule, recurring, durable, action_kind, delivery }` |
+| `PATCH /v1/scheduler/cron/:id` | `CronUpdateRequest` | `{ id, updated, human_schedule }` |
+| `POST /v1/scheduler/cron/:id/run` | none | Sets `trigger_at_ms`; returns `{ id, triggered: true }`. |
+| `DELETE /v1/scheduler/cron/:id` | none | `{ removed }` |
+
+HTTP creation mirrors `cron_create` plus `chat_id` and `mode`. If `durable` is omitted, HTTP and
+`cron_create` persist into the active project store when one exists; explicit `durable: false`
+keeps the job session-only. If the request creates an agent turn or uses `chat` delivery, `chat_id`
+must name an existing open chat. HTTP list responses flatten trigger details for the GUI and still
+redact webhook tokens as `has_token`.
+
+### Daemon cron clock
+
+The headless daemon does not run jobs itself. Its `cron_clock` scans each open project's
+`.refact/scheduled_tasks.json`, records the nearest pending durable job, and wakes the project worker
+about 90s before fire time. The scan intentionally supports only durable cron-triggered
+`agent_turn` jobs targeting an existing chat with `chat` delivery; unsupported jobs are skipped by the
+clock, but can still run once a worker is already alive.
+
+`GET /cron/status` returns:
+
+```json
+{ "enabled": true, "jobs": 1, "next_wake_ms": 1770000000000 }
+```
+
+`jobs` is the count of projects with pending cron-clock entries, not a full job count.
+
+### Daemon inbound webhooks
+
+Daemon HTTP routes:
+
+| Route | Body | Behavior |
+|---|---|---|
+| `POST /hooks/wake` | `{project, text}` | Wakes the project worker and injects `text` as a `system_notice`. |
+| `POST /hooks/agent` | `{project, message, mode?, model?, deliver?}` | Wakes the worker and fires an isolated inline agent job. Delivery must resolve to `chat`. |
+| `POST /hooks/:name` | Mapping-specific body | Resolves `hooks.mappings[name]`, applies mapping defaults, wakes the worker, then forwards to `/v1/hooks/fire`. |
+| `POST /hooks` | none | Authenticates, then returns `400 missing hook name` when hooks are enabled. |
+
+Daemon config (`daemon.yaml`):
+
+```yaml
+bind: 127.0.0.1
+mdns: {}
+scheduler:
+  enabled: true
+  disable_durable: false
+hooks:
+  enabled: true
+  token: hook-secret
+  default_project: demo
+  allowed_projects: [demo, /abs/path/to/project]
+  mappings:
+    deploy:
+      project: demo
+      kind: agent        # wake | agent
+      mode: agent
+      model: test-model
+      deliver:
+        type: chat
+```
+
+Project resolution order is request body `project` → mapping `project` → `default_project`.
+Allowed projects can match project id, slug, or root path. Hook auth accepts `Authorization: Bearer`
+or `x-refact-token`; query-string daemon tokens are rejected for hook routes. Hooks may be open only
+when the daemon is bound to loopback (`127.0.0.1` or `::1`); non-loopback binds require `hooks.token`
+or daemon auth and refuse to start otherwise. The worker forward token is the daemon auth token when
+present, otherwise the hook token.
+Daemon bind defaults to `127.0.0.1`; explicit `bind: 0.0.0.0` keeps LAN exposure opt-in. Daemon mDNS uses `mdns.enabled: true|false`; omitted means auto-advertise only for non-loopback binds. Advertisements use the generic `Refact Daemon` instance name and include TXT `auth=required|none`.
+
+Worker endpoint `POST /v1/hooks/fire` accepts:
+
+```json
+{
+  "kind": "wake",
+  "text": "optional wake text",
+  "message": "optional agent message",
+  "mode": "agent",
+  "model": "model-id",
+  "hook_id": "deploy",
+  "deliver": { "kind": "chat" }
+}
+```
+
+`kind="wake"` with text injects a notice. `kind="agent"` with message creates and fires an isolated
+manual `agent_turn` job. Any `hook_id` also fires matching stored `Trigger::Webhook` jobs from both
+session and durable stores, so a single hook call may perform the inline action and stored webhook jobs.
+
+### Non-goals / boundaries
+
+- No chat-platform messaging gateway is implemented here. Deliveries are Refact chat session,
+  outgoing HTTP webhook, configured notifier backend, or no-op.
+- Slack/email notifiers are framework-ready future plugins, not shipped backends. The in-tree notifier
+  backend is Telegram (`notifier_telegram`).
+- `OnProcessExit` is an optional/reserved trigger shape and is not wired through public cron creation or
+  process-exit event handling.
 
 ## HTTP API
 
 Base: `http://127.0.0.1:{port}/v1/`. Middleware: permissive CORS, 15MB body limit.
 
-Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/chats/{id}/commands`, `/chats/subscribe`, `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status`, `/rag-status`, `/vecdb-search`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
+Key endpoints: `/ping`, `/caps`, `/graceful-shutdown`, `/p/{project_id}/v1/chats/{id}/commands`, `/p/{project_id}/v1/chats/subscribe` (project-scoped chat protocol; `daemon::chat_client::ProxyChatClient` is the in-tree client), `/chat` (legacy), `/code-completion`, `/code-lens`, `/tools`, `/tools-check-if-confirmation-needed`, `/ast-file-symbols`, `/ast-status`, `/rag-status`, `/vecdb-search`, `/git-commit`, `/checkpoints-preview`, `/checkpoints-restore`, `/integrations`, `/integration-get`, `/integration-save`, `/knowledge/update-memory`, `/knowledge/delete-memory`, `/knowledge-graph`, `/voice/transcribe`, `/voice/stream/{id}`, `/voice/stream/{id}/chunk`.
 
 ## AST
 
@@ -497,5 +867,5 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 
 - **User**: `~/.config/refact/` (default_privacy.yaml, providers.d/*.yaml)
 - **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations)
-- **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/)
+- **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/, `project_information.yaml` — schema_version 1, toggles + size caps for the `system_info` / `environment_instructions` / `detected_environments` / `git_info` / `project_tree` / `instruction_files` / `project_configs` / `memories` sections surfaced to the model)
 - **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.

@@ -3,77 +3,275 @@
 }
 
 .header {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
-  opacity: 0.8;
-  transition: opacity 0.15s ease;
+  opacity: var(--rf-motion-opacity-soft);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  text-align: left;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .header:hover {
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
-.taskRow {
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
-  border-left: 2px solid transparent;
-  transition:
-    background-color 0.2s ease,
-    border-color 0.2s ease,
-    opacity 0.2s ease;
-  opacity: 0.8;
+.header:focus-visible,
+.goalHeader:focus-visible,
+.goalInput:focus-visible,
+.goalBudgetInput:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
-.taskRow:hover {
-  opacity: 1;
+.headerInner,
+.headerMain,
+.goalHeaderContent,
+.goalAffordance,
+.goalIndicator {
+  min-width: 0;
 }
 
-.taskRow.active {
-  background: var(--accent-a3);
-  border-left-color: var(--accent-9);
-  opacity: 1;
+.headerMain {
+  flex: 1;
 }
 
-.activeHint {
+.goalIndicatorText,
+.goalAffordanceText,
+.goalTitle,
+.taskText,
+.activeHint,
+.eventText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.headerIcon {
-  color: var(--gray-11);
-  flex-shrink: 0;
+.goalAffordance {
+  color: var(--rf-color-accent);
 }
 
 .content {
-  animation: slideDown 0.2s ease-out;
+  padding: 0 var(--rf-space-3) var(--rf-space-3);
   transform-origin: top;
+  animation: slideDown var(--rf-dur-med) var(--rf-ease-entrance);
 }
 
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.goalBlock {
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.goalHeader {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: var(--rf-space-2);
+  text-align: left;
+}
+
+.goalBody {
+  padding: 0 var(--rf-space-2) var(--rf-space-2);
+}
+
+.goalLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.goalInput {
+  width: 100%;
+  min-width: 0;
+  min-height: calc(var(--rf-control-h-lg) * 2);
+  resize: vertical;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font: inherit;
+  line-height: var(--rf-line);
+  padding: var(--rf-space-2);
+}
+
+.goalInput::placeholder {
+  color: var(--rf-color-faint);
+}
+
+.goalBudgetGroup {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.goalBudgetLegend {
+  padding: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.goalBudgetGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, calc(var(--rf-control-h-lg) * 3)), 1fr)
+  );
+}
+
+.goalBudgetField {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.goalBudgetLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.goalBudgetInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font: inherit;
+  padding: 0 var(--rf-space-2);
+}
+
+.goalBudgetActions {
+  min-width: 0;
+}
+
+.goalProgress {
+  min-width: 0;
+}
+
+.goalControls {
+  min-width: 0;
+}
+
+.attemptCard {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  padding: var(--rf-space-2);
+}
+
+.gapList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding-inline-start: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}
+
+.verifierReply {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.eventList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.eventRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 .taskList {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+}
+
+.taskRow {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-left: calc(var(--rf-hairline) * 2) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  opacity: var(--rf-motion-opacity-soft);
+  transition:
+    background-color var(--rf-dur-med) var(--rf-ease-standard),
+    border-color var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.taskRow:hover {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.taskRow.active {
+  border-left-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .taskRowEnter {
-  animation: taskFadeIn 0.2s ease-out forwards;
+  animation: taskFadeIn var(--rf-dur-med) var(--rf-ease-entrance) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content,
+  .taskRowEnter {
+    animation: none;
+  }
+}
+
+@keyframes slideDown {
+  from {
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateY(calc(-1 * var(--rf-motion-distance-sm)));
+  }
+  to {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(0);
+  }
 }
 
 @keyframes taskFadeIn {
   from {
-    opacity: 0;
-    transform: translateX(-8px);
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateX(calc(-1 * var(--rf-motion-distance-sm)));
   }
   to {
-    opacity: 0.8;
+    opacity: var(--rf-motion-opacity-soft);
     transform: translateX(0);
   }
 }

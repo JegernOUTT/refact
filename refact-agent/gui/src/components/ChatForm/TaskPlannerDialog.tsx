@@ -16,9 +16,8 @@ import { push } from "../../features/Pages/pagesSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import {
-  selectMessages,
-  selectCurrentThreadId,
-  selectThreadWorktree,
+  selectMessagesById,
+  selectThreadWorktreeById,
 } from "../../features/Chat/Thread";
 import { regenerate } from "../../services/refact/chatCommands";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
@@ -45,6 +44,7 @@ function extractErrorMessage(err: unknown): string {
 }
 
 type TaskPlannerDialogProps = {
+  sourceChatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Present when opened from inside a task workspace; otherwise a new task is created */
@@ -56,6 +56,7 @@ type TaskPlannerDialogProps = {
 type PendingTask = { id: string; name: string };
 
 export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
+  sourceChatId,
   open,
   onOpenChange,
   taskId,
@@ -64,9 +65,12 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
-  const messages = useAppSelector(selectMessages);
-  const sourceChatId = useAppSelector(selectCurrentThreadId);
-  const sourceWorktree = useAppSelector(selectThreadWorktree);
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, sourceChatId),
+  );
+  const sourceWorktree = useAppSelector((state) =>
+    selectThreadWorktreeById(state, sourceChatId),
+  );
 
   const [error, setError] = useState<string | null>(null);
   // Cache the created task so retries after a planner-creation failure don't
@@ -109,6 +113,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
       // Create the planner chat — task-owned, with context if available
       let newChatId: string;
+      let rootChatId: string | undefined;
       if (hasMessages && sourceChatId) {
         const result = await createFromTransition({
           taskId: resolved.id,
@@ -116,6 +121,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
           targetModeDescription: targetModeDescription ?? "",
         }).unwrap();
         newChatId = result.new_chat_id;
+        rootChatId = result.root_chat_id ?? undefined;
       } else {
         const result = await createPlannerChat({
           taskId: resolved.id,
@@ -135,6 +141,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
             role: "planner",
             planner_chat_id: newChatId,
           },
+          rootChatId,
           worktree: sourceWorktree,
         }),
       );

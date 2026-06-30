@@ -51,6 +51,8 @@ pub enum KeyAction {
     ToggleEvents,
     Quit,
     NewChat,
+    PreviousSession,
+    NextSession,
     OpenProjects,
     OpenModels,
     OpenModes,
@@ -113,6 +115,8 @@ impl KeyAction {
             Self::ToggleEvents => "toggle-events",
             Self::Quit => "quit",
             Self::NewChat => "new-chat",
+            Self::PreviousSession => "previous-session",
+            Self::NextSession => "next-session",
             Self::OpenProjects => "projects",
             Self::OpenModels => "models",
             Self::OpenModes => "modes",
@@ -175,6 +179,8 @@ impl KeyAction {
             Self::ToggleEvents => "toggle daemon events and workers pane",
             Self::Quit => "quit the TUI",
             Self::NewChat => "start a new chat",
+            Self::PreviousSession => "switch to previous recent chat",
+            Self::NextSession => "switch to next recent chat",
             Self::OpenProjects => "open project picker",
             Self::OpenModels => "open model picker",
             Self::OpenModes => "open mode picker",
@@ -245,6 +251,8 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::ToggleEvents,
     KeyAction::Quit,
     KeyAction::NewChat,
+    KeyAction::PreviousSession,
+    KeyAction::NextSession,
     KeyAction::OpenProjects,
     KeyAction::OpenModels,
     KeyAction::OpenModes,
@@ -819,8 +827,10 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::ToggleEvents, &["f2"]),
         entry(KeyContext::Main, KeyAction::Quit, &["ctrl-q"]),
         entry(KeyContext::Main, KeyAction::NewChat, &["ctrl-n"]),
+        entry(KeyContext::Main, KeyAction::PreviousSession, &["f6"]),
+        entry(KeyContext::Main, KeyAction::NextSession, &["f7"]),
         entry(KeyContext::Main, KeyAction::OpenProjects, &["ctrl-p"]),
-        entry(KeyContext::Main, KeyAction::OpenModels, &["ctrl-m"]),
+        entry(KeyContext::Main, KeyAction::OpenModels, &["alt-m"]),
         entry(KeyContext::Main, KeyAction::OpenModes, &["ctrl-o"]),
         entry(
             KeyContext::Main,
@@ -838,7 +848,6 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::CtrlC, &["ctrl-c"]),
         entry(KeyContext::Main, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::Main, KeyAction::CycleToolSelection, &["tab"]),
-        entry(KeyContext::Main, KeyAction::ToggleSelectedTool, &["space"]),
         entry(KeyContext::Main, KeyAction::OpenSlashCommands, &["/"]),
         entry(KeyContext::Main, KeyAction::OpenFileMention, &["@"]),
         entry(
@@ -1155,6 +1164,20 @@ newline = "enter"
         let registry = KeymapRegistry::default();
         assert!(registry.warnings().is_empty());
         assert_eq!(
+            registry.dispatch(
+                KeyContext::Main,
+                key(KeyCode::Char(' '), KeyModifiers::empty())
+            ),
+            KeyDispatch::text(' ')
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::ModalPicker,
+                key(KeyCode::Char(' '), KeyModifiers::empty())
+            ),
+            Some(KeyAction::ToggleSelectedTool)
+        );
+        assert_eq!(
             registry.action_for(
                 KeyContext::Main,
                 key(KeyCode::Char('r'), KeyModifiers::CONTROL)
@@ -1164,6 +1187,25 @@ newline = "enter"
         assert_eq!(
             registry.action_for(KeyContext::Main, key(KeyCode::Char('r'), KeyModifiers::ALT)),
             Some(KeyAction::ToggleReasoning)
+        );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::Char('m'), KeyModifiers::ALT)),
+            Some(KeyAction::OpenModels)
+        );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::F(6), KeyModifiers::empty())),
+            Some(KeyAction::PreviousSession)
+        );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::F(7), KeyModifiers::empty())),
+            Some(KeyAction::NextSession)
+        );
+        assert_ne!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('m'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::OpenModels)
         );
         let rows = registry.help_rows();
         assert!(rows
@@ -1175,5 +1217,14 @@ newline = "enter"
         assert!(rows
             .iter()
             .any(|row| row.action == KeyAction::Redo && row.bindings.contains("Ctrl-Shift-Z")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::OpenModels && row.bindings.contains("Alt-M")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::PreviousSession && row.bindings.contains("F6")));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == KeyAction::NextSession && row.bindings.contains("F7")));
     }
 }

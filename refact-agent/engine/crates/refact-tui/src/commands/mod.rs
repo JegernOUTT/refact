@@ -223,6 +223,18 @@ mod tests {
     }
 
     #[test]
+    fn goal_command_wires_to_show_goal() {
+        let command = command_by_name("goal").unwrap();
+
+        assert_eq!(
+            command.action,
+            CommandAction::Workflow {
+                command: workflow::WorkflowCommand::ShowGoal,
+            }
+        );
+    }
+
+    #[test]
     fn misc_command_group_is_visible_in_popup() {
         let items = command_picker_items(CommandContext { active_turn: false });
         for title in [

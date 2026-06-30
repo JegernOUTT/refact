@@ -1,13 +1,14 @@
 import { useCallback } from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import { Archive } from "lucide-react";
 import { IconButton } from "../ui";
+import { HoverCard } from "../LongTailPrimitives";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectCurrentThreadId,
-  selectAutoCompactEnabled,
+  selectAutoCompactEnabledById,
   setAutoCompactEnabled,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { updateChatParams } from "../../services/refact/chatCommands";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 
@@ -19,8 +20,10 @@ export const AutoCompactToggleButton = ({
   disabled,
 }: AutoCompactToggleButtonProps) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
-  const isEnabled = useAppSelector(selectAutoCompactEnabled);
+  const chatId = useThreadId();
+  const isEnabled = useAppSelector((state) =>
+    selectAutoCompactEnabledById(state, chatId),
+  );
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
@@ -44,8 +47,8 @@ export const AutoCompactToggleButton = ({
     : "Auto-compression OFF — click to enable";
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <HoverCard>
+      <HoverCard.Trigger asChild>
         <IconButton
           aria-label={actionLabel}
           aria-pressed={isEnabled}
@@ -57,7 +60,7 @@ export const AutoCompactToggleButton = ({
           variant={isEnabled ? "primary" : "ghost"}
         />
       </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
+      <HoverCard.Content side="top">
         <Text as="p" size="2">
           {label}
         </Text>
@@ -68,7 +71,7 @@ export const AutoCompactToggleButton = ({
           manually.
         </Text>
       </HoverCard.Content>
-    </HoverCard.Root>
+    </HoverCard>
   );
 };
 

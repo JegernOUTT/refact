@@ -7,6 +7,7 @@ use crate::tools::file_edit::auxiliary::{
     append_scope_warnings, convert_edit_to_diffchunks, parse_path_for_update,
     scope_warnings_to_tool_message, sync_documents_ast,
 };
+use crate::files_in_workspace::remove_memory_document_for_path;
 use crate::tools::file_edit::undo_history::{get_undo_history, UndoEntry};
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -103,11 +104,7 @@ pub async fn tool_undo_text_doc_exec(
         }
     }
 
-    gcx.documents_state
-        .memory_document_map
-        .lock()
-        .await
-        .remove(&a.path);
+    remove_memory_document_for_path(gcx.clone(), &a.path).await;
 
     let summary = if target_content.is_empty() {
         format!(

@@ -1,13 +1,146 @@
+use std::net::{IpAddr, SocketAddr};
+
+use axum::extract::ConnectInfo;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::Engine;
 use serde_json::json;
+
+use crate::daemon::config::DaemonConfig;
+
+const BASIC_AUTH_REALM: &str = "Refact daemon";
+
+#[derive(Clone, Default)]
+pub(crate) struct DaemonAuthPolicy {
+    pub token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub hook_token: Option<String>,
+    pub open_hooks_allowed: bool,
+}
+
+impl DaemonAuthPolicy {
+    fn basic_credentials(&self) -> Option<(&str, &str)> {
+        match (self.username.as_deref(), self.password.as_deref()) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                Some((username, password))
+            }
+            _ => None,
+        }
+    }
+
+    fn requires_auth(&self) -> bool {
+        self.token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+            || self.basic_credentials().is_some()
+    }
+}
+
+pub(crate) fn peer_is_loopback<B>(req: &Request<B>) -> bool {
+    match req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        Some(ConnectInfo(addr)) => addr.ip().is_loopback(),
+        None => true,
+    }
+}
+
+pub(crate) fn origin_is_loopback(origin: &str) -> bool {
+    let host = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin);
+    let host = host.split('/').next().unwrap_or(host).trim();
+    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host.rsplit_once(':').map(|(left, _)| left).unwrap_or(host)
+    };
+    host_no_port.eq_ignore_ascii_case("localhost")
+        || host_no_port
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn loopback_trust_allowed<B>(req: &Request<B>) -> bool {
+    if !peer_is_loopback(req) {
+        return false;
+    }
+    match req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        None => true,
+        Some(origin) if origin.eq_ignore_ascii_case("null") => false,
+        Some(origin) => origin_is_loopback(origin),
+    }
+}
+
+fn basic_credentials_from_headers(headers: &HeaderMap) -> Option<(String, String)> {
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    let mut parts = value.splitn(2, |ch: char| ch.is_ascii_whitespace());
+    let scheme = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
+    let encoded = parts.next()?.trim();
+    let decoded = base64::prelude::BASE64_STANDARD.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+fn basic_auth_matches(req_headers: &HeaderMap, expected_user: &str, expected_pass: &str) -> bool {
+    match basic_credentials_from_headers(req_headers) {
+        Some((username, password)) => {
+            token_matches(&username, expected_user) && token_matches(&password, expected_pass)
+        }
+        None => false,
+    }
+}
+
+fn remote_authorized<B>(req: &Request<B>, policy: &DaemonAuthPolicy) -> bool {
+    if let Some((username, password)) = policy.basic_credentials() {
+        if basic_auth_matches(req.headers(), username, password) {
+            return true;
+        }
+    }
+    if let Some(token) = policy
+        .token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+    {
+        return request_authorized(req, token);
+    }
+    false
+}
+
+fn unauthorized_basic() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            header::WWW_AUTHENTICATE,
+            format!("Basic realm=\"{BASIC_AUTH_REALM}\""),
+        )],
+        Json(json!({"error": "Unauthorized"})),
+    )
+        .into_response()
+}
 
 pub(crate) const DAEMON_AUTH_COOKIE: &str = "refact_daemon_auth";
 pub(crate) const DAEMON_AUTH_QUERY: &str = "daemon_token";
 const PROJECT_COOKIE_PREFIX: &str = "project:";
 const REDACTED_DAEMON_TOKEN: &str = "<redacted>";
+const REFACT_TOKEN_HEADER: &str = "x-refact-token";
 
 pub(crate) fn generate_token() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -32,7 +165,10 @@ pub(crate) fn token_matches(provided: &str, expected: &str) -> bool {
 }
 
 fn request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
-    bearer_token(req)
+    if has_multiple_authorization_headers(req.headers()) {
+        return false;
+    }
+    bearer_token_from_headers(req.headers())
         .map(|token| token_matches(token, expected))
         .unwrap_or(false)
         || cookie_token_matches(req, expected)
@@ -40,11 +176,44 @@ fn request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
             && matching_daemon_query_token(req.uri().query(), expected).is_some())
 }
 
-fn bearer_token<B>(req: &Request<B>) -> Option<&str> {
-    req.headers()
+fn hook_request_authorized<B>(req: &Request<B>, expected: &str) -> bool {
+    if query_contains_daemon_token(req.uri().query()) {
+        return false;
+    }
+    if has_multiple_authorization_headers(req.headers()) {
+        return false;
+    }
+    bearer_token_from_headers(req.headers())
+        .map(|token| token_matches(token, expected))
+        .unwrap_or(false)
+        || req
+            .headers()
+            .get(REFACT_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(|token| token_matches(token.trim(), expected))
+            .unwrap_or(false)
+}
+
+pub(crate) fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    let value = headers
         .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    let mut parts = value.splitn(2, |ch: char| ch.is_ascii_whitespace());
+    let scheme = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = parts.next()?.trim();
+    (!token.is_empty()).then_some(token)
+}
+
+fn has_multiple_authorization_headers(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    values.next().is_some() && values.next().is_some()
 }
 
 fn cookie_token_matches<B>(req: &Request<B>, expected: &str) -> bool {
@@ -98,6 +267,11 @@ fn is_public_request<B>(req: &Request<B>) -> bool {
         || (req.method() == Method::GET && is_static_asset_path(req.uri().path()))
 }
 
+fn is_hook_request<B>(req: &Request<B>) -> bool {
+    let path = req.uri().path();
+    path == "/hooks" || path == "/hooks/" || path.starts_with("/hooks/")
+}
+
 fn is_static_asset_path(path: &str) -> bool {
     path.starts_with("/dist/chat/")
 }
@@ -128,11 +302,11 @@ pub(crate) fn project_cookie_from_headers(
     project_id: &str,
     expected: &str,
 ) -> Option<String> {
-    if let Some(token) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| token_matches(token, expected))
+    if has_multiple_authorization_headers(headers) {
+        return None;
+    }
+    if let Some(token) =
+        bearer_token_from_headers(headers).filter(|token| token_matches(token, expected))
     {
         return Some(project_cookie_value(project_id, token));
     }
@@ -169,6 +343,14 @@ pub(crate) fn matching_daemon_query_token(query: Option<&str>, expected: &str) -
     })
 }
 
+fn query_contains_daemon_token(query: Option<&str>) -> bool {
+    query
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == DAEMON_AUTH_QUERY)
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn query_without_daemon_token(query: Option<&str>) -> Option<String> {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     let mut kept = false;
@@ -182,7 +364,7 @@ pub(crate) fn query_without_daemon_token(query: Option<&str>) -> Option<String> 
     kept.then(|| serializer.finish())
 }
 
-pub(crate) fn redact_daemon_token(value: &str) -> String {
+pub(crate) fn redact_daemon_query_token(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut cursor = 0;
     while let Some((value_start, value_end)) = next_daemon_token_value(value, cursor) {
@@ -195,6 +377,55 @@ pub(crate) fn redact_daemon_token(value: &str) -> String {
     }
     out.push_str(&value[cursor..]);
     out
+}
+
+pub(crate) fn daemon_lan_auth_ok(config: &DaemonConfig) -> bool {
+    if !config.auth.enabled {
+        return false;
+    }
+    let has_token = config
+        .auth
+        .token
+        .as_deref()
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    let has_basic = config
+        .auth
+        .username
+        .as_deref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        && config
+            .auth
+            .password
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+    has_token || has_basic
+}
+
+pub(crate) fn hooks_unauthenticated_allowed_for_bind(bind: &str) -> bool {
+    bind.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+pub(crate) fn validate_hooks_auth_policy(
+    config: &DaemonConfig,
+    bind_ip: IpAddr,
+) -> Result<(), String> {
+    if !config.hooks.enabled || config.auth.enabled || bind_ip.is_loopback() {
+        return Ok(());
+    }
+    if config
+        .hooks
+        .token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        return Ok(());
+    }
+    Err("daemon hooks without hooks.token or daemon auth are only allowed on loopback binds; set hooks.token, enable auth, or bind to 127.0.0.1/::1".to_string())
 }
 
 fn next_daemon_token_value(value: &str, from: usize) -> Option<(usize, usize)> {
@@ -251,20 +482,58 @@ fn is_token_delimiter(ch: char) -> bool {
     )
 }
 
-pub(crate) async fn check<B>(token: Option<String>, req: Request<B>, next: Next<B>) -> Response
+pub(crate) async fn enforce<B>(policy: DaemonAuthPolicy, req: Request<B>, next: Next<B>) -> Response
 where
     B: Send + 'static,
 {
-    if let Some(expected) = token {
-        if !is_public_request(&req) {
-            if !request_authorized(&req, &expected) {
+    let peer_loopback = loopback_trust_allowed(&req);
+    if is_hook_request(&req) {
+        if query_contains_daemon_token(req.uri().query()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Unauthorized"})),
+            )
+                .into_response();
+        }
+        let expected = policy
+            .hook_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| {
+                policy
+                    .token
+                    .as_deref()
+                    .filter(|token| !token.trim().is_empty())
+            });
+        match expected {
+            Some(expected) => {
+                if !hook_request_authorized(&req, expected) {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": "Unauthorized"})),
+                    )
+                        .into_response();
+                }
+            }
+            None if policy.open_hooks_allowed => {}
+            None => {
                 return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Unauthorized"})),
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "hooks require hooks.token or daemon auth on non-loopback binds"})),
                 )
                     .into_response();
             }
         }
+        return next.run(req).await;
+    }
+    if peer_loopback || is_public_request(&req) {
+        return next.run(req).await;
+    }
+    if !policy.requires_auth() {
+        return unauthorized_basic();
+    }
+    if !remote_authorized(&req, &policy) {
+        return unauthorized_basic();
     }
     next.run(req).await
 }
@@ -321,6 +590,33 @@ mod tests {
             .unwrap();
 
         assert!(request_authorized(&request, "secret-token"));
+    }
+
+    #[test]
+    fn auth_middleware_accepts_ows_and_case_insensitive_bearer_scheme() {
+        let request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::AUTHORIZATION, "  bEaReR \t secret-token  ")
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(request_authorized(&request, "secret-token"));
+    }
+
+    #[test]
+    fn auth_middleware_rejects_multiple_authorization_headers() {
+        let mut request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::AUTHORIZATION, "Bearer secret-token")
+            .header(header::COOKIE, "refact_daemon_auth=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+
+        assert!(!request_authorized(&request, "secret-token"));
     }
 
     #[test]
@@ -447,6 +743,58 @@ mod tests {
     }
 
     #[test]
+    fn project_cookie_from_headers_rejects_multiple_authorization_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+        headers.append(
+            header::AUTHORIZATION,
+            "Bearer secret-token".parse().unwrap(),
+        );
+
+        assert_eq!(
+            project_cookie_from_headers(&headers, "project-a", "secret-token"),
+            None
+        );
+    }
+
+    #[test]
+    fn hooks_auth_policy_allows_no_token_on_loopback_only() {
+        let loopback = DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let wildcard = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tokenized = DaemonConfig {
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                token: Some("hook-secret".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(hooks_unauthenticated_allowed_for_bind("127.0.0.1"));
+        assert!(hooks_unauthenticated_allowed_for_bind("::1"));
+        assert!(!hooks_unauthenticated_allowed_for_bind("0.0.0.0"));
+        assert!(validate_hooks_auth_policy(&loopback, "127.0.0.1".parse().unwrap()).is_ok());
+        assert!(validate_hooks_auth_policy(&tokenized, "0.0.0.0".parse().unwrap()).is_ok());
+        assert!(validate_hooks_auth_policy(&wildcard, "0.0.0.0".parse().unwrap()).is_err());
+    }
+
+    #[test]
     fn query_without_daemon_token_removes_only_daemon_token() {
         assert_eq!(
             query_without_daemon_token(Some("a=1&daemon_token=secret&b=2")),
@@ -464,14 +812,16 @@ mod tests {
     }
 
     #[test]
-    fn redact_daemon_token_hides_query_values() {
-        let redacted =
-            redact_daemon_token("GET http://x/p/a/v1?daemon_token=secret-token&chat=1 failed");
+    fn redact_daemon_query_token_hides_query_values() {
+        let redacted = redact_daemon_query_token(
+            "GET http://x/p/a/v1?daemon_token=secret-token&chat=1 failed",
+        );
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("daemon_token=<redacted>&chat=1"));
 
-        let redacted =
-            redact_daemon_token("GET http://x/p/a/v1?d%61emon_token=secret-token&chat=1 failed");
+        let redacted = redact_daemon_query_token(
+            "GET http://x/p/a/v1?d%61emon_token=secret-token&chat=1 failed",
+        );
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("d%61emon_token=<redacted>&chat=1"));
     }

@@ -7,7 +7,6 @@ pub struct ChatLimits {
     pub recent_request_ids_capacity: usize,
     pub max_images_per_message: usize,
     pub max_parallel_tools: usize,
-    pub max_included_files: usize,
     pub max_file_size: usize,
 }
 
@@ -19,7 +18,6 @@ impl Default for ChatLimits {
             recent_request_ids_capacity: 100,
             max_images_per_message: 5,
             max_parallel_tools: 32,
-            max_included_files: 15,
             max_file_size: 40_000,
         }
     }

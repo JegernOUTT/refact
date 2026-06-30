@@ -66,7 +66,10 @@ fn fake_worker_cmd() -> Option<String> {
     let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fake_worker.py");
-    Some(format!("{} {}", python, script.display()))
+    Some(shell_words::join([
+        python.as_str(),
+        script.to_string_lossy().as_ref(),
+    ]))
 }
 
 fn durable_task(cron: &str, created_at_ms: u64, chat_id: &str) -> Value {

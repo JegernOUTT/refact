@@ -49,6 +49,9 @@ function Normalize-Version([string]$Value) {
     if ($Value.StartsWith("engine/")) {
         return $Value.Substring(7)
     }
+    if ($Value.StartsWith("release/v")) {
+        return $Value.Substring(9)
+    }
     if ($Value.StartsWith("v")) {
         return $Value.Substring(1)
     }
@@ -56,15 +59,17 @@ function Normalize-Version([string]$Value) {
 }
 
 function Get-LatestVersion {
+    $releasesUrl = "$ApiUrl/releases?per_page=100"
     try {
-        $release = Invoke-RestMethod -Uri "$ApiUrl/releases/latest" -Headers @{ Accept = "application/vnd.github+json" }
+        $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers @{ Accept = "application/vnd.github+json" })
     } catch {
-        Fail "could not resolve latest release from $ApiUrl/releases/latest: $($_.Exception.Message)"
+        Fail "could not fetch releases from ${releasesUrl}: $($_.Exception.Message)"
     }
-    if (-not $release.tag_name) {
-        Fail "latest release response did not include tag_name"
+    $engineRelease = $releases | Where-Object { $_.tag_name -like "engine/v*" } | Select-Object -First 1
+    if ($null -eq $engineRelease) {
+        Fail "could not find an engine/v* release in $releasesUrl"
     }
-    return Normalize-Version ([string]$release.tag_name)
+    return Normalize-Version ([string]$engineRelease.tag_name)
 }
 
 function Resolve-Version {

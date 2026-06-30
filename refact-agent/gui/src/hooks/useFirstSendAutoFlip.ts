@@ -1,23 +1,27 @@
 import { useEffect, useRef } from "react";
 import { useAppDispatch, useAppSelector } from "./index";
 import {
-  selectMessages,
-  selectAutoEnrichmentEnabled,
-  selectMemoryEnrichmentUserTouched,
+  selectMessagesById,
+  selectAutoEnrichmentEnabledById,
+  selectMemoryEnrichmentUserTouchedById,
   setAutoEnrichmentEnabled,
-} from "../features/Chat";
-import { selectChatId } from "../features/Chat/Thread/selectors";
+  useThreadId,
+} from "../features/Chat/Thread";
 import { updateChatParams } from "../services/refact/chatCommands";
 import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 
 export function useFirstSendAutoFlip() {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
-  const messages = useAppSelector(selectMessages);
-  const autoEnabled = useAppSelector(selectAutoEnrichmentEnabled);
-  const userTouched = useAppSelector(selectMemoryEnrichmentUserTouched);
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const autoEnabled = useAppSelector((state) =>
+    selectAutoEnrichmentEnabledById(state, chatId),
+  );
+  const userTouched = useAppSelector((state) =>
+    selectMemoryEnrichmentUserTouchedById(state, chatId),
+  );
 
   const prevUserCountRef = useRef(0);
 

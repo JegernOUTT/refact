@@ -1526,10 +1526,7 @@ mod tests {
             &HashMap::new(),
             true,
         );
-        assert_eq!(
-            openai_record.base.tokenizer,
-            refact_core::model_caps::OPENAI_CLOUD_TOKENIZER
-        );
+        assert_eq!(openai_record.base.tokenizer, "fake");
 
         let mut instance_model = model.clone();
         instance_model.id = "custom-named-model".to_string();
@@ -1546,10 +1543,7 @@ mod tests {
             &HashMap::new(),
             true,
         );
-        assert_eq!(
-            instance_record.base.tokenizer,
-            refact_core::model_caps::OPENAI_CLOUD_TOKENIZER
-        );
+        assert_eq!(instance_record.base.tokenizer, "fake");
 
         let mut explicit_model = model.clone();
         explicit_model.tokenizer = Some("hf://custom/tokenizer".to_string());
@@ -1557,7 +1551,7 @@ mod tests {
         model_caps.insert(
             "openai/gpt-4.1".to_string(),
             ModelCapabilities {
-                tokenizer: refact_core::model_caps::OPENAI_CLOUD_TOKENIZER.to_string(),
+                tokenizer: "fake".to_string(),
                 ..Default::default()
             },
         );

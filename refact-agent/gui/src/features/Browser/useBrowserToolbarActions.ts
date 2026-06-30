@@ -98,6 +98,7 @@ export function useBrowserToolbarActions(chatId: string) {
                 "Browser Annotations",
                 `The screenshot has numbered annotations:\n${annotText}`,
               ),
+              chatId,
             );
             await browserAnnotateClear({ chat_id: chatId })
               .unwrap()
@@ -159,6 +160,7 @@ export function useBrowserToolbarActions(chatId: string) {
                 }\nBbox: ${JSON.stringify(pickResult.bbox)}`;
                 insertBrowserDraft(
                   formatBrowserDraftBlock("Browser Picked Element", text),
+                  chatId,
                 );
               }
               break;
@@ -193,7 +195,7 @@ export function useBrowserToolbarActions(chatId: string) {
               : action === "paste_console"
                 ? "Browser Console"
                 : "Browser Network";
-          insertBrowserDraft(formatBrowserDraftBlock(title, content));
+          insertBrowserDraft(formatBrowserDraftBlock(title, content), chatId);
           break;
         }
 
@@ -201,6 +203,7 @@ export function useBrowserToolbarActions(chatId: string) {
           const result = await browserCurl({ chat_id: chatId }).unwrap();
           insertBrowserDraft(
             formatBrowserDraftBlock("Browser cURL", result.curl),
+            chatId,
           );
           break;
         }
@@ -235,7 +238,10 @@ export function useBrowserToolbarActions(chatId: string) {
             action === "summarize"
               ? "Summarize this page"
               : "Extract data as JSON from tables/lists";
-          insertBrowserDraft(formatBrowserDraftBlock("Browser Task", message));
+          insertBrowserDraft(
+            formatBrowserDraftBlock("Browser Task", message),
+            chatId,
+          );
           break;
         }
 

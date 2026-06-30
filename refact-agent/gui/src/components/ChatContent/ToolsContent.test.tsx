@@ -202,6 +202,37 @@ describe("ToolsContent routing", () => {
     expect(screen.getByText("exec_service_dev")).toBeInTheDocument();
   });
 
+  it("renders tool results from an explicit non-current thread", () => {
+    const id = "call-agent-finish-thread-b";
+    const chat = createDefaultChatState();
+    const currentId = chat.current_thread_id;
+    const currentRuntime = chat.threads[currentId];
+    const otherRuntime = {
+      ...currentRuntime,
+      thread: {
+        ...currentRuntime.thread,
+        id: "thread-b",
+        messages: [makeToolMessage(id, "Right thread report")] as ChatMessages,
+      },
+    };
+    currentRuntime.thread.messages = [
+      makeToolMessage(id, "Wrong current report"),
+    ] as ChatMessages;
+    chat.threads["thread-b"] = otherRuntime;
+    chat.open_thread_ids = [currentId, "thread-b"];
+
+    render(
+      <ToolContent
+        toolCalls={[makeToolCall("agent_finish", id)]}
+        threadId="thread-b"
+      />,
+      { preloadedState: { chat } },
+    );
+
+    expect(screen.getByText("Right thread report")).toBeInTheDocument();
+    expect(screen.queryByText("Wrong current report")).not.toBeInTheDocument();
+  });
+
   it("final_report_tool_card_uses_hidden_marker_not_display_contents", () => {
     const { container } = renderToolContent(
       "agent_finish",

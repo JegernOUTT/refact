@@ -42,6 +42,7 @@ impl ReadOnlyView {
             title: self.title().to_string(),
             rendered_lines: vec![format!("Loading /{} data…", self.command_name())],
             raw_lines: Vec::new(),
+            surface: None,
         }
     }
 }
@@ -51,22 +52,42 @@ pub struct ViewOverlay {
     pub title: String,
     pub rendered_lines: Vec<String>,
     pub raw_lines: Vec<String>,
+    pub surface: Option<ViewOverlaySurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewOverlaySurface {
+    pub summary_lines: Vec<String>,
+    pub rows: Vec<ViewOverlayRow>,
+    pub empty_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewOverlayRow {
+    pub name: String,
+    pub description: Option<String>,
+    pub category_tag: Option<String>,
+    pub disabled_reason: Option<String>,
+    pub is_disabled: bool,
 }
 
 pub fn mcp_overlay(data: &McpViewData) -> ViewOverlay {
-    let mut lines = vec![
-        "MCP".to_string(),
+    let mut summary_lines = vec![
         "Configured servers from /v1/integrations; live status from /v1/mcp-server-info."
             .to_string(),
         format!("Servers: {}", data.servers.len()),
     ];
     if !data.error_log.is_empty() {
-        lines.push(format!("Integration warnings: {}", data.error_log.len()));
+        summary_lines.push(format!("Integration warnings: {}", data.error_log.len()));
     }
+    let mut lines = overlay_lines("MCP", &summary_lines);
+    let mut rows = Vec::new();
     lines.push(String::new());
 
     if data.servers.is_empty() {
-        lines.push("No configured MCP servers found via /v1/integrations.".to_string());
+        let empty = "No configured MCP servers found via /v1/integrations.".to_string();
+        lines.push(empty.clone());
+        rows.push(surface_note_row(empty));
     } else {
         for server in &data.servers {
             let scope = if server.project_path.is_empty() {
@@ -75,7 +96,10 @@ pub fn mcp_overlay(data: &McpViewData) -> ViewOverlay {
                 format!("project {}", server.project_path)
             };
             match &server.info {
-                Some(info) => push_mcp_server_lines(&mut lines, server, info, &scope),
+                Some(info) => {
+                    push_mcp_server_lines(&mut lines, server, info, &scope);
+                    push_mcp_server_rows(&mut rows, server, info, &scope);
+                }
                 None => {
                     lines.push(format!(
                         "• {} [{}] — status unavailable",
@@ -88,6 +112,15 @@ pub fn mcp_overlay(data: &McpViewData) -> ViewOverlay {
                         .as_deref()
                         .unwrap_or("backend did not return details");
                     lines.push(format!("  notice: {error}"));
+                    rows.push(surface_item_row(
+                        server.name.clone(),
+                        Some(format!(
+                            "[{}] status unavailable · scope {scope}",
+                            server.transport
+                        )),
+                    ));
+                    rows.push(surface_item_row("config", Some(server.config_path.clone())));
+                    rows.push(surface_item_row("notice", Some(error.to_string())));
                 }
             }
             lines.push(String::new());
@@ -98,26 +131,34 @@ pub fn mcp_overlay(data: &McpViewData) -> ViewOverlay {
         title: "MCP".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: Some(ViewOverlaySurface {
+            summary_lines,
+            rows,
+            empty_message: "No configured MCP servers found via /v1/integrations.".to_string(),
+        }),
     }
 }
 
 pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
-    let mut lines = vec![
-        "Skills".to_string(),
+    let summary_lines = vec![
         "Available skills and slash commands from /v1/slash-commands.".to_string(),
         format!(
             "Skills: {} · Slash commands: {}",
             data.skills.len(),
             data.commands.len()
         ),
-        String::new(),
-        "Skills".to_string(),
     ];
+    let mut lines = overlay_lines("Skills", &summary_lines);
+    let mut rows = Vec::new();
+    lines.extend([String::new(), "Skills".to_string()]);
+    rows.push(surface_header_row("Skills"));
 
     let mut skills = data.skills.iter().collect::<Vec<_>>();
     skills.sort_by(|left, right| left.name.cmp(&right.name));
     if skills.is_empty() {
-        lines.push("No skills returned by /v1/slash-commands.".to_string());
+        let empty = "No skills returned by /v1/slash-commands.".to_string();
+        lines.push(empty.clone());
+        rows.push(surface_note_row(empty));
     } else {
         for skill in skills {
             let invocable = if skill.user_invocable {
@@ -132,15 +173,24 @@ pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
             if !skill.description.trim().is_empty() {
                 lines.push(format!("  {}", compact_text(&skill.description)));
             }
+            let mut row = surface_item_row(
+                format!("/{}", skill.name),
+                non_empty_compact(&skill.description),
+            );
+            row.category_tag = Some(format!("{invocable} · {}", skill.source));
+            rows.push(row);
         }
     }
 
     lines.push(String::new());
     lines.push("Slash commands".to_string());
+    rows.push(surface_header_row("Slash commands"));
     let mut commands = data.commands.iter().collect::<Vec<_>>();
     commands.sort_by(|left, right| left.name.cmp(&right.name));
     if commands.is_empty() {
-        lines.push("No slash commands returned by /v1/slash-commands.".to_string());
+        let empty = "No slash commands returned by /v1/slash-commands.".to_string();
+        lines.push(empty.clone());
+        rows.push(surface_note_row(empty));
     } else {
         for command in commands {
             let hint = command.argument_hint.as_deref().unwrap_or_default();
@@ -153,6 +203,9 @@ pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
             if !command.description.trim().is_empty() {
                 lines.push(format!("  {}", compact_text(&command.description)));
             }
+            let mut row = surface_item_row(title, non_empty_compact(&command.description));
+            row.category_tag = Some(command.source.clone());
+            rows.push(row);
         }
     }
 
@@ -160,13 +213,18 @@ pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
         title: "Skills".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: Some(ViewOverlaySurface {
+            summary_lines,
+            rows,
+            empty_message: "No skills or slash commands returned by /v1/slash-commands."
+                .to_string(),
+        }),
     }
 }
 
 pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
     let stats = &data.stats;
-    let mut lines = vec![
-        "Memories".to_string(),
+    let mut summary_lines = vec![
         "Knowledge graph summary from /v1/knowledge-graph.".to_string(),
         format!(
             "Docs: {} active / {} total · Tags: {} · Files: {} · Entities: {} · Edges: {}",
@@ -179,11 +237,13 @@ pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
         ),
     ];
     if stats.deprecated_docs > 0 || stats.trajectory_count > 0 {
-        lines.push(format!(
+        summary_lines.push(format!(
             "Deprecated docs: {} · Trajectory docs: {}",
             stats.deprecated_docs, stats.trajectory_count
         ));
     }
+    let mut lines = overlay_lines("Memories", &summary_lines);
+    let mut rows = Vec::new();
     lines.push(String::new());
 
     let mut docs = data
@@ -193,11 +253,15 @@ pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
         .collect::<Vec<_>>();
     docs.sort_by(|left, right| left.label.cmp(&right.label));
     if docs.is_empty() {
-        lines.push("No knowledge documents returned by /v1/knowledge-graph.".to_string());
+        let empty = "No knowledge documents returned by /v1/knowledge-graph.".to_string();
+        lines.push(empty.clone());
+        rows.push(surface_note_row(empty));
     } else {
         lines.push("Knowledge entries".to_string());
+        rows.push(surface_header_row("Knowledge entries"));
         for doc in docs {
             push_knowledge_doc_lines(&mut lines, doc);
+            rows.push(knowledge_doc_row(doc));
         }
     }
 
@@ -211,12 +275,19 @@ pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
     if !tags.is_empty() {
         lines.push(String::new());
         lines.push(format!("Tags: {}", tags.join(", ")));
+        rows.push(surface_header_row("Tags"));
+        rows.push(surface_item_row("tags", Some(tags.join(", "))));
     }
 
     ViewOverlay {
         title: "Memories".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: Some(ViewOverlaySurface {
+            summary_lines,
+            rows,
+            empty_message: "No knowledge documents returned by /v1/knowledge-graph.".to_string(),
+        }),
     }
 }
 
@@ -249,6 +320,7 @@ pub fn hooks_overlay(data: &HooksResponse) -> ViewOverlay {
         title: "Hooks".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: None,
     }
 }
 
@@ -288,6 +360,7 @@ pub fn import_sources_overlay(data: &CompetitorImportInfoResponse) -> ViewOverla
         title: "Import".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: None,
     }
 }
 
@@ -340,6 +413,7 @@ pub fn import_run_overlay(data: &CompetitorImportRunResponse) -> ViewOverlay {
         title: "Import".to_string(),
         rendered_lines: trim_trailing_blank(lines),
         raw_lines: raw_lines(data),
+        surface: None,
     }
 }
 
@@ -387,17 +461,54 @@ fn push_mcp_server_lines(
     }
 }
 
+fn push_mcp_server_rows(
+    rows: &mut Vec<ViewOverlayRow>,
+    server: &crate::client::McpServerSummary,
+    info: &McpServerInfoResponse,
+    scope: &str,
+) {
+    let status = status_summary(&info.status);
+    let auth = status_summary(&info.auth_status);
+    let mut server_row = surface_item_row(
+        server.name.clone(),
+        Some(format!(
+            "[{}] {} · auth {} · tools {} · resources {} · prompts {} · scope {scope}",
+            server.transport,
+            status,
+            auth,
+            info.tools.len(),
+            info.resources.len(),
+            info.prompts.len()
+        )),
+    );
+    server_row.category_tag = Some(server.transport.clone());
+    rows.push(server_row);
+    rows.push(surface_item_row("config", Some(server.config_path.clone())));
+    if let Some(name) = &info.server_name {
+        let version = info.server_version.as_deref().unwrap_or("unknown");
+        let protocol = info.protocol_version.as_deref().unwrap_or("unknown");
+        rows.push(surface_item_row(
+            "server",
+            Some(format!("{name} {version} · protocol {protocol}")),
+        ));
+    }
+    rows.push(surface_header_row("Tools"));
+    if info.tools.is_empty() {
+        rows.push(surface_note_row("tools: none returned".to_string()));
+    } else {
+        for tool in &info.tools {
+            let name = if tool.internal_name.is_empty() {
+                tool.name.clone()
+            } else {
+                tool.internal_name.clone()
+            };
+            rows.push(surface_item_row(name, non_empty_compact(&tool.description)));
+        }
+    }
+}
+
 fn push_knowledge_doc_lines(lines: &mut Vec<String>, doc: &KnowledgeNode) {
-    let kind = doc
-        .kind
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            doc.node_type
-                .trim_start_matches("doc_")
-                .trim_start_matches("doc")
-        });
-    let kind = if kind.is_empty() { "doc" } else { kind };
+    let kind = knowledge_doc_kind(doc);
     let tags = doc
         .tags
         .as_ref()
@@ -414,6 +525,91 @@ fn push_knowledge_doc_lines(lines: &mut Vec<String>, doc: &KnowledgeNode) {
     if let Some(path) = doc.file_path.as_deref() {
         lines.push(format!("  {path}"));
     }
+}
+
+fn knowledge_doc_row(doc: &KnowledgeNode) -> ViewOverlayRow {
+    let mut parts = Vec::new();
+    if let Some(tags) = doc.tags.as_ref().filter(|tags| !tags.is_empty()) {
+        parts.push(format!("tags {}", tags.join(", ")));
+    }
+    if let Some(created) = doc
+        .created
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(created.to_string());
+    }
+    if let Some(path) = doc
+        .file_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(path.to_string());
+    }
+    let mut row = surface_item_row(
+        doc.label.clone(),
+        (!parts.is_empty()).then(|| parts.join(" · ")),
+    );
+    row.category_tag = Some(knowledge_doc_kind(doc));
+    row
+}
+
+fn knowledge_doc_kind(doc: &KnowledgeNode) -> String {
+    let kind = doc
+        .kind
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            doc.node_type
+                .trim_start_matches("doc_")
+                .trim_start_matches("doc")
+        });
+    if kind.is_empty() {
+        "doc".to_string()
+    } else {
+        kind.to_string()
+    }
+}
+
+fn overlay_lines(title: &str, summary_lines: &[String]) -> Vec<String> {
+    let mut lines = vec![title.to_string()];
+    lines.extend(summary_lines.iter().cloned());
+    lines
+}
+
+fn surface_header_row(name: impl Into<String>) -> ViewOverlayRow {
+    ViewOverlayRow {
+        name: name.into(),
+        description: None,
+        category_tag: None,
+        disabled_reason: None,
+        is_disabled: true,
+    }
+}
+
+fn surface_note_row(message: String) -> ViewOverlayRow {
+    ViewOverlayRow {
+        name: message,
+        description: None,
+        category_tag: None,
+        disabled_reason: None,
+        is_disabled: true,
+    }
+}
+
+fn surface_item_row(name: impl Into<String>, description: Option<String>) -> ViewOverlayRow {
+    ViewOverlayRow {
+        name: name.into(),
+        description,
+        category_tag: None,
+        disabled_reason: None,
+        is_disabled: false,
+    }
+}
+
+fn non_empty_compact(value: &str) -> Option<String> {
+    let compact = compact_text(value);
+    (!compact.is_empty()).then_some(compact)
 }
 
 fn push_hook_lines(lines: &mut Vec<String>, hook: &HookInfo) {

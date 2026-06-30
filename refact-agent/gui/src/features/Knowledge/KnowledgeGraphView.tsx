@@ -19,6 +19,17 @@ cytoscape.use(fcose);
 
 type GraphEdge = KnowledgeGraphEdge & { id?: string };
 
+// Doc nodes carry a frontmatter `kind` (e.g. "memory", "insight", "decision");
+// when it is missing we derive it from `node_type` ("doc_code" -> "code",
+// "doc" -> "doc"). This is what selects the node color, so it must be robust.
+function resolveNodeKind(node: KnowledgeGraphNode): string {
+  const raw = node.kind?.trim().toLowerCase();
+  if (raw) return raw;
+  const nodeType = node.node_type.toLowerCase();
+  if (nodeType.startsWith("doc_")) return nodeType.slice(4);
+  return "doc";
+}
+
 type CytoscapeElement = {
   data: {
     id: string;
@@ -85,7 +96,7 @@ export function KnowledgeGraphView({
         data: {
           id: node.id,
           label: node.label,
-          type: node.kind ?? "default",
+          type: resolveNodeKind(node),
           degree: degreeMap.get(node.id) ?? 1,
         },
         group: "nodes" as const,
@@ -105,19 +116,11 @@ export function KnowledgeGraphView({
   }, [filteredNodes, filteredEdges, degreeMap]);
 
   const stylesheet = useMemo<Cytoscape.StylesheetStyle[]>(() => {
-    const nodeColors: Record<string, string> = {
-      code: colors.kind.code,
-      decision: colors.kind.decision,
-      preference: colors.kind.preference,
-      pattern: colors.kind.pattern,
-      lesson: colors.kind.lesson,
-    };
-
     return [
       {
         selector: "node",
         style: {
-          "background-color": colors.kind.other,
+          "background-color": colors.kindDefault,
           label: "",
           "font-size": "12px",
           color: colors.foreground,
@@ -129,7 +132,7 @@ export function KnowledgeGraphView({
           "text-max-width": "80px",
         },
       },
-      ...Object.entries(nodeColors).map(([type, color]) => ({
+      ...Object.entries(colors.kind).map(([type, color]) => ({
         selector: `node[type="${type}"]`,
         style: {
           "background-color": color,

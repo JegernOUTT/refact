@@ -35,6 +35,7 @@ struct PickerDaemon {
     port: u16,
     started_at_ms: u64,
     uptime_secs: u64,
+    log_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +51,7 @@ struct PickerProject {
     live_proxy_streams: u64,
     cron_next_fire_ms: Option<u64>,
     last_active_ms: u64,
+    log_path: String,
 }
 
 pub(crate) async fn handle_project_picker(
@@ -61,6 +63,20 @@ pub(crate) async fn handle_project_picker(
     }
     let data = picker_data(state, port).await;
     html_response(StatusCode::OK, render_picker_html(&data))
+}
+
+pub(crate) async fn handle_project_gui_redirect(OriginalUri(uri): OriginalUri) -> Response {
+    let path = uri.path();
+    let location = match uri.query() {
+        Some(query) if !query.is_empty() => format!("{path}/?{query}"),
+        _ => format!("{path}/"),
+    };
+    let mut response = Response::new(axum::body::boxed(axum::body::Full::from(Vec::<u8>::new())));
+    *response.status_mut() = StatusCode::PERMANENT_REDIRECT;
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        response.headers_mut().insert(header::LOCATION, value);
+    }
+    response
 }
 
 pub(crate) async fn handle_project_gui_index(
@@ -243,6 +259,12 @@ async fn picker_data(state: Arc<DaemonState>, port: u16) -> PickerData {
             live_proxy_streams: activity.live_proxy_streams,
             cron_next_fire_ms: state.cron_pending(&entry.id).await,
             last_active_ms: last_activity_ms,
+            log_path: state
+                .daemon_dir
+                .join("logs")
+                .join(format!("worker-{}.log", entry.slug))
+                .to_string_lossy()
+                .to_string(),
         });
     }
 
@@ -253,6 +275,12 @@ async fn picker_data(state: Arc<DaemonState>, port: u16) -> PickerData {
             started_at_ms: state.started_at_ms,
             uptime_secs: Duration::from_millis(now_ms().saturating_sub(state.started_at_ms))
                 .as_secs(),
+            log_path: state
+                .daemon_dir
+                .join("logs")
+                .join("daemon.log")
+                .to_string_lossy()
+                .to_string(),
         },
         projects,
     }
@@ -521,6 +549,7 @@ mod tests {
             config.auth = crate::daemon::config::AuthConfig {
                 enabled: true,
                 token: Some(token.to_string()),
+                ..Default::default()
             };
         }
         let state = DaemonState::new(
@@ -536,6 +565,7 @@ mod tests {
         WorkerStatusReport {
             project_id: project_id.to_string(),
             pid: 123,
+            instance_token: "token".to_string(),
             lsp_clients,
             busy_chats: 2,
             exec_running: 1,
@@ -617,6 +647,7 @@ mod tests {
                 port: 8488,
                 started_at_ms: 10,
                 uptime_secs: 3,
+                log_path: "/tmp/daemon/logs/daemon.log".to_string(),
             },
             projects: vec![PickerProject {
                 id: "abc123".to_string(),
@@ -630,6 +661,7 @@ mod tests {
                 live_proxy_streams: 0,
                 cron_next_fire_ms: Some(42),
                 last_active_ms: 99,
+                log_path: "/tmp/daemon/logs/worker-my-project.log".to_string(),
             }],
         };
         let html = String::from_utf8(render_picker_html(&data).into_owned()).unwrap();
@@ -682,14 +714,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_enabled_picker_requires_credentials() {
-        let state = test_state_with_auth(Some("secret-token")).await.state;
+    async fn invalid_project_index_returns_escaped_404_page() {
+        let state = test_state().await.state;
         let response = crate::daemon::server::make_router(state, 8488)
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/p/%3Cbad%3E/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("&lt;bad&gt;"));
+        assert!(!body.contains("<bad>"));
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_picker_requires_credentials() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(request)
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_dist_chat_assets_are_public() {
+        let state = test_state_with_auth(Some("secret-token")).await.state;
+        let response = crate::daemon::server::make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/dist/chat/missing.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -830,39 +903,30 @@ mod tests {
             crate::daemon::auth::project_cookie_value(&entry_a.id, "secret-token")
         );
         let router = crate::daemon::server::make_router(state, 8488);
+        let remote =
+            || axum::extract::ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 50], 40000)));
 
-        let same_project = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/p/{}/", entry_a.id))
-                    .header(header::COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        let mut same_request = Request::builder()
+            .uri(format!("/p/{}/", entry_a.id))
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
             .unwrap();
-        let other_project = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/p/{}/", entry_b.id))
-                    .header(header::COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        same_request.extensions_mut().insert(remote());
+        let same_project = router.clone().oneshot(same_request).await.unwrap();
+        let mut other_request = Request::builder()
+            .uri(format!("/p/{}/", entry_b.id))
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
             .unwrap();
-        let control_plane = router
-            .oneshot(
-                Request::builder()
-                    .uri("/daemon/v1/projects")
-                    .header(header::COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        other_request.extensions_mut().insert(remote());
+        let other_project = router.clone().oneshot(other_request).await.unwrap();
+        let mut control_request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
             .unwrap();
+        control_request.extensions_mut().insert(remote());
+        let control_plane = router.oneshot(control_request).await.unwrap();
 
         assert_eq!(same_project.status(), StatusCode::OK);
         assert_eq!(other_project.status(), StatusCode::UNAUTHORIZED);

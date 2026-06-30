@@ -736,8 +736,8 @@ fn convert_to_responses_format(
     messages: &[refact_core::chat_types::ChatMessage],
 ) -> (Value, Option<String>) {
     use super::render_extra::{
-        is_context_role, is_event_role, is_plan_role, render_context_message, render_event_message,
-        render_plan_message,
+        is_context_role, is_event_role, is_goal_role, is_plan_role, render_context_message,
+        render_event_message, render_goal_message, render_plan_message,
     };
 
     let mut instructions = None;
@@ -760,7 +760,7 @@ fn convert_to_responses_format(
                 }
                 instructions = Some(msg.content.content_text_only());
             }
-            role if is_plan_role(role) => {
+            role if is_goal_role(role) || is_plan_role(role) => {
                 if !pending_user_content.is_empty() {
                     input_messages.push(json!({
                         "type": "message",
@@ -768,7 +768,12 @@ fn convert_to_responses_format(
                         "content": std::mem::take(&mut pending_user_content),
                     }));
                 }
-                if let Some(text) = render_plan_message(msg) {
+                let text = if is_goal_role(role) {
+                    render_goal_message(msg)
+                } else {
+                    render_plan_message(msg)
+                };
+                if let Some(text) = text {
                     input_messages.push(json!({
                         "type": "message",
                         "role": "user",
@@ -1198,6 +1203,20 @@ mod tests {
         }
     }
 
+    fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1245,6 +1264,23 @@ mod tests {
         let text = input[0]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
         assert!(text.contains("Do the thing"));
+    }
+
+    #[test]
+    fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
+        let messages = vec![
+            goal_message("agent", 1, "Reach the goal"),
+            plan_message("agent", 1, "Do the thing"),
+        ];
+
+        let (input, instructions) = convert_to_responses_format(&messages);
+        let serialized = json!({"input": input, "instructions": instructions}).to_string();
+
+        assert!(instructions.is_none());
+        assert_eq!(serialized.matches("<goal mode=").count(), 1);
+        assert_eq!(serialized.matches("<plan mode=").count(), 1);
+        assert!(serialized.find("<goal mode=").unwrap() < serialized.find("<plan mode=").unwrap());
+        assert!(!serialized.contains("\"role\":\"goal\""));
     }
 
     #[test]

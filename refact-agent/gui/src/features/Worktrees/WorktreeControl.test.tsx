@@ -4,6 +4,7 @@ import path from "node:path";
 import { http, HttpResponse } from "msw";
 import { screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
+import { ChatThreadProvider } from "../Chat/Thread";
 import type {
   WorktreeDiffResponse,
   WorktreeListResponse,
@@ -149,6 +150,16 @@ function commandCapture(calls: JsonObject[]) {
   });
 }
 
+function commandCaptureWithChatIds(calls: JsonObject[]) {
+  return http.post("*/v1/chats/:id/commands", async ({ params, request }) => {
+    calls.push({
+      ...((await request.json()) as JsonObject),
+      route_chat_id: String(params.id),
+    });
+    return HttpResponse.json({ status: "queued" });
+  });
+}
+
 function createWorktreeHandler(
   record: WorktreeRecordView,
   calls: JsonObject[],
@@ -283,6 +294,108 @@ describe("WorktreeControl", () => {
         "refact/chat/branch",
       );
     });
+  });
+
+  test("pane providers scope worktree labels to each pane thread", async () => {
+    const global = makeWorktreeRecord("wt-global", "refact/chat/global");
+    const left = makeWorktreeRecord("wt-left", "refact/chat/left");
+    const right = makeWorktreeRecord("wt-right", "refact/chat/right");
+    const chat = makeChatState("global-chat", global.meta);
+    const globalRuntime = chat.threads["global-chat"];
+    if (!globalRuntime) throw new Error("global test thread missing");
+    chat.open_thread_ids = ["global-chat", "left-chat", "right-chat"];
+    chat.threads["left-chat"] = {
+      ...globalRuntime,
+      thread: {
+        ...globalRuntime.thread,
+        id: "left-chat",
+        worktree: left.meta,
+      },
+    };
+    chat.threads["right-chat"] = {
+      ...globalRuntime,
+      thread: {
+        ...globalRuntime.thread,
+        id: "right-chat",
+        worktree: right.meta,
+      },
+    };
+    server.use(worktreesList([global, left, right]));
+
+    render(
+      <>
+        <ChatThreadProvider chatId="left-chat">
+          <WorktreeControl />
+        </ChatThreadProvider>
+        <ChatThreadProvider chatId="right-chat">
+          <WorktreeControl />
+        </ChatThreadProvider>
+      </>,
+      {
+        preloadedState: {
+          chat,
+          config: configState(),
+        },
+      },
+    );
+
+    await waitFor(() => {
+      const triggers = screen.getAllByTestId("worktree-control-trigger");
+      expect(triggers).toHaveLength(2);
+      expect(triggers[0]).toHaveTextContent("refact/chat/left");
+      expect(triggers[1]).toHaveTextContent("refact/chat/right");
+      expect(triggers[0]).not.toHaveTextContent("refact/chat/global");
+      expect(triggers[1]).not.toHaveTextContent("refact/chat/global");
+    });
+  });
+
+  test("pane provider attaches selected worktree to pane thread", async () => {
+    const global = makeWorktreeRecord("wt-global", "refact/chat/global");
+    const paneTarget = makeWorktreeRecord("wt-pane", "refact/chat/pane");
+    const chat = makeChatState("global-chat", global.meta);
+    const globalRuntime = chat.threads["global-chat"];
+    if (!globalRuntime) throw new Error("global test thread missing");
+    chat.open_thread_ids = ["global-chat", "pane-chat"];
+    chat.threads["pane-chat"] = {
+      ...globalRuntime,
+      thread: {
+        ...globalRuntime.thread,
+        id: "pane-chat",
+        worktree: null,
+      },
+    };
+    const commandCalls: JsonObject[] = [];
+    server.use(
+      worktreesList([global, paneTarget]),
+      commandCaptureWithChatIds(commandCalls),
+    );
+
+    const { user } = render(
+      <ChatThreadProvider chatId="pane-chat">
+        <WorktreeControl />
+      </ChatThreadProvider>,
+      {
+        preloadedState: {
+          chat,
+          config: configState(),
+        },
+      },
+    );
+
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Select worktree refact\/chat\/pane/,
+      }),
+    );
+
+    await waitFor(() => expect(commandCalls).toHaveLength(1));
+    expect(commandCalls[0]).toMatchObject({
+      route_chat_id: "pane-chat",
+      type: "set_params",
+      patch: { worktree_id: "wt-pane" },
+    });
+    expect(commandCalls[0]?.route_chat_id).not.toBe("global-chat");
   });
 
   test("no-worktree label shows current source branch", async () => {

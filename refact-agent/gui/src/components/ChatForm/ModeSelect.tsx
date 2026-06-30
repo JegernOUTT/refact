@@ -14,10 +14,7 @@ import {
 } from "../../services/refact/chatModes";
 import { DEFAULT_MODE } from "../../features/Chat/Thread/types";
 import { useAppSelector, useAppDispatch } from "../../hooks";
-import {
-  selectMessages,
-  selectCurrentThreadId,
-} from "../../features/Chat/Thread";
+import { selectMessagesById, useThreadId } from "../../features/Chat/Thread";
 import { push, selectCurrentPage } from "../../features/Pages/pagesSlice";
 import { Badge, Chip, Icon, Popover, Skeleton } from "../ui";
 import { ModeTransitionDialog } from "./ModeTransitionDialog";
@@ -56,8 +53,10 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const { data, isLoading } = useGetChatModesQuery(undefined);
-  const messages = useAppSelector(selectMessages);
-  const currentChatId = useAppSelector(selectCurrentThreadId);
+  const currentChatId = useThreadId();
+  const messages = useAppSelector((state) =>
+    selectMessagesById(state, currentChatId),
+  );
   const currentPage = useAppSelector(selectCurrentPage);
 
   const taskId =
@@ -268,11 +267,11 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           targetMode={targetModeForTransition.id}
           targetModeTitle={targetModeForTransition.title}
           targetModeDescription={targetModeForTransition.description}
-          taskId={taskId}
         />
       )}
 
       <TaskPlannerDialog
+        sourceChatId={currentChatId}
         open={taskPlannerDialogOpen}
         onOpenChange={setTaskPlannerDialogOpen}
         taskId={taskId}

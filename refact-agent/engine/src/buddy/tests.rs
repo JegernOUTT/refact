@@ -901,14 +901,15 @@ async fn test_settings_update_fallback_response_includes_storage_metadata() {
     .await
     .unwrap();
     let storage = response.0["storage"].as_object().expect("storage object");
-    let expected_project_root = dir.path().to_string_lossy().to_string();
-    let expected_settings_path = dir
-        .path()
+    let expected_project_root =
+        crate::files_correction::canonicalize_normalized_path(dir.path().to_path_buf());
+    let expected_settings_path = expected_project_root
         .join(".refact")
         .join("buddy")
         .join("settings.json")
         .to_string_lossy()
         .to_string();
+    let expected_project_root = expected_project_root.to_string_lossy().to_string();
 
     assert_eq!(
         storage["project_root"].as_str(),
@@ -1662,6 +1663,64 @@ async fn test_unified_listing_mixed_kinds() {
     let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
     assert!(kinds.contains(&"chat"));
     assert!(kinds.contains(&"workflow"));
+}
+
+#[tokio::test]
+async fn test_list_recent_buddy_conversations_bounded_by_recency() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    for (name, id, updated, title) in [
+        ("a.json", "a", "2026-01-02T00:00:00Z", "Older"),
+        ("b.json", "b", "2026-01-05T00:00:00Z", "Newer"),
+        ("c.json", "c", "2026-01-04T00:00:00Z", "Middle"),
+    ] {
+        let path = root.join(format!(".refact/buddy/chats/conversations/{name}"));
+        let json = serde_json::json!({
+            "chat_id": id, "title": title, "kind": "chat",
+            "created_at": "2026-01-01T00:00:00Z", "last_message_at": updated,
+            "messages": [{ "role": "user" }]
+        });
+        super::storage::atomic_write_json(&path, &json)
+            .await
+            .unwrap();
+    }
+
+    let recent = super::conversation_ledger::list_recent_buddy_conversations(root, 2).await;
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].title, "Newer");
+    assert_eq!(recent[1].title, "Middle");
+}
+
+#[tokio::test]
+async fn test_list_recent_buddy_conversations_includes_workflows() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let conv_path = root.join(".refact/buddy/chats/conversations/c1.json");
+    let conv_json = serde_json::json!({
+        "chat_id": "c1", "title": "Conversation One", "kind": "chat",
+        "created_at": "2026-01-01T00:00:00Z", "last_message_at": "2026-01-03T00:00:00Z",
+        "messages": [{ "role": "user" }]
+    });
+    super::storage::atomic_write_json(&conv_path, &conv_json)
+        .await
+        .unwrap();
+
+    let wf_path = root.join(".refact/buddy/chats/workflows/commit_message.json");
+    let wf_json = serde_json::json!({
+        "entries": [{ "timestamp": "2026-01-05T00:00:00Z", "output_summary": "done", "success": true }]
+    });
+    super::storage::atomic_write_json(&wf_path, &wf_json)
+        .await
+        .unwrap();
+
+    let recent = super::conversation_ledger::list_recent_buddy_conversations(root, 5).await;
+    assert!(recent.iter().any(|e| e.kind == "chat"));
+    assert!(recent.iter().any(|e| e.kind == "workflow"));
+    assert_eq!(recent[0].kind, "workflow");
 }
 
 #[tokio::test]
@@ -6001,6 +6060,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let snapshot = TrajectorySnapshot {
+        goal: None,
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),
@@ -7277,7 +7337,7 @@ async fn pulse_populates_all_subpulse_counts() {
     .await
     .unwrap();
 
-    // Inject stuck + abandoned facts into the FactStore.
+    // Inject recent stuck + abandoned alert facts into the FactStore.
     let mut store = FactStore::new();
     let now = chrono::Utc::now();
     store.ingest(make_fact("task:stuck:t1", BuddyFactKind::TaskStuck, now));
@@ -7302,12 +7362,20 @@ async fn pulse_populates_all_subpulse_counts() {
     assert!(pulse.customization.skills > 0, "skills must be populated");
     assert!(pulse.customization.hooks > 0, "hooks must be populated");
     assert_eq!(
+        pulse.tasks.recent_stuck_alerts_1h, 1,
+        "recent stuck alert count must reflect injected fact"
+    );
+    assert_eq!(
+        pulse.tasks.recent_abandoned_alerts_24h, 1,
+        "recent abandoned alert count must reflect injected fact"
+    );
+    assert_eq!(
         pulse.tasks.stuck, 1,
-        "stuck count must reflect injected fact"
+        "legacy stuck count must stay compatible"
     );
     assert_eq!(
         pulse.tasks.abandoned, 1,
-        "abandoned count must reflect injected fact"
+        "legacy abandoned count must stay compatible"
     );
 }
 
@@ -10328,6 +10396,61 @@ async fn pulse_task_total_and_by_status_populated() {
         1,
         "completed count must be 1"
     );
+}
+
+#[tokio::test]
+async fn pulse_task_current_state_and_recent_alerts_are_separate() {
+    use super::facts::FactStore;
+    use super::pulse::build_pulse;
+    use crate::tasks::storage::{create_task, load_task_meta, save_task_meta};
+    use crate::tasks::types::TaskStatus;
+
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+    }
+
+    let _planning = create_task(gcx.clone(), "Task planning").await.unwrap();
+    let active = create_task(gcx.clone(), "Task active").await.unwrap();
+    let completed = create_task(gcx.clone(), "Task completed").await.unwrap();
+
+    let mut active_meta = load_task_meta(gcx.clone(), &active.id).await.unwrap();
+    active_meta.status = TaskStatus::Active;
+    save_task_meta(gcx.clone(), &active.id, &active_meta)
+        .await
+        .unwrap();
+
+    let mut completed_meta = load_task_meta(gcx.clone(), &completed.id).await.unwrap();
+    completed_meta.status = TaskStatus::Completed;
+    save_task_meta(gcx.clone(), &completed.id, &completed_meta)
+        .await
+        .unwrap();
+
+    let mut store = FactStore::new();
+    let now = chrono::Utc::now();
+    store.ingest(make_fact("task:stuck:t1", BuddyFactKind::TaskStuck, now));
+    store.ingest(make_fact(
+        "task:abandoned:t2",
+        BuddyFactKind::TaskAbandoned,
+        now,
+    ));
+
+    let pulse = build_pulse(app, dir.path(), &store).await;
+
+    assert_eq!(pulse.tasks.total, 3);
+    assert_eq!(pulse.tasks.by_status.get("planning"), Some(&1));
+    assert_eq!(pulse.tasks.by_status.get("active"), Some(&1));
+    assert_eq!(pulse.tasks.by_status.get("completed"), Some(&1));
+    assert_eq!(pulse.tasks.recent_stuck_alerts_1h, 1);
+    assert_eq!(pulse.tasks.recent_abandoned_alerts_24h, 1);
+    assert_eq!(pulse.tasks.stuck, 1);
+    assert_eq!(pulse.tasks.abandoned, 1);
 }
 
 #[test]

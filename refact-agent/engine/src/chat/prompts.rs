@@ -6,7 +6,10 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::app_state::AppState;
 use crate::call_validation;
-use crate::files_correction::get_project_dirs;
+use crate::files_correction::{
+    get_unscoped_project_dirs, normalize_path_for_unscoped_root_selection,
+    registered_worktree_path_mappings,
+};
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
@@ -183,14 +186,18 @@ async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<Pa
 
 async fn workspace_files_info(app: &AppState) -> (Vec<String>, Option<PathBuf>) {
     let documents_state = &app.workspace.documents_state;
-    let workspace_dirs: Vec<String> = {
-        let dirs_locked = documents_state.workspace_folders.lock().unwrap();
-        dirs_locked
-            .iter()
-            .map(|x| x.to_string_lossy().to_string())
-            .collect()
-    };
-    let active_file_path = documents_state.active_file_path.lock().await.clone();
+    let workspace_dirs: Vec<String> = get_unscoped_project_dirs(app.gcx.clone())
+        .await
+        .iter()
+        .map(|x| x.to_string_lossy().to_string())
+        .collect();
+    let worktree_mappings = registered_worktree_path_mappings(app.paths.cache_dir.as_path());
+    let active_file_path = documents_state
+        .active_file_path
+        .lock()
+        .await
+        .clone()
+        .and_then(|path| normalize_path_for_unscoped_root_selection(&path, &worktree_mappings));
     (workspace_dirs, active_file_path)
 }
 
@@ -244,7 +251,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.environment_instructions.enabled and max_chars
     if system_prompt.contains("%ENVIRONMENT_INFO%") {
         if include_project_info && config.sections.environment_instructions.enabled {
-            let project_dirs = get_project_dirs(app.gcx.clone()).await;
+            let project_dirs = get_unscoped_project_dirs(app.gcx.clone()).await;
             let environments = system_context::detect_environments(&project_dirs).await;
             let mut env_instructions =
                 system_context::generate_environment_instructions(&environments);
@@ -261,7 +268,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.project_configs.enabled and max_items
     if system_prompt.contains("%PROJECT_CONFIGS%") {
         if include_project_info && config.sections.project_configs.enabled {
-            let project_dirs = get_project_dirs(app.gcx.clone()).await;
+            let project_dirs = get_unscoped_project_dirs(app.gcx.clone()).await;
             let configs = system_context::find_project_configs(&project_dirs).await;
             let max_items = config.sections.project_configs.max_items.unwrap_or(30);
             let configs_to_show: Vec<_> = configs.into_iter().take(max_items).collect();
@@ -306,7 +313,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.git_info.enabled and max_chars
     if system_prompt.contains("%GIT_INFO%") {
         if include_project_info && config.sections.git_info.enabled {
-            let project_dirs = get_project_dirs(app.gcx.clone()).await;
+            let project_dirs = get_unscoped_project_dirs(app.gcx.clone()).await;
             let git_infos = gather_git_info(&project_dirs).await;
             let mut git_section = generate_git_info_prompt(&git_infos);
             if let Some(max_chars) = config.sections.git_info.max_chars {
@@ -1993,6 +2000,7 @@ async fn run_task_briefing_subchat(
                     parent_subchat_tx: None,
                     abort_flag: None,
                     subchat_depth: 0,
+                    final_step_force_answer: false,
                     buddy_meta: None,
                 };
                 let result = crate::subchat::run_subchat(app.gcx.clone(), messages, config).await?;

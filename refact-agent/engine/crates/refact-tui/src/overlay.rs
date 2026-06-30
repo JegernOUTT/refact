@@ -18,6 +18,7 @@ pub struct PagerOverlay {
     title: String,
     rendered_lines: Vec<String>,
     raw_lines: Vec<String>,
+    surface: Option<crate::read_only_views::ViewOverlaySurface>,
     mode: PagerMode,
     scroll: usize,
     search_input: Option<String>,
@@ -36,6 +37,7 @@ impl PagerOverlay {
             title: title.into(),
             rendered_lines,
             raw_lines,
+            surface: None,
             mode: PagerMode::Rendered,
             scroll: 0,
             search_input: None,
@@ -53,6 +55,14 @@ impl PagerOverlay {
         let mut overlay = Self::new(title, rendered_lines, raw_lines);
         overlay.mode = PagerMode::Raw;
         overlay
+    }
+
+    pub fn with_surface(
+        mut self,
+        surface: Option<crate::read_only_views::ViewOverlaySurface>,
+    ) -> Self {
+        self.surface = surface;
+        self
     }
 
     pub fn title(&self) -> &str {
@@ -94,6 +104,14 @@ impl PagerOverlay {
         }
     }
 
+    pub fn surface(&self) -> Option<&crate::read_only_views::ViewOverlaySurface> {
+        if self.mode == PagerMode::Rendered {
+            self.surface.as_ref()
+        } else {
+            None
+        }
+    }
+
     pub fn visible_lines(&self, height: usize) -> Vec<String> {
         if height == 0 {
             return Vec::new();
@@ -111,6 +129,31 @@ impl PagerOverlay {
         let start = self.scroll.min(self.raw_lines.len());
         let end = start.saturating_add(height).min(self.raw_lines.len());
         self.raw_lines[start..end].join("\n")
+    }
+
+    pub fn mode_label(&self) -> &'static str {
+        match self.mode {
+            PagerMode::Rendered => "Rendered",
+            PagerMode::Raw => "Raw",
+        }
+    }
+
+    pub fn search_label(&self) -> String {
+        if let Some(input) = &self.search_input {
+            return format!("/{input}");
+        }
+        if self.query.is_empty() {
+            return "/".to_string();
+        }
+        if self.matches.is_empty() {
+            return format!("/{} 0/0", self.query);
+        }
+        format!(
+            "/{} {}/{}",
+            self.query,
+            self.active_match.saturating_add(1),
+            self.matches.len()
+        )
     }
 
     pub fn status(&self) -> String {

@@ -13,6 +13,30 @@ import {
 
 let globalSeq = 100;
 
+type ProjectProxyRequestInit = Omit<Partial<fetchH2.RequestInit>, "headers"> & {
+    headers?: Record<string, string>;
+};
+
+export type FetchFailure = {
+    ok: false;
+    status: number;
+    statusText: string;
+    message: string;
+    url: string;
+    retryable: boolean;
+};
+
+export type FetchResult<T> = { ok: true; data: T } | { ok: false; error: FetchFailure };
+
+type ProjectProxyFetcher = {
+    project_proxy_url?: (addthis: string) => string;
+    fetch_project_proxy?: (
+        addthis: string,
+        init: ProjectProxyRequestInit,
+        fetchInit?: Partial<fetchH2.FetchInit>,
+    ) => Promise<fetchH2.Response>;
+};
+
 
 export class PendingRequest {
     seq: number;
@@ -94,6 +118,20 @@ export class PendingRequest {
         });
         this.apiPromise = new Promise((resolve, reject) => {
             h2stream.then(async (result_stream) => {
+                if (!result_stream.ok) {
+                    const text = await result_stream.text().catch(() => "");
+                    const failure = normalized_fetch_failure(result_stream.status, result_stream.statusText, url, text);
+                    statusBar.send_network_problems_to_status_bar(false, scope, url, failure.message, "");
+                    if (this.streaming_end_callback) {
+                        let my_cb = this.streaming_end_callback;
+                        this.streaming_end_callback = undefined;
+                        await my_cb(failure.message);
+                        resolve("");
+                        return;
+                    }
+                    reject(failure);
+                    return;
+                }
                 if (this.streaming_callback) {
                     // Streaming is a bit homegrown, maybe read the docs:
                     // https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch
@@ -260,6 +298,10 @@ export function rust_url(addthis: string)
     if (!global.rust_binary_blob) {
         return "";
     }
+    const proxy = global.rust_binary_blob as ProjectProxyFetcher;
+    if (proxy.project_proxy_url) {
+        return proxy.project_proxy_url(addthis);
+    }
     let url = global.rust_binary_blob.rust_url();
     while (url.endsWith("/")) {
         url = url.slice(0, -1);
@@ -281,6 +323,43 @@ export function inference_context(third_party: boolean)
     };
 }
 
+export async function fetch_project_proxy(
+    addthis: string,
+    init: ProjectProxyRequestInit,
+    fetchInit?: Partial<fetchH2.FetchInit>,
+): Promise<fetchH2.Response> {
+    const proxy = global.rust_binary_blob as ProjectProxyFetcher | undefined;
+    if (proxy?.fetch_project_proxy) {
+        return proxy.fetch_project_proxy(addthis, init, fetchInit);
+    }
+    const url = rust_url(addthis);
+    if (!url) {
+        return Promise.reject("No rust binary working");
+    }
+    return fetchH2.fetch(new fetchH2.Request(url, init), fetchInit);
+}
+
+export function normalized_fetch_failure(status: number, statusText: string, url: string, body: string = ""): FetchFailure {
+    const message = body.trim() || statusText || `HTTP ${status}`;
+    return {
+        ok: false,
+        status,
+        statusText,
+        message,
+        url,
+        retryable: status === 502 || status === 503 || status === 504,
+    };
+}
+
+async function json_result<T>(response: fetchH2.Response, url: string): Promise<FetchResult<T>> {
+    if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        return { ok: false, error: normalized_fetch_failure(response.status, response.statusText, url, text) };
+    }
+    const json = await response.json() as T;
+    return { ok: true, data: json };
+}
+
 
 export function fetch_code_completion(
     cancelToken: vscode.CancellationToken,
@@ -295,13 +374,12 @@ export function fetch_code_completion(
     // api_fields: estate.ApiFields,
 ): Promise<fetchH2.Response>
 {
-    let url = rust_url("/v1/code-completion");
+    const endpoint = "/v1/code-completion";
+    let url = rust_url(endpoint);
     if (!url) {
         console.log(["fetch_code_completion: No rust binary working"]);
         return Promise.reject("No rust binary working");
     }
-    let third_party = false;
-    let ctx = inference_context(third_party);
     let model_name = vscode.workspace.getConfiguration().get<string>("refactai.codeCompletionModel") || "";
     let client_version = vscode.extensions.getExtension("smallcloud.codify")!.packageJSON.version;
     // api_fields.scope = "code-completion";
@@ -338,15 +416,15 @@ export function fetch_code_completion(
     const headers = {
         "Content-Type": "application/json",
     };
-    let req = new fetchH2.Request(url, {
+    const requestInit: ProjectProxyRequestInit = {
         method: "POST",
         headers: headers,
         body: post,
         redirect: "follow",
         cache: "no-cache",
-        referrer: "no-referrer"
-    });
-    let init: any = {
+        referrer: "no-referrer",
+    };
+    let init: Partial<fetchH2.FetchInit> = {
         timeout: 20*1000,
     };
     if (cancelToken) {
@@ -361,8 +439,7 @@ export function fetch_code_completion(
         });
         init.signal = abort.signal;
     }
-    let promise = ctx.fetch(req, init);
-    return promise;
+    return fetch_project_proxy(endpoint, requestInit, init);
 }
 
 
@@ -375,12 +452,13 @@ export function fetch_chat_promise(
     tools: AtToolCommand[] | null = null,
 ): [Promise<fetchH2.Response>, string, string]
 {
-    let url = rust_url("/v1/chat");
+    const endpoint = "/v1/chat";
+    let url = rust_url(endpoint);
     if (!url) {
         console.log(["fetch_chat_promise: No rust binary working"]);
         return [Promise.reject("No rust binary working"), scope, ""];
     }
-    let ctx = inference_context(third_party);
+    void third_party;
 
     // an empty tools array causes issues
     const maybeTools = tools && tools.length > 0 ? {tools} : {};
@@ -398,15 +476,15 @@ export function fetch_chat_promise(
         "Content-Type": "application/json",
     };
 
-    let req = new fetchH2.Request(url, {
+    const requestInit: ProjectProxyRequestInit = {
         method: "POST",
         headers: headers,
         body: body,
         redirect: "follow",
         cache: "no-cache",
-        referrer: "no-referrer"
-    });
-    let init: any = {
+        referrer: "no-referrer",
+    };
+    let init: Partial<fetchH2.FetchInit> = {
         timeout: 20*1000,
     };
     if (cancelToken) {
@@ -417,7 +495,7 @@ export function fetch_chat_promise(
         });
         init.signal = abort.signal;
     }
-    let promise = ctx.fetch(req, init);
+    let promise = fetch_project_proxy(endpoint, requestInit, init);
     return [promise, scope, ""];
 }
 
@@ -447,19 +525,18 @@ export function look_for_common_errors(json: any, scope: string, url: string): b
 }
 
 export async function get_caps(): Promise<CapsResponse> {
-  let url = rust_url("/v1/caps");
+  const endpoint = "/v1/caps";
+  let url = rust_url(endpoint);
   if (!url) {
     return Promise.reject("read_caps no rust binary working, very strange");
   }
 
-  let req = new fetchH2.Request(url, {
+  let resp = await fetch_project_proxy(endpoint, {
     method: "GET",
     redirect: "follow",
     cache: "no-cache",
     referrer: "no-referrer",
   });
-
-  let resp = await fetchH2.fetch(req);
   if (resp.status !== 200) {
     console.log(["read_caps http status", resp.status]);
     return Promise.reject("read_caps bad status");
@@ -469,21 +546,33 @@ export async function get_caps(): Promise<CapsResponse> {
   return json as CapsResponse;
 }
 
+export async function get_json<T>(addthis: string, init: ProjectProxyRequestInit): Promise<FetchResult<T>> {
+    const url = rust_url(addthis);
+    if (!url) {
+        return { ok: false, error: normalized_fetch_failure(0, "", addthis, "No rust binary working") };
+    }
+    try {
+        const response = await fetch_project_proxy(addthis, init);
+        return json_result<T>(response, url);
+    } catch (error) {
+        return { ok: false, error: normalized_fetch_failure(0, "", url, error instanceof Error ? error.message : String(error)) };
+    }
+}
+
 export async function get_prompt_customization(): Promise<CustomPromptsResponse> {
-    const url = rust_url("/v1/customization");
+    const endpoint = "/v1/customization";
+    const url = rust_url(endpoint);
 
     if (!url) {
         return Promise.reject("unable to get prompt customization");
     }
 
-    const request = new fetchH2.Request(url, {
+    const response = await fetch_project_proxy(endpoint, {
 		method: "GET",
 		redirect: "follow",
 		cache: "no-cache",
 		referrer: "no-referrer",
 	});
-
-    const response = await fetchH2.fetch(request);
 
     if (!response.ok) {
         console.log(["get_prompt_customization http status", response.status]);
@@ -529,20 +618,21 @@ export interface RagStatus {
 
 async function fetch_rag_status()
 {
-    const url = rust_url("/v1/rag-status");
+    const endpoint = "/v1/rag-status";
+    const url = rust_url(endpoint);
     if(!url) {
         return Promise.reject("rag-status no rust binary working, very strange");
     }
 
-    const request = new fetchH2.Request(url, {
+    const requestInit: ProjectProxyRequestInit = {
         method: "GET",
         redirect: "follow",
         cache: "no-cache",
         referrer: "no-referrer",
-    });
+    };
 
     try {
-        const response = await fetchH2.fetch(request);
+        const response = await fetch_project_proxy(endpoint, requestInit);
         if (response.status !== 200) {
             console.log(["rag-status http status", response.status]);
         }
@@ -630,20 +720,21 @@ type AtToolCommand = {
 type AtToolResponse = AtToolCommand[];
 
 export async function get_tools(notes: boolean = false): Promise<AtToolResponse> {
-    const url = rust_url("/v1/tools");
+    const endpoint = "/v1/tools";
+    const url = rust_url(endpoint);
 
     if (!url) {
         return Promise.reject("unable to get tools url");
     }
-	const request = new fetchH2.Request(url, {
+	const requestInit: ProjectProxyRequestInit = {
         method: "GET",
         redirect: "follow",
 		cache: "no-cache",
 		referrer: "no-referrer",
-    });
+    };
 
 
-    const response = await fetchH2.fetch(request);
+    const response = await fetch_project_proxy(endpoint, requestInit);
 
     if (!response.ok) {
         console.log(["tools response http status", response.status]);
@@ -664,7 +755,8 @@ export async function get_tools(notes: boolean = false): Promise<AtToolResponse>
 
 export async function lsp_set_active_document(editor: vscode.TextEditor)
 {
-    let url = rust_url("/v1/lsp-set-active-document");
+    const endpoint = "/v1/lsp-set-active-document";
+    let url = rust_url(endpoint);
     if (url) {
         const post = JSON.stringify({
             "uri": editor.document.uri.toString(),
@@ -672,15 +764,15 @@ export async function lsp_set_active_document(editor: vscode.TextEditor)
         const headers = {
             "Content-Type": "application/json",
         };
-        let req = new fetchH2.Request(url, {
+        const requestInit: ProjectProxyRequestInit = {
             method: "POST",
             headers: headers,
             body: post,
             redirect: "follow",
             cache: "no-cache",
             referrer: "no-referrer"
-        });
-        fetchH2.fetch(req).then((response) => {
+        };
+        fetch_project_proxy(endpoint, requestInit).then((response) => {
             if (!response.ok) {
                 console.log(["lsp-set-active-document failed", response.status, response.statusText]);
             } else {

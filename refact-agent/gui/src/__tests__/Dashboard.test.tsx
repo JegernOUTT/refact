@@ -176,6 +176,31 @@ describe("Dashboard progressive sidebar readiness", () => {
     expect(await screen.findByText(/No tasks yet/i)).toBeInTheDocument();
   });
 
+  it("fetches tasks when the dashboard task section is ready without SSE data", async () => {
+    server.use(http.get("*/v1/tasks", () => HttpResponse.json([task])));
+
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {},
+          isLoading: false,
+          loadError: null,
+          pagination: {
+            cursor: null,
+            hasMore: false,
+            totalCount: null,
+            generation: 0,
+          },
+        },
+        sidebar: READY_SIDEBAR,
+      },
+    });
+
+    expect(await screen.findByText("Progressive task")).toBeInTheDocument();
+    expect(screen.getByText("1 total")).toBeInTheDocument();
+  });
+
   it("settles from predefined backend workspace snapshots", async () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation((key) =>
       key === "refact-trajectories-migrated" ? "true" : null,

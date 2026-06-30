@@ -11,8 +11,8 @@ use chrono::Utc;
 use refact_buddy_core::user_action::UserAction;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
-use super::types::{TaskMeta, TaskBoard, TaskStatus, TrajectoryInfo};
-use super::events::{TaskEvent, emit_task_event};
+use super::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
+use super::events::{emit_task_event, emit_task_updated, TaskEvent};
 
 const TASKS_DIR: &str = "tasks";
 
@@ -429,14 +429,7 @@ pub async fn update_task_name(
     meta.is_name_generated = true;
     meta.updated_at = Utc::now().to_rfc3339();
     save_task_meta(gcx.clone(), task_id, &meta).await?;
-    emit_task_event(
-        gcx,
-        TaskEvent::TaskUpdated {
-            task_id: task_id.to_string(),
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    emit_task_updated(gcx, task_id.to_string(), meta.clone()).await;
     Ok(meta)
 }
 
@@ -451,23 +444,30 @@ pub async fn update_task_stats(gcx: Arc<GlobalContext>, task_id: &str) -> Result
         .iter()
         .filter(|c| c.column == "failed" || c.column == "regressed")
         .count();
-    meta.agents_active = board
-        .cards
-        .iter()
-        .filter(|c| c.column == "doing" && c.assignee.is_some())
-        .count();
+    meta.agents_active = active_agent_count(&board.cards);
     meta.updated_at = Utc::now().to_rfc3339();
 
     save_task_meta(gcx.clone(), task_id, &meta).await?;
-    emit_task_event(
-        gcx,
-        TaskEvent::TaskUpdated {
-            task_id: task_id.to_string(),
-            meta: meta.clone(),
-        },
-    )
-    .await;
+    emit_task_updated(gcx, task_id.to_string(), meta.clone()).await;
     Ok(meta)
+}
+
+pub(crate) fn active_agent_count(cards: &[BoardCard]) -> usize {
+    cards
+        .iter()
+        .filter(|card| card.column == "doing")
+        .map(|card| {
+            if let Some(variants) = card.ab_variants.as_ref() {
+                if variants.winner.is_none() {
+                    return [variants.a.finish.as_ref(), variants.b.finish.as_ref()]
+                        .into_iter()
+                        .filter(|finish| finish.is_none())
+                        .count();
+                }
+            }
+            usize::from(card.agent_chat_id.is_some())
+        })
+        .sum()
 }
 
 pub fn get_task_trajectory_dir(task_dir: &PathBuf, role: &str, agent_id: Option<&str>) -> PathBuf {
@@ -587,7 +587,10 @@ pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use refact_buddy_core::user_action::UserAction;
-    use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus};
+    use crate::tasks::types::{
+        AbVariantFinish, AbVariantInfo, AbVariants, BoardCard, StatusUpdate, TaskBoard, TaskMeta,
+        TaskStatus,
+    };
     use chrono::Utc;
     use serde_json::json;
 
@@ -788,6 +791,67 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn active_agent_count_counts_unfinished_ab_variants() {
+        fn card(id: &str) -> BoardCard {
+            BoardCard {
+                id: id.to_string(),
+                title: id.to_string(),
+                column: "doing".to_string(),
+                priority: "P1".to_string(),
+                depends_on: vec![],
+                instructions: String::new(),
+                assignee: Some("ab".to_string()),
+                agent_chat_id: None,
+                status_updates: vec![],
+                comments: vec![],
+                final_report: None,
+                final_report_structured: None,
+                verifier_report: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                started_at: None,
+                last_heartbeat_at: None,
+                completed_at: None,
+                agent_branch: None,
+                agent_worktree: None,
+                agent_worktree_name: None,
+                ab_variants: None,
+                team_members: vec![],
+                target_files: vec![],
+                scope_guard_mode: Default::default(),
+            }
+        }
+        fn variant(key: &str, finished: bool) -> AbVariantInfo {
+            AbVariantInfo {
+                agent_id: format!("agent-{key}"),
+                chat_id: format!("chat-{key}"),
+                worktree: format!("/tmp/{key}"),
+                worktree_name: None,
+                branch: None,
+                model: None,
+                finish: finished.then(|| AbVariantFinish {
+                    success: true,
+                    final_report: "done".to_string(),
+                    final_report_structured: None,
+                    completed_at: "2026-01-01T00:00:01Z".to_string(),
+                    commit_hash: None,
+                }),
+            }
+        }
+
+        let mut ab = card("T-1");
+        ab.ab_variants = Some(AbVariants {
+            a: variant("a", true),
+            b: variant("b", false),
+            winner: None,
+        });
+        let mut singleton = card("T-2");
+        singleton.assignee = Some("agent".to_string());
+        singleton.agent_chat_id = Some("chat-single".to_string());
+
+        assert_eq!(active_agent_count(&[ab, singleton]), 2);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 import { selectConfig } from "../features/Config/configSlice";
 import { pingApi } from "../services/refact";
@@ -22,6 +22,8 @@ export const useGetPing = () => {
 
   const [pollingInterval, setPollingInterval] = useState(POLL_INTERVAL_ERROR);
   const [queryStarted, setQueryStarted] = useState(false);
+  const failureCountRef = useRef(0);
+  const lastHandledRequestIdRef = useRef<string | undefined>(undefined);
 
   const result = pingApi.endpoints.ping.useQuery(
     {
@@ -40,6 +42,8 @@ export const useGetPing = () => {
 
   useEffect(() => {
     if (canPing) return;
+    failureCountRef.current = 0;
+    lastHandledRequestIdRef.current = undefined;
     setPollingInterval(POLL_INTERVAL_ERROR);
     setQueryStarted(false);
     dispatch(
@@ -58,13 +62,31 @@ export const useGetPing = () => {
 
   useEffect(() => {
     if (result.isUninitialized && queryStarted) {
+      failureCountRef.current = 0;
+      lastHandledRequestIdRef.current = undefined;
       setPollingInterval(POLL_INTERVAL_ERROR);
       setQueryStarted(false);
-    } else if (result.isSuccess) {
+      return;
+    }
+
+    if (!canPing) return;
+    if (result.isFetching) return;
+    if (!result.requestId) return;
+    if (lastHandledRequestIdRef.current === result.requestId) return;
+
+    if (result.isSuccess) {
+      lastHandledRequestIdRef.current = result.requestId;
+      failureCountRef.current = 0;
       setPollingInterval(POLL_INTERVAL_HEALTHY);
       dispatch(setBackendStatus({ status: "online" }));
-    } else if (result.isError) {
+      return;
+    }
+
+    if (result.isError) {
+      lastHandledRequestIdRef.current = result.requestId;
+      failureCountRef.current += 1;
       setPollingInterval(POLL_INTERVAL_ERROR);
+      if (failureCountRef.current < 2) return;
       const err = result.error as Record<string, unknown> | undefined;
       const errorMsg =
         err && typeof err === "object" && "message" in err
@@ -73,6 +95,8 @@ export const useGetPing = () => {
       dispatch(setBackendStatus({ status: "offline", error: errorMsg }));
     }
   }, [
+    result.requestId,
+    result.isFetching,
     result.isSuccess,
     result.isError,
     result.isUninitialized,
@@ -83,6 +107,8 @@ export const useGetPing = () => {
   ]);
 
   useEffect(() => {
+    failureCountRef.current = 0;
+    lastHandledRequestIdRef.current = undefined;
     setPollingInterval(POLL_INTERVAL_ERROR);
     setQueryStarted(false);
   }, [

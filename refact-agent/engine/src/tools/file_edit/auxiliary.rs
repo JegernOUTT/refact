@@ -4,9 +4,9 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::DiffChunk;
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_project_dirs, preprocess_path_for_normalization,
+    correct_to_nearest_dir_path, get_unscoped_project_dirs, preprocess_path_for_normalization,
 };
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory_document_for_path};
 use crate::global_context::GlobalContext;
 use crate::privacy::{check_file_privacy, FilePrivacyLevel, PrivacySettings};
 use crate::tasks::types::ScopeGuardMode;
@@ -169,7 +169,7 @@ pub async fn parse_path_for_update(
         gcx.clone(),
         &raw_path,
         &candidates,
-        &get_project_dirs(gcx.clone()).await,
+        &get_unscoped_project_dirs(gcx.clone()).await,
         false,
     )
     .await
@@ -241,7 +241,7 @@ pub async fn parse_path_for_create(
                 gcx.clone(),
                 &parent_str,
                 &candidates,
-                &get_project_dirs(gcx.clone()).await,
+                &get_unscoped_project_dirs(gcx.clone()).await,
                 true,
             )
             .await?;
@@ -473,11 +473,7 @@ pub async fn write_file(
             warn!("{err}");
             err
         })?;
-        gcx.documents_state
-            .memory_document_map
-            .lock()
-            .await
-            .remove(path);
+        remove_memory_document_for_path(gcx.clone(), path).await;
     }
 
     Ok((before_text, file_text.to_string()))

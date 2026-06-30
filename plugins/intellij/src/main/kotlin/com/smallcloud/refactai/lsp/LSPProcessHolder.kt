@@ -12,12 +12,14 @@ import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.messages.MessageBus
 import com.intellij.util.messages.Topic
 import com.smallcloud.refactai.Resources
+import com.smallcloud.refactai.getThisPlugin
 import com.smallcloud.refactai.io.ConnectionStatus
-import com.smallcloud.refactai.io.HttpStatusException
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.notifications.emitError
 import java.io.File
 import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
@@ -28,6 +30,7 @@ import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as I
 interface LSPProcessHolderChangedNotifier {
     fun capabilitiesChanged(newCaps: LSPCapabilities) {}
     fun lspIsActive(isActive: Boolean) {}
+    fun backendConnectionStatusChanged(newStatus: LSPBackendConnectionStatus) {}
     fun ragStatusChanged(ragStatus: RagStatus) {}
 
     companion object {
@@ -36,6 +39,22 @@ interface LSPProcessHolderChangedNotifier {
         )
     }
 }
+
+enum class LSPBackendConnectionStatus(val wireName: String) {
+    CONNECTING("connecting"),
+    STARTING("starting"),
+    INSTALLING("installing"),
+    READY("ready"),
+    FAILED("failed")
+}
+
+private data class BinaryResolutionFailure(
+    val message: String,
+    val failedAtMs: Long,
+    val retryAfterMs: Long,
+)
+
+private const val WORKER_HEALTH_FAILURE_THRESHOLD = 3
 
 open class LSPProcessHolder(val project: Project) : Disposable {
     @Volatile
@@ -63,6 +82,16 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     @Volatile
     private var startupInProgress = false
     @Volatile
+    private var nextHealthCheckAtMs = 0L
+    @Volatile
+    private var healthBackoffMs = 1_000L
+    @Volatile
+    private var binaryResolutionFailure: BinaryResolutionFailure? = null
+    @Volatile
+    private var consecutiveWorkerHealthFailures = 0
+    @Volatile
+    private var backendConnectionStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING
+    @Volatile
     private var attachedProject: DaemonProject? = null
     protected open val daemonClient: RefactDaemonClient = HttpRefactDaemonClient()
 
@@ -81,25 +110,26 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             }
         }
 
+    open fun backendConnectionStatus(): LSPBackendConnectionStatus {
+        return backendConnectionStatus
+    }
+
+    fun backendReady(): Boolean {
+        return backendConnectionStatus() == LSPBackendConnectionStatus.READY
+    }
+
+    private fun setBackendConnectionStatus(newStatus: LSPBackendConnectionStatus) {
+        if (backendConnectionStatus == newStatus) return
+        backendConnectionStatus = newStatus
+        if (!project.isDisposed) {
+            project.messageBus.syncPublisher(LSPProcessHolderChangedNotifier.TOPIC).backendConnectionStatusChanged(newStatus)
+        }
+    }
+
     private fun logIfBlockingOperationOnEdt(operation: String) {
         if (ApplicationManager.getApplication().isDispatchThread) {
             logger.error("LSP blocking operation '$operation' called on EDT")
         }
-    }
-
-    private fun defaultMdnsHost(): String {
-        val label = runCatching { java.net.InetAddress.getLocalHost().hostName }
-            .getOrNull()
-            ?.lowercase()
-            ?.replace(Regex("[^a-z0-9-]"), "-")
-            ?.trim('-')
-            ?.takeIf { it.isNotEmpty() }
-            ?: "refact"
-        return "$label.local"
-    }
-
-    private fun defaultBrowserHost(): String {
-        return defaultMdnsHost()
     }
 
     open fun browserUrlOrNull(): URI? {
@@ -108,13 +138,54 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         val host = if (configuredHost.isNotEmpty() && configuredHost != "0.0.0.0") {
             configuredHost
         } else {
-            defaultBrowserHost()
+            base.host ?: "127.0.0.1"
         }
-        return URI("http://$host:${base.port}${base.rawPath}")
+        return browserUrl(base, host, attachedProject?.daemon?.authToken)
+    }
+
+    private fun browserUrl(base: URI, host: String, authToken: String?): URI {
+        val scheme = base.scheme?.takeIf { it.isNotBlank() } ?: "http"
+        val path = base.rawPath?.takeIf { it.isNotEmpty() } ?: "/"
+        val token = authToken?.trim()?.takeIf { it.isNotEmpty() }
+        val query = token?.let {
+            "?daemon_token=${URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")}"
+        }.orEmpty()
+        return URI("$scheme://$host:${base.port}$path$query")
     }
 
     private fun shouldAbortLifecycleWork(): Boolean {
         return isDisposed || project.isDisposed
+    }
+
+    private fun retrySuppressedByBinaryResolutionFailure(nowMs: Long = healthNowMs()): Boolean {
+        val failure = binaryResolutionFailure ?: return false
+        if (nowMs >= failure.retryAfterMs) return false
+        logger.debug("Suppressing binary resolution retry until ${failure.retryAfterMs}; failedAt=${failure.failedAtMs}: ${failure.message}")
+        setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+        nextHealthCheckAtMs = maxOf(nextHealthCheckAtMs, failure.retryAfterMs)
+        return true
+    }
+
+    private fun recordBinaryResolutionFailure(message: String) {
+        val nowMs = healthNowMs()
+        val retryAfterMs = nowMs + healthBackoffMs
+        binaryResolutionFailure = BinaryResolutionFailure(message, nowMs, retryAfterMs)
+        nextHealthCheckAtMs = retryAfterMs
+        healthBackoffMs = (healthBackoffMs * 2).coerceAtMost(30_000L)
+        setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+    }
+
+    private fun clearBinaryResolutionFailure() {
+        binaryResolutionFailure = null
+    }
+
+    private fun resetWorkerHealthFailures() {
+        consecutiveWorkerHealthFailures = 0
+    }
+
+    private fun workerHealthFailureThresholdReached(): Boolean {
+        consecutiveWorkerHealthFailures += 1
+        return consecutiveWorkerHealthFailures >= WORKER_HEALTH_FAILURE_THRESHOLD
     }
 
     private fun requestLifecycleWork(reason: String, restart: Boolean) {
@@ -124,6 +195,13 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return
             }
 
+            if (restart) {
+                clearBinaryResolutionFailure()
+                resetWorkerHealthFailures()
+                setBackendConnectionStatus(LSPBackendConnectionStatus.CONNECTING)
+            } else if (retrySuppressedByBinaryResolutionFailure()) {
+                return
+            }
             lifecycleStartRequested.set(true)
             if (restart) {
                 lifecycleRestartRequested.set(true)
@@ -203,6 +281,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             logger.info("Skipping ensure-started for disposed LSPProcessHolder or project")
             return
         }
+        if (retrySuppressedByBinaryResolutionFailure()) return
 
         initialize()
         logger.debug("Ensuring LSP is attached through daemon: $reason")
@@ -280,15 +359,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
 
         healthCheckerScheduler.scheduleWithFixedDelay({
             try {
-                if (isDisposed || project.isDisposed) {
-                    logger.info("Skipping health check for disposed LSPProcessHolder or project")
-                    return@scheduleWithFixedDelay
-                }
-
-                if (lastConfig == null || startupInProgress) return@scheduleWithFixedDelay
-                if (attachedProject == null || !isWorking) {
-                    ensureStartedAsync("health-check-daemon-detached-or-unready")
-                }
+                runHealthCheckOnce()
             } catch (e: RejectedExecutionException) {
                 if (e.message?.contains("Already shutdown") == true) {
                     logger.info("Ignoring RejectedExecutionException during health check: ${e.message}")
@@ -302,7 +373,40 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 1000, TimeUnit.MILLISECONDS)
     }
 
+    protected open fun runHealthCheckOnce() {
+        if (isDisposed || project.isDisposed) {
+            logger.info("Skipping health check for disposed LSPProcessHolder or project")
+            return
+        }
+
+        if (lastConfig == null || startupInProgress) return
+        if (healthNowMs() < nextHealthCheckAtMs) return
+        if (attachedProject == null || !isWorking) {
+            val retryingBinaryResolutionFailure = binaryResolutionFailure != null
+            ensureStartedAsync("health-check-daemon-detached-or-unready")
+            if (!retryingBinaryResolutionFailure) {
+                deferHealthRetry()
+            }
+            return
+        }
+        if (!probeAttachedWorker()) {
+            if (!workerHealthFailureThresholdReached()) {
+                logger.warn("LSP health probe failed; waiting for consecutive failure threshold")
+                return
+            }
+            logger.warn("LSP health probe failed repeatedly; restarting attached worker")
+            clearAttachedProjectState(preserveConfig = true, detach = true)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            ensureStartedAsync("health-check-worker-unreachable")
+            deferHealthRetry()
+            return
+        }
+        resetWorkerHealthFailures()
+        resetHealthBackoff()
+    }
+
     open fun settingsChanged(reason: String = "settings-changed") {
+        resetBinaryResolutionFailureForSettingsChange()
         requestLifecycleWork(reason, restart = true)
     }
 
@@ -336,30 +440,48 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         val startedAt = System.currentTimeMillis()
         if (shouldAbortLifecycleWork()) return
         val newConfig = currentConfig()
+        if (retrySuppressedByBinaryResolutionFailure()) return
 
-        if (newConfig.sameRuntimeSettings(lastConfig) && attachedProject != null && isWorking) return
+        if (newConfig.sameRuntimeSettings(lastConfig) && attachedProject != null && isWorking) {
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            return
+        }
 
         startupInProgress = true
         try {
             capabilities = LSPCapabilities()
             closeAttachedProject()
-            terminate()
-            if (!newConfig.isValid) return
-            val bin = BIN_PATH
-            if (bin == null) {
-                logger.warn("LSP daemon attach BIN_PATH is null")
+            if (!newConfig.isValid) {
+                terminate(LSPBackendConnectionStatus.FAILED)
+                setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
             }
+            lastConfig = newConfig
+            terminate(LSPBackendConnectionStatus.STARTING, preserveConfig = true)
             val root = projectRootPath()
             if (root == null) {
                 logger.warn("LSP daemon attach project root is null")
+                setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
                 return
             }
-            logger.debug("LSP daemon attach $bin ${newConfig.toSafeLogString()}")
-            daemonClient.ensureDaemon(bin)
-            val openedProject = daemonClient.openProject(root, newConfig)
+            val compatibleDaemonStatus = compatibleDaemonStatusOrNull()
+            val daemonStatus = if (compatibleDaemonStatus == null) {
+                val bin = resolveBinaryPathForDaemon {
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
+                } ?: run {
+                    recordBinaryResolutionFailure(binaryResolutionFailureMessage())
+                    return
+                }
+                clearBinaryResolutionFailure()
+                logger.debug("LSP daemon spawn/upgrade $bin ${newConfig.toSafeLogString()}")
+                daemonClient.ensureDaemon(bin)
+            } else {
+                clearBinaryResolutionFailure()
+                logger.debug("LSP daemon attach existing pid=${compatibleDaemonStatus.pid} version=${compatibleDaemonStatus.version} ${newConfig.toSafeLogString()}")
+                compatibleDaemonStatus
+            }
+            val openedProject = daemonClient.openProject(root, newConfig, daemonStatus)
             attachedProject = openedProject
-            lastConfig = newConfig
             isWorking = true
             refreshAttachedWorkerState()
             if (shouldAbortLifecycleWork()) {
@@ -368,15 +490,37 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 return
             }
             initializeAttachedProject()
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            clearBinaryResolutionFailure()
+            resetWorkerHealthFailures()
+            resetHealthBackoff()
             logger.info("LSP daemon attach finished in ${System.currentTimeMillis() - startedAt}ms (working=$isWorking)")
         } catch (e: Exception) {
             logger.warn("LSP daemon attach failed: ${e.message}", e)
-            isWorking = false
-            attachedProject = null
-            lastConfig = null
+            clearAttachedProjectState(preserveConfig = true, detach = true)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            deferHealthRetry()
         } finally {
             startupInProgress = false
         }
+    }
+
+    private fun compatibleDaemonStatusOrNull(): DaemonStatus? {
+        val status = runCatching { daemonClient.status() }
+            .onFailure { logger.debug("LSP daemon status probe failed: ${it.message}") }
+            .getOrNull()
+            ?: return null
+        val requiredVersion = requiredDaemonVersion()
+        return if (versionIsOlder(status.version, requiredVersion)) {
+            logger.info("LSP daemon version ${status.version} is older than plugin $requiredVersion")
+            null
+        } else {
+            status
+        }
+    }
+
+    protected open fun requiredDaemonVersion(): String {
+        return Resources.version
     }
 
     protected open fun refreshAttachedWorkerState() {
@@ -406,10 +550,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     private fun shouldWakeAndRetry(error: Throwable?): Boolean {
-        if (error is HttpStatusException) {
-            return error.statusCode == 502 || error.statusCode == 503
-        }
-        return error?.cause?.let { shouldWakeAndRetry(it) } ?: false
+        return isRecoverableHttpStatus(error)
     }
 
     protected open fun sleepBeforeWakeRetry(attempt: Int) {
@@ -417,18 +558,50 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     fun wakeWorkerForRetry(reason: String): Boolean {
-        val bin = BIN_PATH ?: return false
-        val root = projectRootPath() ?: return false
+        val root = projectRootPath() ?: run {
+            clearAttachedProjectState(preserveConfig = true, detach = false)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            return false
+        }
         val config = lastConfig ?: currentConfig()
+        if (!config.isValid) {
+            clearAttachedProjectState(preserveConfig = false, detach = false)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            return false
+        }
+        if (retrySuppressedByBinaryResolutionFailure()) return false
         return try {
             logger.debug("LSP daemon wake retry: $reason")
-            daemonClient.ensureDaemon(bin)
-            attachedProject = daemonClient.openProject(root, config)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.STARTING)
+            val compatibleDaemonStatus = compatibleDaemonStatusOrNull()
+            val daemonStatus = if (compatibleDaemonStatus == null) {
+                val bin = resolveBinaryPathForDaemon {
+                    setBackendConnectionStatus(LSPBackendConnectionStatus.INSTALLING)
+                } ?: run {
+                    clearAttachedProjectState(preserveConfig = true, detach = false)
+                    recordBinaryResolutionFailure(binaryResolutionFailureMessage())
+                    return false
+                }
+                clearBinaryResolutionFailure()
+                daemonClient.ensureDaemon(bin)
+            } else {
+                compatibleDaemonStatus
+            }
+            attachedProject = daemonClient.openProject(root, config, daemonStatus)
             lastConfig = config
             isWorking = true
+            refreshAttachedWorkerState()
+            initializeAttachedProject()
+            setBackendConnectionStatus(LSPBackendConnectionStatus.READY)
+            clearBinaryResolutionFailure()
+            resetWorkerHealthFailures()
+            resetHealthBackoff()
             true
         } catch (e: Exception) {
             logger.warn("LSP wake retry failed: ${e.message}")
+            clearAttachedProjectState(preserveConfig = true, detach = true)
+            setBackendConnectionStatus(LSPBackendConnectionStatus.FAILED)
+            deferHealthRetry()
             false
         }
     }
@@ -520,13 +693,62 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
-    private fun terminate() {
-        if (!isDisposed) {
-            logIfBlockingOperationOnEdt("terminate")
+    private fun clearAttachedProjectState(preserveConfig: Boolean, detach: Boolean) {
+        if (detach) {
+            closeAttachedProject()
         }
         isWorking = false
         attachedProject = null
-        lastConfig = null
+        if (!preserveConfig) {
+            lastConfig = null
+        }
+    }
+
+    protected open fun probeAttachedWorker(): Boolean {
+        val base = baseUrlOrNull() ?: return false
+        return runCatching {
+            InferenceGlobalContext.connection.get(base.resolve("v1/build_info")).join().get()
+        }.isSuccess
+    }
+
+    protected open fun healthNowMs(): Long {
+        return System.currentTimeMillis()
+    }
+
+    protected open fun resolveBinaryPathForDaemon(onDownloadStart: () -> Unit): String? {
+        return binaryPathForDaemon(getThisPlugin()?.pluginPath, onDownloadStart)
+    }
+
+    protected open fun binaryResolutionFailureMessage(): String {
+        return lastBinaryResolutionErrorMessage()
+    }
+
+    private fun resetHealthBackoff() {
+        healthBackoffMs = 1_000L
+        nextHealthCheckAtMs = 0L
+    }
+
+    private fun deferHealthRetry() {
+        nextHealthCheckAtMs = healthNowMs() + healthBackoffMs
+        healthBackoffMs = (healthBackoffMs * 2).coerceAtMost(30_000L)
+    }
+
+    protected fun resetBinaryResolutionFailureForSettingsChange() {
+        clearBinaryResolutionFailure()
+        resetWorkerHealthFailures()
+        nextHealthCheckAtMs = 0L
+        healthBackoffMs = 1_000L
+    }
+
+    private fun terminate(
+        newStatus: LSPBackendConnectionStatus = LSPBackendConnectionStatus.CONNECTING,
+        preserveConfig: Boolean = false,
+    ) {
+        if (!isDisposed) {
+            logIfBlockingOperationOnEdt("terminate")
+        }
+        setBackendConnectionStatus(newStatus)
+        clearAttachedProjectState(preserveConfig = preserveConfig, detach = false)
     }
 
     override fun dispose() {
@@ -613,6 +835,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     companion object {
         @Volatile
         var BIN_PATH: String? = null
+        @Volatile
+        private var LAST_BINARY_RESOLUTION_ERROR: String? = null
         private var BIN_CACHE_DIR: Path = Path.of(PathManager.getSystemPath(), "refactai", "bin")
 
         @JvmStatic
@@ -626,40 +850,56 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             BIN_CACHE_DIR = path
             initialized.set(false)
             BIN_PATH = null
+            LAST_BINARY_RESOLUTION_ERROR = null
         }
 
         fun resetBinaryResolution() {
             initialized.set(false)
             BIN_PATH = null
+            LAST_BINARY_RESOLUTION_ERROR = null
+        }
+
+        fun lastBinaryResolutionErrorMessage(): String {
+            return LAST_BINARY_RESOLUTION_ERROR
+                ?: "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases. " +
+                    "Check network/proxy settings or set refactai.binaryPath to a compatible refact executable."
         }
 
         @Synchronized
-        fun initialize() {
-            logger.warn("LSP initialize start")
-            if (initialized.get()) return
+        fun binaryPathForDaemon(bundledDir: Path? = null, onDownloadStart: () -> Unit = {}): String? {
             if (ApplicationManager.getApplication().isUnitTestMode && BIN_PATH != null) {
-                initialized.set(true)
-                return
+                return BIN_PATH
             }
+            BIN_PATH?.let { return it }
             val resolvedPath = try {
                 RefactBinaryResolver.resolve(
                     RefactBinaryResolverOptions(
                         explicitPath = InferenceGlobalContext.refactBinaryPath,
+                        bundledDir = bundledDir,
                         minVersion = Resources.version,
                         pinnedVersion = Resources.version,
                         cacheDir = BIN_CACHE_DIR,
+                        onDownloadStart = onDownloadStart,
                     )
                 )
             } catch (e: Exception) {
-                emitError("Refact binary is not available for host operating system: ${e.message}")
-                logger.warn("LSP initialize failed: ${e.message}", e)
-                logger.warn("LSP initialize finished")
-                return
+                val message = "Failed to download the Refact engine (version ${Resources.version}) from GitHub releases. " +
+                    "Check network/proxy settings or set refactai.binaryPath to a compatible refact executable. ${e.message}"
+                LAST_BINARY_RESOLUTION_ERROR = message
+                emitError(message)
+                logger.warn("LSP binary resolution failed: ${e.message}", e)
+                return null
             }
             BIN_PATH = resolvedPath
-            initialized.set(true)
-            logger.warn("LSP initialize finished")
+            LAST_BINARY_RESOLUTION_ERROR = null
             logger.warn("LSP initialize BIN_PATH=$BIN_PATH")
+            return resolvedPath
+        }
+
+        @Synchronized
+        fun initialize() {
+            if (!initialized.compareAndSet(false, true)) return
+            logger.info("LSP initialize")
         }
 
         fun cleanup() {

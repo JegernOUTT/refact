@@ -3,11 +3,13 @@ import { HoverCard, Flex, Text, Badge } from "../LongTailPrimitives";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
   type ClaudeCodeUsageData,
   type ClaudeCodeUsageWindow,
   type OpenAICodexAdditionalRateLimit,
   type OpenAICodexUsageWindow,
   type OpenAICodexRateLimit,
+  type OpenCodeUsageData,
 } from "../../services/refact/providers";
 import { useCapsForToolUse, useGetConfiguredProvidersQuery } from "../../hooks";
 import styles from "./UsageCounter.module.css";
@@ -430,9 +432,102 @@ const OpenAICodexQuotaPill: React.FC<{
   );
 };
 
+type OpenCodeUsageWindowKey = keyof Pick<
+  OpenCodeUsageData,
+  "rolling" | "weekly" | "monthly"
+>;
+
+const OPENCODE_USAGE_WINDOWS: {
+  key: OpenCodeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "rolling", label: "Rolling" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
+const OpenCodeQuotaPill: React.FC<{
+  providerName: string;
+  displayName: string;
+}> = ({ providerName, displayName }) => {
+  const { data: openCodeUsage } = useGetOpenCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 30_000 },
+  );
+
+  const data = openCodeUsage?.data;
+  if (!data) return null;
+
+  const windows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: OpenCodeUsageWindowKey;
+      label: string;
+      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
+    } => Boolean(row.window),
+  );
+  if (windows.length === 0 && typeof data.balance !== "number") return null;
+
+  const pct = Math.max(0, ...windows.map(({ window }) => window.used_percent));
+
+  return (
+    <ProviderIndicator label={displayName} pct={pct}>
+      <Flex direction="column" gap="3">
+        <Flex align="center" gap="2">
+          <Text size="2" weight="medium">
+            {displayName} quota
+          </Text>
+          {data.plan_type && (
+            <Badge color="blue" size="1">
+              {data.plan_type}
+            </Badge>
+          )}
+        </Flex>
+        {data.workspace_id && (
+          <Text size="1" color="gray">
+            Workspace: {data.workspace_id}
+          </Text>
+        )}
+        {typeof data.balance === "number" && (
+          <Text size="1" color="gray">
+            Zen balance:{" "}
+            {data.balance.toLocaleString(undefined, {
+              maximumFractionDigits: 2,
+            })}
+          </Text>
+        )}
+        {windows.length > 0 ? (
+          <Flex direction="column" gap="2">
+            {windows.map(({ key, label, window }) => (
+              <CodexWindowRow
+                key={key}
+                label={formatWindowLabel(label, window.limit_window_seconds)}
+                w={window}
+                limitReached={window.status === "rate-limited"}
+              />
+            ))}
+          </Flex>
+        ) : (
+          <Text size="1" color="gray">
+            Quota windows not reported.
+          </Text>
+        )}
+        <Text size="1" color="gray">
+          Instance: {providerName}
+        </Text>
+      </Flex>
+    </ProviderIndicator>
+  );
+};
+
 /**
  * Renders a quota indicator only when the currently selected chat model belongs
- * to a Claude Code or OpenAI Codex provider instance. The displayed quota is
+ * to a provider instance with subscription quota data. The displayed quota is
  * scoped to that exact provider instance (multi-account safe).
  */
 export const ProviderUsageIndicator: React.FC = () => {
@@ -464,6 +559,17 @@ export const ProviderUsageIndicator: React.FC = () => {
     return (
       <Flex align="center" gap="2">
         <OpenAICodexQuotaPill
+          providerName={selectedProvider.name}
+          displayName={selectedProvider.display_name}
+        />
+      </Flex>
+    );
+  }
+
+  if (selectedProvider.base_provider === "opencode") {
+    return (
+      <Flex align="center" gap="2">
+        <OpenCodeQuotaPill
           providerName={selectedProvider.name}
           displayName={selectedProvider.display_name}
         />

@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
+use futures::stream::{self, BoxStream};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::events_pane::{parse_daemon_event, DaemonEventRecord};
 use crate::protocol::SseEvent;
@@ -37,6 +39,36 @@ pub enum ClientError {
     Json(String),
     #[error("SSE error: {0}")]
     Sse(String),
+    #[error("SSE stream disconnected unexpectedly: {0}")]
+    SseDisconnect(String),
+    #[error("worker not ready: {0}")]
+    WorkerNotReady(String),
+}
+
+impl ClientError {
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            ClientError::Status { status, .. } => matches!(*status, 502 | 503 | 504),
+            ClientError::Http(message) => message_indicates_unreachable(message),
+            ClientError::SseDisconnect(_) => true,
+            ClientError::Sse(message) => message_indicates_unreachable(message),
+            ClientError::Json(_) | ClientError::WorkerNotReady(_) => false,
+        }
+    }
+
+    pub fn is_auth_stale(&self) -> bool {
+        match self {
+            ClientError::Status { status, body } => {
+                matches!(*status, 401 | 403) || message_indicates_auth_stale(body)
+            }
+            ClientError::Http(message) | ClientError::Sse(message) => {
+                message_indicates_auth_stale(message)
+            }
+            ClientError::Json(_)
+            | ClientError::SseDisconnect(_)
+            | ClientError::WorkerNotReady(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,7 +571,7 @@ impl DaemonEndpoint {
 
     fn from_info(info: DaemonInfoFile) -> Self {
         Self {
-            base_url: format!("http://{}:{}", connect_host(&info.bind), info.port),
+            base_url: daemon_base_url_from_bind(&info.bind, info.port),
             auth_token: info.auth_token.filter(|token| !token.is_empty()),
         }
     }
@@ -552,16 +584,39 @@ pub fn discover_daemon_endpoint() -> Result<Option<DaemonEndpoint>, DaemonDiscov
 pub fn resolve_daemon_endpoint(
     explicit_base_url: Option<String>,
 ) -> Result<DaemonEndpoint, DaemonDiscoveryWarning> {
-    let endpoint = discover_daemon_endpoint()?.unwrap_or_else(DaemonEndpoint::fallback);
-    Ok(
-        match explicit_base_url.filter(|value| !value.trim().is_empty()) {
-            Some(base_url) => DaemonEndpoint {
+    resolve_daemon_endpoint_from_path(&daemon_json_path(), explicit_base_url, None)
+}
+
+pub fn resolve_daemon_endpoint_with_auth(
+    explicit_base_url: Option<String>,
+    explicit_auth_token: Option<String>,
+) -> Result<DaemonEndpoint, DaemonDiscoveryWarning> {
+    resolve_daemon_endpoint_from_path(&daemon_json_path(), explicit_base_url, explicit_auth_token)
+}
+
+fn resolve_daemon_endpoint_from_path(
+    path: &Path,
+    explicit_base_url: Option<String>,
+    explicit_auth_token: Option<String>,
+) -> Result<DaemonEndpoint, DaemonDiscoveryWarning> {
+    let endpoint = discover_daemon_endpoint_from(path)?.unwrap_or_else(DaemonEndpoint::fallback);
+    let explicit_auth_token = explicit_auth_token.and_then(non_empty_string);
+    Ok(match explicit_base_url.and_then(non_empty_string) {
+        Some(base_url) => {
+            let base_url = trim_base_url(base_url);
+            let auth_token = explicit_auth_token.or_else(|| {
+                same_origin(&endpoint.base_url, &base_url).then_some(endpoint.auth_token)?
+            });
+            DaemonEndpoint {
                 base_url,
-                ..endpoint
-            },
-            None => endpoint,
+                auth_token,
+            }
+        }
+        None => DaemonEndpoint {
+            base_url: endpoint.base_url,
+            auth_token: explicit_auth_token.or(endpoint.auth_token),
         },
-    )
+    })
 }
 
 pub fn discover_daemon_endpoint_from(
@@ -582,10 +637,12 @@ impl DaemonClient {
         base_url: impl Into<String>,
         auth_token: Option<String>,
     ) -> Result<Self, ClientError> {
-        let client = build_plain_http_client()?;
-        let sse_client = build_sse_http_client()?;
+        let base_url = trim_base_url(base_url.into());
+        let bypass_proxy = should_bypass_proxy_for_base_url(&base_url);
+        let client = build_plain_http_client(bypass_proxy)?;
+        let sse_client = build_sse_http_client(bypass_proxy)?;
         Ok(Self {
-            base_url: trim_base_url(base_url.into()),
+            base_url,
             auth_token,
             client,
             sse_client,
@@ -615,7 +672,9 @@ impl DaemonClient {
             .send()
             .await
             .map_err(|error| ClientError::Http(format!("failed to open project: {error}")))?;
-        decode_response(response).await
+        let project: OpenProjectResponse = decode_response(response).await?;
+        validate_open_project_response(&project)?;
+        Ok(project)
     }
 
     pub async fn list_workers(&self) -> Result<Vec<WorkerInfo>, ClientError> {
@@ -1023,46 +1082,117 @@ impl SseLineParser {
         self.buffer.push_str(chunk);
         let mut events = Vec::new();
         while let Some(newline) = self.buffer.find('\n') {
-            let mut line = self.buffer[..newline].to_string();
+            let line = self.buffer[..newline].to_string();
             self.buffer.drain(..=newline);
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            if line.is_empty() {
-                if !self.data_lines.is_empty() {
-                    events.push(self.data_lines.join("\n"));
-                    self.data_lines.clear();
-                }
-                continue;
-            }
-            if let Some(data) = line.strip_prefix("data:") {
-                self.data_lines.push(data.trim_start().to_string());
-            }
+            self.push_line(line, &mut events);
         }
         events
+    }
+
+    pub fn finish(&mut self) -> Vec<String> {
+        let mut events = Vec::new();
+        if !self.buffer.is_empty() {
+            let line = std::mem::take(&mut self.buffer);
+            self.push_line(line, &mut events);
+        }
+        if !self.data_lines.is_empty() {
+            events.push(self.data_lines.join("\n"));
+            self.data_lines.clear();
+        }
+        events
+    }
+
+    fn push_line(&mut self, mut line: String, events: &mut Vec<String>) {
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        if line.is_empty() {
+            if !self.data_lines.is_empty() {
+                events.push(self.data_lines.join("\n"));
+                self.data_lines.clear();
+            }
+            return;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            self.data_lines.push(data.trim_start().to_string());
+        }
     }
 }
 
 fn sse_data_stream(response: reqwest::Response) -> BoxStream<'static, Result<String, ClientError>> {
-    response
-        .bytes_stream()
-        .map({
-            let mut parser = SseLineParser::default();
-            let mut pending_utf8 = Vec::new();
-            move |chunk| {
-                let chunk = chunk.map_err(|error| ClientError::Sse(error.to_string()))?;
-                let text = drain_utf8_chunk(&mut pending_utf8, &chunk)?;
-                let events = parser
-                    .push(&text)
-                    .into_iter()
-                    .filter(|data| !data.trim().is_empty())
-                    .map(Ok::<_, ClientError>)
-                    .collect::<Vec<_>>();
-                Ok(futures::stream::iter(events))
+    let byte_stream = response.bytes_stream().boxed();
+    let state = (
+        byte_stream,
+        SseLineParser::default(),
+        Vec::<u8>::new(),
+        VecDeque::<Result<String, ClientError>>::new(),
+        false,
+    );
+    stream::unfold(
+        state,
+        |(mut byte_stream, mut parser, mut pending_utf8, mut pending_events, mut done)| async move {
+            loop {
+                if let Some(event) = pending_events.pop_front() {
+                    return Some((
+                        event,
+                        (byte_stream, parser, pending_utf8, pending_events, done),
+                    ));
+                }
+                if done {
+                    return None;
+                }
+                match byte_stream.next().await {
+                    Some(Ok(chunk)) => match drain_utf8_chunk(&mut pending_utf8, &chunk) {
+                        Ok(text) => {
+                            pending_events.extend(
+                                parser
+                                    .push(&text)
+                                    .into_iter()
+                                    .filter(|data| !data.trim().is_empty())
+                                    .map(Ok),
+                            );
+                        }
+                        Err(error) => {
+                            done = true;
+                            return Some((
+                                Err(error),
+                                (byte_stream, parser, pending_utf8, pending_events, done),
+                            ));
+                        }
+                    },
+                    Some(Err(error)) => {
+                        done = true;
+                        return Some((
+                            Err(ClientError::Sse(error.to_string())),
+                            (byte_stream, parser, pending_utf8, pending_events, done),
+                        ));
+                    }
+                    None => {
+                        done = true;
+                        if !pending_utf8.is_empty() {
+                            return Some((
+                                Err(ClientError::Sse(
+                                    "incomplete UTF-8 sequence at SSE EOF".to_string(),
+                                )),
+                                (byte_stream, parser, pending_utf8, pending_events, done),
+                            ));
+                        }
+                        pending_events.extend(
+                            parser
+                                .finish()
+                                .into_iter()
+                                .filter(|data| !data.trim().is_empty())
+                                .map(Ok),
+                        );
+                        pending_events.push_back(Err(ClientError::SseDisconnect(
+                            "stream ended before the subscription was closed cleanly".to_string(),
+                        )));
+                    }
+                }
             }
-        })
-        .try_flatten()
-        .boxed()
+        },
+    )
+    .boxed()
 }
 
 fn parse_chat_event(data: &str) -> Result<ChatEvent, ClientError> {
@@ -1136,6 +1266,35 @@ async fn decode_response<T: for<'de> Deserialize<'de>>(
         .map_err(|error| ClientError::Json(error.to_string()))
 }
 
+fn validate_open_project_response(project: &OpenProjectResponse) -> Result<(), ClientError> {
+    let Some(worker) = project.worker.as_ref() else {
+        return Err(ClientError::WorkerNotReady(format!(
+            "project {} opened without worker details",
+            project.project_id
+        )));
+    };
+    let state = worker_state_label(Some(worker));
+    if !state.eq_ignore_ascii_case("ready") {
+        let last_error = worker
+            .last_error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default();
+        return Err(ClientError::WorkerNotReady(format!(
+            "project {} worker state is {state}{last_error}",
+            project.project_id
+        )));
+    }
+    if worker.http_port == 0 || worker.lsp_port == 0 {
+        return Err(ClientError::WorkerNotReady(format!(
+            "project {} worker has invalid ports http={} lsp={}",
+            project.project_id, worker.http_port, worker.lsp_port
+        )));
+    }
+    Ok(())
+}
+
 async fn status_error(response: reqwest::Response) -> ClientError {
     let status = response.status().as_u16();
     let body = response
@@ -1189,21 +1348,73 @@ fn sanitize_status_body(body: impl AsRef<str>) -> String {
     sanitized
 }
 
-fn build_plain_http_client() -> Result<reqwest::Client, ClientError> {
-    reqwest::Client::builder()
+fn message_indicates_unreachable(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("status 502")
+        || message.contains("status 503")
+        || message.contains("status 504")
+        || message.contains("bad gateway")
+        || message.contains("service unavailable")
+        || message.contains("gateway timeout")
+        || message.contains("error sending request")
+        || message.contains("error trying to connect")
+        || message.contains("connect error")
+        || message.contains("tcp connect error")
+        || message.contains("connection refused")
+        || message.contains("connection reset")
+        || message.contains("connection aborted")
+        || message.contains("connection closed")
+        || message.contains("network is unreachable")
+        || message.contains("failed to lookup address")
+        || message.contains("dns error")
+        || message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("broken pipe")
+        || message.contains("eof")
+        || message.contains("end of file")
+}
+
+fn message_indicates_auth_stale(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("status 401")
+        || message.contains("status 403")
+        || message.contains("unauthorized")
+        || message.contains("forbidden")
+        || message.contains("invalid token")
+        || message.contains("expired token")
+        || message.contains("stale token")
+        || message.contains("invalid bearer")
+        || message.contains("authorization failed")
+}
+
+fn build_plain_http_client(bypass_proxy: bool) -> Result<reqwest::Client, ClientError> {
+    let builder = reqwest::Client::builder()
         .connect_timeout(PLAIN_HTTP_CONNECT_TIMEOUT)
         .timeout(PLAIN_HTTP_REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    apply_proxy_bypass(builder, bypass_proxy)
         .build()
         .map_err(|error| ClientError::Http(format!("failed to build HTTP client: {error}")))
 }
 
-fn build_sse_http_client() -> Result<reqwest::Client, ClientError> {
-    reqwest::Client::builder()
+fn build_sse_http_client(bypass_proxy: bool) -> Result<reqwest::Client, ClientError> {
+    let builder = reqwest::Client::builder()
         .connect_timeout(SSE_HTTP_CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    apply_proxy_bypass(builder, bypass_proxy)
         .build()
         .map_err(|error| ClientError::Http(format!("failed to build SSE client: {error}")))
+}
+
+fn apply_proxy_bypass(
+    builder: reqwest::ClientBuilder,
+    bypass_proxy: bool,
+) -> reqwest::ClientBuilder {
+    if bypass_proxy {
+        builder.no_proxy()
+    } else {
+        builder
+    }
 }
 
 fn invalid_info_warning(path: &Path, message: String) -> DaemonDiscoveryWarning {
@@ -1215,6 +1426,11 @@ fn invalid_info_warning(path: &Path, message: String) -> DaemonDiscoveryWarning 
 
 fn daemon_json_path() -> PathBuf {
     daemon_dir().join("daemon.json")
+}
+
+fn daemon_base_url_from_bind(bind: &str, port: u16) -> String {
+    let host = connect_host(bind);
+    format!("http://{}:{port}", host_for_url(host))
 }
 
 fn daemon_dir() -> PathBuf {
@@ -1242,8 +1458,49 @@ fn connect_host(bind: &str) -> &str {
     }
 }
 
+fn host_for_url(host: &str) -> String {
+    if host.parse::<IpAddr>().is_ok_and(|addr| addr.is_ipv6()) {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
 fn trim_base_url(base_url: String) -> String {
     base_url.trim_end_matches('/').to_string()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn same_origin(left: &str, right: &str) -> bool {
+    base_url_origin(left)
+        .zip(base_url_origin(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn base_url_origin(base_url: &str) -> Option<(String, String, u16)> {
+    let url = Url::parse(base_url).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    let host = url.host_str()?.to_ascii_lowercase();
+    let port = url.port_or_known_default()?;
+    Some((scheme, host, port))
+}
+
+fn should_bypass_proxy_for_base_url(base_url: &str) -> bool {
+    let Some((scheme, host, _)) = base_url_origin(base_url) else {
+        return false;
+    };
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return false;
+    }
+    if host == "localhost" {
+        return true;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 fn encode_query_value(value: &str) -> String {
@@ -1412,6 +1669,52 @@ mod tests {
         }
     }
 
+    fn spawn_chat_sse_bytes_server(body: &'static [u8]) -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_vec();
+        let (stop, stopped) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                read_request_headers(&mut stream);
+                let _ =
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+            let _ = stopped.recv_timeout(Duration::from_millis(10));
+        });
+        TestServer {
+            base_url: format!("http://{addr}"),
+            stop,
+            handle,
+        }
+    }
+
+    fn spawn_open_project_server(response: Value) -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                read_request_headers(&mut stream);
+                let body = response.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+            let _ = stopped.recv_timeout(Duration::from_millis(10));
+        });
+        TestServer {
+            base_url: format!("http://{addr}"),
+            stop,
+            handle,
+        }
+    }
+
     fn read_request_headers(stream: &mut std::net::TcpStream) {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
         let mut request = Vec::new();
@@ -1433,6 +1736,8 @@ mod tests {
         assert_eq!(parser.push(":1}\n\n"), vec!["{\"a\":1}".to_string()]);
         assert!(parser.push("data: one\n").is_empty());
         assert_eq!(parser.push("data: two\n\n"), vec!["one\ntwo".to_string()]);
+        assert!(parser.push("data: three\n").is_empty());
+        assert_eq!(parser.finish(), vec!["three".to_string()]);
     }
 
     #[test]
@@ -1541,6 +1846,172 @@ mod tests {
         assert_eq!(event.chat_id.as_deref(), Some("chat"));
         assert_eq!(event.seq, Some(1));
         assert_eq!(event.kind, "snapshot");
+    }
+
+    #[tokio::test]
+    async fn sse_eof_flushes_buffered_event_then_reports_disconnect() {
+        let server = spawn_chat_sse_bytes_server(
+            b"data: {\"chat_id\":\"chat\",\"seq\":0,\"type\":\"snapshot\"}\n",
+        );
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let mut stream = client.subscribe_chat("project", "chat").await.unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        server.stop();
+
+        assert_eq!(event.kind, "snapshot");
+        assert_eq!(event.seq, Some(0));
+        assert!(matches!(error, ClientError::SseDisconnect(_)));
+        assert!(error.is_unreachable());
+    }
+
+    #[tokio::test]
+    async fn sse_mid_event_eof_surfaces_parse_error() {
+        let server = spawn_chat_sse_bytes_server(b"data: {\"chat_id\":\"chat\"");
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let mut stream = client.subscribe_chat("project", "chat").await.unwrap();
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        server.stop();
+
+        assert!(matches!(error, ClientError::Json(_)));
+    }
+
+    #[tokio::test]
+    async fn client_error_classifiers_cover_recovery_cases() {
+        for status in [502, 503, 504] {
+            assert!(ClientError::Status {
+                status,
+                body: "worker waking".to_string(),
+            }
+            .is_unreachable());
+        }
+        assert!(ClientError::SseDisconnect("eof".to_string()).is_unreachable());
+        assert!(ClientError::Status {
+            status: 401,
+            body: "Unauthorized".to_string(),
+        }
+        .is_auth_stale());
+        assert!(ClientError::Status {
+            status: 403,
+            body: "Forbidden".to_string(),
+        }
+        .is_auth_stale());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = DaemonClient::new(format!("http://{addr}"), None).unwrap();
+        let error = client.status().await.unwrap_err();
+
+        assert!(error.is_unreachable(), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn open_project_requires_ready_worker_with_ports() {
+        let server = spawn_open_project_server(json!({
+            "project_id": "p1",
+            "slug": "fixture",
+            "root": "/tmp/fixture",
+            "pinned": false,
+            "worker": {
+                "project_id": "p1",
+                "pid": 7,
+                "http_port": 31000,
+                "lsp_port": 31001,
+                "state": "starting",
+                "last_error": null
+            },
+            "cron_pending": null
+        }));
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let error = client
+            .open_project(Path::new("/tmp/fixture"))
+            .await
+            .unwrap_err();
+        server.stop();
+
+        match error {
+            ClientError::WorkerNotReady(message) => assert!(message.contains("starting")),
+            other => panic!("expected worker readiness error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_project_accepts_ready_worker_with_nonzero_ports() {
+        let server = spawn_open_project_server(json!({
+            "project_id": "p1",
+            "slug": "fixture",
+            "root": "/tmp/fixture",
+            "pinned": false,
+            "worker": {
+                "project_id": "p1",
+                "pid": 7,
+                "http_port": 31000,
+                "lsp_port": 31001,
+                "state": "ready",
+                "last_error": null
+            },
+            "cron_pending": null
+        }));
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let project = client
+            .open_project(Path::new("/tmp/fixture"))
+            .await
+            .unwrap();
+        server.stop();
+
+        assert_eq!(project.project_id, "p1");
+        assert_eq!(project.worker.unwrap().http_port, 31000);
+    }
+
+    #[test]
+    fn explicit_base_url_origin_change_drops_discovered_token_unless_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.json");
+        std::fs::write(
+            &path,
+            r#"{"pid":7,"port":43123,"bind":"127.0.0.1","version":"9.9.9","auth_token":"secret-token"}"#,
+        )
+        .unwrap();
+
+        let changed = resolve_daemon_endpoint_from_path(
+            &path,
+            Some("http://127.0.0.1:45454".to_string()),
+            None,
+        )
+        .unwrap();
+        let same = resolve_daemon_endpoint_from_path(
+            &path,
+            Some("http://127.0.0.1:43123".to_string()),
+            None,
+        )
+        .unwrap();
+        let explicit = resolve_daemon_endpoint_from_path(
+            &path,
+            Some("http://127.0.0.1:45454".to_string()),
+            Some("explicit-token".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(changed.base_url, "http://127.0.0.1:45454");
+        assert_eq!(changed.auth_token, None);
+        assert_eq!(same.auth_token.as_deref(), Some("secret-token"));
+        assert_eq!(explicit.auth_token.as_deref(), Some("explicit-token"));
+    }
+
+    #[test]
+    fn loopback_base_urls_bypass_ambient_proxies() {
+        assert!(should_bypass_proxy_for_base_url("http://127.0.0.1:8488"));
+        assert!(should_bypass_proxy_for_base_url("http://[::1]:8488"));
+        assert!(should_bypass_proxy_for_base_url("http://localhost:8488"));
+        assert!(!should_bypass_proxy_for_base_url("http://192.0.2.10:8488"));
+        assert!(!should_bypass_proxy_for_base_url(
+            "https://daemon.example:8488"
+        ));
     }
 
     #[test]

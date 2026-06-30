@@ -58,6 +58,7 @@ use super::openrouter::OpenRouterProvider;
 use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::openai_codex::{OpenAICodexProvider, UsageRequestError};
+use super::opencode::OpenCodeProvider;
 
 const PROVIDER_AVAILABLE_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -147,7 +148,7 @@ fn health_base_provider_supported(base_provider: &str) -> bool {
 }
 
 fn usage_base_provider_supported(base_provider: &str) -> bool {
-    matches!(base_provider, "claude_code" | "openai_codex")
+    matches!(base_provider, "claude_code" | "openai_codex" | "opencode")
 }
 
 fn provider_identity_from_existing_config(
@@ -3068,6 +3069,24 @@ async fn openai_codex_usage_response(
     }
 }
 
+async fn opencode_usage_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, http_client) =
+        resolve_provider_for_base(&gcx, provider_name, "opencode").await?;
+    let opencode = downcast_provider::<OpenCodeProvider>(provider.as_ref(), "OpenCode")?;
+
+    if opencode.usage_endpoint.trim().is_empty() {
+        return json_response(StatusCode::OK, &json!({"data": null}));
+    }
+
+    match opencode.fetch_usage(&http_client).await {
+        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
 async fn openai_codex_redeem_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
@@ -3098,6 +3117,7 @@ pub async fn handle_v1_provider_usage(
     match identity.base_provider.as_str() {
         "claude_code" => claude_code_usage_response(gcx, &params.name).await,
         "openai_codex" => openai_codex_usage_response(gcx, &params.name).await,
+        "opencode" => opencode_usage_response(gcx, &params.name).await,
         _ => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             format!("Provider '{}' does not support usage", params.name),

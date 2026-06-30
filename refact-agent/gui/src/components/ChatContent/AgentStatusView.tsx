@@ -13,11 +13,11 @@ import {
 } from "lucide-react";
 import { useAppSelector } from "../../hooks";
 import {
-  selectChatId,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../features/Chat/Thread";
 import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
@@ -621,14 +621,18 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, chatId, toolCall.id),
   );
   const content =
     maybeResult && typeof maybeResult.content === "string"

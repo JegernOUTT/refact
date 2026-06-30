@@ -1330,10 +1330,10 @@ fn habit_fact_relevant(kind: BuddyFactKind) -> bool {
 
 fn habit_evidence(ctx: &BuddyJobContext) -> Option<AutonomousEvidence> {
     let mut lines = vec![format!(
-        "task_pulse total={} stuck={} abandoned={} trajectory_total={} untitled={} oldest_age_days={} diagnostics_last_hour={} top_error_types={}",
+        "task_pulse current_total={} recent_stuck_alerts_1h={} recent_abandoned_alerts_24h={} trajectory_total={} untitled={} oldest_age_days={} diagnostics_last_hour={} top_error_types={}",
         ctx.pulse.tasks.total,
-        ctx.pulse.tasks.stuck,
-        ctx.pulse.tasks.abandoned,
+        ctx.pulse.tasks.recent_stuck_alert_count_1h(),
+        ctx.pulse.tasks.recent_abandoned_alert_count_24h(),
         ctx.pulse.trajectories.total,
         ctx.pulse.trajectories.untitled,
         ctx.pulse.trajectories.oldest_age_days,
@@ -1389,7 +1389,8 @@ fn habit_evidence(ctx: &BuddyJobContext) -> Option<AutonomousEvidence> {
         ));
     }
     let repeated_diagnostics = ctx.recent_diagnostics.len() >= 5;
-    let task_pattern = ctx.pulse.tasks.stuck > 0 || ctx.pulse.tasks.abandoned > 0;
+    let task_pattern = ctx.pulse.tasks.recent_stuck_alert_count_1h() > 0
+        || ctx.pulse.tasks.recent_abandoned_alert_count_24h() > 0;
     let trajectory_pattern =
         ctx.pulse.trajectories.untitled >= 5 || ctx.pulse.trajectories.oldest_age_days >= 30;
     let fact_pattern = ctx.facts.iter().any(|fact| habit_fact_relevant(fact.kind));
@@ -4215,7 +4216,7 @@ mod tests {
     #[test]
     fn habit_evidence_is_deterministic_for_task_status_and_fact_order() {
         let mut first = context_with_last_result(None);
-        first.pulse.tasks.stuck = 1;
+        first.pulse.tasks.recent_stuck_alerts_1h = 1;
         first.pulse.tasks.by_status = HashMap::from([
             ("completed".to_string(), 2),
             ("active".to_string(), 1),
@@ -4232,7 +4233,7 @@ mod tests {
             ),
         ];
         let mut second = context_with_last_result(None);
-        second.pulse.tasks.stuck = 1;
+        second.pulse.tasks.recent_stuck_alerts_1h = 1;
         second.pulse.tasks.by_status = HashMap::from([
             ("planning".to_string(), 3),
             ("completed".to_string(), 2),
@@ -4257,6 +4258,24 @@ mod tests {
                     .unwrap()
         );
         assert_eq!(first_spec.signal_hash, second_spec.signal_hash);
+    }
+
+    #[test]
+    fn habit_evidence_labels_current_task_state_and_recent_alerts() {
+        let mut ctx = context_with_last_result(None);
+        ctx.pulse.tasks.total = 5;
+        ctx.pulse.tasks.by_status =
+            HashMap::from([("planning".to_string(), 4), ("active".to_string(), 1)]);
+        ctx.pulse.tasks.recent_stuck_alerts_1h = 2;
+        ctx.pulse.tasks.recent_abandoned_alerts_24h = 3;
+
+        let evidence = habit_evidence(&ctx).unwrap().evidence;
+
+        assert!(evidence.contains("task_pulse current_total=5"));
+        assert!(evidence.contains("recent_stuck_alerts_1h=2"));
+        assert!(evidence.contains("recent_abandoned_alerts_24h=3"));
+        assert!(evidence.contains("task_status planning=4"));
+        assert!(!evidence.contains("task_pulse total=5 stuck=2 abandoned=3"));
     }
 
     #[test]

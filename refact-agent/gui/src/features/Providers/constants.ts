@@ -9,6 +9,7 @@ export const BEAUTIFUL_PROVIDER_NAMES: Record<string, string> = {
   deepseek: "DeepSeek",
   google_gemini: "Google Gemini",
   ollama: "Ollama",
+  opencode: "OpenCode Go",
   lmstudio: "LM Studio",
   vllm: "vLLM",
   xai: "xAI",

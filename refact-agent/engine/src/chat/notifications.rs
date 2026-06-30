@@ -297,6 +297,7 @@ mod tests {
 
     fn notification_test_snapshot(chat_id: &str) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            goal: None,
             chat_id: chat_id.to_string(),
             title: "Notification test".to_string(),
             model: "model".to_string(),

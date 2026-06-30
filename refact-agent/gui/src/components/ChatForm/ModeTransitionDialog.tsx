@@ -5,11 +5,6 @@ import { Dialog, Icon } from "../ui";
 import { Callout } from "../Callout";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
-import { useCreatePlannerChatFromTransitionMutation } from "../../services/refact/tasks";
-import {
-  addPlannerChat,
-  setTaskActiveChat,
-} from "../../features/Tasks/tasksSlice";
 import {
   createChatWithId,
   requestSseRefresh,
@@ -52,7 +47,6 @@ type ModeTransitionDialogProps = {
   targetMode: string;
   targetModeTitle: string;
   targetModeDescription: string;
-  taskId?: string;
 };
 
 type TransitionPhase = "analyzing" | "refreshing" | "opening" | "starting";
@@ -88,7 +82,6 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   targetMode,
   targetModeTitle,
   targetModeDescription,
-  taskId,
 }) => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -108,10 +101,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
 
   const [applyMutation, { isLoading: isApplying }] =
     useApplyModeTransitionMutation();
-  const [createFromTransition, { isLoading: isTransitioning }] =
-    useCreatePlannerChatFromTransitionMutation();
-
-  const isBusy = isApplying || isTransitioning || phase !== null;
+  const isBusy = isApplying || phase !== null;
 
   const handleApply = useCallback(async () => {
     if (isBusy) return;
@@ -126,80 +116,34 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     setError(null);
     setPhase("analyzing");
     try {
-      let newChatId: string;
-      if (taskId) {
-        const result = await createFromTransition({
-          taskId,
-          sourceChatId: chatId,
-          targetMode,
-          targetModeDescription,
-        }).unwrap();
-        newChatId = result.new_chat_id;
-        const now = new Date().toISOString();
-        setPhase("opening");
-        dispatch(
-          createChatWithId({
-            id: newChatId,
-            mode: targetMode,
-            isTaskChat: true,
-            taskMeta: {
-              task_id: taskId,
-              role: "planner",
-              planner_chat_id: newChatId,
-            },
-            parentId: chatId,
-            linkType: "mode_transition",
-            worktree: sourceWorktree,
-          }),
-        );
-        dispatch(
-          addPlannerChat({
-            taskId,
-            planner: {
-              id: newChatId,
-              title: "",
-              createdAt: now,
-              updatedAt: now,
-              mode: targetMode,
-            },
-          }),
-        );
-        dispatch(
-          setTaskActiveChat({
-            taskId,
-            activeChat: { type: "planner", chatId: newChatId },
-          }),
-        );
-        dispatch(requestSseRefresh({ chatId: newChatId }));
-      } else {
-        const result = await applyMutation({
-          chatId,
-          targetMode,
-          targetModeDescription,
-        }).unwrap();
-        newChatId = result.new_chat_id;
+      const result = await applyMutation({
+        chatId,
+        targetMode,
+        targetModeDescription,
+      }).unwrap();
+      const newChatId = result.new_chat_id;
 
-        setPhase("refreshing");
-        await dispatch(
-          trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
-            forceRefetch: true,
-          }),
-        ).unwrap();
+      setPhase("refreshing");
+      await dispatch(
+        trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
+          forceRefetch: true,
+        }),
+      ).unwrap();
 
-        setPhase("opening");
-        dispatch(closeThread({ id: chatId, force: true }));
-        dispatch(
-          createChatWithId({
-            id: newChatId,
-            mode: targetMode,
-            parentId: chatId,
-            linkType: "mode_transition",
-            worktree: sourceWorktree,
-          }),
-        );
-        dispatch(requestSseRefresh({ chatId: newChatId }));
-        dispatch(push({ name: "chat" }));
-      }
+      setPhase("opening");
+      dispatch(closeThread({ id: chatId, force: true }));
+      dispatch(
+        createChatWithId({
+          id: newChatId,
+          mode: targetMode,
+          parentId: chatId,
+          linkType: "mode_transition",
+          rootChatId: result.root_chat_id ?? undefined,
+          worktree: sourceWorktree,
+        }),
+      );
+      dispatch(requestSseRefresh({ chatId: newChatId }));
+      dispatch(push({ name: "chat" }));
 
       await waitForNextFrame();
       setPhase("starting");
@@ -230,9 +174,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     targetMode,
     targetModeTitle,
     targetModeDescription,
-    taskId,
     applyMutation,
-    createFromTransition,
     dispatch,
     onOpenChange,
     config,

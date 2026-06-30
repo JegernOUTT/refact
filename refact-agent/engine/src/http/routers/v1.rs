@@ -29,6 +29,7 @@ use crate::http::routers::v1::git::{
     handle_v1_git_commit, handle_v1_checkpoints_preview, handle_v1_checkpoints_restore,
 };
 use crate::http::routers::v1::graceful_shutdown::handle_v1_graceful_shutdown;
+use crate::http::routers::v1::hooks::handle_v1_hooks_fire;
 use crate::http::routers::v1::links::handle_v1_links;
 use crate::http::routers::v1::lsp_like_handlers::{
     handle_v1_lsp_did_change, handle_v1_lsp_add_folder, handle_v1_lsp_initialize,
@@ -133,6 +134,7 @@ mod file_edit_tools;
 mod git;
 pub mod graceful_shutdown;
 mod gui_help_handlers;
+mod hooks;
 pub mod knowledge_enrichment;
 mod knowledge_graph;
 pub mod knowledge_ops;
@@ -606,6 +608,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/scheduler/cron/:id/run",
             post(handle_v1_scheduler_cron_run),
         )
+        .route("/hooks/fire", post(handle_v1_hooks_fire))
         .route("/setup/status", get(handle_v1_setup_status))
         .route("/browser/start", post(handle_browser_start))
         .route("/browser/stop", post(handle_browser_stop))

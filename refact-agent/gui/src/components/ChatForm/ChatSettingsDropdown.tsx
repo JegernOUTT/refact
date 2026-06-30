@@ -18,19 +18,19 @@ import {
 } from "../../hooks";
 import type { CapCost } from "../../services/refact/caps";
 import {
-  selectChatId,
-  selectModel,
-  selectMessages,
-  selectIsStreaming,
-  selectIsWaiting,
-  selectThreadBoostReasoning,
-  selectReasoningEffort,
-  selectThinkingBudget,
-  selectMaxTokens,
+  selectModelById,
+  selectMessagesById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectThreadBoostReasoningById,
+  selectReasoningEffortById,
+  selectThinkingBudgetById,
+  selectMaxTokensById,
   setReasoningEffort,
   setThinkingBudget,
   setTemperature,
   setMaxTokens,
+  useThreadId,
 } from "../../features/Chat/Thread";
 import type { ReasoningEffort } from "../../features/Chat/Thread/types";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
@@ -153,15 +153,27 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectChatId);
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
-  const threadModel = useAppSelector(selectModel);
-  const messages = useAppSelector(selectMessages);
-  const isBoostReasoningEnabled = useAppSelector(selectThreadBoostReasoning);
-  const threadMaxTokens = useAppSelector(selectMaxTokens);
-  const threadReasoningEffort = useAppSelector(selectReasoningEffort);
-  const threadThinkingBudget = useAppSelector(selectThinkingBudget);
+  const chatId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
+  const threadModel = useAppSelector((state) => selectModelById(state, chatId));
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const isBoostReasoningEnabled = useAppSelector((state) =>
+    selectThreadBoostReasoningById(state, chatId),
+  );
+  const threadMaxTokens = useAppSelector((state) =>
+    selectMaxTokensById(state, chatId),
+  );
+  const threadReasoningEffort = useAppSelector((state) =>
+    selectReasoningEffortById(state, chatId),
+  );
+  const threadThinkingBudget = useAppSelector((state) =>
+    selectThinkingBudgetById(state, chatId),
+  );
 
   const caps = useCapsForToolUse();
   const capsQuery = useGetCapsQuery(undefined);

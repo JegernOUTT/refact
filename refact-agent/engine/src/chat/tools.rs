@@ -70,8 +70,45 @@ pub enum ToolStepOutcome {
     Stop,
 }
 
+pub(super) fn validate_goal_result_state(
+    tool_calls: &[ChatToolCall],
+    tool_results: &[ChatMessage],
+) -> Option<SessionState> {
+    tool_calls.iter().find_map(|tool_call| {
+        if crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
+            &tool_call.function.name,
+        ) != "validate_goal"
+        {
+            return None;
+        }
+        tool_results.iter().find_map(|message| {
+            if message.tool_call_id == tool_call.id && message.tool_failed != Some(true) {
+                validate_goal_state_from_extra(message)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn validate_goal_state_from_extra(message: &ChatMessage) -> Option<SessionState> {
+    let verdict = message
+        .extra
+        .get("validate_goal")
+        .and_then(|value| value.get("verdict"))
+        .and_then(|value| value.as_str())?;
+    if verdict == "met" {
+        Some(SessionState::Completed)
+    } else {
+        None
+    }
+}
+
 use super::types::*;
 use super::trajectories::maybe_save_trajectory;
+use super::goal_verifier::{
+    should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
+};
 
 use super::config::{limits, tokens};
 
@@ -383,7 +420,10 @@ fn spawn_subchat_bridge(
 
             match recv_result {
                 Ok(Some(value)) => {
-                    info!("spawn_subchat_bridge: received message: {:?}", value);
+                    info!(
+                        "spawn_subchat_bridge: received message: {}b",
+                        value.to_string().len()
+                    );
                     let tool_call_id = value.get("tool_call_id").and_then(|v| v.as_str());
                     let subchat_id = value.get("subchat_id").and_then(|v| v.as_str());
 
@@ -806,6 +846,87 @@ source:
         assert_eq!(
             ordered,
             vec!["result_0", "result_1", "result_2", "result_3", "result_4"]
+        );
+    }
+
+    fn tool_call(id: &str, name: &str) -> ChatToolCall {
+        ChatToolCall {
+            id: id.to_string(),
+            index: Some(0),
+            function: crate::call_validation::ChatToolFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        }
+    }
+
+    fn tool_result(id: &str, content: &str, failed: Option<bool>) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            tool_call_id: id.to_string(),
+            tool_failed: failed,
+            ..Default::default()
+        }
+    }
+
+    fn validate_goal_tool_result(id: &str, verdict: &str, failed: Option<bool>) -> ChatMessage {
+        let mut message = tool_result(id, "human-readable output can change", failed);
+        message.extra.insert(
+            "validate_goal".to_string(),
+            serde_json::json!({"verdict": verdict}),
+        );
+        message
+    }
+
+    #[test]
+    fn validate_goal_result_state_detects_terminal_outputs() {
+        let calls = vec![tool_call("tc", "validate_goal")];
+
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[validate_goal_tool_result("tc", "met", Some(false))],
+            ),
+            Some(SessionState::Completed)
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[validate_goal_tool_result("tc", "unmet", Some(false))],
+            ),
+            None
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "No active goal to validate.",
+                    Some(false)
+                )],
+            ),
+            None
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[tool_result(
+                    "tc",
+                    "GOAL MET — goal marked complete; pursuit disabled.",
+                    Some(false),
+                )],
+            ),
+            None
+        );
+        assert_eq!(
+            validate_goal_result_state(
+                &calls,
+                &[validate_goal_tool_result("tc", "met", Some(true),)],
+            ),
+            None
         );
     }
 
@@ -1324,6 +1445,8 @@ pub async fn process_tool_calls_once(
     // Only apply stop state if the tool actually succeeded (tool_failed != Some(true)), otherwise
     // let the loop continue so the LLM can see the error and retry with correct arguments.
     let mut final_state = SessionState::Idle;
+    let mut completion_trigger: Option<String> = None;
+    let validate_goal_state = validate_goal_result_state(&tools_to_execute, &tool_results);
     for tool_call in &tools_to_execute {
         let failed = tool_results
             .iter()
@@ -1335,13 +1458,23 @@ pub async fn process_tool_calls_once(
                 );
             match tool_name.as_str() {
                 "ask_questions" | "wait_agents" => final_state = SessionState::WaitingUserInput,
-                "task_done" => final_state = SessionState::Completed,
-                "agent_finish" => final_state = SessionState::Completed,
+                "task_done" | "finish" => {
+                    final_state = SessionState::Completed;
+                    completion_trigger = Some(tool_name.to_string());
+                }
+                "agent_finish" => {
+                    final_state = SessionState::Completed;
+                    completion_trigger = Some(tool_name.to_string());
+                }
                 "handoff_to_mode" => final_state = SessionState::Completed,
                 _ => {}
             }
         }
     }
+    if let Some(state) = validate_goal_state {
+        final_state = state;
+    }
+
     let tool_initiated_stop = matches!(
         final_state,
         SessionState::Completed | SessionState::WaitingUserInput
@@ -1358,6 +1491,7 @@ pub async fn process_tool_calls_once(
         session.abort_flag.load(Ordering::Relaxed)
     };
 
+    let mut verify_completion = false;
     {
         let mut session = session_arc.lock().await;
         if !was_interrupted || tool_initiated_stop {
@@ -1369,13 +1503,37 @@ pub async fn process_tool_calls_once(
             session.clear_post_tool_side_effects();
         }
         if tool_initiated_stop {
-            // Tools that intentionally stop the current turn always apply their intended state.
-            session.set_runtime_state(final_state, None);
+            if final_state == SessionState::Completed
+                && completion_trigger.is_some()
+                && should_verify_goal_on_done(&session)
+            {
+                session.set_runtime_state(SessionState::ExecutingTools, None);
+                verify_completion = true;
+            } else {
+                session.set_runtime_state(final_state, None);
+            }
         } else if was_aborted {
             // User abort during regular tools: transition to Idle so UI stops animating
             session.set_runtime_state(SessionState::Idle, None);
         } else {
             session.set_runtime_state(SessionState::Generating, None);
+        }
+    }
+
+    if verify_completion {
+        let trigger = completion_trigger.as_deref().unwrap_or("task_done");
+        match verify_goal_before_completion(app.clone(), session_arc.clone(), trigger).await {
+            GoalCompletionGateOutcome::Passthrough => {
+                let mut session = session_arc.lock().await;
+                session.set_runtime_state(SessionState::Completed, None);
+            }
+            GoalCompletionGateOutcome::Finalized => {}
+            GoalCompletionGateOutcome::Rearmed => {
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                return ToolStepOutcome::Stop;
+            }
+            GoalCompletionGateOutcome::BudgetExhausted(_) => {}
+            GoalCompletionGateOutcome::Aborted => return ToolStepOutcome::Stop,
         }
     }
 

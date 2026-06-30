@@ -13,6 +13,7 @@ use crate::{
     xai::XAIProvider, xai_responses::XAIResponsesProvider, google_gemini::GoogleGeminiProvider,
     qwen::QwenProvider, kimi::KimiProvider, zhipu::ZhipuProvider, minimax::MiniMaxProvider,
     github_copilot::GitHubCopilotProvider, custom::CustomProvider, claude_code::ClaudeCodeProvider,
+    opencode::OpenCodeProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -34,6 +35,7 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "kimi",
     "zhipu",
     "minimax",
+    "opencode",
     "github_copilot",
     "custom",
     "claude_code",
@@ -59,6 +61,7 @@ pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
         "kimi" => Some(Box::new(KimiProvider::default())),
         "zhipu" => Some(Box::new(ZhipuProvider::default())),
         "minimax" => Some(Box::new(MiniMaxProvider::default())),
+        "opencode" => Some(Box::new(OpenCodeProvider::default())),
         "github_copilot" => Some(Box::new(GitHubCopilotProvider::default())),
         "custom" => Some(Box::new(CustomProvider::default())),
         "claude_code" => Some(Box::new(ClaudeCodeProvider::default())),

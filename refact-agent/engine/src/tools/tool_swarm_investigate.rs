@@ -23,7 +23,6 @@ const DEFAULT_MAX_PARALLEL: usize = 3;
 const HARD_MAX_PARALLEL: usize = 5;
 const DEFAULT_PER_AGENT_BUDGET: usize = 15;
 const MAX_PER_AGENT_BUDGET: usize = 50;
-const QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TOTAL_RESULT_BYTES: usize = 30 * 1024;
 const TRUNCATION_NOTE: &str = "\n\n… truncated\n";
 const INVESTIGATION_SYSTEM_PROMPT: &str =
@@ -279,7 +278,7 @@ fn aggregate_swarm_report(topic: &str, results: &[SwarmQuestionResult]) -> Strin
 
 async fn run_swarm_questions<F, Fut>(
     input: SwarmInput,
-    timeout: Duration,
+    timeout: Option<Duration>,
     runner: F,
 ) -> Vec<SwarmQuestionResult>
 where
@@ -309,11 +308,17 @@ where
                     ),
                 };
             };
-            let result = tokio::time::timeout(timeout, runner(job.clone())).await;
-            let finding = match result {
-                Ok(Ok(text)) => SwarmFinding::Success(text),
-                Ok(Err(error)) => SwarmFinding::Failed(error),
-                Err(_) => SwarmFinding::TimedOut(timeout),
+            let finding = if let Some(timeout) = timeout {
+                match tokio::time::timeout(timeout, runner(job.clone())).await {
+                    Ok(Ok(text)) => SwarmFinding::Success(text),
+                    Ok(Err(error)) => SwarmFinding::Failed(error),
+                    Err(_) => SwarmFinding::TimedOut(timeout),
+                }
+            } else {
+                match runner(job.clone()).await {
+                    Ok(text) => SwarmFinding::Success(text),
+                    Err(error) => SwarmFinding::Failed(error),
+                }
             };
             SwarmQuestionResult {
                 index: job.index,
@@ -423,7 +428,7 @@ impl Tool for ToolSwarmInvestigate {
             let ctx = ctx.clone();
             async move { run_real_investigation_subchat(ctx, job).await }
         };
-        let results = run_swarm_questions(input.clone(), QUESTION_TIMEOUT, runner).await;
+        let results = run_swarm_questions(input.clone(), None, runner).await;
         let report = aggregate_swarm_report(&input.topic, &results);
 
         Ok((
@@ -521,7 +526,7 @@ mod tests {
         let input = input_with_questions(3, 3);
         let active = Arc::new(AtomicUsize::new(0));
         let max_seen = Arc::new(AtomicUsize::new(0));
-        let results = run_swarm_questions(input.clone(), Duration::from_secs(1), {
+        let results = run_swarm_questions(input.clone(), Some(Duration::from_secs(1)), {
             let active = active.clone();
             let max_seen = max_seen.clone();
             move |job| {
@@ -554,7 +559,7 @@ mod tests {
         let input = input_with_questions(3, 3);
         let results = run_swarm_questions(
             input.clone(),
-            Duration::from_secs(1),
+            Some(Duration::from_secs(1)),
             move |job| async move {
                 if job.index == 1 {
                     Err("boom".to_string())
@@ -580,7 +585,7 @@ mod tests {
         let input = input_with_questions(1, 1);
         let results = run_swarm_questions(
             input.clone(),
-            Duration::from_millis(10),
+            Some(Duration::from_millis(10)),
             move |_job| async move {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 Ok("late".to_string())

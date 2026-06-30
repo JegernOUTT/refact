@@ -3,10 +3,11 @@ import { useStoredOpen } from "../useStoredOpen";
 
 import { useAppSelector } from "../../../hooks";
 import {
-  selectIsStreaming,
-  selectIsWaiting,
-  selectToolResultById,
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import type { ToolCall, ToolResult } from "../../../services/refact/types";
 import type { ToolStatus } from "./ToolCard";
 
@@ -42,12 +43,17 @@ export function useOpenAiResponsesToolCardState(
 ): OpenAiResponsesToolCardState {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, toggleOpen] = useStoredOpen(storeKey, false);
+  const threadId = useThreadId();
 
-  const isStreaming = useAppSelector(selectIsStreaming);
-  const isWaiting = useAppSelector(selectIsWaiting);
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
 
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const toolName = toolCall.function.name ?? "openai";

@@ -303,14 +303,60 @@ pub fn approval_decision(
 
 pub async fn run(options: RunOptions, io: &mut dyn RunIo) -> i32 {
     let json_output = options.json;
-    let result = match crate::daemon::client::ensure_daemon_running().await {
-        Ok(info) => run_with_daemon_info(options, info, io).await,
-        Err(error) => Err(RunFailure {
-            kind: RunErrorKind::Unreachable,
-            message: format!("daemon unreachable: {error}"),
-        }),
-    };
+    let result = run_with_rediscover(options, io).await;
     finish_result(result, json_output, io)
+}
+
+async fn run_with_rediscover(
+    options: RunOptions,
+    io: &mut dyn RunIo,
+) -> Result<RunJsonSummary, RunFailure> {
+    let mut retried = false;
+    loop {
+        let result = match crate::daemon::client::ensure_daemon_running().await {
+            Ok(info) => run_with_daemon_info(options.clone(), info, io).await,
+            Err(error) => Err(RunFailure {
+                kind: RunErrorKind::Unreachable,
+                message: format!("daemon unreachable: {error}"),
+            }),
+        };
+        match result {
+            Err(error) if !retried && run_failure_is_recoverable(&error) => {
+                retried = true;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn run_failure_is_recoverable(error: &RunFailure) -> bool {
+    match error.kind {
+        RunErrorKind::Unreachable => recoverable_message(&error.message),
+        RunErrorKind::ProjectOpen | RunErrorKind::Chat => recoverable_message(&error.message),
+        RunErrorKind::ApprovalDenied | RunErrorKind::Timeout | RunErrorKind::Interrupted => false,
+    }
+}
+
+fn recoverable_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "failed to contact daemon",
+        "connection refused",
+        "connection closed",
+        "status 401",
+        "unauthorized",
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "sse stream ended before completion",
+        "chat sse error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 async fn run_with_daemon_info(
@@ -1027,7 +1073,7 @@ mod tests {
             ];
             std::env::set_var(
                 "REFACT_DAEMON_WORKER_CMD",
-                format!("{} {}", python, worker.display()),
+                shell_words::join([python.as_str(), worker.to_string_lossy().as_ref()]),
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::set_var("FAKE_WORKER_CHAT_SCRIPT", script);

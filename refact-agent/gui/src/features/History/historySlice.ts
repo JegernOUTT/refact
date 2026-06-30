@@ -784,12 +784,18 @@ startHistoryListening({
   actionCreator: setChatMode,
   effect: (action, listenerApi) => {
     const state = listenerApi.getState();
-    const runtime = state.chat.threads[state.chat.current_thread_id];
+    const chatId =
+      typeof action.payload === "string"
+        ? state.chat.current_thread_id
+        : action.payload.chatId ?? state.chat.current_thread_id;
+    const mode =
+      typeof action.payload === "string" ? action.payload : action.payload.mode;
+    const runtime = state.chat.threads[chatId];
     if (!runtime) return;
     const thread = runtime.thread;
     if (!(thread.id in state.history.chats)) return;
 
-    const toSave = { ...thread, mode: action.payload };
+    const toSave = { ...thread, mode };
     listenerApi.dispatch(saveChat(toSave));
   },
 });

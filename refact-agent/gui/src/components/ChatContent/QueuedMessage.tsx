@@ -5,7 +5,7 @@ import type { QueuedItem } from "../../features/Chat";
 import { useChatActions } from "../../hooks";
 import { useAppSelector } from "../../hooks";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
-import { selectChatId } from "../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../features/Chat/Thread";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { setInputValue } from "../ChatForm/actions";
 import { Badge, Icon, IconButton, Tooltip } from "../ui";
@@ -17,9 +17,13 @@ type QueuedMessageProps = {
   position: number;
 };
 
-function postInputValue(text: string, sendImmediately: boolean) {
+function postInputValue(
+  chatId: string,
+  text: string,
+  sendImmediately: boolean,
+) {
   window.postMessage(
-    setInputValue({ value: text, send_immediately: sendImmediately }),
+    setInputValue({ chatId, value: text, send_immediately: sendImmediately }),
     window.location.origin || "*",
   );
 }
@@ -28,10 +32,10 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   queuedItem,
   position,
 }) => {
-  const { cancelQueued } = useChatActions();
+  const chatId = useThreadId();
+  const { cancelQueued } = useChatActions(chatId);
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
-  const chatId = useAppSelector(selectChatId);
   const [isWorking, setIsWorking] = useState(false);
 
   const content = queuedItem.content ?? "";
@@ -56,7 +60,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
     try {
       const ok = await cancelQueued(queuedItem.client_request_id);
       if (!ok) return;
-      postInputValue(content, queuedItem.priority);
+      postInputValue(chatId, content, queuedItem.priority);
     } catch {
       return;
     } finally {
@@ -66,6 +70,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
     isWorking,
     isEditable,
     cancelQueued,
+    chatId,
     queuedItem.client_request_id,
     queuedItem.priority,
     content,
@@ -96,7 +101,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
           !queuedItem.priority,
         );
       } catch {
-        postInputValue(content, queuedItem.priority);
+        postInputValue(chatId, content, queuedItem.priority);
       }
     } catch {
       return;

@@ -7,7 +7,6 @@ import React, {
 } from "react";
 import { Flex } from "@radix-ui/themes";
 import {
-  Chat,
   createChatWithId,
   selectAllThreads,
   selectBackgroundAgentsByThread,
@@ -16,6 +15,7 @@ import {
   selectThread,
   switchToThread,
 } from "./Chat";
+import { WorkspaceView } from "./Workspace/WorkspaceView";
 
 import {
   useAppSelector,
@@ -25,10 +25,9 @@ import {
   useEventsBusForIDE,
   useSidebarSubscription,
   useAllChatsSubscription,
-  useGetConfiguredProvidersQuery,
+  useProviderBootstrapState,
   useResizeObserverOnRef,
 } from "../hooks";
-import { useGetPing } from "../hooks/useGetPing";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
@@ -52,6 +51,7 @@ import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 
 import { StatsDashboard } from "./StatsDashboard";
+import { RefactDaemonPage } from "./RefactDaemon";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
 import { BuddyHome } from "./Buddy/BuddyHome";
@@ -70,18 +70,22 @@ import {
 
 import styles from "./App.module.css";
 import { usePatchesAndDiffsEventsForIDE } from "../hooks/usePatchesAndDiffEventsForIDE";
-import { hasAnyUsableActiveProvider } from "./Login/providerAccess";
 import {
+  getProjectStorageNamespace,
   isProjectStorageNamespaceTrusted,
   loadPersistedActiveTab,
   savePersistedActiveTab,
 } from "../utils/chatUiPersistence";
+import { selectFocusedWorkspaceChatId } from "./Workspace";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
+import { isPointerDragHost } from "./ChatPanes/pointerDrag";
+import { PointerDragGhost } from "./ChatPanes/PointerDragGhost";
 
 const STARTUP_SPLASH_DEADLINE_MS = 12_000;
+const APP_ACCESS_LOSS_GRACE_MS = 3_000;
 
 export interface AppProps {
   style?: React.CSSProperties;
@@ -96,11 +100,14 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const persistedActiveTabRef = useRef<ReturnType<
     typeof loadPersistedActiveTab
   > | null>(null);
+  const lastProjectStorageRestoreIdentityRef = useRef<string | null>(null);
+  const lastTrustedProjectStorageNamespaceRef = useRef<string | null>(null);
 
   const pages = useAppSelector(selectPages);
   const isStreaming = useAppSelector(selectIsStreaming);
   const allThreads = useAppSelector(selectAllThreads);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
+  const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
 
   const isPageInHistory = useCallback(
     (pageName: string) => {
@@ -118,16 +125,23 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   );
   const backendStatus = useAppSelector(selectBackendStatus);
   const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
-  const providersQuery = useGetConfiguredProvidersQuery();
+  const providerBootstrap = useProviderBootstrapState();
   useEventBusForWeb();
   useEventBusForApp();
   usePatchesAndDiffsEventsForIDE();
   useSidebarSubscription();
   useAllChatsSubscription();
-  useGetPing();
   useBrowserOnlineStatus();
 
   const config = useConfig();
+  const projectStorageNamespaceTrusted = isProjectStorageNamespaceTrusted();
+  const projectStorageNamespace = getProjectStorageNamespace();
+  const trustedProjectStorageNamespace = projectStorageNamespaceTrusted
+    ? projectStorageNamespace
+    : null;
+  const projectStorageRestoreIdentity = projectStorageNamespaceTrusted
+    ? `trusted:${projectStorageNamespace ?? ""}`
+    : "untrusted";
 
   useEffectOnce(() => {
     if (crashSessionStartedRef.current) return;
@@ -262,18 +276,19 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const pageSwitching = desiredPage !== renderedPage;
 
-  const isLoggedIn = isPageInHistory("history") || isPageInHistory("chat");
+  const isLoggedIn =
+    isPageInHistory("history") ||
+    isPageInHistory("chat") ||
+    isPageInHistory("tasks list") ||
+    isPageInHistory("task workspace") ||
+    isPageInHistory("task agent");
 
-  const hasAnyActiveProvider = useMemo(() => {
-    return hasAnyUsableActiveProvider({
-      providers: providersQuery.data?.providers ?? [],
-    });
-  }, [providersQuery.data?.providers]);
-  const canAccessApp = hasAnyActiveProvider;
-  const canResolveProviderAccess = providersQuery.isSuccess;
+  const canAccessApp = providerBootstrap.canAccessApp;
+  const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);
   const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
   const hasEndpoint = hasUsableEngineEndpoint(config);
+  const isBackendInstalling = providerBootstrap.status === "backend_installing";
 
   useEffect(() => {
     setStartupDeadlineReached(false);
@@ -290,41 +305,56 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   ]);
 
   useEffect(() => {
-    if (backendStatus !== "online") {
+    if (
+      backendStatus !== "online" ||
+      providerBootstrap.status === "backend_connecting" ||
+      providerBootstrap.status === "backend_installing"
+    ) {
       setStartupResolved(false);
       return;
     }
 
-    if (providersQuery.isSuccess || providersQuery.isError) {
+    if (providerBootstrap.status !== "provider_loading") {
       setStartupResolved(true);
     }
-  }, [backendStatus, providersQuery.isError, providersQuery.isSuccess]);
+  }, [backendStatus, providerBootstrap.status]);
 
   const showStartupSplash =
     !startupDeadlineReached &&
-    hasEndpoint &&
+    (hasEndpoint || isBackendInstalling) &&
     !startupResolved &&
     backendLastOkAt === null &&
-    (backendStatus !== "online" ||
-      providersQuery.isUninitialized ||
-      providersQuery.isLoading ||
-      providersQuery.isFetching);
-
+    providerBootstrap.status !== "ready" &&
+    providerBootstrap.status !== "setup_required" &&
+    providerBootstrap.status !== "provider_error";
   useEffect(() => {
-    if (canAccessApp && !isLoggedIn) {
-      dispatch(push({ name: "history" }));
+    if (canAccessApp) {
+      hadAppAccessRef.current = true;
+      if (!isLoggedIn) {
+        dispatch(push({ name: "history" }));
+      }
+      return;
     }
 
-    if (
-      !canAccessApp &&
-      canResolveProviderAccess &&
-      desiredPage.name !== "login page"
-    ) {
+    const shouldShowLoginPage =
+      providerBootstrap.status !== "backend_connecting" &&
+      providerBootstrap.status !== "backend_installing" &&
+      providerBootstrap.status !== "provider_loading";
+    if (!shouldShowLoginPage || desiredPage.name === "login page") return;
+
+    if (!hadAppAccessRef.current) {
       dispatch(popBackTo({ name: "login page" }));
+      return;
     }
+
+    const timeoutId = setTimeout(() => {
+      dispatch(popBackTo({ name: "login page" }));
+    }, APP_ACCESS_LOSS_GRACE_MS);
+
+    return () => clearTimeout(timeoutId);
   }, [
     canAccessApp,
-    canResolveProviderAccess,
+    providerBootstrap.status,
     desiredPage.name,
     isLoggedIn,
     dispatch,
@@ -389,7 +419,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (desiredPage.name === "chat") {
       return {
         type: "chat",
-        id: chatId,
+        id: focusedWorkspaceChatId ?? chatId,
       };
     }
     if (desiredPage.name === "history") {
@@ -404,12 +434,53 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
         taskName: "",
       };
     }
-    if (desiredPage.name === "knowledge graph") {
+    if (desiredPage.name === "buddy") {
+      return {
+        type: "buddy",
+      };
+    }
+    if (
+      desiredPage.name === "knowledge graph" ||
+      desiredPage.name === "refact daemon"
+    ) {
       return {
         type: "dashboard",
       };
     }
-  }, [desiredPage, chatId]);
+  }, [desiredPage, chatId, focusedWorkspaceChatId]);
+
+  useEffect(() => {
+    const previousIdentity = lastProjectStorageRestoreIdentityRef.current;
+    if (previousIdentity === null) {
+      lastProjectStorageRestoreIdentityRef.current =
+        projectStorageRestoreIdentity;
+      if (trustedProjectStorageNamespace !== null) {
+        lastTrustedProjectStorageNamespaceRef.current =
+          trustedProjectStorageNamespace;
+      }
+      return;
+    }
+
+    if (projectStorageRestoreIdentity !== previousIdentity) {
+      const previousTrustedNamespace =
+        lastTrustedProjectStorageNamespaceRef.current;
+      if (
+        trustedProjectStorageNamespace !== null &&
+        previousTrustedNamespace !== null &&
+        trustedProjectStorageNamespace !== previousTrustedNamespace
+      ) {
+        restoredActiveTabRef.current = false;
+        persistedActiveTabRef.current = null;
+      }
+    }
+
+    if (trustedProjectStorageNamespace !== null) {
+      lastTrustedProjectStorageNamespaceRef.current =
+        trustedProjectStorageNamespace;
+    }
+    lastProjectStorageRestoreIdentityRef.current =
+      projectStorageRestoreIdentity;
+  }, [projectStorageRestoreIdentity, trustedProjectStorageNamespace]);
 
   useEffect(() => {
     if (!restoredActiveTabRef.current) return;
@@ -418,6 +489,11 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
     if (activeTab.type === "task") {
       savePersistedActiveTab({ type: "task", taskId: activeTab.taskId });
+      return;
+    }
+
+    if (activeTab.type === "buddy") {
+      savePersistedActiveTab({ type: "buddy" });
       return;
     }
 
@@ -443,23 +519,51 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       return;
     }
 
-    if (persistedActiveTab.type === "chat") {
-      if (!allThreads[persistedActiveTab.id]) return;
+    if (persistedActiveTab.type === "buddy") {
       restoredActiveTabRef.current = true;
-      dispatch(switchToThread({ id: persistedActiveTab.id }));
       dispatch(popBackTo({ name: "history" }));
-      dispatch(push({ name: "chat" }));
+      dispatch(push({ name: "buddy" }));
       return;
     }
 
-    if (openTasks.some((task) => task.id === persistedActiveTab.taskId)) {
+    if (persistedActiveTab.type === "chat") {
+      const restoredChatId =
+        focusedWorkspaceChatId && allThreads[focusedWorkspaceChatId]
+          ? focusedWorkspaceChatId
+          : persistedActiveTab.id;
       restoredActiveTabRef.current = true;
-      dispatch(popBackTo({ name: "history" }));
+      if (allThreads[restoredChatId]) {
+        dispatch(switchToThread({ id: restoredChatId, openTab: false }));
+        dispatch(popBackTo({ name: "history" }));
+        dispatch(push({ name: "chat" }));
+      } else {
+        dispatch(popBackTo({ name: "history" }));
+      }
+      return;
+    }
+
+    restoredActiveTabRef.current = true;
+    dispatch(popBackTo({ name: "history" }));
+    if (openTasks.some((task) => task.id === persistedActiveTab.taskId)) {
       dispatch(
         push({ name: "task workspace", taskId: persistedActiveTab.taskId }),
       );
     }
-  }, [allThreads, canAccessApp, dispatch, isLoggedIn, openTasks]);
+  }, [
+    allThreads,
+    canAccessApp,
+    dispatch,
+    focusedWorkspaceChatId,
+    isLoggedIn,
+    openTasks,
+  ]);
+
+  const startupSplashMessage =
+    providerBootstrap.status === "backend_installing"
+      ? "Downloading Refact engine…"
+      : backendStatus === "online"
+        ? "Loading your providers…"
+        : "Starting local Refact engine…";
 
   return (
     <Flex
@@ -471,13 +575,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       data-element="app-root"
     >
       {showStartupSplash ? (
-        <SplashScreen
-          message={
-            backendStatus === "online"
-              ? "Loading your providers…"
-              : "Starting local Refact engine…"
-          }
-        />
+        <SplashScreen message={startupSplashMessage} />
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
@@ -487,11 +585,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
             {!pageSwitching && renderedPage.name === "chat" && (
               <InternalLinkProvider onInternalLink={handleInternalLink}>
-                <Chat
-                  host={config.host}
-                  tabbed={config.tabbed}
-                  backFromChat={goBack}
-                />
+                <WorkspaceView />
               </InternalLinkProvider>
             )}
             {!pageSwitching && isSettingsPage(renderedPage) && (
@@ -532,9 +626,14 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
 
+            {!pageSwitching && renderedPage.name === "refact daemon" && (
+              <RefactDaemonPage backFromDaemon={goBack} />
+            )}
+
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
           </PageWrapper>
           <ProcessCompletedToasts />
+          {isPointerDragHost(config.host) && <PointerDragGhost />}
         </>
       )}
     </Flex>

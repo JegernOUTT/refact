@@ -315,6 +315,7 @@ pub struct SubchatConfig {
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub subchat_depth: usize,
+    pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
 }
 
@@ -975,6 +976,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_subchat_tx,
         abort_flag,
         subchat_depth,
+        final_step_force_answer: false,
         buddy_meta: None,
     })
 }
@@ -1239,6 +1241,23 @@ fn is_aborted(abort_flag: &Option<Arc<AtomicBool>>) -> bool {
         .unwrap_or(false)
 }
 
+fn final_step_wrap_up_message(max_steps: usize) -> ChatMessage {
+    ChatMessage::new(
+        "user".to_string(),
+        format!(
+            "⚠️ Step budget reached ({max_steps}/{max_steps}): no more tool calls are available. Stop investigating now and write your final response using everything you have gathered so far, following the exact final report / Status format defined in your system prompt. Do not call any tools. If something is still unverified, give your best partial findings and flag the gaps — never return an empty result."
+        ),
+    )
+}
+
+fn needs_forced_final_answer(
+    final_step_force_answer: bool,
+    aborted: bool,
+    has_answer: bool,
+) -> bool {
+    final_step_force_answer && !aborted && !has_answer
+}
+
 async fn run_subchat_loop(
     ccx: Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
@@ -1327,7 +1346,85 @@ async fn run_subchat_loop(
         }
     }
 
+    if needs_forced_final_answer(
+        config.final_step_force_answer,
+        is_aborted(&config.abort_flag),
+        has_final_answer(&messages),
+    ) {
+        messages = run_forced_final_answer_turn(
+            ccx.clone(),
+            config,
+            messages,
+            &mut context_limit_compact_count,
+            usage,
+        )
+        .await?;
+    }
+
     Ok(messages)
+}
+
+async fn run_forced_final_answer_turn(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+    mut messages: Vec<ChatMessage>,
+    context_limit_compact_count: &mut usize,
+    usage: &mut ChatUsage,
+) -> Result<Vec<ChatMessage>, String> {
+    messages.push(final_step_wrap_up_message(config.max_steps));
+
+    let results = loop {
+        match subchat_single_internal(
+            ccx.clone(),
+            &config.model,
+            &config.mode,
+            messages.clone(),
+            Some(vec![]),
+            false,
+            config.temperature,
+            config.max_new_tokens,
+            config.reasoning_effort.clone(),
+            config.cache_control,
+            false,
+            if should_stream_thinking_progress(&config.tool_name) {
+                config.parent_tool_call_id.as_deref()
+            } else {
+                None
+            },
+        )
+        .await
+        {
+            Ok(r) => break r,
+            Err(ref err)
+                if should_compact_context_limit_error(
+                    err,
+                    *context_limit_compact_count,
+                    &config.abort_flag,
+                ) =>
+            {
+                let original_error = err.clone();
+                let log_error = safe_context_limit_error_for_log(&original_error);
+                *context_limit_compact_count += 1;
+                warn!(
+                    "Subchat forced final answer context limit, applying segment summarization attempt {}/{}: {}",
+                    *context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
+                );
+                apply_subchat_reactive_compaction(
+                    ccx.lock().await.global_context.clone(),
+                    config,
+                    &mut messages,
+                    &original_error,
+                    *context_limit_compact_count,
+                    true,
+                )
+                .await;
+            }
+            Err(err) => return Err(err),
+        }
+    };
+
+    update_usage_from_messages(usage, &results);
+    Ok(results.into_iter().next().unwrap_or(messages))
 }
 
 async fn run_subchat_with_wrap_up(
@@ -2122,6 +2219,7 @@ mod subchat_tests {
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
+    use super::{final_step_wrap_up_message, needs_forced_final_answer};
     use crate::chat::diagnostics::{
         is_ui_only_message, SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS,
         SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
@@ -2182,6 +2280,24 @@ mod subchat_tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
+    #[test]
+    fn needs_forced_final_answer_gating() {
+        assert!(needs_forced_final_answer(true, false, false));
+        assert!(!needs_forced_final_answer(false, false, false));
+        assert!(!needs_forced_final_answer(true, true, false));
+        assert!(!needs_forced_final_answer(true, false, true));
+    }
+
+    #[test]
+    fn final_step_wrap_up_message_is_tool_free_user_instruction() {
+        let message = final_step_wrap_up_message(50);
+        assert_eq!(message.role, "user");
+        let text = message.content.content_text_only();
+        assert!(text.contains("50/50"));
+        assert!(text.contains("Do not call any tools"));
+        assert!(text.contains("never return an empty result"));
+    }
+
     fn test_subchat_config() -> SubchatConfig {
         SubchatConfig {
             tool_name: "subagent".to_string(),
@@ -2209,6 +2325,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            final_step_force_answer: false,
             buddy_meta: None,
         }
     }
@@ -2523,6 +2640,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            final_step_force_answer: false,
             buddy_meta: None,
         };
 
@@ -2571,6 +2689,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            final_step_force_answer: false,
             buddy_meta: None,
         };
 
@@ -2625,6 +2744,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            final_step_force_answer: false,
             buddy_meta: None,
         };
 
@@ -2838,6 +2958,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             subchat_depth: 1,
+            final_step_force_answer: false,
             buddy_meta: None,
         };
         let mut thread = stateful_thread_from_config("child-ref-chat", &config);

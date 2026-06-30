@@ -475,13 +475,9 @@ export function useSidebarSubscription() {
     }, 0);
   }, [flushTaskList]);
 
-  const replaceTaskList = useCallback(
-    (tasks: TaskMeta[]) => {
-      taskListRef.current = tasks;
-      scheduleTaskListFlush();
-    },
-    [scheduleTaskListFlush],
-  );
+  const replaceTaskList = useCallback((tasks: TaskMeta[]) => {
+    taskListRef.current = tasks;
+  }, []);
 
   const upsertTaskInList = useCallback(
     (task: TaskMeta) => {

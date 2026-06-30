@@ -118,14 +118,14 @@ pub struct ModelCapabilities {
 const MAX_REASONABLE_N_CTX: usize = 10_000_000;
 const MAX_REASONABLE_OUTPUT_TOKENS: usize = 1_000_000;
 
-pub const OPENAI_CLOUD_TOKENIZER: &str = "openai";
 pub const ANTHROPIC_CLOUD_TOKENIZER: &str = "anthropic";
 pub const CLAUDE_CLOUD_TOKENIZER_ALIAS: &str = "claude";
+pub const OPENAI_CLOUD_TOKENIZER: &str = "openai";
 
 pub fn is_predefined_cloud_tokenizer(tokenizer: &str) -> bool {
     matches!(
         tokenizer.trim().to_ascii_lowercase().as_str(),
-        OPENAI_CLOUD_TOKENIZER | ANTHROPIC_CLOUD_TOKENIZER | CLAUDE_CLOUD_TOKENIZER_ALIAS
+        ANTHROPIC_CLOUD_TOKENIZER | CLAUDE_CLOUD_TOKENIZER_ALIAS | OPENAI_CLOUD_TOKENIZER
     )
 }
 
@@ -144,38 +144,11 @@ pub fn predefined_cloud_tokenizer_for_model(
         return Some(ANTHROPIC_CLOUD_TOKENIZER);
     }
 
-    if is_openai_model_id(&model_id) {
-        return Some(OPENAI_CLOUD_TOKENIZER);
-    }
-
-    if matches!(
-        provider.as_str(),
-        "openai" | "openai_responses" | "openai_codex"
-    ) {
-        return Some(OPENAI_CLOUD_TOKENIZER);
-    }
-
     if matches!(provider.as_str(), "anthropic" | "claude_code") {
         return Some(ANTHROPIC_CLOUD_TOKENIZER);
     }
 
     None
-}
-
-fn is_openai_model_id(model_id: &str) -> bool {
-    model_id.starts_with("chatgpt-")
-        || model_id.starts_with("codex-")
-        || model_id.starts_with("computer-use-")
-        || model_id.starts_with("gpt-image-")
-        || model_id.starts_with("gpt-")
-        || model_id == "o1"
-        || model_id.starts_with("o1-")
-        || model_id == "o3"
-        || model_id.starts_with("o3-")
-        || model_id == "o4"
-        || model_id.starts_with("o4-")
-        || model_id == "o5"
-        || model_id.starts_with("o5-")
 }
 
 fn normalize_tokenizer(tokenizer: &str) -> String {
@@ -622,30 +595,26 @@ mod tests {
 
     #[test]
     fn validate_model_caps_preserves_predefined_cloud_tokenizer_names() {
-        let mut caps = HashMap::from([
-            (
-                "gpt".to_string(),
-                ModelCapabilities {
-                    tokenizer: "OpenAI".to_string(),
-                    ..Default::default()
-                },
-            ),
-            (
-                "claude".to_string(),
-                ModelCapabilities {
-                    tokenizer: "Anthropic".to_string(),
-                    ..Default::default()
-                },
-            ),
-        ]);
+        let mut caps = HashMap::from([(
+            "claude".to_string(),
+            ModelCapabilities {
+                tokenizer: "Anthropic".to_string(),
+                ..Default::default()
+            },
+        )]);
 
         validate_model_caps(&mut caps);
 
-        assert_eq!(caps.get("gpt").unwrap().tokenizer, OPENAI_CLOUD_TOKENIZER);
         assert_eq!(
             caps.get("claude").unwrap().tokenizer,
             ANTHROPIC_CLOUD_TOKENIZER
         );
+    }
+
+    #[test]
+    fn predefined_cloud_tokenizer_matches_explicit_openai_name() {
+        assert!(is_predefined_cloud_tokenizer("openai"));
+        assert!(is_predefined_cloud_tokenizer(" OpenAI "));
     }
 
     #[test]
@@ -676,10 +645,7 @@ mod tests {
 
         validate_model_caps(&mut caps);
 
-        assert_eq!(
-            caps.get("openai/gpt-4.1").unwrap().tokenizer,
-            OPENAI_CLOUD_TOKENIZER
-        );
+        assert_eq!(caps.get("openai/gpt-4.1").unwrap().tokenizer, "fake");
         assert_eq!(
             caps.get("anthropic/claude-sonnet-4-5").unwrap().tokenizer,
             ANTHROPIC_CLOUD_TOKENIZER
@@ -688,25 +654,9 @@ mod tests {
     }
 
     #[test]
-    fn predefined_cloud_tokenizer_matches_openai_and_anthropic_model_families() {
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("openai", "gpt-4.1"),
-            Some(OPENAI_CLOUD_TOKENIZER)
-        );
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("openai_responses", "o3-mini"),
-            Some(OPENAI_CLOUD_TOKENIZER)
-        );
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("openai", "chatgpt-4o-latest"),
-            Some(OPENAI_CLOUD_TOKENIZER)
-        );
+    fn predefined_cloud_tokenizer_matches_anthropic_model_families() {
         assert_eq!(
             predefined_cloud_tokenizer_for_model("anthropic", "claude-3-5-sonnet-latest"),
-            Some(ANTHROPIC_CLOUD_TOKENIZER)
-        );
-        assert_eq!(
-            predefined_cloud_tokenizer_for_model("openai", "claude-3-5-sonnet-latest"),
             Some(ANTHROPIC_CLOUD_TOKENIZER)
         );
         assert_eq!(

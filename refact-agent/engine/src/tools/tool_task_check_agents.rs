@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tasks::storage;
-use crate::tasks::types::{BoardCard, TaskBoard};
+use crate::tasks::types::{AbVariantInfo, BoardCard, TaskBoard};
 use crate::tools::task_tool_helpers::{human_age, require_bound_planner_task, truncate_chars};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::{ChatSessionFacade, SessionState};
@@ -27,6 +27,7 @@ impl ToolTaskCheckAgents {
 #[derive(Debug, Clone)]
 pub(crate) struct AgentStatus {
     pub(crate) card_id: String,
+    pub(crate) variant_key: Option<String>,
     pub(crate) card_title: String,
     pub(crate) agent_chat_id: String,
     pub(crate) column: String,
@@ -37,6 +38,26 @@ pub(crate) struct AgentStatus {
     pub(crate) final_report: Option<String>,
     pub(crate) last_tool_name: Option<String>,
     pub(crate) change_seq: u64,
+}
+
+impl AgentStatus {
+    pub(crate) fn status_id(&self) -> String {
+        self.variant_key
+            .as_deref()
+            .map(|variant| format!("{}/{}", self.card_id, variant))
+            .unwrap_or_else(|| self.card_id.clone())
+    }
+
+    fn matches_card_filter(&self, filter: &str) -> bool {
+        let filter = filter.trim();
+        filter == self.card_id
+            || filter == self.status_id()
+            || self
+                .variant_key
+                .as_deref()
+                .map(|variant| filter == format!("{}:{}", self.card_id, variant))
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,26 +388,54 @@ async fn statuses_from_board(
             continue;
         }
 
-        let mut session_state = None;
-        let mut last_tool_name = None;
-        if let Some(agent_chat_id) = &card.agent_chat_id {
-            let live_state = chat_facade.session_state(agent_chat_id).await?;
-            let snapshot = chat_facade.session_snapshot(agent_chat_id).await.ok();
-            session_state = live_state;
-            last_tool_name = snapshot
-                .as_ref()
-                .and_then(|snapshot| last_tool_name_from_messages(&snapshot.messages));
+        if let Some(variants) = card.ab_variants.as_ref() {
+            if card.column == "doing" && variants.winner.is_none() {
+                for (variant_key, variant) in [("a", &variants.a), ("b", &variants.b)] {
+                    let (session_state, last_tool_name) =
+                        session_details(chat_facade.clone(), &variant.chat_id).await?;
+                    statuses.push(agent_status_from_ab_variant(
+                        card,
+                        board.rev,
+                        variant_key,
+                        variant,
+                        session_state,
+                        last_tool_name,
+                    ));
+                }
+                continue;
+            }
         }
 
-        statuses.push(agent_status_from_card(
-            card,
-            board.rev,
-            session_state,
-            last_tool_name,
-        ));
+        if let Some(agent_chat_id) = &card.agent_chat_id {
+            let (session_state, last_tool_name) =
+                session_details(chat_facade.clone(), agent_chat_id).await?;
+            statuses.push(agent_status_from_card(
+                card,
+                board.rev,
+                session_state,
+                last_tool_name,
+            ));
+        } else {
+            statuses.push(agent_status_from_card(card, board.rev, None, None));
+        }
     }
 
     Ok(statuses)
+}
+
+async fn session_details(
+    chat_facade: Arc<dyn ChatSessionFacade>,
+    agent_chat_id: &str,
+) -> Result<(Option<SessionState>, Option<String>), String> {
+    let live_state = chat_facade.session_state(agent_chat_id).await?;
+    if live_state.is_none() {
+        return Ok((None, None));
+    }
+    let snapshot = chat_facade.session_snapshot(agent_chat_id).await.ok();
+    let last_tool_name = snapshot
+        .as_ref()
+        .and_then(|snapshot| last_tool_name_from_messages(&snapshot.messages));
+    Ok((live_state, last_tool_name))
 }
 
 fn should_report_card(card: &BoardCard) -> bool {
@@ -417,6 +466,7 @@ fn agent_status_from_card(
 
     AgentStatus {
         card_id: card.id.clone(),
+        variant_key: None,
         card_title: card.title.clone(),
         agent_chat_id: card
             .agent_chat_id
@@ -428,6 +478,59 @@ fn agent_status_from_card(
         last_status_update,
         last_activity_at,
         final_report: card.final_report.clone(),
+        last_tool_name,
+        change_seq,
+    }
+}
+
+fn agent_status_from_ab_variant(
+    card: &BoardCard,
+    board_rev: u64,
+    variant_key: &str,
+    variant: &AbVariantInfo,
+    session_state: Option<SessionState>,
+    last_tool_name: Option<String>,
+) -> AgentStatus {
+    let last_update = card.status_updates.last();
+    let last_status_update_at = last_update.and_then(|update| parse_timestamp(&update.timestamp));
+    let last_heartbeat_at = card.last_heartbeat_at.as_deref().and_then(parse_timestamp);
+    let started_at = card.started_at.as_deref().and_then(parse_timestamp);
+    let created_at = parse_timestamp(&card.created_at);
+    let (column, completed_at, final_report, variant_update) = match variant.finish.as_ref() {
+        Some(finish) => (
+            if finish.success { "done" } else { "failed" }.to_string(),
+            parse_timestamp(&finish.completed_at),
+            Some(finish.final_report.clone()),
+            Some(format!(
+                "{}: A/B variant {} finished",
+                finish.completed_at,
+                variant_key.to_ascii_uppercase()
+            )),
+        ),
+        None => (card.column.clone(), None, None, None),
+    };
+    let last_activity_at = latest_timestamp([
+        completed_at,
+        last_heartbeat_at,
+        last_status_update_at,
+        started_at,
+        created_at,
+    ]);
+    let change_seq = change_seq_from_activity(board_rev, last_activity_at);
+    let last_status_update = variant_update
+        .or_else(|| last_update.map(|update| format!("{}: {}", update.timestamp, update.message)));
+
+    AgentStatus {
+        card_id: card.id.clone(),
+        variant_key: Some(variant_key.to_string()),
+        card_title: format!("{} [A/B {}]", card.title, variant_key.to_ascii_uppercase()),
+        agent_chat_id: variant.chat_id.clone(),
+        column,
+        priority: card.priority.clone(),
+        session_state,
+        last_status_update,
+        last_activity_at,
+        final_report,
         last_tool_name,
         change_seq,
     }
@@ -562,12 +665,19 @@ fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> St
         "### {} {} ({})\n**Status:** {} | **Column:** {} | **Priority:** {} | **Chat:** `{}`\n",
         state_emoji,
         status.card_title,
-        status.card_id,
+        status.status_id(),
         state_text,
         status.column,
         status.priority,
         status.agent_chat_id
     );
+
+    if let Some(variant_key) = status.variant_key.as_deref() {
+        result.push_str(&format!(
+            "**A/B variant:** {}\n",
+            variant_key.to_ascii_uppercase()
+        ));
+    }
 
     if let Some(last_activity) = status.last_activity_at {
         result.push_str(&format!(
@@ -669,7 +779,8 @@ fn filtered_statuses<'a>(
     statuses
         .iter()
         .filter(|status| {
-            if !seen.insert(status.card_id.as_str()) {
+            let status_id = status.status_id();
+            if !seen.insert(status_id) {
                 return false;
             }
             if matches!(query.format, AgentReportFormat::Delta)
@@ -678,7 +789,10 @@ fn filtered_statuses<'a>(
                 return false;
             }
             if let Some(card_ids) = &query.card_ids {
-                if !card_ids.contains(&status.card_id) {
+                if !card_ids
+                    .iter()
+                    .any(|card_id| status.matches_card_filter(card_id))
+                {
                     return false;
                 }
             }
@@ -724,11 +838,11 @@ fn sort_statuses(
         let cmp = match sort {
             AgentSort::Priority => priority_rank(&a.priority).cmp(&priority_rank(&b.priority)),
             AgentSort::LastActivity => last_activity_sort_key(a).cmp(&last_activity_sort_key(b)),
-            AgentSort::CardId => a.card_id.cmp(&b.card_id),
+            AgentSort::CardId => a.status_id().cmp(&b.status_id()),
             AgentSort::Status => status_rank(classify_agent_status(a, now))
                 .cmp(&status_rank(classify_agent_status(b, now))),
         };
-        cmp.then_with(|| a.card_id.cmp(&b.card_id))
+        cmp.then_with(|| a.status_id().cmp(&b.status_id()))
     });
 }
 
@@ -897,19 +1011,31 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
     match kind {
         AgentStateKind::Stuck => format!(
             "{:<2} 🔴  {:<5} {:<22} | STUCK {:<5} | needs attention",
-            priority, status.card_id, title, short_age
+            priority,
+            status.status_id(),
+            title,
+            short_age
         ),
         AgentStateKind::Failed => format!(
             "{:<2} ❌  {:<5} {:<22} | failed     | {}",
-            priority, status.card_id, title, age
+            priority,
+            status.status_id(),
+            title,
+            age
         ),
         AgentStateKind::Done => format!(
             "{:<2} ✅  {:<5} {:<22} | done       | {}",
-            priority, status.card_id, title, age
+            priority,
+            status.status_id(),
+            title,
+            age
         ),
         AgentStateKind::Paused => format!(
             "{:<2} ⏸️  {:<5} {:<22} | paused     | {} | approval",
-            priority, status.card_id, title, age
+            priority,
+            status.status_id(),
+            title,
+            age
         ),
         AgentStateKind::Running => {
             let (emoji, state_text) = match status.session_state {
@@ -922,7 +1048,13 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
             };
             format!(
                 "{:<2} {}  {:<5} {:<22} | {:<10} | {:>7} | last: {}",
-                priority, emoji, status.card_id, title, state_text, age, last_tool
+                priority,
+                emoji,
+                status.status_id(),
+                title,
+                state_text,
+                age,
+                last_tool
             )
         }
     }
@@ -1070,6 +1202,7 @@ mod tests {
         let ts = now() - Duration::minutes(minutes_ago);
         AgentStatus {
             card_id: id.to_string(),
+            variant_key: None,
             card_title: format!("{} title", id),
             agent_chat_id: format!("agent-{}", id),
             column: column.to_string(),
@@ -1138,6 +1271,46 @@ mod tests {
         let mut card = board_card(id, "doing", None);
         card.assignee = Some("agent-1".to_string());
         card
+    }
+
+    fn ab_doing_card(id: &str) -> BoardCard {
+        let mut card = board_card(id, "doing", None);
+        card.assignee = Some("ab".to_string());
+        card.ab_variants = Some(crate::tasks::types::AbVariants {
+            a: AbVariantInfo {
+                agent_id: "agent-a".to_string(),
+                chat_id: "agent-chat-a".to_string(),
+                worktree: "/tmp/agent-a".to_string(),
+                worktree_name: Some("worktree-a".to_string()),
+                branch: Some("branch-a".to_string()),
+                model: Some("model-a".to_string()),
+                finish: None,
+            },
+            b: AbVariantInfo {
+                agent_id: "agent-b".to_string(),
+                chat_id: "agent-chat-b".to_string(),
+                worktree: "/tmp/agent-b".to_string(),
+                worktree_name: Some("worktree-b".to_string()),
+                branch: Some("branch-b".to_string()),
+                model: Some("model-b".to_string()),
+                finish: None,
+            },
+            winner: None,
+        });
+        card
+    }
+
+    async fn insert_live_session(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        chat_id: &str,
+        state: SessionState,
+    ) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        session.set_runtime_state(state, None);
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
     }
 
     fn task_meta() -> StoredTaskMeta {
@@ -1327,6 +1500,77 @@ mod tests {
         assert!(output.contains("T-404"));
         assert!(output.contains("STUCK"));
         assert!(output.contains("needs attention"));
+    }
+
+    #[tokio::test]
+    async fn check_agents_surfaces_active_ab_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![ab_doing_card("T-AB")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        insert_live_session(gcx.clone(), "agent-chat-a", SessionState::Generating).await;
+        insert_live_session(gcx.clone(), "agent-chat-b", SessionState::Paused).await;
+        let chat_facade = AppState::from_gcx(gcx.clone()).await.chat.facade.clone();
+
+        let statuses = get_agent_statuses(gcx, chat_facade, "task-1")
+            .await
+            .unwrap();
+        let output =
+            format_agent_statuses_at(&statuses, &query(AgentReportFormat::Compact), now()).unwrap();
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].status_id(), "T-AB/a");
+        assert_eq!(statuses[1].status_id(), "T-AB/b");
+        assert!(output.contains("T-AB/a"));
+        assert!(output.contains("T-AB/b"));
+        assert!(output.contains("generating"));
+        assert!(output.contains("paused"));
+        assert!(!output.contains("STUCK"));
+    }
+
+    #[tokio::test]
+    async fn wait_agents_records_ab_variant_ids() {
+        use crate::chat::types::ChatSession;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let board = TaskBoard {
+            cards: vec![ab_doing_card("T-AB")],
+            ..Default::default()
+        };
+        let gcx = write_task_board(temp.path(), board).await;
+        insert_live_session(gcx.clone(), "agent-chat-a", SessionState::Generating).await;
+        insert_live_session(gcx.clone(), "agent-chat-b", SessionState::ExecutingTools).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let app = {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.app.clone()
+        };
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("planner-chat".to_string())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("planner-chat".to_string(), session_arc.clone());
+
+        let result = ToolTaskWaitForAgents::new()
+            .tool_execute(ccx.clone(), &"call".to_string(), &HashMap::new())
+            .await
+            .unwrap();
+
+        let output = tool_output_text(result);
+        assert!(output.contains("T-AB/a"));
+        assert!(output.contains("T-AB/b"));
+        let session = session_arc.lock().await;
+        assert_eq!(session.waiting_for_card_ids, vec!["T-AB/a", "T-AB/b"]);
+        drop(session);
+        let aborted = {
+            let ccx_lock = ccx.lock().await;
+            ccx_lock.abort_flag.load(Ordering::SeqCst)
+        };
+        assert!(aborted);
     }
 
     #[tokio::test]

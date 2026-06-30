@@ -1,34 +1,28 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "../../utils/test-utils";
+import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { Toolbar, type Tab } from "./Toolbar";
-import {
-  createChatWithId,
-  newBuddyChatAction,
-  updateChatRuntimeFromSessionState,
-} from "../../features/Chat/Thread";
-import { processCompleted } from "../../features/Notifications";
-import type { ProcessCompletedEvent } from "../../features/Notifications";
+import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
+import { push } from "../../features/Pages/pagesSlice";
 import { openTask } from "../../features/Tasks";
+import {
+  makeSurfaceKey,
+  openTab,
+  setActiveTab,
+} from "../../features/Workspace";
 import type { TaskMeta } from "../../services/refact/tasks";
 
 const baseConfig = {
   host: "web" as const,
   lspPort: 8001,
   lspUrl: "http://127.0.0.1:8001/v1/ping/Refact",
-  themeProps: {},
+  themeProps: { appearance: "dark" as const },
 };
 
 const chatModesResponse = {
@@ -50,9 +44,22 @@ const chatModesResponse = {
   errors: [],
 };
 
+const createdTask: TaskMeta = {
+  id: "task-new",
+  name: "New Task",
+  status: "planning",
+  created_at: "2026-06-07T00:00:00.000Z",
+  updated_at: "2026-06-07T00:00:00.000Z",
+  cards_total: 0,
+  cards_done: 0,
+  cards_failed: 0,
+  agents_active: 0,
+};
+
 function useToolbarHandlers(tasks: TaskMeta[] = []) {
   server.use(
     http.get("*/v1/tasks", () => HttpResponse.json(tasks)),
+    http.post("*/v1/tasks", () => HttpResponse.json(createdTask)),
     http.get("*/v1/chat-modes", () => HttpResponse.json(chatModesResponse)),
     http.post("*/v1/chats/:id/commands", () =>
       HttpResponse.json({ status: "queued" }),
@@ -60,60 +67,67 @@ function useToolbarHandlers(tasks: TaskMeta[] = []) {
   );
 }
 
+function pagesForActiveTab(activeTab: Tab) {
+  if (activeTab.type === "dashboard") return [{ name: "history" as const }];
+  if (activeTab.type === "task") {
+    return [
+      { name: "history" as const },
+      { name: "task workspace" as const, taskId: activeTab.taskId },
+    ];
+  }
+  if (activeTab.type === "buddy") {
+    return [{ name: "history" as const }, { name: "buddy" as const }];
+  }
+  return [{ name: "history" as const }, { name: "chat" as const }];
+}
+
 function renderToolbar(activeTab: Tab) {
   return render(<Toolbar activeTab={activeTab} />, {
-    preloadedState: { config: baseConfig },
+    preloadedState: {
+      config: baseConfig,
+      pages: pagesForActiveTab(activeTab),
+    },
   });
 }
 
-function dispatchAndRerender(
+function rerenderToolbar(
   view: ReturnType<typeof renderToolbar>,
   activeTab: Tab,
-  callback: () => void,
 ) {
-  act(callback);
   view.rerender(<Toolbar activeTab={activeTab} />);
 }
 
-function createProcessCompletedEvent(
-  chatId: string,
-  seq: string,
-): ProcessCompletedEvent {
-  return {
-    chat_id: chatId,
-    seq,
-    type: "process_completed",
-    process_id: `exec_${seq}`,
-    status: "failed",
-    exit_code: 1,
-    short_description: "Run toolbar parity test",
-    mode: "background",
-  };
+function arrangeFocusedWorkspaceChatWithHiddenCurrent(
+  view: ReturnType<typeof renderToolbar>,
+  focusedId = "chat-focused",
+  hiddenId = "chat-hidden",
+) {
+  const focusedSurface = makeSurfaceKey("chat", focusedId);
+
+  act(() => {
+    view.store.dispatch(createChatWithId({ id: focusedId, title: "Focused" }));
+    view.store.dispatch(openTab(focusedSurface));
+    view.store.dispatch(setActiveTab(focusedSurface));
+    view.store.dispatch(
+      createChatWithId({ id: hiddenId, title: "Hidden", openTab: false }),
+    );
+    view.store.dispatch(switchToThread({ id: hiddenId, openTab: false }));
+  });
 }
 
-function getTabWrap(title: string): HTMLElement {
-  const wrap = screen.getByTitle(title).closest("div");
-  if (!wrap) throw new Error(`missing tab wrapper for ${title}`);
-  return wrap;
-}
+async function expectNewChatCleansFocusedWorkspaceChat(
+  view: ReturnType<typeof renderToolbar>,
+  focusedId = "chat-focused",
+  hiddenId = "chat-hidden",
+) {
+  await view.user.click(screen.getByRole("button", { name: "New Chat" }));
 
-function expectTabToContainStatus(title: string, label: string) {
-  const tab = screen.getByTitle(title);
-  const status = within(tab).getByLabelText(label);
-  expect(tab).toContainElement(status);
-}
-
-function createDataTransferStub() {
-  const data = new Map<string, string>();
-  return {
-    data,
-    dataTransfer: {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: (type: string, value: string) => data.set(type, value),
-      getData: (type: string) => data.get(type) ?? "",
-    },
-  };
+  await waitFor(() => {
+    expect(view.store.getState().chat.current_thread_id).not.toBe(hiddenId);
+  });
+  expect(view.store.getState().chat.threads[focusedId]).toBeUndefined();
+  expect(view.store.getState().chat.threads[hiddenId]).toBeDefined();
+  expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
 }
 
 afterEach(() => {
@@ -152,515 +166,269 @@ describe("Dropdown navigation", () => {
   });
 });
 
-describe("Toolbar tab parity", () => {
-  it("closes the active chat tab and falls back to the first remaining chat tab", async () => {
+describe("Toolbar single workspace tab row", () => {
+  it("renders the unified workspace tab bar on chat and task pages without legacy KitTabs", () => {
     useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-b" });
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const chatA = makeSurfaceKey("chat", "chat-a");
 
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    dispatchAndRerender(view, { type: "chat", id: "chat-b" }, () => {
-      if (initialThreadId) {
-        view.store.dispatch({
-          type: "chatThread/closeThread",
-          payload: { id: initialThreadId },
-        });
-      }
+    act(() => {
       view.store.dispatch(
         createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
       );
-      view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
-      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+      view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
     });
+    rerenderToolbar(view, activeTab);
 
-    await userEvent.click(
-      within(getTabWrap("Chat Beta")).getByTitle("Close tab"),
-    );
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(
+      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
 
-    expect(view.store.getState().chat.open_thread_ids).toContain("chat-a");
-    expect(view.store.getState().chat.open_thread_ids).not.toContain("chat-b");
-    expect(view.store.getState().chat.current_thread_id).toBe("chat-a");
-    expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
-  });
-
-  it("closes the last active chat tab and falls back to the dashboard", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "solo-chat" });
-
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    if (!initialThreadId) throw new Error("missing initial thread");
-    dispatchAndRerender(view, { type: "chat", id: "solo-chat" }, () => {
-      view.store.dispatch(
-        createChatWithId({ id: "solo-chat", title: "Solo Chat" }),
-      );
-      view.store.dispatch({
-        type: "chatThread/closeThread",
-        payload: { id: initialThreadId },
-      });
+    act(() => {
+      view.store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
     });
-
-    await userEvent.click(
-      within(getTabWrap("Solo Chat")).getByTitle("Close tab"),
-    );
-
-    expect(view.store.getState().chat.open_thread_ids).not.toContain(
-      "solo-chat",
-    );
-    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
-  });
-
-  it("closes the active task tab and falls back to the dashboard", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({
+    rerenderToolbar(view, {
       type: "task",
       taskId: "task-a",
       taskName: "Task Alpha",
     });
 
-    dispatchAndRerender(
-      view,
-      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
-      () => {
-        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-      },
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
-
-    await userEvent.click(
-      within(getTabWrap("Task Alpha")).getByTitle("Close task tab"),
-    );
-
-    expect(view.store.getState().tasksUI.openTasks).toEqual([]);
-    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
   });
 
-  it("closes a chat tab with middle click", () => {
+  it("renders the unified workspace tab bar on dashboard when tabs are open", () => {
     useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "middle-chat" });
+    const view = renderToolbar({ type: "dashboard" });
+    const chatA = makeSurfaceKey("chat", "chat-a");
 
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    dispatchAndRerender(view, { type: "chat", id: "middle-chat" }, () => {
-      if (initialThreadId) {
-        view.store.dispatch({
-          type: "chatThread/closeThread",
-          payload: { id: initialThreadId },
-        });
-      }
-      view.store.dispatch(
-        createChatWithId({ id: "middle-chat", title: "Middle Chat" }),
-      );
-    });
-
-    screen.getByTitle("Middle Chat").dispatchEvent(
-      new MouseEvent("auxclick", {
-        button: 1,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-
-    expect(view.store.getState().chat.open_thread_ids).not.toContain(
-      "middle-chat",
-    );
-    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
-  });
-
-  it("persists reordered chat tabs after drag and drop", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-a" });
-
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
-      if (initialThreadId) {
-        view.store.dispatch({
-          type: "chatThread/closeThread",
-          payload: { id: initialThreadId },
-        });
-      }
+    act(() => {
       view.store.dispatch(
         createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
       );
-      view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
-      );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+      view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
     });
+    rerenderToolbar(view, { type: "dashboard" });
 
-    const dragged = screen.getByTitle("Chat Beta");
-    const target = getTabWrap("Chat Alpha");
-    const { dataTransfer } = createDataTransferStub();
-
-    const dragStart = new Event("dragstart", { bubbles: true });
-    Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
-    dragged.dispatchEvent(dragStart);
-    const drop = new Event("drop", { bubbles: true, cancelable: true });
-    Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
-    target.dispatchEvent(drop);
-
-    expect(view.store.getState().chat.open_thread_ids).toEqual([
-      "chat-b",
-      "chat-a",
-    ]);
-  });
-
-  it("closes an inactive chat tab without switching to it", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-a" });
-
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
-      if (initialThreadId) {
-        view.store.dispatch({
-          type: "chatThread/closeThread",
-          payload: { id: initialThreadId },
-        });
-      }
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
-      );
-    });
-
-    const pagesLengthBefore = view.store.getState().pages.length;
-    const pagesTopBefore = view.store.getState().pages.at(-1)?.name;
-
-    await userEvent.click(
-      within(getTabWrap("Chat Beta")).getByTitle("Close tab"),
-    );
-
-    expect(view.store.getState().chat.open_thread_ids).not.toContain("chat-b");
-    expect(view.store.getState().pages.length).toBe(pagesLengthBefore);
-    expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
-  });
-
-  it("closes an inactive task tab without switching to it", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-a",
-      taskName: "Task Alpha",
-    });
-
-    dispatchAndRerender(
-      view,
-      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
-      () => {
-        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-        view.store.dispatch(openTask({ id: "task-b", name: "Task Beta" }));
-      },
-    );
-
-    const pagesLengthBefore = view.store.getState().pages.length;
-    const pagesTopBefore = view.store.getState().pages.at(-1)?.name;
-
-    await userEvent.click(
-      within(getTabWrap("Task Beta")).getByTitle("Close task tab"),
-    );
-
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      view.store.getState().tasksUI.openTasks.map((task) => task.id),
-    ).toEqual(["task-a"]);
-    expect(view.store.getState().pages.length).toBe(pagesLengthBefore);
-    expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
-  });
-
-  it("does not start tab drag from a close button", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-a" });
-
-    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
-    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
-      if (initialThreadId) {
-        view.store.dispatch({
-          type: "chatThread/closeThread",
-          payload: { id: initialThreadId },
-        });
-      }
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
-      );
-    });
-
-    const closeButton = within(getTabWrap("Chat Beta")).getByTitle("Close tab");
-    const { data, dataTransfer } = createDataTransferStub();
-
-    fireEvent.dragStart(closeButton, { dataTransfer });
-
-    expect(data.size).toBe(0);
-    expect(view.store.getState().chat.open_thread_ids).toEqual([
-      "chat-a",
-      "chat-b",
-    ]);
-  });
-
-  it("commits and cancels chat title renames from double-click rename mode", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "rename-chat" });
-
-    dispatchAndRerender(view, { type: "chat", id: "rename-chat" }, () => {
-      view.store.dispatch(
-        createChatWithId({ id: "rename-chat", title: "Original Chat" }),
-      );
-    });
-
-    await userEvent.dblClick(
-      screen.getByRole("tab", { name: /Original Chat/ }),
-    );
-    const renameInput = screen.getByDisplayValue("Original Chat");
-    await userEvent.clear(renameInput);
-    await userEvent.type(renameInput, "Renamed Chat{Enter}");
-
-    expect(
-      view.store.getState().chat.threads["rename-chat"]?.thread.title,
-    ).toBe("Renamed Chat");
-    expect(
-      screen.getByRole("tab", { name: /Renamed Chat/ }),
+      screen.getByRole("tablist", { name: "Open workspace tabs" }),
     ).toBeInTheDocument();
-
-    await userEvent.dblClick(screen.getByRole("tab", { name: /Renamed Chat/ }));
-    const cancelInput = screen.getByDisplayValue("Renamed Chat");
-    await userEvent.clear(cancelInput);
-    await userEvent.type(cancelInput, "Cancelled Chat{Escape}");
-
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
     expect(
-      view.store.getState().chat.threads["rename-chat"]?.thread.title,
-    ).toBe("Renamed Chat");
+      screen.getByRole("button", { name: "New Chat" }),
+    ).toBeInTheDocument();
     expect(
-      screen.getByRole("tab", { name: /Renamed Chat/ }),
+      screen.getByRole("button", { name: "New Task" }),
     ).toBeInTheDocument();
   });
 
-  it("commits and cancels task title renames from double-click rename mode", async () => {
-    const updatedTask: TaskMeta = {
-      id: "task-rename",
-      name: "Renamed Task",
-      status: "planning",
-      created_at: "2026-06-07T00:00:00.000Z",
-      updated_at: "2026-06-07T00:00:00.000Z",
-      cards_total: 0,
-      cards_done: 0,
-      cards_failed: 0,
-      agents_active: 0,
-    };
-    let patchBody: unknown;
-    server.use(
-      http.get("*/v1/tasks", () => HttpResponse.json([])),
-      http.get("*/v1/chat-modes", () => HttpResponse.json(chatModesResponse)),
-      http.patch("*/v1/tasks/task-rename/meta", async ({ request }) => {
-        patchBody = await request.json();
-        return HttpResponse.json(updatedTask);
-      }),
-    );
-    const view = renderToolbar({
-      type: "task",
-      taskId: "task-rename",
-      taskName: "Original Task",
-    });
-
-    dispatchAndRerender(
-      view,
-      {
-        type: "task",
-        taskId: "task-rename",
-        taskName: "Original Task",
-      },
-      () => {
-        view.store.dispatch(
-          openTask({ id: "task-rename", name: "Original Task" }),
-        );
-      },
-    );
-
-    await userEvent.dblClick(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    );
-    const renameInput = screen.getByDisplayValue("Original Task");
-    await userEvent.clear(renameInput);
-    await userEvent.type(renameInput, "Renamed Task{Enter}");
-
-    await waitFor(() => expect(patchBody).toEqual({ name: "Renamed Task" }));
-
-    await userEvent.dblClick(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    );
-    const cancelInput = screen.getByDisplayValue("Original Task");
-    await userEvent.clear(cancelInput);
-    await userEvent.type(cancelInput, "Cancelled Task{Escape}");
-
-    expect(
-      screen.getByRole("tab", { name: /Original Task/ }),
-    ).toBeInTheDocument();
-  });
-
-  it("renders unread process notification badges and caps counts above nine", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
-
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
-      view.store.dispatch(
-        createChatWithId({ id: "badge-chat", title: "Badge Chat" }),
-      );
-      for (let i = 1; i <= 10; i += 1) {
-        view.store.dispatch(
-          processCompleted(
-            createProcessCompletedEvent("badge-chat", String(i)),
-          ),
-        );
-      }
-    });
-
-    expect(
-      screen.getByLabelText("10 unread process notifications"),
-    ).toHaveTextContent("9+");
-  });
-
-  it("maps chat and task states to the current status dot labels", async () => {
-    const task: TaskMeta = {
-      id: "task-status",
-      name: "Task Status",
-      status: "planning",
-      created_at: "2026-06-07T00:00:00.000Z",
-      updated_at: "2026-06-07T00:00:00.000Z",
-      cards_total: 0,
-      cards_done: 0,
-      cards_failed: 0,
-      agents_active: 0,
-      planner_session_state: "waiting_ide",
-    };
-    useToolbarHandlers([task]);
-    const view = renderToolbar({ type: "dashboard" });
-
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
-      view.store.dispatch(
-        createChatWithId({ id: "idle-chat", title: "Idle Chat" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "running-chat", title: "Running Chat" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "paused-chat", title: "Paused Chat" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "done-chat", title: "Done Chat" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "error-chat", title: "Error Chat" }),
-      );
-      view.store.dispatch(
-        updateChatRuntimeFromSessionState({
-          id: "running-chat",
-          session_state: "generating",
-        }),
-      );
-      view.store.dispatch(
-        updateChatRuntimeFromSessionState({
-          id: "paused-chat",
-          session_state: "waiting_user_input",
-        }),
-      );
-      view.store.dispatch(
-        updateChatRuntimeFromSessionState({
-          id: "done-chat",
-          session_state: "completed",
-        }),
-      );
-      view.store.dispatch(
-        updateChatRuntimeFromSessionState({
-          id: "error-chat",
-          session_state: "error",
-        }),
-      );
-      view.store.dispatch(openTask({ id: "task-status", name: "Task Status" }));
-    });
-
-    expectTabToContainStatus("Idle Chat", "Idle");
-    expectTabToContainStatus("Running Chat", "In progress...");
-    expectTabToContainStatus("Paused Chat", "Needs your attention");
-    expectTabToContainStatus("Done Chat", "Completed");
-    expectTabToContainStatus("Error Chat", "An error occurred");
-
-    await waitFor(() => {
-      expectTabToContainStatus("Task Status", "Needs your attention");
-    });
-  });
-
-  it("excludes buddy and task-owned chat threads from the tab strip", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
-
-    dispatchAndRerender(view, { type: "dashboard" }, () => {
-      view.store.dispatch(
-        createChatWithId({ id: "normal-chat", title: "Normal Chat" }),
-      );
-      view.store.dispatch(newBuddyChatAction({ chat_id: "buddy-chat" }));
-      view.store.dispatch(
-        createChatWithId({
-          id: "task-owned-chat",
-          title: "Task Owned Chat",
-          isTaskChat: true,
-        }),
-      );
-    });
-
-    expect(
-      screen.getByRole("tab", { name: /Normal Chat/ }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("tab", { name: /buddy-chat/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("tab", { name: /Task Owned Chat/ }),
-    ).not.toBeInTheDocument();
-  });
-  it("wheel-scrolls an overflowing tab container horizontally", () => {
+  it("does not render an empty tab strip on dashboard", () => {
     useToolbarHandlers();
     renderToolbar({ type: "dashboard" });
 
-    const tabList = screen.getByRole("tablist");
-    const container = tabList.parentElement;
-    if (!container) throw new Error("missing tabs container");
-    Object.defineProperty(container, "scrollWidth", {
-      configurable: true,
-      value: 300,
-    });
-    Object.defineProperty(container, "clientWidth", {
-      configurable: true,
-      value: 100,
-    });
-
-    expect(container.scrollLeft).toBe(0);
-    container.dispatchEvent(
-      new WheelEvent("wheel", { deltaY: 24, bubbles: true, cancelable: true }),
-    );
-
-    expect(container.scrollLeft).toBe(24);
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
-  it("scrolls the active tab into view when the active tab changes", () => {
+  it("opens the Refact Daemon page from the connection area", async () => {
     useToolbarHandlers();
-    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+    const view = renderToolbar({ type: "dashboard" });
 
-    const view = renderToolbar({ type: "chat", id: "chat-a" });
+    await view.user.click(
+      screen.getByRole("button", { name: "Refact Daemon" }),
+    );
 
-    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
+    expect(view.store.getState().pages.at(-1)).toEqual({
+      name: "refact daemon",
+    });
+  });
+
+  it("renders a flex spacer instead of the tab bar when no tabs are open", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(
+      view.container.querySelector('[data-element="ToolbarSpacer"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("drops the spacer when the workspace tab bar takes over the row", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+    const chatA = makeSurfaceKey("chat", "chat-a");
+
+    act(() => {
       view.store.dispatch(
         createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
       );
+      view.store.dispatch(openTab(chatA));
+      view.store.dispatch(setActiveTab(chatA));
+    });
+    rerenderToolbar(view, { type: "dashboard" });
+
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+    expect(
+      view.container.querySelector('[data-element="ToolbarSpacer"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Home, New Chat, New Task, theme, and menu actions functional", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-a" };
+    const view = renderToolbar(activeTab);
+    const initialThreadId = view.store.getState().chat.current_thread_id;
+
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Chat" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New Task" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Toggle Dark Mode" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Menu" })).toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("button", { name: "Home" }));
+    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
+
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+    expect(view.store.getState().chat.current_thread_id).not.toBe(
+      initialThreadId,
+    );
+    expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Toggle Dark Mode" }),
+    );
+    expect(view.store.getState().config.themeProps.appearance).toBe("light");
+
+    await view.user.click(screen.getByRole("button", { name: "New Task" }));
+    await waitFor(() => {
+      expect(view.store.getState().tasksUI.openTasks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "task-new", name: "New Task" }),
+        ]),
+      );
+      expect(view.store.getState().pages.at(-1)).toEqual({
+        name: "task workspace",
+        taskId: "task-new",
+      });
+    });
+  });
+
+  it("uses the active workspace chat for New Chat cleanup", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "chat" as const, id: "chat-visible" };
+    const view = renderToolbar(activeTab);
+
+    act(() => {
       view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
+        createChatWithId({ id: "chat-visible", title: "Visible Chat" }),
+      );
+      view.store.dispatch(
+        createChatWithId({
+          id: "task-hidden",
+          title: "Task Hidden",
+          openTab: false,
+        }),
+      );
+      view.store.dispatch(
+        switchToThread({ id: "task-hidden", openTab: false }),
       );
     });
+    rerenderToolbar(view, activeTab);
 
-    view.rerender(<Toolbar activeTab={{ type: "chat", id: "chat-b" }} />);
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
 
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: "smooth",
-      block: "nearest",
-      inline: "nearest",
+    await waitFor(() => {
+      expect(view.store.getState().chat.current_thread_id).not.toBe(
+        "task-hidden",
+      );
     });
+    expect(view.store.getState().chat.threads["chat-visible"]).toBeUndefined();
+    expect(view.store.getState().chat.threads["task-hidden"]).toBeDefined();
+    expect(view.store.getState().chat.open_thread_ids).not.toContain(
+      "task-hidden",
+    );
+    expect(view.store.getState().chat.open_thread_ids).toContain(
+      view.store.getState().chat.current_thread_id,
+    );
+    expect(view.store.getState().chat.current_thread_id).not.toBe(
+      "chat-visible",
+    );
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from dashboard", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, { type: "dashboard" });
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
+  });
+
+  it("does not clean a hidden current chat from dashboard without focused workspace chat", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({
+          id: "chat-hidden",
+          title: "Hidden",
+          openTab: false,
+        }),
+      );
+      view.store.dispatch(
+        switchToThread({ id: "chat-hidden", openTab: false }),
+      );
+    });
+    rerenderToolbar(view, { type: "dashboard" });
+
+    await view.user.click(screen.getByRole("button", { name: "New Chat" }));
+
+    expect(view.store.getState().chat.threads["chat-hidden"]).toBeDefined();
+    expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from task workspace", async () => {
+    useToolbarHandlers();
+    const activeTab = {
+      type: "task" as const,
+      taskId: "task-a",
+      taskName: "Task Alpha",
+    };
+    const view = renderToolbar(activeTab);
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, activeTab);
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
+  });
+
+  it("uses the focused workspace chat for New Chat cleanup from buddy", async () => {
+    useToolbarHandlers();
+    const activeTab = { type: "buddy" as const };
+    const view = renderToolbar(activeTab);
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, activeTab);
+
+    await expectNewChatCleansFocusedWorkspaceChat(view);
   });
 });
 
@@ -675,5 +443,16 @@ describe("Toolbar chrome containment", () => {
     const block = match?.[0] ?? "";
     expect(block).toContain("flex-shrink: 0");
     expect(block).toContain("height: 36px");
+  });
+
+  it("toolbar_spacer_grows_to_keep_right_controls_pinned_to_the_edge", async () => {
+    const css = await readFile(
+      resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
+      "utf8",
+    );
+    const match = /\.toolbarSpacer \{[^}]*\}/.exec(css);
+    expect(match).not.toBeNull();
+    const block = match?.[0] ?? "";
+    expect(block).toContain("flex: 1 1 auto");
   });
 });

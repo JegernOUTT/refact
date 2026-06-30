@@ -21,7 +21,7 @@ tool:
       description: Comma-separated list of tool names the subagent should use
     - name: max_steps
       type: string
-      description: Maximum number of steps the subagent can make (default 10)
+      description: Maximum number of steps the subagent can make (default 50, max 50)
   required:
     - task
     - expected_result
@@ -29,7 +29,7 @@ tool:
 subchat:
   context_mode: bare
   stateful: true
-  max_steps: 10
+  max_steps: 50
   model_type: light
   n_ctx: 200000
   max_new_tokens: 16000

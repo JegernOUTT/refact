@@ -187,6 +187,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             thread: session.thread.clone(),
             session_state: session.runtime.state,
             pause_reasons: session.runtime.pause_reasons.clone(),
+            goal: session.goal.clone(),
         })
     }
 
@@ -587,8 +588,9 @@ impl BuddyEventSink for AppBuddyEventSink {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let snapshot = self.snapshot().await?;
         let pulse_one_liner = format!(
-            "{} pending ops, {} stuck tasks",
-            snapshot.pulse.memory.pending_ops, snapshot.pulse.tasks.stuck
+            "{} pending ops, {} recent stuck task alerts",
+            snapshot.pulse.memory.pending_ops,
+            snapshot.pulse.tasks.recent_stuck_alert_count_1h()
         );
         let voice_ctx = crate::buddy::voice_service::VoiceCtx {
             persona: &snapshot.state.personality,

@@ -39,7 +39,39 @@ const task: CronTask = {
   isolated: false,
 };
 
+const webhookTask: CronTask = {
+  ...task,
+  id: "cron_hook",
+  cron: "",
+  human_schedule: "webhook",
+  description: "Deploy hook",
+  prompt: "",
+  recurring: true,
+  durable: false,
+  next_fire_at_ms: 0,
+  fire_count: 0,
+  trigger_kind: "webhook",
+  hook_id: "deploy",
+  last_status: null,
+  recent_runs: [],
+  action_kind: "command",
+  delivery_kind: "none",
+  delivery: { kind: "none" },
+};
+
 describe("SchedulerPanel", () => {
+  it("renders webhook management from listed webhook trigger jobs", async () => {
+    server.use(
+      http.get("*/v1/scheduler/cron", () => HttpResponse.json([webhookTask])),
+    );
+
+    render(<SchedulerPanel onBack={vi.fn()} embedded />);
+
+    expect(await screen.findByText("hook_id: deploy")).toBeInTheDocument();
+    expect(screen.getByText("/hooks/deploy")).toBeInTheDocument();
+    expect(screen.getByText("No runs")).toBeInTheDocument();
+  });
+
   it("catches failed delete requests and clears deleting state", async () => {
     const unhandledRejection = vi.fn();
     window.addEventListener("unhandledrejection", unhandledRejection);

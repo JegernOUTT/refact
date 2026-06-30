@@ -15,9 +15,11 @@ use crate::chat::verifier::{schedule_card_verifier_after_finish, ExpectedCardSta
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
+use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
 use crate::tools::tool_task_spawn_agent::{
     build_agent_prompt, build_agent_thread_params, find_abandoned_worktrees,
-    prepare_agent_worktree_with_suffix, resolve_agent_model, PreparedWorktree,
+    prepare_agent_worktree_with_suffix, resolve_agent_model, resolve_invoking_planner_chat_id,
+    PreparedWorktree,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -48,6 +50,8 @@ struct PreparedAbVariants {
 
 pub struct ToolSpawnAb;
 pub struct ToolPickAbWinner;
+
+const STALE_PICK_AB_WINNER: &str = "stale A/B winner selection";
 
 impl ToolSpawnAb {
     pub fn new() -> Self {
@@ -125,37 +129,41 @@ async fn planner_context(
     args: &HashMap<String, Value>,
     tool_name: &str,
 ) -> Result<(Arc<GlobalContext>, String, String, String), String> {
-    let ccx_lock = ccx.lock().await;
-    let is_planner = ccx_lock
-        .task_meta
+    let (gcx, current_model, chat_id, root_chat_id, task_meta, requested_task_id) = {
+        let ccx_lock = ccx.lock().await;
+        let is_planner = ccx_lock
+            .task_meta
+            .as_ref()
+            .map(|m| m.role == "planner")
+            .unwrap_or(false);
+        if !is_planner {
+            return Err(format!(
+                "{} can only be called by the task planner.",
+                tool_name
+            ));
+        }
+        (
+            ccx_lock.app.gcx.clone(),
+            ccx_lock.current_model.clone(),
+            ccx_lock.chat_id.clone(),
+            ccx_lock.root_chat_id.clone(),
+            ccx_lock.task_meta.clone(),
+            args.get("task_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        )
+    };
+    let task_id = task_meta
         .as_ref()
-        .map(|m| m.role == "planner")
-        .unwrap_or(false);
-    if !is_planner {
-        return Err(format!(
-            "{} can only be called by the task planner.",
-            tool_name
-        ));
-    }
-    let task_id = args
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| ccx_lock.task_meta.as_ref().map(|m| m.task_id.clone()))
-        .or_else(|| storage::infer_task_id_from_chat_id(&ccx_lock.chat_id))
+        .map(|m| m.task_id.clone())
+        .or(requested_task_id)
+        .or_else(|| storage::infer_task_id_from_chat_id(&chat_id))
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())?;
-    let planner_chat_id = ccx_lock
-        .task_meta
-        .as_ref()
-        .and_then(|m| m.planner_chat_id.clone())
-        .unwrap_or_else(|| ccx_lock.chat_id.clone());
-    Ok((
-        ccx_lock.app.gcx.clone(),
-        task_id,
-        planner_chat_id,
-        ccx_lock.current_model.clone(),
-    ))
+    let planner_chat_id =
+        resolve_invoking_planner_chat_id(gcx.clone(), &chat_id, &root_chat_id, task_meta.as_ref())
+            .await;
+    Ok((gcx, task_id, planner_chat_id, current_model))
 }
 
 fn ab_prompt_instructions(card_instructions: &str, variant: &AbVariantSpec) -> String {
@@ -350,6 +358,23 @@ async fn cleanup_ab_variant(
     gcx: Arc<GlobalContext>,
     variant: &AbVariantInfo,
 ) -> Result<(), String> {
+    cleanup_ab_variant_with_timeout(gcx, variant, AGENT_ABORT_TIMEOUT).await
+}
+
+async fn cleanup_ab_variant_with_timeout(
+    gcx: Arc<GlobalContext>,
+    variant: &AbVariantInfo,
+    abort_timeout: std::time::Duration,
+) -> Result<(), String> {
+    wait_for_agent_abort(gcx.clone(), &variant.chat_id, abort_timeout)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to abort A/B variant {} before cleanup: {}",
+                variant.chat_id, e
+            )
+        })?;
+
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
 
@@ -388,6 +413,135 @@ async fn cleanup_ab_variant(
     Ok(())
 }
 
+async fn promote_ab_winner_if_current(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    winner: &str,
+    expected_state: ExpectedCardState,
+    winner_variant: AbVariantInfo,
+    winner_finish: crate::tasks::types::AbVariantFinish,
+) -> Result<Option<ExpectedCardState>, String> {
+    let card_id_owned = card_id.to_string();
+    let task_id_owned = task_id.to_string();
+    let winner_owned = winner.to_string();
+    let winner_for_board = winner_variant;
+    let winner_finish_for_board = winner_finish;
+    let result = storage::update_board_atomic(gcx, task_id, move |board| {
+        let board_rev = board.rev;
+        let next_board_rev = board.rev + 1;
+        let card = board
+            .get_card_mut(&card_id_owned)
+            .ok_or(format!("Card {} not found", card_id_owned))?;
+        if !expected_state.matches_board_card(board_rev, card) {
+            return Err(format!(
+                "{} for task {} card {}: current card state no longer matches winner request",
+                STALE_PICK_AB_WINNER, task_id_owned, card_id_owned
+            ));
+        }
+        let variants = card
+            .ab_variants
+            .as_mut()
+            .ok_or_else(|| format!("Card {} has no A/B variants", card_id_owned))?;
+        if let Some(existing_winner) = variants.winner.as_deref() {
+            return Err(format!(
+                "Card {} already picked A/B winner {}",
+                card_id_owned, existing_winner
+            ));
+        }
+        let current_winner = variants
+            .variant(&winner_owned)
+            .ok_or_else(|| format!("Invalid winner '{}', must be 'a' or 'b'", winner_owned))?;
+        if current_winner.chat_id != winner_for_board.chat_id {
+            return Err(format!(
+                "{} for task {} card {}: A/B winner variant changed",
+                STALE_PICK_AB_WINNER, task_id_owned, card_id_owned
+            ));
+        }
+        if current_winner.finish.as_ref() != Some(&winner_finish_for_board) {
+            return Err(format!(
+                "{} for task {} card {}: A/B winner finish changed",
+                STALE_PICK_AB_WINNER, task_id_owned, card_id_owned
+            ));
+        }
+        card.agent_worktree = Some(winner_for_board.worktree.clone());
+        card.agent_worktree_name = winner_for_board.worktree_name.clone();
+        card.agent_branch = winner_for_board.branch.clone();
+        card.agent_chat_id = Some(winner_for_board.chat_id.clone());
+        card.assignee = Some(winner_for_board.agent_id.clone());
+        card.final_report = Some(if winner_finish_for_board.success {
+            winner_finish_for_board.final_report.clone()
+        } else {
+            format!("FAILED: {}", winner_finish_for_board.final_report)
+        });
+        card.final_report_structured = winner_finish_for_board.final_report_structured.clone();
+        card.column = if winner_finish_for_board.success {
+            "done".to_string()
+        } else {
+            "failed".to_string()
+        };
+        card.completed_at = Some(Utc::now().to_rfc3339());
+        if let Some(variants) = card.ab_variants.as_mut() {
+            variants.winner = Some(winner_owned.clone());
+        }
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("A/B winner: {}; loser cleanup pending", winner_owned),
+        });
+        Ok(ExpectedCardState::from_card(next_board_rev, card))
+    })
+    .await;
+    match result {
+        Ok((_, expected)) => Ok(Some(expected)),
+        Err(error) if error.starts_with(STALE_PICK_AB_WINNER) => {
+            tracing::info!("{}", error);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn mark_ab_loser_cleaned_if_current(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    expected_state: ExpectedCardState,
+    winner: &str,
+    loser_key: &str,
+) {
+    let card_id_owned = card_id.to_string();
+    let winner_owned = winner.to_string();
+    let loser_key_owned = loser_key.to_string();
+    let _ = storage::update_board_atomic(gcx, task_id, move |board| {
+        let board_rev = board.rev;
+        if let Some(card) = board.get_card_mut(&card_id_owned) {
+            if expected_state.matches_board_card(board_rev, card) {
+                card.status_updates.push(StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: format!(
+                        "A/B winner: {}, loser {} cleaned up",
+                        winner_owned, loser_key_owned
+                    ),
+                });
+            }
+        }
+        Ok(())
+    })
+    .await;
+}
+
+async fn ab_card_state_matches(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    expected_state: &ExpectedCardState,
+) -> Result<bool, String> {
+    let board = storage::load_board(gcx, task_id).await?;
+    Ok(board
+        .get_card(card_id)
+        .is_some_and(|card| expected_state.matches_board_card(board.rev, card)))
+}
+
 async fn pick_ab_winner_impl(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -419,51 +573,36 @@ async fn pick_ab_winner_impl(
             winner, card_id
         )
     })?;
+    let expected_state = ExpectedCardState::from_card(board.rev, card);
     let winner_variant = winner_variant.clone();
     let loser_variant = loser_variant.clone();
-
-    cleanup_ab_variant(gcx.clone(), &loser_variant).await?;
-
-    let card_id_owned = card_id.to_string();
-    let winner_owned = winner.to_string();
     let loser_key = if winner == "a" { "b" } else { "a" }.to_string();
-    let winner_for_board = winner_variant.clone();
-    let winner_finish_for_board = winner_finish.clone();
     let success_for_board = winner_finish.success;
-    let (_, verifier_expected_state) =
-        storage::update_board_atomic(gcx.clone(), task_id, move |board| {
-            let next_board_rev = board.rev + 1;
-            let card = board
-                .get_card_mut(&card_id_owned)
-                .ok_or(format!("Card {} not found", card_id_owned))?;
-            card.agent_worktree = Some(winner_for_board.worktree.clone());
-            card.agent_worktree_name = winner_for_board.worktree_name.clone();
-            card.agent_branch = winner_for_board.branch.clone();
-            card.agent_chat_id = Some(winner_for_board.chat_id.clone());
-            card.assignee = Some(winner_for_board.agent_id.clone());
-            card.final_report = Some(if winner_finish_for_board.success {
-                winner_finish_for_board.final_report.clone()
-            } else {
-                format!("FAILED: {}", winner_finish_for_board.final_report)
-            });
-            card.final_report_structured = winner_finish_for_board.final_report_structured.clone();
-            card.column = if winner_finish_for_board.success {
-                "done".to_string()
-            } else {
-                "failed".to_string()
-            };
-            card.completed_at = Some(Utc::now().to_rfc3339());
-            if let Some(variants) = card.ab_variants.as_mut() {
-                variants.winner = Some(winner_owned.clone());
-            }
-            card.status_updates.push(StatusUpdate {
-                timestamp: Utc::now().to_rfc3339(),
-                message: format!("A/B winner: {}, loser cleaned up", winner_owned),
-            });
-            Ok(ExpectedCardState::from_card(next_board_rev, card))
-        })
-        .await?;
+    let verifier_expected_state = promote_ab_winner_if_current(
+        gcx.clone(),
+        task_id,
+        card_id,
+        winner,
+        expected_state,
+        winner_variant.clone(),
+        winner_finish,
+    )
+    .await?
+    .ok_or_else(|| format!("{} for card {}", STALE_PICK_AB_WINNER, card_id))?;
     storage::update_task_stats(gcx.clone(), task_id).await?;
+    if !ab_card_state_matches(gcx.clone(), task_id, card_id, &verifier_expected_state).await? {
+        return Err(format!("{} for card {}", STALE_PICK_AB_WINNER, card_id));
+    }
+    cleanup_ab_variant(gcx.clone(), &loser_variant).await?;
+    mark_ab_loser_cleaned_if_current(
+        gcx.clone(),
+        task_id,
+        card_id,
+        verifier_expected_state.clone(),
+        winner,
+        &loser_key,
+    )
+    .await;
     if success_for_board {
         schedule_card_verifier_after_finish(
             gcx,
@@ -932,6 +1071,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_ab_planner_context_prefers_live_root_controller() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut planner_session =
+            crate::chat::types::ChatSession::new("controller-planner".to_string());
+        planner_session.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("controller-planner".to_string()),
+        });
+        gcx.chat_sessions.write().await.insert(
+            "controller-planner".to_string(),
+            Arc::new(tokio::sync::Mutex::new(planner_session)),
+        );
+        let ccx = Arc::new(tokio::sync::Mutex::new(
+            AtCommandsContext::new_from_app(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "planner-child".to_string(),
+                Some("controller-planner".to_string()),
+                "model".to_string(),
+                Some(refact_chat_api::TaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some("stale-planner".to_string()),
+                }),
+                None,
+            )
+            .await,
+        ));
+
+        let (_, task_id, planner_chat_id, _) = planner_context(&ccx, &HashMap::new(), "spawn_ab")
+            .await
+            .unwrap();
+
+        assert_eq!(task_id, "task-1");
+        assert_eq!(planner_chat_id, "controller-planner");
+    }
+
+    #[tokio::test]
     async fn pick_ab_winner_cleans_up_loser() {
         let (gcx, _temp, _source) = setup_repo_task().await;
         let meta = storage::load_task_meta(gcx.clone(), "task-1")
@@ -1009,6 +1194,149 @@ mod tests {
         cleanup_ab_variant(gcx, &variant_info(&prepared.a))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pick_ab_winner_stale_state_noops_before_loser_cleanup() {
+        let (gcx, _temp, _source) = setup_repo_task().await;
+        let meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let prepared = prepare_ab_worktrees(
+            gcx.clone(),
+            &meta,
+            "task-1",
+            "T-1",
+            "model-a".to_string(),
+            "model-b".to_string(),
+        )
+        .await
+        .unwrap();
+        let loser_root = prepared.b.prepared.worktree_path();
+        let variants = AbVariants {
+            a: variant_info(&prepared.a),
+            b: variant_info(&prepared.b),
+            winner: None,
+        };
+        let mut variants = variants;
+        variants.a.finish = Some(AbVariantFinish {
+            success: true,
+            final_report: "winner report".to_string(),
+            final_report_structured: None,
+            completed_at: Utc::now().to_rfc3339(),
+            commit_hash: Some("abc123".to_string()),
+        });
+        storage::update_board_atomic(gcx.clone(), "task-1", {
+            let variants = variants.clone();
+            move |board| {
+                let card = board.get_card_mut("T-1").unwrap();
+                card.column = "doing".to_string();
+                card.assignee = Some("ab".to_string());
+                card.ab_variants = Some(variants.clone());
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        let expected_state = ExpectedCardState::from_card(board.rev, card);
+        let winner_variant = variants.a.clone();
+        let winner_finish = variants.a.finish.clone().unwrap();
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-1").unwrap().title = "newer title".to_string();
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let promoted = promote_ab_winner_if_current(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            "a",
+            expected_state,
+            winner_variant,
+            winner_finish,
+        )
+        .await
+        .unwrap();
+
+        assert!(promoted.is_none());
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.title, "newer title");
+        assert_eq!(card.column, "doing");
+        assert_eq!(
+            card.ab_variants
+                .as_ref()
+                .and_then(|variants| variants.winner.as_deref()),
+            None
+        );
+        assert!(loser_root.exists());
+
+        prepared.a.prepared.cleanup_unlinked(gcx.clone()).await;
+        prepared.b.prepared.cleanup_unlinked(gcx).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_ab_loser_cleanup_aborts_before_delete() {
+        use crate::chat::types::ChatSession;
+        use refact_runtime_api::SessionState;
+        use std::sync::atomic::Ordering;
+        use tokio::sync::Mutex as AMutex;
+
+        let (gcx, _temp, _source) = setup_repo_task().await;
+        let meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let prepared = prepare_ab_worktrees(
+            gcx.clone(),
+            &meta,
+            "task-1",
+            "T-1",
+            "model-a".to_string(),
+            "model-b".to_string(),
+        )
+        .await
+        .unwrap();
+        let loser = variant_info(&prepared.b);
+        let loser_root = prepared.b.prepared.worktree_path();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(loser.chat_id.clone())));
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
+        }
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(loser.chat_id.clone(), session_arc.clone());
+
+        let error = cleanup_ab_variant_with_timeout(
+            gcx.clone(),
+            &loser,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Failed to abort A/B variant"), "{error}");
+        assert!(loser_root.exists());
+        {
+            let session = session_arc.lock().await;
+            assert!(session.abort_flag.load(Ordering::SeqCst));
+            assert_eq!(session.runtime.state, SessionState::Idle);
+            session
+                .queue_processor_running
+                .store(false, Ordering::SeqCst);
+        }
+        cleanup_ab_variant(gcx.clone(), &loser).await.unwrap();
+        assert!(!loser_root.exists());
+
+        prepared.a.prepared.cleanup_unlinked(gcx).await;
     }
 
     #[tokio::test]

@@ -394,6 +394,23 @@ describe("useSidebarSubscription", () => {
     disconnect();
   });
 
+  it("sends an Accept: text/event-stream header on the sidebar subscription", async () => {
+    const accepts: (string | null)[] = [];
+    server.use(
+      http.get("*/v1/sidebar/subscribe", ({ request }) => {
+        accepts.push(request.headers.get("accept"));
+        return pendingSidebarResponse();
+      }),
+    );
+
+    const { disconnect } = subscribeForTest();
+    await waitFor(() => {
+      expect(accepts.length).toBeGreaterThan(0);
+    });
+    expect(accepts[0]).toContain("text/event-stream");
+    disconnect();
+  });
+
   it("heartbeat_event_resets_liveness_timer", async () => {
     server.use(sidebarHandler([envelope(0, { type: "heartbeat" })]));
     const { events, errors, liveness, disconnect } = subscribeForTest();

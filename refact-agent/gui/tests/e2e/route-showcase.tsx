@@ -7,7 +7,9 @@ import { setUpStore, type RootState } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
-import { Chat } from "../../src/features/Chat";
+import { TabBar } from "../../src/features/Workspace/TabBar";
+import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
+import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
 import { TrajectoryButton } from "../../src/components/Trajectory";
 import { ModeSelect } from "../../src/components/ChatForm/ModeSelect";
 import {
@@ -55,6 +57,13 @@ import "../../src/lib/render/web.css";
 
 const now = "2026-06-07T10:00:00Z";
 const chatId = "showcase-chat";
+const splitChatId = "showcase-chat-b";
+const chatSurface = (id: string) => makeSurfaceKey("chat", id);
+const route =
+  new URLSearchParams(window.location.search).get("route") ?? "dashboard";
+const chatRoute = route === "chat" || route === "chat-split";
+const chatDndRoute = route === "chat-dnd";
+const multiChatRoute = route === "chat-split" || chatDndRoute;
 
 const buddySettings: BuddySettings = {
   enabled: true,
@@ -398,6 +407,16 @@ const chatRuntime: ChatThreadRuntime = {
   memory_enrichment_user_touched: false,
   manual_preview_items: [],
   manual_preview_ran: false,
+};
+
+const splitChatRuntime: ChatThreadRuntime = {
+  ...chatRuntime,
+  thread: {
+    ...chatRuntime.thread,
+    id: splitChatId,
+    title: "Responsive split pane companion",
+    messages: showcaseMessages,
+  },
 };
 
 const historyItem = (
@@ -836,6 +855,26 @@ const cronTasks = [
     next_fire_at_ms: Date.now() + 900000,
     fire_count: 42,
     created_at_ms: Date.now() - 3600000,
+    enabled: true,
+    paused: false,
+    trigger_kind: "cron",
+    tz: "UTC",
+    every_ms: null,
+    at_ms: null,
+    last_status: "fired",
+    last_error: null,
+    recent_runs: [
+      {
+        at_ms: Date.now() - 1800000,
+        status: "fired",
+        error: null,
+      },
+    ],
+    action_kind: "agent_turn",
+    delivery: { kind: "chat" },
+    chat_id: chatId,
+    target: "existing_chat",
+    isolated: false,
   },
 ];
 
@@ -1043,15 +1082,59 @@ const preloadedState: Partial<RootState> = {
     shiftEnterToSubmit: false,
   },
   chat: {
-    current_thread_id: chatId,
-    open_thread_ids: [chatId],
-    threads: { [chatId]: chatRuntime },
+    current_thread_id: route === "chat-split" ? splitChatId : chatId,
+    open_thread_ids: multiChatRoute ? [chatId, splitChatId] : [chatId],
+    threads: multiChatRoute
+      ? { [chatId]: chatRuntime, [splitChatId]: splitChatRuntime }
+      : { [chatId]: chatRuntime },
     max_new_tokens: 4096,
     tool_use: "agent",
     system_prompt: {},
     sse_refresh_requested: null,
     stream_version: 0,
   },
+  ...(chatRoute || chatDndRoute
+    ? {
+        workspace:
+          route === "chat-split"
+            ? {
+                tabs: [chatSurface(chatId)],
+                activeTabId: chatSurface(chatId),
+                groups: {
+                  [chatSurface(chatId)]: {
+                    root: {
+                      kind: "split" as const,
+                      id: "root:split:row",
+                      dir: "row" as const,
+                      sizes: [0.5, 0.5],
+                      children: [
+                        {
+                          kind: "leaf" as const,
+                          id: "root",
+                          tabIds: [chatSurface(chatId)],
+                          activeTabId: chatSurface(chatId),
+                        },
+                        {
+                          kind: "leaf" as const,
+                          id: `root:sibling:${chatSurface(chatId)}`,
+                          tabIds: [chatSurface(splitChatId)],
+                          activeTabId: chatSurface(splitChatId),
+                        },
+                      ],
+                    },
+                    focusedLeafId: `root:sibling:${chatSurface(chatId)}`,
+                  },
+                },
+              }
+            : {
+                tabs: chatDndRoute
+                  ? [chatSurface(chatId), chatSurface(splitChatId)]
+                  : [chatSurface(chatId)],
+                activeTabId: chatSurface(chatId),
+                groups: {},
+              },
+      }
+    : {}),
   history: {
     chats: {
       alpha: historyItem("alpha", "Dashboard route smoke coverage", now),
@@ -1077,8 +1160,6 @@ for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
 store.dispatch(setBuddySnapshot(buddySnapshot));
 store.dispatch(tasksApi.util.upsertQueryData("listTasks", undefined, tasks));
 
-const route =
-  new URLSearchParams(window.location.search).get("route") ?? "dashboard";
 const root = document.getElementById("refact-chat");
 
 if (!root) {
@@ -1123,8 +1204,28 @@ const ShowcaseSurface = () => {
     return <OverlayRegressionSurface />;
   }
 
-  if (route === "chat") {
-    return <Chat host="web" tabbed={false} backFromChat={() => undefined} />;
+  if (chatDndRoute) {
+    return (
+      <Flex
+        direction="column"
+        style={{
+          width: "100%",
+          minWidth: 0,
+          minHeight: 0,
+          flex: "1 1 auto",
+          overflow: "hidden",
+        }}
+      >
+        <TabBar />
+        <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
+          <WorkspaceView />
+        </Flex>
+      </Flex>
+    );
+  }
+
+  if (chatRoute) {
+    return <WorkspaceView />;
   }
 
   if (route === "settings") {
@@ -1169,7 +1270,6 @@ const Showcase = () => {
               width: "100%",
               maxWidth: "100%",
               minWidth: 0,
-              height: "100vh",
               overflow: "hidden",
             }}
           >

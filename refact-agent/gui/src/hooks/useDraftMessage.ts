@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useAppSelector } from "./useAppSelector";
-import { selectChatId } from "../features/Chat";
+import { useThreadId } from "../features/Chat/Thread";
 import {
   saveDraftMessage,
   getDraftMessage,
@@ -9,7 +8,7 @@ import {
 import { useDebounceCallback } from "usehooks-ts";
 
 export function useDraftMessage() {
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
   const [value, setValueInternal] = useState<string>(() => {
     if (chatId) {
       return getDraftMessage(chatId);

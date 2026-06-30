@@ -479,8 +479,8 @@ fn convert_to_anthropic(
     context_sanitizer: Option<&dyn Fn(&str) -> String>,
 ) -> (Option<Value>, Vec<Value>) {
     use super::render_extra::{
-        is_context_role, is_event_role, is_plan_role, render_context_message, render_event_message,
-        render_plan_message,
+        is_context_role, is_event_role, is_goal_role, is_plan_role, render_context_message,
+        render_event_message, render_goal_message, render_plan_message,
     };
 
     let mut system_text = None;
@@ -494,12 +494,17 @@ fn convert_to_anthropic(
             "system" => {
                 system_text = Some(msg.content.content_text_only());
             }
-            role if is_plan_role(role) => {
+            role if is_goal_role(role) || is_plan_role(role) => {
                 if !pending_context_text.is_empty() && pending_tool_results.is_empty() {
                     flush_pending_context_text(&mut result, &mut pending_context_text);
                 }
                 flush_tool_results(&mut result, &mut pending_tool_results);
-                if let Some(text) = render_plan_message(msg) {
+                let text = if is_goal_role(role) {
+                    render_goal_message(msg)
+                } else {
+                    render_plan_message(msg)
+                };
+                if let Some(text) = text {
                     result.push(json!({
                         "role": "user",
                         "content": [{"type": "text", "text": text}]
@@ -1500,6 +1505,20 @@ mod tests {
         }
     }
 
+    fn goal_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            json!({"mode": mode, "version": version}),
+        );
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1695,6 +1714,23 @@ mod tests {
         let text = converted[0]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
         assert!(text.contains("Do the thing"));
+    }
+
+    #[test]
+    fn convert_goal_and_plan_to_user_wrapped_xml_in_order() {
+        let messages = vec![
+            goal_message("agent", 1, "Reach the goal"),
+            plan_message("agent", 1, "Do the thing"),
+        ];
+
+        let (system, converted) = convert_to_anthropic(&messages, None);
+        let serialized = json!({"system": system, "messages": converted}).to_string();
+
+        assert!(system.is_none());
+        assert_eq!(serialized.matches("<goal mode=").count(), 1);
+        assert_eq!(serialized.matches("<plan mode=").count(), 1);
+        assert!(serialized.find("<goal mode=").unwrap() < serialized.find("<plan mode=").unwrap());
+        assert!(!serialized.contains("\"role\":\"goal\""));
     }
 
     #[test]

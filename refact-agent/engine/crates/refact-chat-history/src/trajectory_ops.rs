@@ -47,6 +47,7 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
 fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
     match msg.role.as_str() {
         "plan" => preserve_extra_key(&msg.extra, "plan"),
+        "goal" => preserve_extra_key(&msg.extra, "goal"),
         "event" => preserve_extra_key(&msg.extra, "event"),
         COMPRESSION_REPORT_ROLE => preserve_extra_key(&msg.extra, "compression_report"),
         "assistant" => preserve_assistant_compression_extra(msg),
@@ -487,7 +488,7 @@ fn compression_report_insert_index(messages: &[ChatMessage], affected_boundary: 
     // hidden event/plan messages), never inside it.
     let leading_control_prefix_len = messages
         .iter()
-        .take_while(|message| matches!(message.role.as_str(), "system" | "event" | "plan"))
+        .take_while(|message| matches!(message.role.as_str(), "system" | "event" | "plan" | "goal"))
         .count();
     insert_idx = insert_idx.max(leading_control_prefix_len);
 
@@ -1465,6 +1466,26 @@ mod tests {
         }
     }
 
+    fn make_goal_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "goal".to_string(),
+            serde_json::json!({
+                "version": 1,
+                "active": true,
+                "status": "active",
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "goal".to_string(),
+            content: ChatContent::SimpleText("base goal".to_string()),
+            preserve: Some(true),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn make_plan_delta_event() -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1472,6 +1493,25 @@ mod tests {
             serde_json::json!({
                 "subkind": "plan_delta",
                 "source": "tool.set_plan",
+                "payload": {"seq": 1},
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText("delta".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_goal_delta_event() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "goal_delta",
+                "source": "tool.update_goal",
                 "payload": {"seq": 1},
             }),
         );
@@ -1603,11 +1643,18 @@ mod tests {
         assert!(!message.extra.contains_key("unrelated"));
     }
 
-    fn assert_only_hidden_event_extra(message: &ChatMessage) {
+    fn assert_only_hidden_goal_extra(message: &ChatMessage) {
+        assert_eq!(message.role, "goal");
+        assert_eq!(message.extra["goal"]["version"], serde_json::json!(1));
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
+    fn assert_only_hidden_event_extra(message: &ChatMessage, subkind: &str) {
         assert_eq!(message.role, "event");
         assert_eq!(
             message.extra["event"]["subkind"],
-            serde_json::json!("plan_delta")
+            serde_json::json!(subkind)
         );
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
@@ -1761,7 +1808,18 @@ mod tests {
 
         assert_eq!(sanitized.len(), 2);
         assert_only_hidden_plan_extra(&sanitized[0]);
-        assert_only_hidden_event_extra(&sanitized[1]);
+        assert_only_hidden_event_extra(&sanitized[1], "plan_delta");
+    }
+
+    #[test]
+    fn sanitize_messages_for_new_thread_preserves_goal_and_goal_delta_extra() {
+        let messages = vec![make_goal_msg(), make_goal_delta_event()];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        assert_eq!(sanitized.len(), 2);
+        assert_only_hidden_goal_extra(&sanitized[0]);
+        assert_only_hidden_event_extra(&sanitized[1], "goal_delta");
     }
 
     #[test]
@@ -1813,7 +1871,18 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_only_hidden_plan_extra(&messages[0]);
-        assert_only_hidden_event_extra(&messages[1]);
+        assert_only_hidden_event_extra(&messages[1], "plan_delta");
+    }
+
+    #[test]
+    fn sanitize_messages_for_model_switch_preserves_goal_hidden_role_extra_only() {
+        let mut messages = vec![make_goal_msg(), make_goal_delta_event()];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_only_hidden_goal_extra(&messages[0]);
+        assert_only_hidden_event_extra(&messages[1], "goal_delta");
     }
 
     #[test]
@@ -1861,7 +1930,26 @@ mod tests {
             .collect();
         assert_eq!(persisted.len(), 2);
         assert_only_hidden_plan_extra(persisted[0]);
-        assert_only_hidden_event_extra(persisted[1]);
+        assert_only_hidden_event_extra(persisted[1], "plan_delta");
+    }
+
+    #[test]
+    fn compress_in_place_strip_metering_preserves_goal_hidden_role_extra_only() {
+        let mut messages = vec![make_goal_msg(), make_goal_delta_event()];
+        let opts = CompressOptions {
+            strip_metering: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let persisted: Vec<_> = messages
+            .iter()
+            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
+            .collect();
+        assert_eq!(persisted.len(), 2);
+        assert_only_hidden_goal_extra(persisted[0]);
+        assert_only_hidden_event_extra(persisted[1], "goal_delta");
     }
 
     #[test]
@@ -2474,6 +2562,30 @@ mod tests {
                 "assistant"
             ]
         );
+    }
+
+    #[test]
+    fn test_compression_preserves_goal_and_inserts_report_after_goal_prefix() {
+        let mut messages = vec![
+            make_goal_msg(),
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            strip_metering: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let roles: Vec<_> = messages.iter().map(|msg| msg.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["goal", "user", COMPRESSION_REPORT_ROLE, "assistant"]
+        );
+        assert_only_hidden_goal_extra(&messages[0]);
     }
 
     #[test]

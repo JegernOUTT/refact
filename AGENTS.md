@@ -196,6 +196,10 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 - Hidden `plan` and `plan_delta` are `Never` compression-exempt. Provider wire adapters lower the base as `<plan>` and deltas as `<plan-update>` user-context blocks so the base plan remains cache-safe.
 - Plan bodies are capped at 96KB chars, and transitions into Task Planner auto-create a pinned `initial-plan` task document when an initial plan is provided.
 
+### Hidden Goal Budgets
+
+- Chat goal budgets are unlimited by default. `GoalBudget` hard limits (`max_turns`, `max_minutes`, `max_tokens`, `no_progress_turns`) are optional; `None` and zero values disable that limit. `cooldown_ms` and `no_progress_token_threshold` remain concrete. Restore must not backfill `progress.started_at_ms` from goal creation time, and legacy implicit defaults (`10` turns, `15` minutes, `200000` tokens, `2` no-progress turns) self-heal to unlimited on load.
+
 ## Cross-Project Conventions
 
 ### Rust (Engine)

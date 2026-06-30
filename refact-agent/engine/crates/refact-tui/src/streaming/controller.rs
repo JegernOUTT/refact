@@ -2,26 +2,55 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::history::cells::{
+    raw_lines_from_source, AssistantStreamCell, HistoryCell, HistoryRenderMode, PlanStreamCell,
+};
+use crate::render::MarkdownRenderer;
+use crate::style::proposed_plan_style;
+use crate::table_detect::{is_table_delimiter_line, is_table_header_line};
+use crate::text_safety::sanitize_tool_text;
 use crate::vendored::markdown_stream::MarkdownStreamCollector;
+use crate::vendored::terminal_hyperlinks::{
+    plain_hyperlink_lines, prefix_hyperlink_lines, HyperlinkLine,
+};
 
-use super::chunking::{AdaptiveChunkingPolicy, DrainPlan};
-use super::commit_tick::drain_with_policy;
+use super::chunking::{AdaptiveChunkingPolicy, DrainPlan, QueueSnapshot};
 use super::table_holdback::{TableHoldbackScanner, TableHoldbackState};
 
-pub trait CommitDrain {
-    fn run_commit_tick(&mut self) -> Option<String>;
+#[derive(Debug, Clone)]
+struct QueuedLine {
+    text: String,
+    queued_at: Instant,
+    line_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StablePrefixLenCache {
+    source_start: usize,
+    width: Option<usize>,
+    stable_prefix_len: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct StreamController {
     collector: MarkdownStreamCollector,
     committed: String,
-    buffered: String,
-    queue: VecDeque<String>,
-    held: String,
+    raw_source: String,
+    rendered_lines: Vec<HyperlinkLine>,
+    enqueued_stable_len: usize,
+    emitted_stable_len: usize,
+    enqueued_source_len: usize,
+    queue: VecDeque<QueuedLine>,
     table_scanner: TableHoldbackScanner,
     policy: AdaptiveChunkingPolicy,
+    stable_prefix_len_cache: Option<StablePrefixLenCache>,
+    width: Option<usize>,
+    render_mode: HistoryRenderMode,
 }
 
 impl StreamController {
@@ -29,35 +58,113 @@ impl StreamController {
         Self {
             collector: MarkdownStreamCollector::new(width, cwd),
             committed: String::new(),
-            buffered: String::new(),
+            raw_source: String::new(),
+            rendered_lines: Vec::new(),
+            enqueued_stable_len: 0,
+            emitted_stable_len: 0,
+            enqueued_source_len: 0,
             queue: VecDeque::new(),
-            held: String::new(),
             table_scanner: TableHoldbackScanner::default(),
             policy: AdaptiveChunkingPolicy::default(),
+            stable_prefix_len_cache: None,
+            width,
+            render_mode: HistoryRenderMode::Rich,
         }
     }
 
     pub fn clear(&mut self) {
         self.collector.clear();
         self.committed.clear();
-        self.buffered.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_stable_len = 0;
+        self.emitted_stable_len = 0;
+        self.enqueued_source_len = 0;
         self.queue.clear();
-        self.held.clear();
         self.table_scanner.reset();
         self.policy.reset();
+        self.stable_prefix_len_cache = None;
     }
 
     pub fn replace_committed(&mut self, content: &str) {
+        let sanitized = sanitize_tool_text(content);
+        self.replace_sanitized_committed(&sanitized);
+    }
+
+    pub(crate) fn replace_sanitized_committed(&mut self, content: &str) {
         self.clear();
         self.committed.push_str(content);
+        self.raw_source.push_str(content);
+        self.enqueued_source_len = self.raw_source.len();
         self.table_scanner.replace_prefix(content);
+        self.recompute_streaming_render();
+        self.enqueued_stable_len = self.rendered_lines.len();
+        self.emitted_stable_len = self.rendered_lines.len();
         self.assert_holdback_boundary();
     }
 
+    pub fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+        let had_pending_queue = !self.queue.is_empty();
+        let had_live_tail = self.has_tail();
+        self.width = width;
+        self.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
+        self.stable_prefix_len_cache = None;
+        if had_pending_queue
+            && self.emitted_stable_len == self.rendered_lines.len()
+            && self.emitted_stable_len > 0
+        {
+            self.emitted_stable_len -= 1;
+        }
+        self.queue.clear();
+        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
+            self.enqueued_stable_len = self.rendered_lines.len();
+            self.enqueued_source_len = self.raw_source.len();
+            return;
+        }
+        self.rebuild_stable_queue_from_render();
+    }
+
+    pub fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        if self.render_mode == render_mode {
+            return;
+        }
+        let had_pending_queue = !self.queue.is_empty();
+        let had_live_tail = self.has_tail();
+        self.render_mode = render_mode;
+        if self.raw_source.is_empty() {
+            return;
+        }
+        self.recompute_streaming_render();
+        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
+        self.stable_prefix_len_cache = None;
+        self.queue.clear();
+        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
+            self.enqueued_stable_len = self.rendered_lines.len();
+            self.enqueued_source_len = self.raw_source.len();
+            return;
+        }
+        self.rebuild_stable_queue_from_render();
+    }
+
     pub fn push_delta(&mut self, delta: &str) {
+        let sanitized = sanitize_tool_text(delta);
+        self.push_sanitized_delta(&sanitized);
+    }
+
+    pub(crate) fn push_sanitized_delta(&mut self, delta: &str) {
         self.collector.push_delta(delta);
         if let Some(source) = self.collector.commit_complete_source() {
             self.ingest_complete_source(&source);
+        } else {
+            self.recompute_streaming_render();
         }
     }
 
@@ -66,76 +173,215 @@ impl StreamController {
     }
 
     pub fn live(&self) -> String {
-        let mut live = self.queue.iter().map(String::as_str).collect::<String>();
-        live.push_str(&self.held);
+        let mut live =
+            self.raw_source[self.enqueued_source_len.min(self.raw_source.len())..].to_string();
         live.push_str(self.collector.pending_source());
         live
     }
 
     pub fn visible(&self) -> String {
         let mut visible = self.committed.clone();
+        for line in &self.queue {
+            visible.push_str(&line.text);
+        }
         visible.push_str(&self.live());
         visible
     }
 
+    pub fn current_tail_lines(&self) -> Vec<HyperlinkLine> {
+        let start = self.enqueued_stable_len.min(self.rendered_lines.len());
+        self.rendered_lines[start..].to_vec()
+    }
+
+    pub fn has_live_tail(&self) -> bool {
+        self.has_tail()
+    }
+
     pub fn queued_lines(&self) -> usize {
-        self.queue.len()
+        self.queue.iter().map(|line| line.line_count).sum()
     }
 
     pub fn stable_lines_ready(&self) -> bool {
         !self.queue.is_empty()
     }
 
+    pub fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.queue
+            .front()
+            .map(|line| now.saturating_duration_since(line.queued_at))
+    }
+
     pub fn finalize(&mut self) -> String {
         let remainder = self.collector.finalize_and_drain_source();
         if !remainder.is_empty() {
-            self.buffered.push_str(&remainder);
+            self.raw_source.push_str(&remainder);
+            self.table_scanner.push_source_chunk(&remainder);
         }
-        self.queue.clear();
-        self.held.clear();
-        let buffered = std::mem::take(&mut self.buffered);
-        self.committed.push_str(&buffered);
-        let out = self.committed.clone();
+        let out = if self.raw_source.is_empty() {
+            self.committed.clone()
+        } else {
+            self.raw_source.clone()
+        };
         self.clear();
         out
     }
 
-    fn ingest_complete_source(&mut self, source: &str) {
-        self.buffered.push_str(source);
-        self.table_scanner.push_source_chunk(source);
-        let stable_len = self.stable_buffer_len();
-        self.rebuild_queue(stable_len);
+    pub fn drain_all_stable(&mut self) -> Option<String> {
+        self.drain(DrainPlan::Batch(usize::MAX))
     }
 
-    fn stable_buffer_len(&self) -> usize {
-        self.assert_holdback_boundary();
-        let stable_len = match self.table_scanner.state() {
-            TableHoldbackState::None => self.buffered.len(),
+    pub fn run_commit_tick(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let snapshot = QueueSnapshot {
+            queued_lines: self.queued_lines(),
+            oldest_age: self.oldest_queued_age(now),
+        };
+        let mut policy = std::mem::take(&mut self.policy);
+        let decision = policy.decide(snapshot, now);
+        let drained = self.drain(decision.drain_plan);
+        self.policy = policy;
+        drained
+    }
+
+    pub(crate) fn drain_for_commit_tick(
+        &mut self,
+        plan: DrainPlan,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let drained = self.drain(plan);
+        let cell = drained.map(|drained| {
+            let first = self.committed().len() == drained.len();
+            Box::new(AssistantStreamCell::new_lines(
+                self.render_source(&drained),
+                first,
+            )) as Box<dyn HistoryCell>
+        });
+        (cell, self.queue.is_empty() && !self.has_live_tail())
+    }
+
+    fn ingest_complete_source(&mut self, source: &str) {
+        self.raw_source.push_str(source);
+        self.table_scanner.push_source_chunk(source);
+        self.recompute_streaming_render();
+        self.sync_stable_queue();
+    }
+
+    fn render_source(&self, source: &str) -> Vec<HyperlinkLine> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+        match self.render_mode {
+            HistoryRenderMode::Rich => MarkdownRenderer::new(self.width).render_with_links(source),
+            HistoryRenderMode::Raw => plain_hyperlink_lines(raw_lines_from_source(source)),
+        }
+    }
+
+    fn recompute_streaming_render(&mut self) {
+        let mut source = self.raw_source.clone();
+        source.push_str(self.collector.pending_source());
+        self.rendered_lines = self.render_source(&source);
+    }
+
+    fn has_tail(&self) -> bool {
+        self.enqueued_stable_len < self.rendered_lines.len()
+    }
+
+    fn target_stable_source_len(&self) -> usize {
+        let source_len = self.raw_source.len();
+        if self.render_mode == HistoryRenderMode::Raw {
+            return source_len;
+        }
+        let target = match self.table_scanner.state() {
+            TableHoldbackState::None => source_len,
             TableHoldbackState::PendingHeader { header_start }
             | TableHoldbackState::Confirmed {
                 table_start: header_start,
-            } => header_start.saturating_sub(self.committed.len()),
-        }
-        .min(self.buffered.len());
-        previous_char_boundary(&self.buffered, stable_len)
+            } => header_start,
+        };
+        previous_char_boundary(&self.raw_source, target.min(source_len))
     }
 
-    fn rebuild_queue(&mut self, stable_len: usize) {
+    fn compute_target_stable_len(&mut self) -> usize {
+        let target_source_len = self.target_stable_source_len();
+        self.stable_prefix_len_for_source_start(target_source_len)
+            .max(self.emitted_stable_len)
+    }
+
+    fn sync_stable_queue(&mut self) -> bool {
+        let target_source_len = self.target_stable_source_len();
+        let target_stable_len = self.compute_target_stable_len();
+        if target_source_len < self.enqueued_source_len {
+            self.queue.clear();
+            if self.committed.len() < target_source_len {
+                self.enqueue_source_range(self.committed.len(), target_source_len);
+            }
+            self.enqueued_source_len = target_source_len;
+            self.enqueued_stable_len = target_stable_len;
+            return !self.queue.is_empty();
+        }
+        if target_source_len == self.enqueued_source_len {
+            self.enqueued_stable_len = target_stable_len;
+            return false;
+        }
+        self.enqueue_source_range(self.enqueued_source_len, target_source_len);
+        self.enqueued_source_len = target_source_len;
+        self.enqueued_stable_len = target_stable_len;
+        true
+    }
+
+    fn rebuild_stable_queue_from_render(&mut self) {
+        let target_source_len = self.target_stable_source_len();
+        let target_stable_len = self.compute_target_stable_len();
         self.queue.clear();
-        self.held.clear();
-        let stable_len =
-            previous_char_boundary(&self.buffered, stable_len.min(self.buffered.len()));
-        debug_assert!(self.buffered.is_char_boundary(stable_len));
-        let (stable, held) = self.buffered.split_at(stable_len);
-        enqueue_stable_source(&mut self.queue, stable);
-        self.held.push_str(held);
+        if self.committed.len() < target_source_len {
+            self.enqueue_source_range(self.committed.len(), target_source_len);
+        }
+        self.enqueued_source_len = target_source_len;
+        self.enqueued_stable_len = target_stable_len;
+    }
+
+    fn enqueue_source_range(&mut self, start: usize, end: usize) {
+        if start >= end || start >= self.raw_source.len() {
+            return;
+        }
+        let start = previous_char_boundary(&self.raw_source, start);
+        let end = previous_char_boundary(&self.raw_source, end.min(self.raw_source.len()));
+        let mut chunks = VecDeque::new();
+        enqueue_stable_source(&mut chunks, &self.raw_source[start..end]);
+        let now = Instant::now();
+        for text in chunks {
+            let line_count = text
+                .split_inclusive('\n')
+                .filter(|line| !line.is_empty())
+                .count()
+                .max(1);
+            self.queue.push_back(QueuedLine {
+                text,
+                queued_at: now,
+                line_count,
+            });
+        }
+    }
+
+    fn stable_prefix_len_for_source_start(&mut self, source_start: usize) -> usize {
+        if let Some(cache) = &self.stable_prefix_len_cache {
+            if cache.source_start == source_start && cache.width == self.width {
+                return cache.stable_prefix_len;
+            }
+        }
+        let stable_prefix_len = self.render_source(&self.raw_source[..source_start]).len();
+        self.stable_prefix_len_cache = Some(StablePrefixLenCache {
+            source_start,
+            width: self.width,
+            stable_prefix_len,
+        });
+        stable_prefix_len
     }
 
     fn assert_holdback_boundary(&self) {
         debug_assert_eq!(
             self.table_scanner.source_offset(),
-            self.committed.len().saturating_add(self.buffered.len()),
-            "table scanner offset must match committed + buffered bytes"
+            self.raw_source.len(),
+            "table scanner offset must match raw source bytes"
         );
         let boundary = match self.table_scanner.state() {
             TableHoldbackState::None => return,
@@ -143,19 +389,10 @@ impl StreamController {
             TableHoldbackState::Confirmed { table_start } => table_start,
         };
         debug_assert!(
-            self.absolute_boundary_is_valid(boundary),
-            "invalid table holdback boundary {boundary} for committed {} buffered {}",
-            self.committed.len(),
-            self.buffered.len()
+            boundary <= self.raw_source.len() && self.raw_source.is_char_boundary(boundary),
+            "invalid table holdback boundary {boundary} for source {}",
+            self.raw_source.len()
         );
-    }
-
-    fn absolute_boundary_is_valid(&self, boundary: usize) -> bool {
-        if boundary <= self.committed.len() {
-            return self.committed.is_char_boundary(boundary);
-        }
-        let relative = boundary - self.committed.len();
-        relative <= self.buffered.len() && self.buffered.is_char_boundary(relative)
     }
 
     fn drain(&mut self, plan: DrainPlan) -> Option<String> {
@@ -166,22 +403,186 @@ impl StreamController {
         if count == 0 || self.queue.is_empty() {
             return None;
         }
+        let mut remaining = count;
         let mut drained = String::new();
-        for _ in 0..count {
+        while remaining > 0 {
             let Some(line) = self.queue.pop_front() else {
                 break;
             };
-            self.committed.push_str(&line);
-            drained.push_str(&line);
+            remaining = remaining.saturating_sub(line.line_count.max(1));
+            self.committed.push_str(&line.text);
+            drained.push_str(&line.text);
         }
         if !drained.is_empty() {
-            let drain_len = drained.len().min(self.buffered.len());
-            let drain_len = previous_char_boundary(&self.buffered, drain_len);
-            self.buffered.drain(..drain_len);
+            self.emitted_stable_len = self.render_source(&self.committed).len();
             self.assert_holdback_boundary();
         }
         (!drained.is_empty()).then_some(drained)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanStreamController {
+    stream: StreamController,
+    header_emitted: bool,
+    top_padding_emitted: bool,
+}
+
+impl PlanStreamController {
+    pub fn new(width: Option<usize>, cwd: &Path) -> Self {
+        Self {
+            stream: StreamController::new(width, cwd),
+            header_emitted: false,
+            top_padding_emitted: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.stream.clear();
+        self.header_emitted = false;
+        self.top_padding_emitted = false;
+    }
+
+    pub fn set_width(&mut self, width: Option<usize>) {
+        self.stream.set_width(width);
+    }
+
+    pub fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+        self.stream.set_render_mode(render_mode);
+    }
+
+    pub fn push_delta(&mut self, delta: &str) {
+        self.stream.push_delta(delta);
+    }
+
+    pub fn push_sanitized_delta(&mut self, delta: &str) {
+        self.stream.push_sanitized_delta(delta);
+    }
+
+    pub fn queued_lines(&self) -> usize {
+        self.stream.queued_lines()
+    }
+
+    pub fn stable_lines_ready(&self) -> bool {
+        self.stream.stable_lines_ready()
+    }
+
+    pub fn has_live_tail(&self) -> bool {
+        self.stream.has_live_tail()
+    }
+
+    pub fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.stream.oldest_queued_age(now)
+    }
+
+    pub fn current_tail_display_lines(&self) -> Vec<HyperlinkLine> {
+        let lines = self.stream.current_tail_lines();
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        self.render_display_lines(lines, false)
+    }
+
+    pub fn visible_display_lines(&self) -> Vec<HyperlinkLine> {
+        let source = self.stream.visible();
+        if source.is_empty() {
+            return Vec::new();
+        }
+        self.render_display_lines_with_state(
+            self.stream.render_source(&source),
+            false,
+            false,
+            false,
+        )
+    }
+
+    pub fn finalize(&mut self) -> Option<String> {
+        let source = self.stream.finalize();
+        self.header_emitted = false;
+        self.top_padding_emitted = false;
+        (!source.is_empty()).then_some(source)
+    }
+
+    pub(crate) fn drain_for_commit_tick(
+        &mut self,
+        plan: DrainPlan,
+    ) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let drained = self.stream.drain(plan);
+        let cell = drained.and_then(|drained| self.emit_source(&drained, false));
+        (cell, !self.stable_lines_ready() && !self.has_live_tail())
+    }
+
+    fn emit_source(
+        &mut self,
+        source: &str,
+        include_bottom_padding: bool,
+    ) -> Option<Box<dyn HistoryCell>> {
+        let lines = self.stream.render_source(source);
+        let display_lines = self.render_display_lines(lines, include_bottom_padding);
+        if display_lines.is_empty() {
+            return None;
+        }
+        let continuation = self.header_emitted;
+        self.header_emitted = true;
+        self.top_padding_emitted = true;
+        Some(Box::new(PlanStreamCell::new(display_lines, continuation)))
+    }
+
+    fn render_display_lines(
+        &self,
+        lines: Vec<HyperlinkLine>,
+        include_bottom_padding: bool,
+    ) -> Vec<HyperlinkLine> {
+        self.render_display_lines_with_state(
+            lines,
+            include_bottom_padding,
+            self.header_emitted,
+            self.top_padding_emitted,
+        )
+    }
+
+    fn render_display_lines_with_state(
+        &self,
+        lines: Vec<HyperlinkLine>,
+        include_bottom_padding: bool,
+        header_emitted: bool,
+        top_padding_emitted: bool,
+    ) -> Vec<HyperlinkLine> {
+        if lines.is_empty() && header_emitted && !include_bottom_padding {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if !header_emitted {
+            out.push(HyperlinkLine::new(plan_header_line("Proposed Plan")));
+            out.push(HyperlinkLine::new(Line::from(" ")));
+        }
+
+        let mut card = Vec::new();
+        if !top_padding_emitted {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+        }
+        card.extend(prefix_hyperlink_lines(
+            lines,
+            Span::raw("  "),
+            Span::raw("  "),
+        ));
+        if include_bottom_padding {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+        }
+        let style = proposed_plan_style();
+        out.extend(card.into_iter().map(|line| line.style(style)));
+        out
+    }
+}
+
+fn plan_header_line(title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn previous_char_boundary(source: &str, index: usize) -> usize {
@@ -238,7 +639,7 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
             continue;
         }
         if let Some((previous_start, previous_line)) = previous {
-            if is_table_header(previous_line) && is_table_delimiter(trimmed) {
+            if is_table_header_line(previous_line) && is_table_delimiter_line(trimmed) {
                 table_start = Some(previous_start);
             }
         }
@@ -248,58 +649,22 @@ fn first_table_range(source: &str) -> Option<(usize, usize)> {
     table_start.map(|start| (start, source.len()))
 }
 
-fn is_table_header(line: &str) -> bool {
-    table_segments(line).is_some_and(|segments| {
-        segments.len() >= 2 && segments.iter().any(|segment| !segment.trim().is_empty())
-    })
-}
-
-fn is_table_delimiter(line: &str) -> bool {
-    table_segments(line).is_some_and(|segments| {
-        segments.len() >= 2
-            && segments.iter().all(|segment| {
-                let segment = segment.trim();
-                !segment.is_empty()
-                    && segment
-                        .chars()
-                        .all(|ch| ch == '-' || ch == ':' || ch.is_ascii_whitespace())
-                    && segment.chars().filter(|ch| *ch == '-').count() >= 3
-            })
-    })
-}
-
-fn table_segments(line: &str) -> Option<Vec<&str>> {
-    let mut line = line.trim();
-    if !line.contains('|') {
-        return None;
-    }
-    if let Some(rest) = line.strip_prefix('|') {
-        line = rest;
-    }
-    if let Some(rest) = line.strip_suffix('|') {
-        line = rest;
-    }
-    let segments = line.split('|').collect::<Vec<_>>();
-    (segments.len() >= 2).then_some(segments)
-}
-
-impl CommitDrain for StreamController {
-    fn run_commit_tick(&mut self) -> Option<String> {
-        let queued_lines = self.queued_lines();
-        let mut policy = std::mem::take(&mut self.policy);
-        let drained = drain_with_policy(&mut policy, queued_lines, |plan| self.drain(plan));
-        self.policy = policy;
-        drained
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::render_markdown;
+    use crate::render::wrapping::line_to_plain;
 
     fn controller() -> StreamController {
         StreamController::new(None, std::path::Path::new("."))
+    }
+
+    fn text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(line_to_plain)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -310,7 +675,8 @@ mod tests {
         assert_eq!(stream.queued_lines(), 2);
         assert_eq!(stream.run_commit_tick(), Some("one\n".to_string()));
         assert_eq!(stream.committed(), "one\n");
-        assert_eq!(stream.live(), "two\n");
+        assert_eq!(stream.live(), "");
+        assert_eq!(stream.visible(), "one\ntwo\n");
     }
 
     #[test]
@@ -335,7 +701,7 @@ mod tests {
         let mut stream = controller();
         stream.push_delta("```rust\nfn");
         assert_eq!(stream.committed(), "");
-        assert!(stream.visible().contains("```rust"));
+        assert_eq!(stream.visible(), "```rust\nfn");
         stream.push_delta(" main() {}\n```\n");
         while stream.run_commit_tick().is_some() {}
         assert_eq!(stream.finalize(), "```rust\nfn main() {}\n```\n");
@@ -348,6 +714,32 @@ mod tests {
         stream.push_delta("🦀\n");
         assert_eq!(stream.run_commit_tick(), Some("hello 🦀\n".to_string()));
         assert_eq!(stream.committed(), "hello 🦀\n");
+    }
+
+    #[test]
+    fn streamed_model_text_is_escape_inert_in_source_and_rendered_lines() {
+        let mut stream = controller();
+        stream.push_delta(injected_model_text());
+
+        let tail = stream.current_tail_lines();
+        assert!(!tail.is_empty());
+        assert_hyperlink_lines_escape_inert(&tail);
+        assert_escape_inert(&stream.visible());
+        assert_model_text_survives(&stream.visible());
+
+        stream.push_delta("\n");
+        while let Some(drained) = stream.run_commit_tick() {
+            assert_escape_inert(&drained);
+        }
+        let finalized = stream.finalize();
+
+        assert_escape_inert(&finalized);
+        assert_model_text_survives(&finalized);
+
+        let mut restored = controller();
+        restored.replace_committed(injected_model_text());
+        assert_escape_inert(&restored.visible());
+        assert_hyperlink_lines_escape_inert(&restored.current_tail_lines());
     }
 
     #[test]
@@ -427,13 +819,60 @@ mod tests {
     fn completed_table_commits_as_one_queue_item_before_following_text() {
         let mut stream = controller();
         stream.push_delta("intro\n| A | B |\n| --- | --- |\n| one | two |\n\nafter\n");
-        assert_eq!(stream.queued_lines(), 3);
+        assert_eq!(stream.queued_lines(), 6);
         assert_eq!(stream.run_commit_tick(), Some("intro\n".to_string()));
         assert_eq!(
             stream.run_commit_tick(),
             Some("| A | B |\n| --- | --- |\n| one | two |\n\n".to_string())
         );
         assert_eq!(stream.run_commit_tick(), Some("after\n".to_string()));
+    }
+
+    #[test]
+    fn oldest_queued_age_tracks_first_stable_line() {
+        let mut stream = controller();
+        stream.push_delta("one\ntwo\n");
+        let age = stream.oldest_queued_age(Instant::now() + Duration::from_millis(150));
+        assert!(age.is_some_and(|age| age >= Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn set_width_rebuilds_queue_without_reemitting_emitted_lines() {
+        let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
+        stream.push_delta("alpha beta gamma\ndelta\n");
+        assert!(stream.run_commit_tick().is_some());
+        let emitted = stream.committed().to_string();
+        stream.set_width(Some(24));
+        while stream.run_commit_tick().is_some() {}
+        assert!(stream.committed().starts_with(&emitted));
+        assert_eq!(stream.finalize(), "alpha beta gamma\ndelta\n");
+    }
+
+    #[test]
+    fn raw_render_mode_streams_source_lines_without_markdown_rewrite() {
+        let mut stream = controller();
+        stream.push_delta("## Heading\n");
+        stream.set_render_mode(HistoryRenderMode::Raw);
+
+        let (cell, idle) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        let cell = cell.expect("raw stream cell");
+
+        assert!(idle);
+        assert_eq!(text(&cell.render(80)), "• ## Heading");
+    }
+
+    #[test]
+    fn plan_stream_controller_uses_raw_render_mode_for_source_lines() {
+        let mut plan = PlanStreamController::new(Some(80), std::path::Path::new("."));
+        plan.set_render_mode(HistoryRenderMode::Raw);
+        plan.push_delta("## Heading\n");
+
+        let (cell, idle) = plan.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        let rendered = text(&cell.expect("plan stream cell").render(80));
+
+        assert!(idle);
+        assert!(rendered.contains("Proposed Plan"));
+        assert!(rendered.contains("## Heading"));
     }
 
     fn utf8_chunks(source: &str, max_bytes: usize) -> Vec<&str> {
@@ -460,5 +899,31 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn injected_model_text() -> &'static str {
+        "lead \u{1b}[31mred \u{1b}[2Jclear\u{7} bell \u{009b}31mcsi \u{1b}]8;;http://evil\u{7}TEXT\u{1b}]8;;\u{7} tail"
+    }
+
+    fn assert_hyperlink_lines_escape_inert(lines: &[HyperlinkLine]) {
+        for line in lines {
+            for span in &line.line.spans {
+                assert_escape_inert(span.content.as_ref());
+            }
+        }
+    }
+
+    fn assert_escape_inert(text: &str) {
+        assert!(!text.as_bytes().contains(&0x1b), "raw ESC in {text:?}");
+        assert!(!text.as_bytes().contains(&0x07), "raw BEL in {text:?}");
+        assert!(!text.as_bytes().contains(&0x9b), "raw CSI byte in {text:?}");
+        assert!(!text.contains('\u{009b}'), "raw CSI char in {text:?}");
+        assert!(!text.contains("http://evil"), "raw OSC8 URL in {text:?}");
+    }
+
+    fn assert_model_text_survives(text: &str) {
+        for fragment in ["lead", "red", "clear", "bell", "csi", "TEXT", "tail"] {
+            assert!(text.contains(fragment), "missing {fragment:?} in {text:?}");
+        }
     }
 }

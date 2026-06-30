@@ -5,7 +5,8 @@ import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
-import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
+import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import styles from "./ListTool.module.css";
@@ -29,8 +30,9 @@ export const ListTool: React.FC<ListToolProps> = ({
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
 
+  const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
 
   const args = useMemo<ListToolArgs>(() => {

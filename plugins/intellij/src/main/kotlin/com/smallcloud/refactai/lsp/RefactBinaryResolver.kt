@@ -5,16 +5,29 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.Comparator
-import java.util.zip.GZIPInputStream
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
 internal const val REFACT_RELEASE_BASE_URL = "https://github.com/JegernOUTT/refact/releases/download"
+
+private const val INSTALL_LOCK_NAME = ".install.lock"
+private const val INSTALL_LOCK_RETRY_MS = 100L
+private const val INSTALL_LOCK_TIMEOUT_MS = 120_000L
+private const val INSTALL_LOCK_STALE_MS = 15 * 60_000L
+private const val DOWNLOAD_CONNECT_TIMEOUT_MS = 15_000
+private const val DOWNLOAD_READ_TIMEOUT_MS = 60_000
 
 internal data class RefactReleaseAsset(
     val target: String,
@@ -25,6 +38,7 @@ internal data class RefactReleaseAsset(
 
 internal data class RefactBinaryResolverOptions(
     val explicitPath: String? = null,
+    val bundledDir: Path? = null,
     val minVersion: String,
     val pinnedVersion: String,
     val cacheDir: Path,
@@ -33,9 +47,14 @@ internal data class RefactBinaryResolverOptions(
     val osName: String = System.getProperty("os.name"),
     val arch: String = System.getProperty("os.arch"),
     val versionReader: (Path) -> String? = ::readRefactVersion,
+    val onDownloadStart: () -> Unit = {},
     val downloader: (URI, Path) -> Unit = ::downloadFile,
     val extractor: (Path, Path, Boolean) -> Unit = ::extractArchive,
     val chmod: (Path) -> Unit = ::makeExecutable,
+    val installLockRetryMs: Long = INSTALL_LOCK_RETRY_MS,
+    val installLockTimeoutMs: Long = INSTALL_LOCK_TIMEOUT_MS,
+    val installLockStaleMs: Long = INSTALL_LOCK_STALE_MS,
+    val installLockNowMs: () -> Long = System::currentTimeMillis,
 )
 
 internal object RefactBinaryResolver {
@@ -43,6 +62,12 @@ internal object RefactBinaryResolver {
         val explicit = options.explicitPath?.trim()?.takeIf { it.isNotEmpty() }
         if (explicit != null) {
             return Path.of(explicit).toAbsolutePath().normalize().toString()
+        }
+
+        for (candidate in bundledRefactCandidates(options.bundledDir, options.osName, options.arch)) {
+            if (isCompatibleRefactBinary(candidate, options.minVersion, options.versionReader)) {
+                return candidate.toString()
+            }
         }
 
         for (candidate in systemRefactCandidates(options.pathEnv, options.homeDir, options.osName)) {
@@ -57,6 +82,10 @@ internal object RefactBinaryResolver {
 
 internal fun refactBinaryName(osName: String = System.getProperty("os.name")): String {
     return if (osName.lowercase().contains("win")) "refact.exe" else "refact"
+}
+
+internal fun sharedRefactBinaryPath(homeDir: Path, osName: String = System.getProperty("os.name")): Path {
+    return homeDir.resolve(".refact").resolve("bin").resolve(refactBinaryName(osName)).toAbsolutePath().normalize()
 }
 
 internal fun refactReleaseTarget(osName: String = System.getProperty("os.name"), arch: String = System.getProperty("os.arch")): String {
@@ -170,13 +199,30 @@ private fun Int.coerceSign(): Int = when {
 
 private fun systemRefactCandidates(pathEnv: String, homeDir: Path, osName: String): List<Path> {
     val binaryName = refactBinaryName(osName)
-    val candidates = pathEnv.split(File.pathSeparator)
+    val candidates = mutableListOf(sharedRefactBinaryPath(homeDir, osName))
+    candidates.addAll(pathEnv.split(pathSeparator(osName))
         .asSequence()
         .filter { it.isNotBlank() }
         .map { Path.of(it, binaryName).toAbsolutePath().normalize() }
-        .toMutableList()
-    candidates.add(homeDir.resolve(".refact").resolve("bin").resolve(binaryName).toAbsolutePath().normalize())
+        .toList())
     return candidates.distinctBy { it.toString() }
+}
+
+private fun bundledRefactCandidates(bundledDir: Path?, osName: String, arch: String): List<Path> {
+    val root = bundledDir?.toAbsolutePath()?.normalize() ?: return emptyList()
+    val target = runCatching { refactReleaseTarget(osName, arch) }.getOrNull() ?: return emptyList()
+    val binaryName = refactBinaryName(osName)
+    val distName = "dist-$target"
+    return listOf(
+        root.resolve("bin").resolve(distName).resolve(binaryName),
+        root.resolve("src").resolve("main").resolve("resources").resolve("bin").resolve(distName).resolve(binaryName),
+        root.resolve("src").resolve("main").resolve("resources").resolve("bin").resolve(target).resolve(binaryName),
+    ).map { it.toAbsolutePath().normalize() }
+        .distinctBy { it.toString() }
+}
+
+private fun pathSeparator(osName: String): String {
+    return if (osName.lowercase().contains("win")) ";" else File.pathSeparator
 }
 
 private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionReader: (Path) -> String?): Boolean {
@@ -188,12 +234,28 @@ private fun isCompatibleRefactBinary(binPath: Path, minVersion: String, versionR
 private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): String {
     val target = refactReleaseTarget(options.osName, options.arch)
     val binaryName = refactBinaryName(options.osName)
-    val targetDir = options.cacheDir.resolve(options.pinnedVersion).resolve(target)
-    val binPath = targetDir.resolve(binaryName)
-    if (isCompatibleRefactBinary(binPath, options.minVersion, options.versionReader)) {
-        return binPath.toString()
-    }
+    val sharedBinPath = sharedRefactBinaryPath(options.homeDir, options.osName)
+    return withSharedInstallLock(
+        sharedBinPath,
+        options.installLockRetryMs,
+        options.installLockTimeoutMs,
+        options.installLockStaleMs,
+        options.installLockNowMs,
+    ) {
+        if (isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
+            return@withSharedInstallLock sharedBinPath.toString()
+        }
 
+        downloadPinnedRefactBinaryToSharedPath(options, target, binaryName, sharedBinPath)
+    }
+}
+
+private fun downloadPinnedRefactBinaryToSharedPath(
+    options: RefactBinaryResolverOptions,
+    target: String,
+    binaryName: String,
+    sharedBinPath: Path,
+): String {
     val asset = refactReleaseAsset(options.pinnedVersion, target, options.osName)
     val tmpDir = options.cacheDir.resolve("tmp-${ProcessHandle.current().pid()}-${System.nanoTime()}")
     val archivePath = tmpDir.resolve(asset.archiveName)
@@ -201,6 +263,7 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
     val extractDir = tmpDir.resolve("extract")
     Files.createDirectories(extractDir)
     try {
+        options.onDownloadStart()
         options.downloader(URI(asset.archiveUrl), archivePath)
         options.downloader(URI(asset.sha256Url), shaPath)
         verifySha256(archivePath, shaPath)
@@ -209,18 +272,190 @@ private fun downloadPinnedRefactBinary(options: RefactBinaryResolverOptions): St
         if (!Files.isRegularFile(extractedBin)) {
             throw IOException("downloaded Refact archive did not contain $binaryName")
         }
-        options.chmod(extractedBin)
-        deleteRecursively(targetDir)
-        Files.createDirectories(targetDir.parent)
-        Files.move(extractDir, targetDir, StandardCopyOption.REPLACE_EXISTING)
-        options.chmod(binPath)
-        if (!isCompatibleRefactBinary(binPath, options.minVersion, options.versionReader)) {
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(extractedBin)
+        }
+        promoteSharedBinary(extractedBin, sharedBinPath, options)
+        if (!isCompatibleRefactBinary(sharedBinPath, options.minVersion, options.versionReader)) {
             throw IOException("downloaded Refact binary is older than ${options.minVersion}")
         }
-        return binPath.toString()
+        return sharedBinPath.toString()
     } finally {
         deleteRecursively(tmpDir)
     }
+}
+
+private fun <T> withSharedInstallLock(
+    sharedBinPath: Path,
+    retryMs: Long,
+    timeoutMs: Long,
+    staleMs: Long,
+    nowMs: () -> Long,
+    block: () -> T,
+): T {
+    val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
+    Files.createDirectories(sharedDir)
+    val lockPath = sharedDir.resolve(INSTALL_LOCK_NAME)
+    val channel = acquireInstallLock(lockPath, maxOf(10L, retryMs), maxOf(10L, timeoutMs), maxOf(10L, staleMs), nowMs)
+    val lockText = writeInstallLockMetadata(channel, nowMs())
+    try {
+        return block()
+    } finally {
+        try {
+            channel.close()
+        } finally {
+            releaseInstallLock(lockPath, lockText)
+        }
+    }
+}
+
+private fun acquireInstallLock(
+    lockPath: Path,
+    retryMs: Long,
+    timeoutMs: Long,
+    staleMs: Long,
+    nowMs: () -> Long,
+): FileChannel {
+    val startedAt = nowMs()
+    while (true) {
+        try {
+            return FileChannel.open(lockPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        } catch (error: FileAlreadyExistsException) {
+            if (breakStaleInstallLock(lockPath, staleMs, nowMs())) {
+                continue
+            }
+            val elapsedMs = nowMs() - startedAt
+            if (elapsedMs >= timeoutMs) {
+                throw IOException("timed out waiting for Refact install lock at $lockPath", error)
+            }
+            try {
+                Thread.sleep(minOf(retryMs, maxOf(10L, timeoutMs - elapsedMs)))
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("interrupted waiting for Refact install lock at $lockPath", interrupted)
+            }
+        }
+    }
+}
+
+private data class InstallLockMetadata(
+    val pid: Long?,
+    val timestampMs: Long?,
+)
+
+private fun writeInstallLockMetadata(channel: FileChannel, nowMs: Long): String {
+    val content = "pid=${ProcessHandle.current().pid()}\ntimestamp_ms=$nowMs\n".toByteArray(Charsets.UTF_8)
+    channel.write(ByteBuffer.wrap(content))
+    channel.force(true)
+    return content.toString(Charsets.UTF_8)
+}
+
+private fun releaseInstallLock(lockPath: Path, lockText: String) {
+    runCatching {
+        if (Files.exists(lockPath) && Files.readString(lockPath) == lockText) {
+            Files.deleteIfExists(lockPath)
+        }
+    }
+}
+
+private fun breakStaleInstallLock(lockPath: Path, staleMs: Long, nowMs: Long): Boolean {
+    val lockText = runCatching { Files.readString(lockPath) }.getOrNull()
+    val metadata = lockText?.let { parseInstallLockMetadata(it) }
+    val stale = if (metadata == null) {
+        lockFileIsOlderThan(lockPath, nowMs, staleMs)
+    } else {
+        metadata.timestampMs?.let { nowMs - it >= staleMs } == true ||
+            metadata.pid?.let { !processIsAlive(it) } == true ||
+            (metadata.timestampMs == null && lockFileIsOlderThan(lockPath, nowMs, staleMs))
+    }
+    if (!stale) return false
+    if (lockText != null && Files.exists(lockPath) && runCatching { Files.readString(lockPath) }.getOrNull() != lockText) {
+        return false
+    }
+    return runCatching { Files.deleteIfExists(lockPath) }.getOrDefault(false)
+}
+
+private fun parseInstallLockMetadata(text: String): InstallLockMetadata? {
+    val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    if (lines.isEmpty()) return null
+    var pid: Long? = null
+    var timestampMs: Long? = null
+    for (line in lines) {
+        val separator = line.indexOf('=')
+        if (separator <= 0) continue
+        val key = line.substring(0, separator).trim().lowercase()
+        val value = line.substring(separator + 1).trim()
+        when (key) {
+            "pid", "owner_pid" -> pid = value.toLongOrNull()
+            "timestamp", "timestamp_ms", "created_at", "created_at_ms" -> timestampMs = parseLockTimestampMs(value)
+        }
+    }
+    if (pid == null) {
+        pid = lines.firstOrNull()?.toLongOrNull()
+    }
+    if (timestampMs == null) {
+        timestampMs = lines.getOrNull(1)?.let { parseLockTimestampMs(it) }
+    }
+    return if (pid != null || timestampMs != null) InstallLockMetadata(pid, timestampMs) else null
+}
+
+private fun parseLockTimestampMs(value: String): Long? {
+    return value.toLongOrNull() ?: runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+}
+
+private fun processIsAlive(pid: Long): Boolean {
+    if (pid <= 0) return false
+    return runCatching { ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }.getOrDefault(false)
+}
+
+private fun lockFileIsOlderThan(lockPath: Path, nowMs: Long, staleMs: Long): Boolean {
+    val modifiedMs = runCatching { Files.getLastModifiedTime(lockPath).toMillis() }.getOrNull() ?: return false
+    return nowMs - modifiedMs >= staleMs
+}
+
+private fun promoteSharedBinary(extractedBin: Path, sharedBinPath: Path, options: RefactBinaryResolverOptions) {
+    val sharedDir = sharedBinPath.parent ?: throw IOException("shared Refact binary path has no parent: $sharedBinPath")
+    Files.createDirectories(sharedDir)
+    val tmpTarget = sharedDir.resolve(".${sharedBinPath.fileName}.tmp.${ProcessHandle.current().pid()}.${System.nanoTime()}")
+    try {
+        Files.copy(extractedBin, tmpTarget, StandardCopyOption.REPLACE_EXISTING)
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(tmpTarget)
+        }
+        moveReplacingWithAtomicFallback(tmpTarget, sharedBinPath)
+        if (!isWindowsOs(options.osName)) {
+            options.chmod(sharedBinPath)
+        }
+    } finally {
+        Files.deleteIfExists(tmpTarget)
+    }
+}
+
+internal fun moveReplacingWithAtomicFallback(
+    source: Path,
+    target: Path,
+    move: (Path, Path, Boolean) -> Path = { from, to, atomic ->
+        if (atomic) {
+            Files.move(
+                from,
+                to,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        } else {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING)
+        }
+    },
+) {
+    try {
+        move(source, target, true)
+    } catch (_: AtomicMoveNotSupportedException) {
+        move(source, target, false)
+    }
+}
+
+private fun isWindowsOs(osName: String): Boolean {
+    return osName.lowercase().contains("win")
 }
 
 private fun readRefactVersion(binPath: Path): String? {
@@ -244,23 +479,29 @@ private fun downloadFile(url: URI, destPath: Path) {
     var current = url
     repeat(5) {
         val connection = current.toURL().openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "refact-jetbrains")
-        val status = connection.responseCode
-        if (status in 300..399) {
-            val location = connection.getHeaderField("Location")
-            if (!location.isNullOrBlank()) {
-                current = current.resolve(location)
-                return@repeat
+        try {
+            connection.instanceFollowRedirects = true
+            connection.connectTimeout = DOWNLOAD_CONNECT_TIMEOUT_MS
+            connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+            connection.setRequestProperty("User-Agent", "refact-jetbrains")
+            val status = connection.responseCode
+            if (status in 300..399) {
+                val location = connection.getHeaderField("Location")
+                if (!location.isNullOrBlank()) {
+                    current = current.resolve(location)
+                    return@repeat
+                }
             }
+            if (status != 200) {
+                throw IOException("download failed $status $current")
+            }
+            connection.inputStream.use { input ->
+                Files.copy(input, destPath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            return
+        } finally {
+            connection.disconnect()
         }
-        if (status != 200) {
-            throw IOException("download failed $status $current")
-        }
-        connection.inputStream.use { input ->
-            Files.copy(input, destPath, StandardCopyOption.REPLACE_EXISTING)
-        }
-        return
     }
     throw IOException("too many redirects for $url")
 }

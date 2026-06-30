@@ -1,0 +1,28 @@
+.ghost {
+  position: fixed;
+  z-index: var(--rf-z-modal);
+  max-width: var(--rf-nav-w);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  box-shadow: var(--rf-elev-overlay);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  transform: translate(var(--rf-space-3), var(--rf-space-3));
+}
+
+/* While a pointer drag is in flight, neutralise iframe surfaces so they cannot
+ * swallow the pointer stream, and signal the grab globally. */
+:global(body[data-rf-dragging]) {
+  cursor: grabbing;
+  user-select: none;
+}
+
+:global(body[data-rf-dragging] iframe) {
+  pointer-events: none;
+}

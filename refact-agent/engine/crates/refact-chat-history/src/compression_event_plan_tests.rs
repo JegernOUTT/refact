@@ -24,6 +24,25 @@ fn plan(text: &str) -> ChatMessage {
     }
 }
 
+fn goal(text: &str) -> ChatMessage {
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "goal".to_string(),
+        json!({
+            "version": 1,
+            "active": true,
+            "status": "active",
+        }),
+    );
+    ChatMessage {
+        message_id: "goal-id".to_string(),
+        role: "goal".to_string(),
+        content: ChatContent::SimpleText(text.to_string()),
+        extra,
+        ..Default::default()
+    }
+}
+
 fn event(subkind: &str, source: &str, text: &str) -> ChatMessage {
     let mut extra = serde_json::Map::new();
     extra.insert(
@@ -39,6 +58,27 @@ fn event(subkind: &str, source: &str, text: &str) -> ChatMessage {
         content: ChatContent::SimpleText(text.to_string()),
         extra,
         ..Default::default()
+    }
+}
+
+#[test]
+fn goal_is_never_compressed_for_all_strength_values() {
+    let goal = goal("GOAL: keep current objective");
+    let goal_json = serde_json::to_string(&goal).unwrap();
+    let strengths = [
+        CompressionStrength::Absent,
+        CompressionStrength::Low,
+        CompressionStrength::Medium,
+        CompressionStrength::High,
+    ];
+
+    for strength in strengths {
+        assert_eq!(
+            exemption_for(&goal),
+            CompressionExemption::Never,
+            "{strength:?}"
+        );
+        assert_eq!(serde_json::to_string(&goal).unwrap(), goal_json);
     }
 }
 
@@ -70,6 +110,8 @@ fn event_exemptions_match_hidden_role_contract() {
     let notice = event("system_notice", "system", "notice");
     let summary = event("summarization_marker", "chat.summarizer", "summary");
     let plan_delta = event("plan_delta", "tool.set_plan", "append-only note");
+    let goal_delta = event("goal_delta", "tool.update_goal", "append-only note");
+    let goal_pursuit = event("goal_pursuit", "chat.goal", "pursuit turn");
 
     assert_eq!(event_subkind(&tick), Some("tick"));
     assert_eq!(exemption_for(&tick), CompressionExemption::DropOnAge);
@@ -80,4 +122,9 @@ fn event_exemptions_match_hidden_role_contract() {
         CompressionExemption::PreserveAnchor
     );
     assert_eq!(exemption_for(&plan_delta), CompressionExemption::Never);
+    assert_eq!(exemption_for(&goal_delta), CompressionExemption::Never);
+    assert_eq!(
+        exemption_for(&goal_pursuit),
+        CompressionExemption::PreserveAnchor
+    );
 }

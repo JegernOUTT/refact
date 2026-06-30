@@ -1,33 +1,37 @@
 import React, { useMemo } from "react";
 import { Badge, Card, Icon, StatusDot, Surface } from "../../../components/ui";
 import {
+  Activity,
   Bot,
   CalendarClock,
-  CheckCircle2,
-  Clock3,
   Coins,
+  Database,
   Gauge,
-  Hash,
-  MessageSquareText,
-  PiggyBank,
-  RefreshCw,
   ServerCog,
-  Sparkles,
+  ShieldCheck,
   Zap,
 } from "lucide-react";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
+  useGetOpenCodeUsageQuery,
+  type OpenCodeUsageData,
 } from "../../../services/refact/providers";
 import { useGetConfiguredProvidersQuery } from "../../../hooks";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
 import { StatCard } from "../components/StatCard";
+import { StatSection } from "../components/StatSection";
 import {
-  formatTokenCount,
   formatCostDisplay,
+  formatCostPrecise,
   formatDuration,
+  formatDurationLong,
+  formatNumber,
+  formatPercent,
+  formatThroughput,
+  formatTokenCount,
 } from "../utils/formatters";
 import { dateRangeToApiArgs } from "../utils/dateRange";
 import {
@@ -118,6 +122,27 @@ const QuotaLine: React.FC<{
     </div>
   );
 };
+
+type OpenCodeUsageWindowKey = keyof Pick<
+  OpenCodeUsageData,
+  "rolling" | "weekly" | "monthly"
+>;
+
+const OPENCODE_USAGE_WINDOWS: {
+  key: OpenCodeUsageWindowKey;
+  label: string;
+}[] = [
+  { key: "rolling", label: "Rolling" },
+  { key: "weekly", label: "Weekly" },
+  { key: "monthly", label: "Monthly" },
+];
+
+function hasOpenCodeQuotaData(data: OpenCodeUsageData): boolean {
+  return (
+    typeof data.balance === "number" ||
+    OPENCODE_USAGE_WINDOWS.some(({ key }) => Boolean(data[key]))
+  );
+}
 
 const ClaudeCodeInstanceCard: React.FC<{
   providerName: string;
@@ -260,6 +285,117 @@ const OpenAICodexInstanceCard: React.FC<{
   );
 };
 
+const OpenCodeInstanceCard: React.FC<{
+  providerName: string;
+  displayName: string;
+  data: OpenCodeUsageData;
+}> = ({ providerName, displayName, data }) => {
+  const windows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
+    key,
+    label,
+    window: data[key],
+  })).filter(
+    (
+      row,
+    ): row is {
+      key: OpenCodeUsageWindowKey;
+      label: string;
+      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
+    } => Boolean(row.window),
+  );
+  if (!hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <Card animated="rise" className={styles.quotaCard}>
+      <div className={styles.quotaHeader}>
+        <div className={styles.quotaLabel}>
+          <Icon icon={Bot} size="md" tone="accent" />
+          <span className={styles.quotaName}>{displayName}</span>
+          {data.plan_type && <Badge tone="accent">{data.plan_type}</Badge>}
+        </div>
+        <span className={styles.quotaProvider}>{providerName}</span>
+      </div>
+      {data.workspace_id && (
+        <span className={styles.quotaExtra}>
+          Workspace: {data.workspace_id}
+        </span>
+      )}
+      {typeof data.balance === "number" && (
+        <span className={styles.quotaExtra}>
+          Zen balance:{" "}
+          {data.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </span>
+      )}
+      {windows.map(({ key, label, window }) => (
+        <div key={key}>
+          <QuotaLine
+            label={
+              formatLimitWindowSeconds(window.limit_window_seconds) ?? label
+            }
+            pct={window.used_percent}
+            resetAt={window.reset_at}
+            limitReached={window.status === "rate-limited"}
+            windowSeconds={window.limit_window_seconds}
+          />
+          <UsageBar pct={window.used_percent} />
+        </div>
+      ))}
+    </Card>
+  );
+};
+
+const OpenCodeProviderQuotaCard: React.FC<{
+  providerName: string;
+  displayName: string;
+}> = ({ providerName, displayName }) => {
+  const { data: openCodeUsage } = useGetOpenCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 5 * 60_000 },
+  );
+  const data = openCodeUsage?.data;
+  if (!data || !hasOpenCodeQuotaData(data)) return null;
+
+  return (
+    <section className={styles.root}>
+      <h3 className={styles.sectionTitle}>
+        <Icon icon={Gauge} size="md" tone="accent" />
+        OpenCode Quota
+      </h3>
+      <div className={`${styles.quotaGrid} rf-stagger`}>
+        <OpenCodeInstanceCard
+          providerName={providerName}
+          displayName={displayName}
+          data={data}
+        />
+      </div>
+    </section>
+  );
+};
+
+const OpenCodeProviderQuotaSections: React.FC = () => {
+  const { data: providersData } = useGetConfiguredProvidersQuery();
+  const providers = useMemo(
+    () => providersData?.providers ?? [],
+    [providersData],
+  );
+  const openCodeInstances = useMemo(
+    () => providers.filter((p) => p.base_provider === "opencode" && p.enabled),
+    [providers],
+  );
+
+  return (
+    <>
+      {openCodeInstances.map((p) => (
+        <OpenCodeProviderQuotaCard
+          key={`opencode:${p.name}`}
+          providerName={p.name}
+          displayName={p.display_name}
+        />
+      ))}
+    </>
+  );
+};
+
 const ProviderQuotaSection: React.FC = () => {
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const providers = useMemo(
@@ -277,7 +413,6 @@ const ProviderQuotaSection: React.FC = () => {
       providers.filter((p) => p.base_provider === "openai_codex" && p.enabled),
     [providers],
   );
-
   if (claudeInstances.length === 0 && codexInstances.length === 0) return null;
 
   return (
@@ -308,6 +443,14 @@ const ProviderQuotaSection: React.FC = () => {
 
 type Props = { dateRange: DateRange };
 
+const formatErrorLabel = (key: string): string =>
+  key
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+    .join(" ");
+
 export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
     dateRangeToApiArgs(dateRange),
@@ -319,25 +462,58 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   const t = data?.totals;
   const hasStats = !!(t && t.total_calls > 0);
 
-  const avgPerConversation =
+  const activeDays = t?.active_days ?? 0;
+  const callsPerDay =
+    t && activeDays > 0 ? Math.round(t.total_calls / activeDays) : 0;
+  const avgTokensPerCall =
+    t && t.total_calls > 0 ? Math.round(t.total_tokens / t.total_calls) : 0;
+  const avgTokensPerConversation =
     t && t.total_conversations > 0
       ? Math.round(t.total_tokens / t.total_conversations)
       : 0;
-  const avgPerMessage =
-    t && t.total_messages_sent > 0
-      ? Math.round(t.total_tokens / t.total_messages_sent)
-      : 0;
-  const completionPct =
+  const completionShare =
     t && t.total_tokens > 0
-      ? Math.round((t.total_completion_tokens / t.total_tokens) * 100)
+      ? (t.total_completion_tokens / t.total_tokens) * 100
       : 0;
   const successRate =
-    t && t.total_calls > 0
-      ? Math.round((t.successful_calls / t.total_calls) * 100)
+    t && t.total_calls > 0 ? (t.successful_calls / t.total_calls) * 100 : 0;
+  const successTone =
+    successRate >= 95 ? "success" : successRate >= 80 ? "warning" : "danger";
+  const costPerConversation =
+    t && t.total_conversations > 0 && t.total_cost_usd
+      ? t.total_cost_usd / t.total_conversations
+      : t?.total_cost_usd == null
+        ? null
+        : 0;
+  const costPerMillionTokens =
+    t && t.total_tokens > 0 && t.total_cost_usd
+      ? (t.total_cost_usd / t.total_tokens) * 1_000_000
+      : t?.total_cost_usd == null
+        ? null
+        : 0;
+  const costPerDay =
+    t && activeDays > 0 && t.total_cost_usd
+      ? t.total_cost_usd / activeDays
+      : t?.total_cost_usd == null
+        ? null
+        : 0;
+  const errorCategories = data?.errors?.by_category ?? [];
+  const topError = errorCategories.at(0);
+  const topErrorLabel = topError ? formatErrorLabel(topError.key) : "None";
+  // Input tokens are split into uncached prompt + cache reads + cache writes;
+  // the hit rate is the share of all input tokens served from cache (0-100%).
+  const totalInputTokens = t
+    ? t.total_prompt_tokens +
+      t.total_cache_read_tokens +
+      t.total_cache_creation_tokens
+    : 0;
+  const cacheHitRate =
+    t && totalInputTokens > 0
+      ? (t.total_cache_read_tokens / totalInputTokens) * 100
       : 0;
-  const cacheEfficiency =
-    t && t.total_tokens > 0
-      ? Math.round((t.total_cache_read_tokens / t.total_tokens) * 100)
+  const cacheReuse =
+    t && t.total_cache_creation_tokens > 0
+      ? t.total_cache_read_tokens / t.total_cache_creation_tokens
       : 0;
 
   const topConversations = data?.top_conversations ?? [];
@@ -345,6 +521,7 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   return (
     <div className={styles.root}>
       <ProviderQuotaSection />
+      <OpenCodeProviderQuotaSections />
       {!hasStats && (
         <p className={styles.emptyText}>
           No usage data yet. Start chatting to see stats!
@@ -352,72 +529,160 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
       )}
       {hasStats && (
         <>
-          <div className={`${styles.cardsRow} rf-stagger`}>
-            <StatCard
-              icon={Zap}
-              title="Total Usage"
-              value={formatTokenCount(t.total_tokens)}
-              subtitle={`${formatTokenCount(
-                t.total_prompt_tokens,
-              )} read + ${formatTokenCount(t.total_completion_tokens)} written`}
-            />
-            <StatCard
-              icon={MessageSquareText}
-              title="Conversations"
-              value={t.total_conversations.toString()}
-              subtitle={`Each one used ~${formatTokenCount(
-                avgPerConversation,
-              )} tokens on average`}
-            />
-            <StatCard
-              icon={Hash}
-              title="Messages Sent"
-              value={t.total_messages_sent.toString()}
-              subtitle={`Each message cost ~${formatTokenCount(
-                avgPerMessage,
-              )} tokens on average`}
-            />
-            <StatCard
-              icon={Sparkles}
-              title="AI Wrote"
-              value={formatTokenCount(t.total_completion_tokens)}
-              subtitle={`${completionPct}% of total — most usage is from reading context`}
-            />
-            <StatCard
-              icon={CheckCircle2}
-              tone="success"
-              title="Success Rate"
-              value={`${successRate}%`}
-              subtitle={`${t.successful_calls} of ${t.total_calls} calls succeeded`}
-            />
-            <StatCard
-              icon={Coins}
-              tone="warning"
-              title="Total Cost"
-              value={formatCostDisplay(t.total_cost_usd)}
-              subtitle="across all providers"
-            />
-            <StatCard
-              icon={Clock3}
-              title="Avg Duration"
-              value={formatDuration(t.avg_duration_ms)}
-              subtitle="average per LLM call"
-            />
-            <StatCard
-              icon={PiggyBank}
-              tone="success"
-              title="Cache Efficiency"
-              value={`${cacheEfficiency}%`}
-              subtitle={`${formatTokenCount(
-                t.total_cache_read_tokens,
-              )} tokens read from cache`}
-            />
-            <StatCard
-              icon={RefreshCw}
-              title="Cache Created"
-              value={formatTokenCount(t.total_cache_creation_tokens)}
-              subtitle="tokens written to cache for future reuse"
-            />
+          <div className={styles.groups}>
+            <StatSection title="Volume & Activity" icon={Activity}>
+              <StatCard
+                title="Total Calls"
+                value={formatNumber(t.total_calls)}
+              />
+              <StatCard
+                title="Conversations"
+                value={formatNumber(t.total_conversations)}
+              />
+              <StatCard
+                title="Messages Sent"
+                value={formatNumber(t.total_messages_sent)}
+              />
+              <StatCard
+                title="Tasks"
+                value={formatNumber(t.total_tasks ?? 0)}
+              />
+              <StatCard
+                title="Agents"
+                value={formatNumber(t.total_agents ?? 0)}
+              />
+              <StatCard
+                title="Active Days"
+                value={formatNumber(t.active_days ?? 0)}
+              />
+              <StatCard
+                title="Calls / Day"
+                value={formatNumber(callsPerDay)}
+                subtitle={activeDays > 0 ? undefined : "—"}
+              />
+            </StatSection>
+
+            <StatSection title="Tokens" icon={Zap}>
+              <StatCard
+                title="Total Tokens"
+                value={formatTokenCount(t.total_tokens)}
+                subtitle={`${formatTokenCount(
+                  t.total_prompt_tokens,
+                )} read + ${formatTokenCount(
+                  t.total_completion_tokens,
+                )} written`}
+              />
+              <StatCard
+                title="Prompt (read)"
+                value={formatTokenCount(t.total_prompt_tokens)}
+              />
+              <StatCard
+                title="Completion (written)"
+                value={formatTokenCount(t.total_completion_tokens)}
+                tone="accent"
+              />
+              <StatCard
+                title="Avg Tokens / Call"
+                value={formatTokenCount(avgTokensPerCall)}
+              />
+              <StatCard
+                title="Avg Tokens / Conversation"
+                value={formatTokenCount(avgTokensPerConversation)}
+              />
+              <StatCard
+                title="Completion Share"
+                value={formatPercent(completionShare)}
+              />
+            </StatSection>
+
+            <StatSection title="Cost" icon={Coins}>
+              <StatCard
+                title="Total Cost"
+                value={formatCostDisplay(t.total_cost_usd)}
+                tone="warning"
+              />
+              <StatCard
+                title="Cost / Conversation"
+                value={formatCostPrecise(costPerConversation)}
+              />
+              <StatCard
+                title="Cost / 1M Tokens"
+                value={formatCostPrecise(costPerMillionTokens)}
+              />
+              <StatCard
+                title="Cost / Day"
+                value={formatCostPrecise(costPerDay)}
+              />
+            </StatSection>
+
+            <StatSection title="Performance" icon={Gauge}>
+              <StatCard
+                title="Avg Duration"
+                value={formatDuration(t.avg_duration_ms)}
+                subtitle="per LLM call"
+              />
+              <StatCard
+                title="Total Compute"
+                value={formatDurationLong(t.total_duration_ms)}
+              />
+              <StatCard
+                title="Throughput"
+                value={formatThroughput(
+                  t.total_completion_tokens,
+                  t.total_duration_ms,
+                )}
+                subtitle="completion tokens/sec"
+              />
+            </StatSection>
+
+            <StatSection title="Reliability" icon={ShieldCheck}>
+              <StatCard
+                title="Success Rate"
+                value={formatPercent(successRate)}
+                tone={successTone}
+                subtitle={`${formatNumber(
+                  t.successful_calls,
+                )} of ${formatNumber(t.total_calls)} succeeded`}
+              />
+              <StatCard
+                title="Failed Calls"
+                value={formatNumber(t.failed_calls)}
+                tone={t.failed_calls > 0 ? "danger" : "muted"}
+              />
+              <StatCard
+                title="Retried Calls"
+                value={formatNumber(t.retried_calls ?? 0)}
+              />
+              <StatCard
+                title="Top Error"
+                value={topErrorLabel}
+                subtitle={topError ? formatNumber(topError.count) : undefined}
+                tone={topError ? "danger" : "success"}
+              />
+            </StatSection>
+
+            <StatSection title="Cache" icon={Database}>
+              <StatCard
+                title="Cache Read"
+                value={formatTokenCount(t.total_cache_read_tokens)}
+                tone="success"
+              />
+              <StatCard
+                title="Cache Created"
+                value={formatTokenCount(t.total_cache_creation_tokens)}
+              />
+              <StatCard
+                title="Cache Hit Rate"
+                value={formatPercent(cacheHitRate)}
+                subtitle="of input tokens served from cache"
+                tone="success"
+              />
+              <StatCard
+                title="Cache Reuse"
+                value={cacheReuse > 0 ? `${cacheReuse.toFixed(1)}×` : "—"}
+                subtitle="tokens read per token cached"
+              />
+            </StatSection>
           </div>
 
           {topConversations.length > 0 && (

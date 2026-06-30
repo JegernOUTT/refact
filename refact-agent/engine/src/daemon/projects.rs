@@ -295,14 +295,10 @@ pub async fn open_project(
         }
     };
     state.sync_project_liveness(&entry).await;
-    let worker = match state.supervisor.ensure_worker(&entry).await {
+    let worker = match state.supervisor.ensure_ready_worker(&entry).await {
         Ok(worker) => worker,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
         }
     };
     let cron_pending = state.cron_pending(&entry.id).await;
@@ -505,7 +501,7 @@ mod tests {
             ];
             std::env::set_var(
                 "REFACT_DAEMON_WORKER_CMD",
-                format!("{} {}", python, script.display()),
+                shell_words::join([python, script.to_string_lossy().as_ref()]),
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::remove_var("FAKE_WORKER_CRASH");

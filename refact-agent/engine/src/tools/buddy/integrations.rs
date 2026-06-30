@@ -48,7 +48,19 @@ fn valid_provider(provider: &Value) -> bool {
 }
 
 fn prepare_forwarded_args(args: &HashMap<String, Value>) -> Result<HashMap<String, Value>, String> {
-    let known = ["title", "body", "labels", "provider", "confidence"];
+    let known = [
+        "title",
+        "body",
+        "labels",
+        "provider",
+        "confidence",
+        "error",
+        "source_file",
+        "tool_name",
+        "diagnostic_index",
+        "diagnostic_id",
+        "collected_at",
+    ];
     let mut unknown: Vec<_> = args
         .keys()
         .filter(|k| !known.contains(&k.as_str()))
@@ -115,6 +127,34 @@ fn prepare_forwarded_args(args: &HashMap<String, Value>) -> Result<HashMap<Strin
     if let Some(provider) = args.get("provider").and_then(Value::as_str) {
         forwarded.insert("provider".to_string(), Value::String(provider.to_string()));
     }
+    // Forward diagnostic/finding references so the issue runner can resolve a stored
+    // diagnostic or synthesize reproduction context. Free-text fields are redacted + capped.
+    for key in ["error", "source_file", "tool_name"] {
+        if let Some(text) = args.get(key).and_then(Value::as_str) {
+            let cleaned = capped_redacted(text, BODY_MAX_CHARS);
+            if !cleaned.trim().is_empty() {
+                forwarded.insert(key.to_string(), Value::String(cleaned));
+            }
+        }
+    }
+    if let Some(diagnostic_id) = args.get("diagnostic_id").and_then(Value::as_str) {
+        forwarded.insert(
+            "diagnostic_id".to_string(),
+            Value::String(diagnostic_id.to_string()),
+        );
+    }
+    if let Some(collected_at) = args.get("collected_at").and_then(Value::as_str) {
+        forwarded.insert(
+            "collected_at".to_string(),
+            Value::String(collected_at.to_string()),
+        );
+    }
+    if let Some(diagnostic_index) = args.get("diagnostic_index").and_then(Value::as_u64) {
+        forwarded.insert(
+            "diagnostic_index".to_string(),
+            Value::from(diagnostic_index),
+        );
+    }
     // The autonomous subchat owns the issue-filing decision; reaching this wrapper means confirmed.
     forwarded.insert(
         "confidence".to_string(),
@@ -142,7 +182,13 @@ impl Tool for ToolBuddyOpenIssue {
                     "title": {"type": "string"},
                     "body": {"type": "string"},
                     "labels": {"type": "array", "items": {"type": "string"}},
-                    "provider": {"type": "string"}
+                    "provider": {"type": "string", "description": "Issue tracker provider: 'github' or 'gitlab'. Defaults to the configured tracker."},
+                    "error": {"type": "string", "description": "Error/finding text. Provide this (with source_file or tool_name) when the issue is not tied to a stored diagnostic."},
+                    "source_file": {"type": "string", "description": "Source file the finding relates to. Gives reproduction context for the issue gate."},
+                    "tool_name": {"type": "string", "description": "Tool the finding relates to. Gives reproduction context for the issue gate."},
+                    "diagnostic_index": {"type": "number", "description": "Index of a stored Buddy diagnostic to attach."},
+                    "diagnostic_id": {"type": "string", "description": "Stable id of a stored Buddy diagnostic to attach."},
+                    "collected_at": {"type": "string", "description": "collected_at timestamp (RFC3339) of a stored Buddy diagnostic to attach."}
                 },
                 "required": ["title", "body"],
                 "additionalProperties": false
@@ -327,5 +373,59 @@ mod tests {
         assert_eq!(out["title"], json!("Simple bug"));
         assert_eq!(out["body"], json!("Repro steps"));
         assert_eq!(out["confidence"], json!("confirmed"));
+    }
+
+    #[test]
+    fn buddy_open_issue_forwards_finding_fields() {
+        let out = forwarded(vec![
+            ("title", json!("Unsafe default")),
+            ("body", json!("Risky config")),
+            ("error", json!("hardcoded credential in config")),
+            ("source_file", json!("src/config.rs")),
+            ("tool_name", json!("security_scan")),
+        ]);
+
+        assert_eq!(out["error"], json!("hardcoded credential in config"));
+        assert_eq!(out["source_file"], json!("src/config.rs"));
+        assert_eq!(out["tool_name"], json!("security_scan"));
+        assert_eq!(out["confidence"], json!("confirmed"));
+    }
+
+    #[test]
+    fn buddy_open_issue_forwards_diagnostic_reference() {
+        let out = forwarded(vec![
+            ("title", json!("Crash")),
+            ("body", json!("Stack trace")),
+            ("diagnostic_id", json!("abc123")),
+            ("collected_at", json!("2026-06-29T00:00:00+00:00")),
+            ("diagnostic_index", json!(2)),
+        ]);
+
+        assert_eq!(out["diagnostic_id"], json!("abc123"));
+        assert_eq!(out["collected_at"], json!("2026-06-29T00:00:00+00:00"));
+        assert_eq!(out["diagnostic_index"], json!(2));
+    }
+
+    #[test]
+    fn buddy_open_issue_redacts_forwarded_error() {
+        let out = forwarded(vec![
+            ("title", json!("Leak")),
+            ("body", json!("details")),
+            ("error", json!("token=abc123 leaked")),
+            ("source_file", json!("src/a.rs")),
+        ]);
+
+        assert_eq!(out["error"], json!("token=[REDACTED] leaked"));
+    }
+
+    #[test]
+    fn buddy_open_issue_skips_blank_finding_fields() {
+        let out = forwarded(vec![
+            ("title", json!("Bug")),
+            ("body", json!("Details")),
+            ("error", json!("   ")),
+        ]);
+
+        assert!(!out.contains_key("error"));
     }
 }

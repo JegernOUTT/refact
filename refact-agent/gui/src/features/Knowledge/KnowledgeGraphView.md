@@ -6,14 +6,17 @@ A simplified, pure graph renderer for displaying memory nodes and their relation
 
 ## Features
 
-- **Doc-only rendering**: Only displays `doc_code`, `doc_decision`, `doc_preference`, `doc_pattern`, and `doc_lesson` nodes
+- **Doc-only rendering**: Displays active `doc` / `doc_*` nodes (excludes deprecated, archived, trajectory, and the `tag`/`file`/`entity` types)
 - **Edge filtering**: Automatically filters edges to only show connections between doc nodes
-- **Node coloring by kind**:
-  - `doc_code` → `--rf-color-info`
-  - `doc_decision` → `--rf-color-accent`
-  - `doc_preference` → `--rf-color-success`
-  - `doc_pattern` → `--rf-color-warning`
-  - `doc_lesson` → `--rf-color-info`
+- **Node coloring by kind**: The kind is derived in `resolveNodeKind` from the node's frontmatter `kind` (falling back to `node_type` with the `doc_` prefix stripped). Colors come from `useKnowledgeGraphTheme`, which maps the kinds that actually exist in the graph to semantic tokens:
+  - `memory` (the dominant kind) → `--rf-color-accent`
+  - `insight`, `code` → `--rf-color-info`
+  - `convention`, `process`, `preference`, `lesson` → `--rf-color-success`
+  - `domain`, `decision`, `pattern` → `--rf-color-warning`
+  - `task-report` → `--rf-color-danger`
+  - `trajectory` → `--rf-color-faint`
+  - any other / unknown kind → `colors.kindDefault` (`--rf-color-muted`)
+- **Theme-correct colors**: `useKnowledgeGraphTheme` resolves tokens against the live `.radix-themes` root (where `data-appearance` lives) using a hidden probe, so `var()`/`color-mix()` are flattened to concrete colors and the graph stays legible on both the dark and light themes. Reading from `document.documentElement` returned the hard-wired dark palette and made nodes invisible on the light theme.
 - **Node sizing by degree**: More connected nodes appear larger
 - **Interactive selection**: Click nodes to select, click background to deselect
 - **Force-directed layout**: Uses fcose algorithm for optimal link visualization
@@ -57,8 +60,8 @@ function MyComponent() {
 
 ### Nodes
 
-- **Included**: `doc_code`, `doc_decision`, `doc_preference`, `doc_pattern`, `doc_lesson`
-- **Excluded**: `doc_deprecated`, `doc_trajectory`, `tag`, `file`, `entity`, and any other types
+- **Included**: active doc nodes — `doc` and any `doc_*` kind (e.g. `doc_code`, `doc_decision`) via `isActiveKnowledgeDocNode`
+- **Excluded**: `doc_deprecated`, `doc_archived`, `doc_trajectory`, `tag`, `file`, `entity`, and any other types
 
 ### Edges
 

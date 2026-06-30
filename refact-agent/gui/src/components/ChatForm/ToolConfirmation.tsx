@@ -12,10 +12,10 @@ import {
   ToolCall,
 } from "../../services/refact";
 import {
-  selectChatId,
-  selectMessages,
+  selectMessagesById,
   setAutoApproveEditingTools,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
 import { Badge, Button, Icon, Surface } from "../ui";
 
@@ -98,8 +98,8 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   pauseReasons,
 }) => {
   const dispatch = useAppDispatch();
-  const messages = useAppSelector(selectMessages);
-  const chatId = useAppSelector(selectChatId);
+  const chatId = useThreadId();
+  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
 
   const toolCallsById = useMemo(() => {
     const map = new Map<string, ToolCall>();
@@ -165,7 +165,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     .filter((r) => r.type === "denial")
     .map((r) => r.toolName);
 
-  const { respondToTools } = useChatActions();
+  const { respondToTools } = useChatActions(chatId);
 
   const confirmToolUsage = useCallback(() => {
     const decisions = toolCallIds.map((id) => ({

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -14,7 +15,7 @@ use futures::Stream;
 use hyper::{Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::state::DaemonState;
@@ -39,6 +40,8 @@ struct ShutdownRequest {
 struct EventsQuery {
     #[serde(default)]
     follow: bool,
+    after_seq: Option<u64>,
+    last_event_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,10 +56,20 @@ fn default_log_tail() -> usize {
 }
 
 pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
-    let ip = config
+    let requested_ip = config
         .bind
         .parse::<IpAddr>()
         .map_err(|error| format!("invalid daemon bind address '{}': {error}", config.bind))?;
+    crate::daemon::auth::validate_hooks_auth_policy(config, requested_ip)?;
+    let ip = if !requested_ip.is_loopback() && !crate::daemon::auth::daemon_lan_auth_ok(config) {
+        tracing::warn!(
+            "daemon bind {requested_ip} is non-loopback but no auth credentials are configured; \
+             falling back to 127.0.0.1 (enable auth with a username/password to allow LAN access)"
+        );
+        IpAddr::from([127, 0, 0, 1])
+    } else {
+        requested_ip
+    };
     let addr = SocketAddr::new(ip, config.port);
     let listener = TcpListener::bind(addr)
         .map_err(|error| format!("failed to bind daemon control API at {addr}: {error}"))?;
@@ -67,9 +80,29 @@ pub fn bind_listener(config: &DaemonConfig) -> Result<TcpListener, String> {
 }
 
 pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
-    let auth_token = state.auth_token.clone();
-    Router::new()
+    let (auth_token, auth_username, auth_password) = if state.config.auth.enabled {
+        (
+            state.auth_token.clone(),
+            state.config.auth.username.clone(),
+            state.config.auth.password.clone(),
+        )
+    } else {
+        (None, None, None)
+    };
+    let hook_token = state.config.hooks.token.clone();
+    let open_hooks_allowed =
+        crate::daemon::auth::hooks_unauthenticated_allowed_for_bind(&state.config.bind);
+    let control = Router::new()
         .route("/", get(crate::daemon::web::handle_project_picker))
+        .route("/hooks", post(crate::daemon::hooks::bare))
+        .route("/hooks/", post(crate::daemon::hooks::bare))
+        .route("/hooks/wake", post(crate::daemon::hooks::wake))
+        .route("/hooks/agent", post(crate::daemon::hooks::agent))
+        .route("/hooks/:name", post(crate::daemon::hooks::named))
+        .route(
+            "/p/:project_id",
+            get(crate::daemon::web::handle_project_gui_redirect),
+        )
         .route(
             "/p/:project_id/",
             get(crate::daemon::web::handle_project_gui_index),
@@ -78,11 +111,15 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/dist/chat/*path",
             get(crate::daemon::web::handle_daemon_gui_asset),
         )
+        .route("/cron/status", get(cron_status))
         .route("/daemon/v1/status", get(status))
+        .route("/daemon/v1/settings", get(get_settings))
+        .route("/daemon/v1/settings", post(update_settings))
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
         .route("/daemon/v1/workers", get(workers))
         .route("/daemon/v1/logs", get(logs))
+        .route("/daemon/v1/logs/stream", get(logs_stream))
         .route("/daemon/v1/worker-status", post(worker_status))
         .route(
             "/daemon/v1/projects/open",
@@ -112,6 +149,8 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             "/daemon/v1/projects/:id/stop",
             post(crate::daemon::projects::stop_project_worker),
         )
+        .layer(DefaultBodyLimit::disable());
+    let proxy = Router::new()
         .route("/p/:project_id/v1", any(crate::daemon::proxy::proxy_v1))
         .route(
             "/p/:project_id/v1/*path",
@@ -119,12 +158,30 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         )
         .layer(DefaultBodyLimit::max(
             crate::daemon::proxy::PROXY_BODY_LIMIT,
-        ))
+        ));
+    control
+        .merge(proxy)
         .layer(middleware::from_fn(move |req, next| {
-            let token = auth_token.clone();
-            crate::daemon::auth::check(token, req, next)
+            let policy = crate::daemon::auth::DaemonAuthPolicy {
+                token: auth_token.clone(),
+                username: auth_username.clone(),
+                password: auth_password.clone(),
+                hook_token: hook_token.clone(),
+                open_hooks_allowed,
+            };
+            crate::daemon::auth::enforce(policy, req, next)
         }))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+                    origin
+                        .to_str()
+                        .map(crate::daemon::auth::origin_is_loopback)
+                        .unwrap_or(false)
+                })),
+        )
         .with_state((state, port))
 }
 
@@ -136,7 +193,7 @@ pub async fn serve(
     let router = make_router(state.clone(), port);
     let server = Server::from_tcp(listener)
         .map_err(|error| format!("failed to create daemon server: {error}"))?
-        .serve(router.into_make_service())
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(wait_for_shutdown(state));
     server
         .await
@@ -172,6 +229,12 @@ async fn workers(
     Json(state.worker_rows().await)
 }
 
+async fn cron_status(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+) -> Json<crate::daemon::cron_clock::CronClockStatus> {
+    Json(crate::daemon::cron_clock::status(&state).await)
+}
+
 async fn logs(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     Query(query): Query<LogsQuery>,
@@ -188,6 +251,292 @@ async fn logs(
         )
             .into_response(),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct SettingsResponse {
+    bind: String,
+    lan_enabled: bool,
+    mdns_enabled: bool,
+    auth_enabled: bool,
+    username: Option<String>,
+    has_password: bool,
+    hostname_local: String,
+    urls: crate::daemon::state::DaemonUrls,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSettingsRequest {
+    lan_enabled: bool,
+    mdns_enabled: bool,
+    auth_enabled: bool,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    bind.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+async fn get_settings(
+    State((state, port)): State<(Arc<DaemonState>, u16)>,
+) -> Json<SettingsResponse> {
+    let info = state.daemon_info(port, state.config.bind.clone());
+    let lan_enabled = !bind_is_loopback(&state.config.bind);
+    let mdns_enabled = state.config.mdns.enabled.unwrap_or(lan_enabled);
+    Json(SettingsResponse {
+        bind: state.config.bind.clone(),
+        lan_enabled,
+        mdns_enabled,
+        auth_enabled: state.config.auth.enabled,
+        username: state.config.auth.username.clone(),
+        has_password: state
+            .config
+            .auth
+            .password
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
+        hostname_local: info.hostname_local,
+        urls: info.urls,
+    })
+}
+
+async fn update_settings(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Json(request): Json<UpdateSettingsRequest>,
+) -> Response {
+    let mut config = state.config.clone();
+    config.bind = if request.lan_enabled {
+        "0.0.0.0".to_string()
+    } else {
+        "127.0.0.1".to_string()
+    };
+    config.mdns.enabled = Some(request.mdns_enabled);
+    config.auth.enabled = request.auth_enabled;
+    config.auth.username = request
+        .username
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(password) = request.password.filter(|value| !value.is_empty()) {
+        config.auth.password = Some(password);
+    }
+    if request.lan_enabled {
+        if !config.auth.enabled {
+            return settings_error("Enabling LAN access requires authentication to be enabled.");
+        }
+        let has_username = config
+            .auth
+            .username
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+        let has_password = config
+            .auth
+            .password
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+        if !has_username || !has_password {
+            return settings_error("Enabling LAN access requires a username and password.");
+        }
+    }
+    if config.auth.enabled
+        && config
+            .auth
+            .token
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    {
+        config.auth.token = Some(crate::daemon::auth::generate_token());
+    }
+    if let Err(error) =
+        crate::daemon::config::save_to_path(&config, &crate::daemon::paths::daemon_config_path())
+            .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response();
+    }
+    spawn_settings_relaunch();
+    state.request_shutdown("settings_changed".to_string());
+    Json(json!({"success": true, "restarting": true})).into_response()
+}
+
+fn settings_error(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": message}))).into_response()
+}
+
+fn spawn_settings_relaunch() {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!("settings relaunch: cannot resolve current executable: {error}");
+            return;
+        }
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("daemon")
+        .env("REFACT_DAEMON_RELAUNCH", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    if let Err(error) = command.spawn() {
+        tracing::warn!("settings relaunch spawn failed: {error}");
+    }
+}
+
+async fn logs_stream(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    let path = match log_path(&state, query.project_id.as_deref()).await {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let initial_tail = query.tail.clamp(1, 10_000);
+    let mut shutdown_rx = state.shutdown_receiver();
+    let stream = async_stream::stream! {
+        let initial = tail_file(&path, initial_tail).await.unwrap_or_default();
+        for line in initial.lines() {
+            yield Ok::<Event, Infallible>(Event::default().data(line.to_string()));
+        }
+        let mut cursor = LogTailCursor::default();
+        if let Ok(mut file) = tokio::fs::File::open(&path).await {
+            if let Ok(meta) = file.metadata().await {
+                let len = meta.len();
+                cursor.head = log_head(&mut file, len).await;
+                cursor.offset = len;
+            }
+        }
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => break,
+                _ = tokio::time::sleep(Duration::from_millis(1000)) => {
+                    let (text, next, error) = read_log_tail(&path, cursor).await;
+                    cursor = next;
+                    if let Some(error) = error {
+                        yield Ok(Event::default().data(format!("[refact: {error}]")));
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        let redacted = crate::daemon::auth::redact_daemon_query_token(&text);
+                        for line in redacted.lines() {
+                            yield Ok(Event::default().data(line.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+const LOG_STREAM_READ_CAP: u64 = 256 * 1024;
+const LOG_STREAM_HEAD_LEN: u64 = 256;
+
+#[derive(Default)]
+struct LogTailCursor {
+    offset: u64,
+    head: Vec<u8>,
+}
+
+async fn log_head(file: &mut tokio::fs::File, len: u64) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let want = len.min(LOG_STREAM_HEAD_LEN);
+    if want == 0 {
+        return Vec::new();
+    }
+    if file.seek(std::io::SeekFrom::Start(0)).await.is_err() {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; want as usize];
+    match file.read_exact(&mut buf).await {
+        Ok(_) => buf,
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn read_log_tail(
+    path: &std::path::Path,
+    cursor: LogTailCursor,
+) -> (String, LogTailCursor, Option<String>) {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (String::new(), LogTailCursor::default(), None);
+        }
+        Err(error) => {
+            return (
+                String::new(),
+                cursor,
+                Some(format!("failed to open log: {error}")),
+            )
+        }
+    };
+    let len = match file.metadata().await {
+        Ok(meta) => meta.len(),
+        Err(error) => {
+            return (
+                String::new(),
+                cursor,
+                Some(format!("failed to stat log: {error}")),
+            )
+        }
+    };
+    let head = log_head(&mut file, len).await;
+    let rotated = !cursor.head.is_empty() && (head != cursor.head || len < cursor.offset);
+    let start = if rotated { 0 } else { cursor.offset.min(len) };
+    if len <= start {
+        return (String::new(), LogTailCursor { offset: len, head }, None);
+    }
+    let to_read = (len - start).min(LOG_STREAM_READ_CAP);
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return (
+            String::new(),
+            LogTailCursor {
+                offset: start,
+                head,
+            },
+            Some("failed to seek log".to_string()),
+        );
+    }
+    let mut buf = vec![0u8; to_read as usize];
+    if let Err(error) = file.read_exact(&mut buf).await {
+        return (
+            String::new(),
+            LogTailCursor {
+                offset: start,
+                head,
+            },
+            Some(format!("failed to read log: {error}")),
+        );
+    }
+    (
+        String::from_utf8_lossy(&buf).to_string(),
+        LogTailCursor {
+            offset: start + to_read,
+            head,
+        },
+        None,
+    )
 }
 
 async fn worker_status(
@@ -208,21 +557,55 @@ async fn worker_status(
 
 async fn events(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let snapshot = state.events.snapshot().await;
-    let mut rx = state.events.subscribe();
+    let rx = query.follow.then(|| state.events.subscribe());
+    let cursor = event_cursor(&headers, &query).unwrap_or(0);
+    let initial = state.events.replay_after(cursor).await;
+    let events = state.events.clone();
     let mut shutdown_rx = state.shutdown_receiver();
     let stream = async_stream::stream! {
-        for event in snapshot {
-            yield Ok(sse_event(&event));
+        let mut last_seq = cursor;
+        if let Some(gap) = initial.gap {
+            let event = resync_event(&gap);
+            if event.seq > last_seq {
+                last_seq = event.seq;
+                yield Ok(sse_event(&event));
+            }
         }
-        if query.follow {
+        for event in initial.events {
+            if event.seq > last_seq {
+                last_seq = event.seq;
+                yield Ok(sse_event(&event));
+            }
+        }
+        if let Some(mut rx) = rx {
             loop {
                 tokio::select! {
                     result = rx.recv() => match result {
-                        Ok(event) => yield Ok(sse_event(&event)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Ok(event) => {
+                            if event.seq > last_seq {
+                                last_seq = event.seq;
+                                yield Ok(sse_event(&event));
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let replay = events.replay_after(last_seq).await;
+                            if let Some(gap) = replay.gap {
+                                let event = resync_event(&gap);
+                                if event.seq > last_seq {
+                                    last_seq = event.seq;
+                                    yield Ok(sse_event(&event));
+                                }
+                            }
+                            for event in replay.events {
+                                if event.seq > last_seq {
+                                    last_seq = event.seq;
+                                    yield Ok(sse_event(&event));
+                                }
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                     _ = shutdown_rx.recv() => break,
@@ -231,6 +614,34 @@ async fn events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn event_cursor(headers: &HeaderMap, query: &EventsQuery) -> Option<u64> {
+    query
+        .after_seq
+        .or(query.last_event_id)
+        .or_else(|| header_seq(headers, "last-event-id"))
+}
+
+fn header_seq(headers: &HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn resync_event(gap: &crate::daemon::events::EventReplayGap) -> crate::daemon::events::DaemonEvent {
+    crate::daemon::events::DaemonEvent {
+        seq: gap.oldest_seq.saturating_sub(1),
+        ts_ms: crate::daemon::state::now_ms(),
+        kind: "daemon_events_resync_required".to_string(),
+        project_id: None,
+        payload: json!({
+            "requested_after_seq": gap.requested_after_seq,
+            "oldest_seq": gap.oldest_seq,
+            "latest_seq": gap.latest_seq,
+        }),
+    }
 }
 
 async fn log_path(state: &Arc<DaemonState>, project_id: Option<&str>) -> Result<PathBuf, Response> {
@@ -275,11 +686,12 @@ async fn tail_file(path: &std::path::Path, tail: usize) -> Result<String, String
     if !out.is_empty() {
         out.push('\n');
     }
-    Ok(crate::daemon::auth::redact_daemon_token(&out))
+    Ok(crate::daemon::auth::redact_daemon_query_token(&out))
 }
 
 fn sse_event(event: &crate::daemon::events::DaemonEvent) -> Event {
     Event::default()
+        .id(event.seq.to_string())
         .event("daemon")
         .data(serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()))
 }
@@ -314,6 +726,43 @@ mod tests {
         assert!(bind_listener(&config).is_err());
     }
 
+    #[test]
+    fn daemon_server_bind_enforces_loopback_open_hooks_policy() {
+        let loopback = DaemonConfig {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let listener = bind_listener(&loopback).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+
+        let wildcard = DaemonConfig {
+            bind: "0.0.0.0".to_string(),
+            hooks: crate::daemon::config::HooksConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let error = bind_listener(&wildcard).unwrap_err();
+        assert!(error.contains("hooks without hooks.token or daemon auth"));
+    }
+
+    #[test]
+    fn daemon_server_bind_falls_back_to_loopback_without_lan_auth() {
+        let wildcard = DaemonConfig {
+            bind: "0.0.0.0".to_string(),
+            port: 0,
+            ..DaemonConfig::default()
+        };
+        let listener = bind_listener(&wildcard).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
     #[tokio::test]
     async fn daemon_server_status_router_reports_workers_zero() {
         use hyper::{Body, Request, StatusCode};
@@ -339,6 +788,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_cron_status_reports_pending_clock_shape() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        state.set_cron_pending("project-a", Some(200_000)).await;
+        state.set_cron_pending("project-b", Some(150_000)).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .uri("/cron/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["jobs"], 2);
+        assert_eq!(json["next_wake_ms"], 60_000);
+    }
+
+    #[tokio::test]
     async fn daemon_server_auth_disabled_passthrough() {
         use hyper::{Body, Request, StatusCode};
         use tower::ServiceExt;
@@ -360,9 +835,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_settings_rejects_lan_without_credentials() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/daemon/v1/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"lan_enabled":true,"mdns_enabled":true,"auth_enabled":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn daemon_server_auth_enabled_rejects_missing_token() {
         use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
         use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -370,6 +870,7 @@ mod tests {
             auth: AuthConfig {
                 enabled: true,
                 token: Some("secret".to_string()),
+                ..Default::default()
             },
             ..DaemonConfig::default()
         };
@@ -378,24 +879,25 @@ mod tests {
             EventBus::new(dir.path().join("events.jsonl")),
             Some("secret".to_string()),
         );
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/daemon/v1/shutdown")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"reason":"t"}"#))
-                    .unwrap(),
-            )
-            .await
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/daemon/v1/shutdown")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"reason":"t"}"#))
             .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn daemon_server_auth_enabled_accepts_correct_token() {
         use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
         use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -403,6 +905,7 @@ mod tests {
             auth: AuthConfig {
                 enabled: true,
                 token: Some("secret".to_string()),
+                ..Default::default()
             },
             ..DaemonConfig::default()
         };
@@ -411,25 +914,97 @@ mod tests {
             EventBus::new(dir.path().join("events.jsonl")),
             Some("secret".to_string()),
         );
-        let response = make_router(state, 8488)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/daemon/v1/shutdown")
-                    .header("content-type", "application/json")
-                    .header("Authorization", "Bearer secret")
-                    .body(Body::from(r#"{"reason":"t"}"#))
-                    .unwrap(),
-            )
-            .await
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/daemon/v1/shutdown")
+            .header("content-type", "application/json")
+            .header("Authorization", "Bearer secret")
+            .body(Body::from(r#"{"reason":"t"}"#))
             .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_enabled_accepts_basic_auth_from_remote() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use base64::Engine;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                username: Some("alice".to_string()),
+                password: Some("hunter2".to_string()),
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let encoded = base64::prelude::BASE64_STANDARD.encode("alice:hunter2");
+        let mut request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header("Authorization", format!("Basic {encoded}"))
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_server_auth_enabled_loopback_needs_no_credentials() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                username: Some("alice".to_string()),
+                password: Some("hunter2".to_string()),
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+        let mut request = Request::builder()
+            .uri("/daemon/v1/projects")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn daemon_server_auth_enabled_status_exempt() {
         use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
         use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -437,6 +1012,7 @@ mod tests {
             auth: AuthConfig {
                 enabled: true,
                 token: Some("secret".to_string()),
+                ..Default::default()
             },
             ..DaemonConfig::default()
         };
@@ -445,16 +1021,48 @@ mod tests {
             EventBus::new(dir.path().join("events.jsonl")),
             Some("secret".to_string()),
         );
+        let mut request = Request::builder()
+            .uri("/daemon/v1/status")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn daemon_control_plane_body_is_not_proxy_limited() {
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let body = serde_json::json!({
+            "project_id": "missing",
+            "pid": 1,
+            "lsp_clients": 0,
+            "busy_chats": 0,
+            "exec_running": 0,
+            "last_activity_ts": 0,
+            "padding": "x".repeat(crate::daemon::proxy::PROXY_BODY_LIMIT + 1024),
+        })
+        .to_string();
+
         let response = make_router(state, 8488)
             .oneshot(
                 Request::builder()
-                    .uri("/daemon/v1/status")
-                    .body(Body::empty())
+                    .method("POST")
+                    .uri("/daemon/v1/worker-status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -488,6 +1096,7 @@ mod tests {
             WorkerStatusReport {
                 project_id: project_id.to_string(),
                 pid,
+                instance_token: "token".to_string(),
                 lsp_clients,
                 busy_chats,
                 exec_running: 0,
@@ -509,6 +1118,7 @@ mod tests {
                 &entry.id,
                 123,
                 crate::daemon::supervisor::WorkerState::Ready,
+                "token",
             )
             .await;
 
@@ -570,6 +1180,7 @@ mod tests {
             WorkerStatusReport {
                 project_id: project_id.to_string(),
                 pid,
+                instance_token: "token".to_string(),
                 lsp_clients: 1,
                 busy_chats: 0,
                 exec_running: 0,
@@ -590,6 +1201,7 @@ mod tests {
                 &entry.id,
                 123,
                 crate::daemon::supervisor::WorkerState::Ready,
+                "token",
             )
             .await;
 

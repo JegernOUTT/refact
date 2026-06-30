@@ -166,7 +166,7 @@ mod tests {
             ];
             std::env::set_var(
                 "REFACT_DAEMON_WORKER_CMD",
-                format!("{} {}", python, script.display()),
+                shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::remove_var("FAKE_WORKER_CRASH");
@@ -343,11 +343,24 @@ mod tests {
         WorkerStatusReport {
             project_id: project_id.to_string(),
             pid: 7,
+            instance_token: "token".to_string(),
             lsp_clients: 0,
             busy_chats: 0,
             exec_running: 0,
             last_activity_ts: 0,
         }
+    }
+
+    async fn store_idle_report_for_worker(state: &DaemonState, project_id: &str) {
+        let worker = state.supervisor.worker_info(project_id).await.unwrap();
+        let mut report = idle_report(project_id);
+        report.pid = worker.pid.unwrap();
+        report.instance_token = state
+            .supervisor
+            .test_worker_instance_token(project_id)
+            .await
+            .unwrap();
+        state.store_worker_status(report).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -359,7 +372,7 @@ mod tests {
         let (_dir, state, entry) = harness(2).await;
         let worker = state.supervisor.ensure_worker(&entry).await.unwrap();
         assert_eq!(worker.state, WorkerState::Ready);
-        state.store_worker_status(idle_report(&entry.id)).await;
+        store_idle_report_for_worker(&state, &entry.id).await;
 
         let idle_task = tokio::spawn(run(state.clone(), Duration::from_millis(25)));
         wait_for_stopped(&state, &entry.id).await;
@@ -401,9 +414,7 @@ mod tests {
         };
         state.sync_project_liveness(&pinned_entry).await;
         state.supervisor.ensure_worker(&pinned_entry).await.unwrap();
-        state
-            .store_worker_status(idle_report(&pinned_entry.id))
-            .await;
+        store_idle_report_for_worker(&state, &pinned_entry.id).await;
         tokio::time::sleep(Duration::from_millis(1100)).await;
         tick_at(&state, now_ms()).await;
         assert_eq!(
@@ -419,7 +430,7 @@ mod tests {
 
         let (_dir, state, entry) = harness(1).await;
         state.supervisor.ensure_worker(&entry).await.unwrap();
-        state.store_worker_status(idle_report(&entry.id)).await;
+        store_idle_report_for_worker(&state, &entry.id).await;
         state
             .set_cron_pending(&entry.id, Some(now_ms() + CRON_SOON_MS))
             .await;
@@ -440,7 +451,7 @@ mod tests {
         };
         let (_dir, state, entry) = harness(1).await;
         state.supervisor.ensure_worker(&entry).await.unwrap();
-        state.store_worker_status(idle_report(&entry.id)).await;
+        store_idle_report_for_worker(&state, &entry.id).await;
         tokio::time::sleep(Duration::from_millis(1100)).await;
 
         let project_id = entry.id.clone();
@@ -475,6 +486,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let mut report = idle_report(&entry.id);
         report.last_activity_ts = now_ms();
+        let worker = state.supervisor.worker_info(&entry.id).await.unwrap();
+        report.pid = worker.pid.unwrap();
+        report.instance_token = state
+            .supervisor
+            .test_worker_instance_token(&entry.id)
+            .await
+            .unwrap();
         state.store_worker_status(report).await;
 
         tick_at(&state, now_ms()).await;

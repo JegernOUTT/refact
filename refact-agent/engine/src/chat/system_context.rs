@@ -8,10 +8,9 @@ use git2::Repository;
 
 use crate::at_commands::at_tree::TreeNode;
 use crate::call_validation::{ChatMessage, ChatContent, ContextFile};
-use crate::files_correction::{get_project_dirs, paths_from_anywhere};
-use crate::memories::{load_memories_by_tags, MemoRecord};
-use crate::chat::config::limits;
-use crate::yaml_configs::project_information::{load_project_information_config, to_relative_path};
+use crate::files_correction::{get_unscoped_project_dirs, paths_from_anywhere};
+use crate::memories::{load_memories_by_tags_from_index, MemoRecord};
+use crate::yaml_configs::project_information::{load_project_information_config, override_key};
 
 pub const PROJECT_CONTEXT_MARKER: &str = "project_context";
 use crate::files_in_workspace::detect_vcs_for_a_file_path;
@@ -1263,7 +1262,7 @@ pub async fn generate_compact_project_tree(
     max_depth: usize,
 ) -> Result<String, String> {
     let paths = paths_from_anywhere(gcx.clone()).await;
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
     let mut result = String::new();
 
@@ -1476,13 +1475,17 @@ fn print_compact_tree(
 const MEMORY_TAGS_FOR_CONTEXT: &[&str] = &["preference", "lesson", "insight", "pattern"];
 const MAX_MEMORIES_IN_CONTEXT: usize = 30;
 
-fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+pub fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}\n[TRUNCATED]", truncated)
+        return s.to_string();
     }
+    const MARKER: &str = "\n[TRUNCATED]";
+    let marker_len = MARKER.chars().count();
+    if max_chars <= marker_len {
+        return s.chars().take(max_chars).collect();
+    }
+    let kept: String = s.chars().take(max_chars - marker_len).collect();
+    format!("{}{}", kept, MARKER)
 }
 
 pub async fn gather_system_context(
@@ -1506,7 +1509,7 @@ pub async fn gather_system_context(
     }
 
     let system_info = SystemInfo::gather();
-    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let project_dirs = get_unscoped_project_dirs(gcx.clone()).await;
 
     let need_environments = config.sections.detected_environments.enabled
         || config.sections.environment_instructions.enabled;
@@ -1527,23 +1530,30 @@ pub async fn gather_system_context(
         vec![]
     };
 
-    let get_override_key =
-        |abs_path: &str| -> Option<String> { to_relative_path(abs_path, &project_dirs) };
-
     let instruction_files = if config.sections.instruction_files.enabled {
-        let max_items = config.sections.instruction_files.max_items.unwrap_or(20);
         let overrides = &config.sections.instruction_files.overrides;
+        let default_max_chars = config
+            .sections
+            .instruction_files
+            .max_chars_per_item
+            .unwrap_or(8000);
 
         find_instruction_files(&project_dirs)
             .await
             .into_iter()
-            .filter(|f| {
-                get_override_key(&f.file_path)
-                    .and_then(|key| overrides.get(&key))
-                    .and_then(|o| o.enabled)
-                    .unwrap_or(true)
+            .filter_map(|mut f| {
+                let file_override = overrides.get(&override_key(&f.file_path, &project_dirs));
+                let enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
+                if !enabled {
+                    return None;
+                }
+                f.max_chars = Some(
+                    file_override
+                        .and_then(|o| o.max_chars)
+                        .unwrap_or(default_max_chars),
+                );
+                Some(f)
             })
-            .take(max_items)
             .collect()
     } else {
         vec![]
@@ -1607,18 +1617,28 @@ pub async fn gather_system_context(
             .max_items
             .unwrap_or(MAX_MEMORIES_IN_CONTEXT);
         let overrides = &config.sections.memories.overrides;
+        let default_max_chars = config.sections.memories.max_chars_per_item.unwrap_or(2000);
 
-        load_memories_by_tags(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
+        load_memories_by_tags_from_index(gcx.clone(), MEMORY_TAGS_FOR_CONTEXT, max_items)
             .await
-            .unwrap_or_default()
             .into_iter()
-            .filter(|m| {
-                m.file_path
+            .filter_map(|mut m| {
+                let file_override = m
+                    .file_path
                     .as_ref()
-                    .and_then(|p| to_relative_path(&p.display().to_string(), &project_dirs))
-                    .and_then(|key| overrides.get(&key))
-                    .and_then(|o| o.enabled)
-                    .unwrap_or(true)
+                    .map(|p| override_key(&p.display().to_string(), &project_dirs))
+                    .and_then(|key| overrides.get(&key));
+                let enabled = file_override.and_then(|o| o.enabled).unwrap_or(true);
+                if !enabled {
+                    return None;
+                }
+                let max_chars = file_override
+                    .and_then(|o| o.max_chars)
+                    .unwrap_or(default_max_chars);
+                if m.content.chars().count() > max_chars {
+                    m.content = truncate_to_chars(&m.content, max_chars);
+                }
+                Some(m)
             })
             .collect()
     } else {
@@ -1682,22 +1702,12 @@ pub fn create_memories_message(memories: &[MemoRecord]) -> Option<ChatMessage> {
     })
 }
 
-fn max_included_files() -> usize {
-    limits().max_included_files
-}
-
 pub async fn create_instruction_files_message(
     instruction_files: &[InstructionFile],
 ) -> Result<ChatMessage, String> {
     let mut context_files = Vec::new();
-    let mut paths_only: Vec<String> = Vec::new();
 
-    for (idx, instr_file) in instruction_files.iter().enumerate() {
-        if idx >= max_included_files() {
-            paths_only.push(instr_file.file_path.clone());
-            continue;
-        }
-
+    for instr_file in instruction_files.iter() {
         let mut content = if let Some(ref processed) = instr_file.processed_content {
             processed.clone()
         } else {
@@ -1718,6 +1728,12 @@ pub async fn create_instruction_files_message(
             content = format!("# Filtered content\n\n{}", content);
         }
 
+        if let Some(max_chars) = instr_file.max_chars {
+            if content.chars().count() > max_chars {
+                content = truncate_to_chars(&content, max_chars);
+            }
+        }
+
         let line_count = content.lines().count().max(1);
         context_files.push(ContextFile {
             file_name: instr_file.file_path.clone(),
@@ -1732,43 +1748,13 @@ pub async fn create_instruction_files_message(
         });
     }
 
-    if !paths_only.is_empty() {
-        let paths_content = format!(
-            "Additional instruction files (paths only, limit of {} full files reached):\n{}",
-            max_included_files(),
-            paths_only
-                .iter()
-                .map(|p| format!("- {}", p))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        context_files.push(ContextFile {
-            file_name: "(additional files - paths only)".to_string(),
-            file_content: paths_content.clone(),
-            line1: 1,
-            line2: paths_content.lines().count().max(1),
-            file_rev: None,
-            symbols: vec![],
-            gradient_type: 0,
-            usefulness: 50.0,
-            skip_pp: true,
-        });
-        tracing::info!(
-            "Listed {} additional instruction files as paths only",
-            paths_only.len()
-        );
-    }
-
     if context_files.is_empty() {
         return Err("No instruction files found or readable".to_string());
     }
 
     tracing::info!(
-        "Created project context message: {} full files, {} paths only",
-        context_files
-            .len()
-            .saturating_sub(if paths_only.is_empty() { 0 } else { 1 }),
-        paths_only.len()
+        "Created project context message: {} instruction files",
+        context_files.len()
     );
 
     Ok(ChatMessage {
@@ -1893,5 +1879,41 @@ mod tests {
         assert_eq!(deduplicated.len(), 2);
         assert_eq!(deduplicated[0].file_path, first_path.to_string_lossy());
         assert_eq!(deduplicated[1].file_path, unique_path.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn test_create_instruction_files_message_truncates_and_keeps_all_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut files = Vec::new();
+        for idx in 0..20 {
+            let path = temp_dir.path().join(format!("AGENTS_{}.md", idx));
+            std::fs::write(&path, "x".repeat(100)).unwrap();
+            files.push(InstructionFile {
+                file_name: format!("AGENTS_{}.md", idx),
+                file_path: path.to_string_lossy().to_string(),
+                source_tool: "universal".to_string(),
+                processed_content: None,
+                importance: 0,
+                max_chars: Some(50),
+            });
+        }
+
+        let message = create_instruction_files_message(&files).await.unwrap();
+        let context_files = match message.content {
+            ChatContent::ContextFiles(cf) => cf,
+            _ => panic!("expected context_file message"),
+        };
+
+        assert_eq!(context_files.len(), 20);
+        assert!(context_files
+            .iter()
+            .all(|cf| cf.file_name != "(additional files - paths only)"));
+
+        for cf in &context_files {
+            assert_eq!(cf.file_content.chars().count(), 50);
+            assert!(cf.file_content.starts_with(&"x".repeat(38)));
+            assert!(cf.file_content.ends_with("[TRUNCATED]"));
+            assert!(!cf.file_content.contains(&"x".repeat(39)));
+        }
     }
 }

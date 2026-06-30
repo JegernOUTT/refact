@@ -6,8 +6,16 @@
   overflow-x: clip;
 }
 
+[data-element="app-root"] {
+  box-sizing: border-box;
+  height: 100vh;
+  height: 100dvh;
+  padding: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0)
+    env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+}
+
 /*
- * The GUI is a fixed 100vh app shell: the page itself must never scroll.
+ * The GUI is a fixed dynamic-viewport app shell: the page itself must never scroll.
  * Transient layout work (portals, streaming growth, measurement passes)
  * otherwise flashes a window scrollbar for a frame or two. Scoped via :has
  * so harnesses without the app root (Storybook) keep page scrolling.

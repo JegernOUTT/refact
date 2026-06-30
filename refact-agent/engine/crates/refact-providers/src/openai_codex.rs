@@ -25,6 +25,7 @@ const CHATGPT_CODEX_MODELS_URL: &str =
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_CODEX_RESET_REDEEM_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+const GPT_5_5_CODEX_CONTEXT_WINDOW: usize = 272_000;
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
 #[allow(dead_code)]
@@ -111,6 +112,16 @@ fn is_chatgpt_codex_live_model(id: &str) -> bool {
 #[allow(dead_code)]
 fn is_openai_api_codex_live_model(id: &str) -> bool {
     is_codex_named_model(id)
+}
+
+fn codex_model_context_window_override(id: &str) -> Option<usize> {
+    (normalized_model_id(id) == "gpt-5.5").then_some(GPT_5_5_CODEX_CONTEXT_WINDOW)
+}
+
+fn apply_codex_model_overrides(model: &mut AvailableModel) {
+    if let Some(n_ctx) = codex_model_context_window_override(&model.id) {
+        model.n_ctx = n_ctx;
+    }
 }
 
 fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
@@ -1021,10 +1032,11 @@ impl OpenAICodexProvider {
             let pricing = self
                 .custom_model_pricing(model_id)
                 .or_else(|| self.custom_model_pricing(capability_key));
-            models_map.insert(
-                model_id.to_string(),
-                AvailableModel::from_caps(model_id, caps, enabled, pricing),
-            );
+            models_map.insert(model_id.to_string(), {
+                let mut model = AvailableModel::from_caps(model_id, caps, enabled, pricing);
+                apply_codex_model_overrides(&mut model);
+                model
+            });
         }
         models_map
     }
@@ -1053,6 +1065,7 @@ impl OpenAICodexProvider {
                 } else {
                     self.unknown_live_codex_model(slug.to_string(), enabled, pricing, model)
                 };
+            apply_codex_model_overrides(&mut available);
             available.display_name = display_name.or(available.display_name);
             models_map.insert(slug.to_string(), available);
         }
@@ -1396,7 +1409,7 @@ impl OpenAICodexProvider {
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
             supports_cache_control: true,
-            tokenizer: Some(refact_core::model_caps::OPENAI_CLOUD_TOKENIZER.to_string()),
+            tokenizer: None,
             enabled,
             is_custom: false,
             pricing,

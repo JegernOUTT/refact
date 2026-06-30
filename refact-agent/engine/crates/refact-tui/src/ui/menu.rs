@@ -1,0 +1,801 @@
+// Adapted from openai/codex codex-rs/tui/src/bottom_pane/selection_popup_common.rs, Apache-2.0.
+
+use std::borrow::Cow;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Widget};
+
+use crate::key_hint;
+use crate::render::{Insets, RectExt};
+use crate::render::wrapping::{line_width, word_wrap_line, RtOptions};
+use crate::style::{accent_style, user_message_style};
+use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
+
+pub(crate) const MAX_POPUP_ROWS: usize = 8;
+
+const MENU_SURFACE_INSET_V: u16 = 1;
+const MENU_SURFACE_INSET_H: u16 = 2;
+const FIXED_LEFT_COLUMN_NUMERATOR: usize = 3;
+const FIXED_LEFT_COLUMN_DENOMINATOR: usize = 10;
+
+#[derive(Default)]
+pub(crate) struct GenericDisplayRow {
+    pub(crate) name: String,
+    pub(crate) name_style: Option<Style>,
+    pub(crate) name_prefix_spans: Vec<Span<'static>>,
+    pub(crate) key_label: Option<String>,
+    pub(crate) match_indices: Option<Vec<usize>>,
+    pub(crate) description: Option<String>,
+    pub(crate) category_tag: Option<String>,
+    pub(crate) disabled_reason: Option<String>,
+    pub(crate) is_disabled: bool,
+    pub(crate) wrap_indent: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ColumnWidthMode {
+    #[default]
+    AutoVisible,
+    Fixed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ColumnWidthConfig {
+    pub(crate) mode: ColumnWidthMode,
+    pub(crate) name_column_width: Option<usize>,
+}
+
+impl ColumnWidthConfig {
+    pub(crate) const fn new(mode: ColumnWidthMode, name_column_width: Option<usize>) -> Self {
+        Self {
+            mode,
+            name_column_width,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrollState {
+    pub(crate) selected_idx: Option<usize>,
+    pub(crate) scroll_top: usize,
+}
+
+impl ScrollState {
+    pub(crate) fn clamp_selection(&mut self, len: usize) {
+        if self.clear_if_empty(len) {
+            return;
+        }
+        self.selected_idx = Some(self.selected_idx.unwrap_or(0).min(len - 1));
+    }
+
+    pub(crate) fn ensure_visible(&mut self, len: usize, visible_rows: usize) {
+        if len == 0 || visible_rows == 0 {
+            self.scroll_top = 0;
+            return;
+        }
+        if let Some(selected) = self.selected_idx {
+            if selected < self.scroll_top {
+                self.scroll_top = selected;
+            } else {
+                let bottom = self.scroll_top + visible_rows - 1;
+                if selected > bottom {
+                    self.scroll_top = selected + 1 - visible_rows;
+                }
+            }
+        } else {
+            self.scroll_top = 0;
+        }
+    }
+
+    fn clear_if_empty(&mut self, len: usize) -> bool {
+        if len != 0 {
+            return false;
+        }
+        self.selected_idx = None;
+        self.scroll_top = 0;
+        true
+    }
+}
+
+pub(crate) fn render_menu_surface(area: Rect, buf: &mut Buffer) -> Rect {
+    if area.is_empty() {
+        return area;
+    }
+    Block::default()
+        .style(user_message_style())
+        .render(area, buf);
+    area.inset(Insets::vh(MENU_SURFACE_INSET_V, MENU_SURFACE_INSET_H))
+}
+
+pub(crate) fn standard_popup_hint_line() -> Line<'static> {
+    accept_cancel_hint_line(Some("Enter"), "to confirm", Some("Esc"), "to go back")
+}
+
+pub(crate) fn accept_cancel_hint_line(
+    accept: Option<&str>,
+    accept_label: &'static str,
+    cancel: Option<&str>,
+    cancel_label: &'static str,
+) -> Line<'static> {
+    match (accept, cancel) {
+        (Some(accept), Some(cancel)) => Line::from(vec![
+            "Press ".into(),
+            key_hint::plain(accept.to_string()),
+            format!(" {accept_label} or ").into(),
+            key_hint::plain(cancel.to_string()),
+            format!(" {cancel_label}").into(),
+        ]),
+        (Some(accept), None) => Line::from(vec![
+            "Press ".into(),
+            key_hint::plain(accept.to_string()),
+            format!(" {accept_label}").into(),
+        ]),
+        (None, Some(cancel)) => Line::from(vec![
+            "Press ".into(),
+            key_hint::plain(cancel.to_string()),
+            format!(" {cancel_label}").into(),
+        ]),
+        (None, None) => Line::from(""),
+    }
+}
+
+pub(crate) fn render_rows(
+    area: Rect,
+    buf: &mut Buffer,
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    empty_message: &str,
+) -> u16 {
+    render_rows_inner(
+        area,
+        buf,
+        rows_all,
+        state,
+        max_results,
+        empty_message,
+        ColumnWidthConfig::default(),
+    )
+}
+
+pub(crate) fn render_rows_single_line(
+    area: Rect,
+    buf: &mut Buffer,
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    empty_message: &str,
+) -> u16 {
+    render_rows_single_line_with_config(
+        area,
+        buf,
+        rows_all,
+        state,
+        max_results,
+        empty_message,
+        ColumnWidthConfig::default(),
+    )
+}
+
+pub(crate) fn render_rows_single_line_with_config(
+    area: Rect,
+    buf: &mut Buffer,
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    empty_message: &str,
+    column_width: ColumnWidthConfig,
+) -> u16 {
+    if rows_all.is_empty() {
+        render_empty_message(area, buf, empty_message);
+        return u16::from(area.height > 0);
+    }
+
+    let visible_items = max_results
+        .min(rows_all.len())
+        .min(area.height.max(1) as usize);
+    if visible_items == 0 {
+        return 0;
+    }
+
+    let start_idx = window_start(rows_all.len(), state, visible_items);
+    let desc_col = compute_desc_col(rows_all, start_idx, visible_items, area.width, column_width);
+    let mut rendered_lines = 0u16;
+    let mut y = area.y;
+
+    for (idx, row) in rows_all
+        .iter()
+        .enumerate()
+        .skip(start_idx)
+        .take(visible_items)
+    {
+        if y >= area.y.saturating_add(area.height) {
+            break;
+        }
+        let mut line = build_full_line(row, desc_col);
+        apply_row_state_style(
+            std::slice::from_mut(&mut line),
+            Some(idx) == state.selected_idx && !row.is_disabled,
+            row.is_disabled,
+        );
+        let line = truncate_line_with_ellipsis_if_overflow(line, area.width as usize);
+        line.render(
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            },
+            buf,
+        );
+        y = y.saturating_add(1);
+        rendered_lines = rendered_lines.saturating_add(1);
+    }
+
+    rendered_lines
+}
+
+pub(crate) fn measure_rows_height(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    width: u16,
+) -> u16 {
+    measure_rows_height_with_config(
+        rows_all,
+        state,
+        max_results,
+        width,
+        ColumnWidthConfig::default(),
+    )
+}
+
+pub(crate) fn measure_rows_height_with_config(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    width: u16,
+    column_width: ColumnWidthConfig,
+) -> u16 {
+    if rows_all.is_empty() {
+        return 1;
+    }
+    let max_lines = max_results;
+    if max_lines == 0 {
+        return 0;
+    }
+    let content_width = width.max(1);
+    let window = wrapped_row_window(rows_all, state, max_lines, content_width, column_width);
+    rows_all
+        .iter()
+        .skip(window.start_idx)
+        .take(window.visible_items)
+        .map(|row| wrap_row_lines(row, window.desc_col, content_width).len() as u16)
+        .fold(0u16, u16::saturating_add)
+        .max(1)
+}
+
+fn render_rows_inner(
+    area: Rect,
+    buf: &mut Buffer,
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    empty_message: &str,
+    column_width: ColumnWidthConfig,
+) -> u16 {
+    if rows_all.is_empty() {
+        render_empty_message(area, buf, empty_message);
+        return u16::from(area.height > 0);
+    }
+    let max_items = max_results.min(rows_all.len());
+    let max_lines = max_results.min(area.height as usize);
+    if max_items == 0 || max_lines == 0 {
+        return 0;
+    }
+    let window = wrapped_row_window(rows_all, state, max_lines, area.width, column_width);
+    let mut rendered_lines = 0u16;
+    let mut y = area.y;
+    let bottom = area.y.saturating_add(max_lines as u16);
+
+    for (idx, row) in rows_all
+        .iter()
+        .enumerate()
+        .skip(window.start_idx)
+        .take(window.visible_items)
+    {
+        if y >= bottom {
+            break;
+        }
+        let mut wrapped = wrap_row_lines(row, window.desc_col, area.width);
+        apply_row_state_style(
+            &mut wrapped,
+            Some(idx) == state.selected_idx && !row.is_disabled,
+            row.is_disabled,
+        );
+        for line in wrapped {
+            if y >= bottom {
+                break;
+            }
+            line.render(
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                },
+                buf,
+            );
+            y = y.saturating_add(1);
+            rendered_lines = rendered_lines.saturating_add(1);
+        }
+    }
+
+    rendered_lines
+}
+
+fn render_empty_message(area: Rect, buf: &mut Buffer, empty_message: &str) {
+    if area.height == 0 {
+        return;
+    }
+    Line::from(Span::styled(
+        empty_message.to_string(),
+        Style::default()
+            .add_modifier(Modifier::DIM)
+            .add_modifier(Modifier::ITALIC),
+    ))
+    .render(area, buf);
+}
+
+fn window_start(len: usize, state: &ScrollState, visible_items: usize) -> usize {
+    if len == 0 || visible_items == 0 {
+        return 0;
+    }
+    let mut start_idx = state.scroll_top.min(len.saturating_sub(1));
+    if let Some(selected) = state.selected_idx {
+        if selected < start_idx {
+            start_idx = selected;
+        } else {
+            let bottom = start_idx.saturating_add(visible_items.saturating_sub(1));
+            if selected > bottom {
+                start_idx = selected + 1 - visible_items;
+            }
+        }
+    }
+    start_idx
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowWindow {
+    start_idx: usize,
+    visible_items: usize,
+    desc_col: usize,
+}
+
+fn wrapped_row_window(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_lines: usize,
+    width: u16,
+    column_width: ColumnWidthConfig,
+) -> RowWindow {
+    let len = rows_all.len();
+    if len == 0 || max_lines == 0 {
+        return RowWindow {
+            start_idx: 0,
+            visible_items: 0,
+            desc_col: 0,
+        };
+    }
+    let width = width.max(1);
+    let mut visible_items = max_lines.min(len).max(1);
+    let mut start_idx = window_start(len, state, visible_items);
+    let mut desc_col = compute_desc_col(rows_all, start_idx, visible_items, width, column_width);
+    for _ in 0..len.saturating_mul(2).max(1) {
+        let line_counts = row_line_counts(rows_all, desc_col, width);
+        let next_start_idx = wrapped_window_start(&line_counts, state, max_lines);
+        let next_visible_items = visible_items_for_lines(&line_counts, next_start_idx, max_lines);
+        let next_desc_col = compute_desc_col(
+            rows_all,
+            next_start_idx,
+            next_visible_items,
+            width,
+            column_width,
+        );
+        if start_idx == next_start_idx
+            && visible_items == next_visible_items
+            && desc_col == next_desc_col
+        {
+            break;
+        }
+        start_idx = next_start_idx;
+        visible_items = next_visible_items;
+        desc_col = next_desc_col;
+    }
+    RowWindow {
+        start_idx,
+        visible_items,
+        desc_col,
+    }
+}
+
+fn row_line_counts(rows_all: &[GenericDisplayRow], desc_col: usize, width: u16) -> Vec<usize> {
+    rows_all
+        .iter()
+        .map(|row| wrap_row_lines(row, desc_col, width).len().max(1))
+        .collect()
+}
+
+fn wrapped_window_start(row_line_counts: &[usize], state: &ScrollState, max_lines: usize) -> usize {
+    if row_line_counts.is_empty() || max_lines == 0 {
+        return 0;
+    }
+    let len = row_line_counts.len();
+    let mut start_idx = state.scroll_top.min(len.saturating_sub(1));
+    let Some(selected) = state.selected_idx.map(|idx| idx.min(len.saturating_sub(1))) else {
+        return start_idx;
+    };
+    if selected < start_idx {
+        return selected;
+    }
+    let selected_bottom = row_line_counts[start_idx..=selected]
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add);
+    if selected_bottom <= max_lines {
+        return start_idx;
+    }
+    start_idx = selected;
+    let mut lines = row_line_counts[selected];
+    while start_idx > 0 {
+        let previous = row_line_counts[start_idx - 1];
+        if lines.saturating_add(previous) > max_lines {
+            break;
+        }
+        lines = lines.saturating_add(previous);
+        start_idx -= 1;
+    }
+    start_idx
+}
+
+fn visible_items_for_lines(row_line_counts: &[usize], start_idx: usize, max_lines: usize) -> usize {
+    if row_line_counts.is_empty() || max_lines == 0 || start_idx >= row_line_counts.len() {
+        return 0;
+    }
+    let mut lines = 0usize;
+    let mut count = 0usize;
+    for row_lines in row_line_counts.iter().copied().skip(start_idx) {
+        if count > 0 && lines.saturating_add(row_lines) > max_lines {
+            break;
+        }
+        lines = lines.saturating_add(row_lines);
+        count += 1;
+        if lines >= max_lines {
+            break;
+        }
+    }
+    count.max(1)
+}
+
+fn compute_desc_col(
+    rows_all: &[GenericDisplayRow],
+    start_idx: usize,
+    visible_items: usize,
+    content_width: u16,
+    column_width: ColumnWidthConfig,
+) -> usize {
+    if content_width <= 1 {
+        return 0;
+    }
+    let max_desc_col = content_width.saturating_sub(1) as usize;
+    match column_width.mode {
+        ColumnWidthMode::Fixed => ((content_width as usize * FIXED_LEFT_COLUMN_NUMERATOR)
+            / FIXED_LEFT_COLUMN_DENOMINATOR)
+            .clamp(1, max_desc_col),
+        ColumnWidthMode::AutoVisible => {
+            let rows = rows_all
+                .iter()
+                .skip(start_idx)
+                .take(visible_items)
+                .collect::<Vec<_>>();
+            let measured = rows
+                .iter()
+                .map(|row| name_line_width(row))
+                .max()
+                .unwrap_or(0);
+            column_width
+                .name_column_width
+                .map(|width| width.max(measured))
+                .unwrap_or(measured)
+                .saturating_add(2)
+                .min(max_desc_col)
+        }
+    }
+}
+
+fn name_line_width(row: &GenericDisplayRow) -> usize {
+    let mut spans = row.name_prefix_spans.clone();
+    spans.extend(name_spans(row));
+    if let Some(key_label) = &row.key_label {
+        spans.push(Span::raw(" ("));
+        spans.push(key_hint::plain(key_label.clone()));
+        spans.push(Span::raw(")"));
+    }
+    if row.disabled_reason.is_some() {
+        spans.push(Span::styled(
+            " (disabled)",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    line_width(&Line::from(spans))
+}
+
+fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
+    let mut spans = row.name_prefix_spans.clone();
+    spans.extend(name_spans(row));
+    if let Some(key_label) = &row.key_label {
+        spans.push(Span::raw(" ("));
+        spans.push(key_hint::plain(key_label.clone()));
+        spans.push(Span::raw(")"));
+    }
+    if row.disabled_reason.is_some() {
+        spans.push(Span::styled(
+            " (disabled)",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    let name_width = line_width(&Line::from(spans.clone()));
+    if let Some(description) = combined_description(row) {
+        let gap = desc_col.saturating_sub(name_width).max(2);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(
+            description,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    if let Some(tag) = row.category_tag.as_ref().filter(|tag| !tag.is_empty()) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            tag.clone(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn name_spans(row: &GenericDisplayRow) -> Vec<Span<'static>> {
+    let base = row.name_style.unwrap_or_default();
+    let Some(match_indices) = row.match_indices.as_ref() else {
+        return vec![Span::styled(row.name.clone(), base)];
+    };
+    row.name
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let text = ch.to_string();
+            if match_indices.contains(&idx) {
+                Span::styled(text, base.add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(text, base)
+            }
+        })
+        .collect()
+}
+
+fn combined_description(row: &GenericDisplayRow) -> Option<String> {
+    match (&row.description, &row.disabled_reason) {
+        (Some(description), Some(reason)) => Some(format!("{description} (disabled: {reason})")),
+        (Some(description), None) => Some(description.clone()),
+        (None, Some(reason)) => Some(format!("disabled: {reason}")),
+        (None, None) => None,
+    }
+}
+
+fn wrap_row_lines(row: &GenericDisplayRow, desc_col: usize, width: u16) -> Vec<Line<'static>> {
+    let full_line = build_full_line(row, desc_col);
+    let continuation_indent = row
+        .wrap_indent
+        .unwrap_or_else(|| {
+            if row.description.is_some() {
+                desc_col
+            } else {
+                0
+            }
+        })
+        .min(width.saturating_sub(1) as usize);
+    let options = RtOptions::new(width.max(1) as usize)
+        .initial_indent(Line::from(""))
+        .subsequent_indent(Line::from(" ".repeat(continuation_indent)));
+    word_wrap_line(&full_line, options)
+        .into_iter()
+        .map(line_to_owned)
+        .collect()
+}
+
+fn line_to_owned(line: Line<'_>) -> Line<'static> {
+    Line {
+        style: line.style,
+        alignment: line.alignment,
+        spans: line
+            .spans
+            .into_iter()
+            .map(|span| Span {
+                style: span.style,
+                content: Cow::Owned(span.content.into_owned()),
+            })
+            .collect(),
+    }
+}
+
+fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disabled: bool) {
+    if selected {
+        for line in lines.iter_mut() {
+            for span in &mut line.spans {
+                span.style = accent_style();
+            }
+        }
+    }
+    if is_disabled {
+        for line in lines.iter_mut() {
+            for span in &mut line.spans {
+                span.style = span.style.dim();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    #[test]
+    fn menu_surface_returns_codex_inset() {
+        let area = Rect::new(2, 3, 20, 10);
+        let mut buffer = Buffer::empty(area);
+
+        let inner = render_menu_surface(area, &mut buffer);
+
+        assert_eq!(inner, Rect::new(4, 4, 16, 8));
+    }
+
+    #[test]
+    fn selected_rows_use_accent_style() {
+        let rows = vec![GenericDisplayRow {
+            name: "Alpha".to_string(),
+            description: Some("fast".to_string()),
+            ..Default::default()
+        }];
+        let state = ScrollState {
+            selected_idx: Some(0),
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buffer = Buffer::empty(area);
+
+        render_rows_single_line(area, &mut buffer, &rows, &state, 1, "no rows");
+
+        let style = buffer[(0, 0)].style();
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn descriptions_are_dim_when_not_selected() {
+        let rows = vec![GenericDisplayRow {
+            name: "Alpha".to_string(),
+            description: Some("fast".to_string()),
+            ..Default::default()
+        }];
+        let state = ScrollState {
+            selected_idx: None,
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buffer = Buffer::empty(area);
+
+        render_rows_single_line(area, &mut buffer, &rows, &state, 1, "no rows");
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let desc_x = text.find("fast").expect("description rendered") as u16;
+        assert!(buffer[(desc_x, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn measure_rows_height_accounts_for_wrapping() {
+        let rows = vec![GenericDisplayRow {
+            name: "Alpha".to_string(),
+            description: Some("one two three four five six".to_string()),
+            ..Default::default()
+        }];
+        let state = ScrollState {
+            selected_idx: Some(0),
+            scroll_top: 0,
+        };
+
+        assert!(measure_rows_height(&rows, &state, 1, 12) > 1);
+    }
+
+    #[test]
+    fn wrapped_rows_window_to_keep_selected_visible() {
+        let mut rows = (0..4)
+            .map(|idx| GenericDisplayRow {
+                name: format!("Row{idx}"),
+                description: Some("one two three four five six seven eight nine ten".to_string()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        rows.push(GenericDisplayRow {
+            name: "Target".to_string(),
+            ..Default::default()
+        });
+        let state = ScrollState {
+            selected_idx: Some(4),
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 18, 4);
+        let mut buffer = Buffer::empty(area);
+
+        render_rows(
+            area,
+            &mut buffer,
+            &rows,
+            &state,
+            area.height as usize,
+            "no rows",
+        );
+
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Target"));
+    }
+
+    #[test]
+    fn fixed_column_mode_uses_codex_split() {
+        let rows = vec![GenericDisplayRow {
+            name: "Alpha".to_string(),
+            description: Some("desc".to_string()),
+            ..Default::default()
+        }];
+        let state = ScrollState {
+            selected_idx: Some(0),
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buffer = Buffer::empty(area);
+
+        let rendered = render_rows_single_line_with_config(
+            area,
+            &mut buffer,
+            &rows,
+            &state,
+            1,
+            "no rows",
+            ColumnWidthConfig::new(ColumnWidthMode::Fixed, None),
+        );
+        let desc_col = compute_desc_col(
+            &rows,
+            0,
+            1,
+            area.width,
+            ColumnWidthConfig::new(ColumnWidthMode::Fixed, None),
+        );
+
+        assert_eq!(rendered, 1);
+        assert_eq!(desc_col, 9);
+    }
+}

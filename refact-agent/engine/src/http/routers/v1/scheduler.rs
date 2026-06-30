@@ -10,55 +10,13 @@ use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
-    active_durable_cron_store, human_schedule, next_run_ms, scheduler_timezone, session_cron_store,
-    Action, AgentTarget, CronRunRecord, CronStore, Delivery, Job, Trigger, delivery_from_value,
+    active_durable_cron_store, cron_task_response, delivery_kind, human_schedule_for_trigger,
+    next_run_ms, scheduler_timezone, session_cron_store, Action, AgentTarget, CronStore,
+    CronTaskResponse, Delivery, DeliveryResponse, Job, Trigger, delivery_from_value,
 };
 use crate::tools::tool_cron_create::MAX_CRON_JOBS;
 
 const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
-
-#[derive(Debug, Serialize)]
-pub struct CronTaskResponse {
-    pub id: String,
-    pub cron: String,
-    pub human_schedule: String,
-    pub description: String,
-    pub prompt: String,
-    pub recurring: bool,
-    pub durable: bool,
-    pub next_fire_at_ms: u64,
-    pub fire_count: u32,
-    pub created_at_ms: u64,
-    pub enabled: bool,
-    pub paused: bool,
-    pub trigger_kind: String,
-    pub tz: Option<String>,
-    pub every_ms: Option<u64>,
-    pub at_ms: Option<u64>,
-    pub last_status: Option<String>,
-    pub last_error: Option<String>,
-    pub recent_runs: Vec<CronRunRecord>,
-    pub action_kind: String,
-    pub delivery: DeliveryResponse,
-    pub chat_id: Option<String>,
-    pub target: String,
-    pub isolated: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeliveryResponse {
-    Chat,
-    Webhook {
-        url: String,
-        has_token: bool,
-    },
-    Notifier {
-        integration_id: String,
-        target: Option<String>,
-    },
-    None,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct CronCreateRequest {
@@ -66,6 +24,8 @@ pub struct CronCreateRequest {
     pub every: Option<String>,
     pub at: Option<String>,
     pub tz: Option<String>,
+    pub trigger: Option<serde_json::Value>,
+    pub hook_id: Option<String>,
     pub prompt: Option<String>,
     pub command: Option<String>,
     pub command_argv: Option<Vec<String>>,
@@ -75,7 +35,7 @@ pub struct CronCreateRequest {
     #[serde(default)]
     pub recurring: Option<bool>,
     #[serde(default)]
-    pub durable: bool,
+    pub durable: Option<bool>,
     #[serde(default)]
     pub isolated: Option<bool>,
     pub description: String,
@@ -91,6 +51,7 @@ pub struct CronCreateResponse {
     pub recurring: bool,
     pub durable: bool,
     pub action_kind: String,
+    pub delivery_kind: String,
     pub delivery: DeliveryResponse,
 }
 
@@ -169,9 +130,10 @@ pub async fn handle_v1_scheduler_cron_post(
     let task = create_http_cron_job(request, durable_store)
         .await
         .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
-    let human = job_human_schedule(&task);
+    let human = human_schedule_for_trigger(&task.trigger);
     let action_kind = task.action_kind().to_string();
-    let delivery = delivery_response(&task.delivery);
+    let delivery_kind = delivery_kind(&task.delivery).to_string();
+    let delivery = DeliveryResponse::from_delivery(&task.delivery);
 
     Ok(Json(CronCreateResponse {
         id: task.id,
@@ -179,6 +141,7 @@ pub async fn handle_v1_scheduler_cron_post(
         recurring: task.recurring,
         durable: task.durable,
         action_kind,
+        delivery_kind,
         delivery,
     }))
 }
@@ -203,7 +166,7 @@ pub async fn handle_v1_scheduler_cron_patch(
         ));
     }
     crate::scheduler::runner_change_notify().notify_waiters();
-    let human_schedule = job_human_schedule(&task);
+    let human_schedule = human_schedule_for_trigger(&task.trigger);
     Ok(Json(CronUpdateResponse {
         id: task.id,
         updated: true,
@@ -263,48 +226,8 @@ pub async fn handle_v1_scheduler_cron_delete(
 }
 
 fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse {
-    let cron = task.cron_expr().unwrap_or_default().to_string();
-    let human_schedule = job_human_schedule(&task);
-    let prompt = first_chars(task.prompt().unwrap_or_default(), 200);
     let next_fire_at_ms = next_run_ms(&task, now_ms, tz).unwrap_or(0);
-    let (trigger_kind, tz, every_ms, at_ms) = trigger_response_fields(&task.trigger);
-    let paused = task.is_paused();
-    let action_kind = task.action_kind().to_string();
-    let delivery = delivery_response(&task.delivery);
-    let chat_id = task.chat_id().map(str::to_string);
-    let isolated = job_is_isolated(&task);
-    let target = if isolated {
-        "isolated"
-    } else {
-        "existing_chat"
-    }
-    .to_string();
-    CronTaskResponse {
-        id: task.id,
-        cron,
-        human_schedule,
-        description: task.description,
-        prompt,
-        recurring: task.recurring,
-        durable: task.durable,
-        next_fire_at_ms,
-        fire_count: task.fire_count,
-        created_at_ms: task.created_at_ms,
-        enabled: task.enabled,
-        paused,
-        trigger_kind,
-        tz,
-        every_ms,
-        at_ms,
-        last_status: task.last_status,
-        last_error: task.last_error,
-        recent_runs: task.recent_runs,
-        action_kind,
-        delivery,
-        chat_id,
-        target,
-        isolated,
-    }
+    cron_task_response(&task, next_fire_at_ms)
 }
 
 async fn create_http_cron_job(
@@ -313,29 +236,24 @@ async fn create_http_cron_job(
 ) -> Result<Job, String> {
     validate_http_action_args(&request)?;
     let now_ms = unix_now_ms();
-    let trigger = parse_schedule(
-        request.cron.as_deref(),
-        request.every.as_deref(),
-        request.at.as_deref(),
-        request.tz.as_deref(),
-        now_ms,
-    )?;
+    let trigger = request_trigger(&request, now_ms)?;
     let recurring = if matches!(trigger, Trigger::Once { .. }) {
         false
     } else {
         request
             .recurring
-            .unwrap_or_else(|| default_recurring_for_trigger(&trigger))
+            .unwrap_or_else(|| !matches!(trigger, Trigger::Once { .. }))
     };
+    let durable = request.durable.unwrap_or_else(|| durable_store.is_some());
     let mut task = Job::new_cron_agent_chat(
         trigger_cron_expr(&trigger).unwrap_or_default().to_string(),
         request.prompt.clone().unwrap_or_default(),
         request.description.clone(),
         recurring,
-        request.durable,
+        durable,
         now_ms,
     );
-    task.trigger = trigger;
+    task.set_trigger(trigger);
     task.delivery = request_delivery(&request)?;
     apply_http_action(&mut task, &request)?;
     validate_next_fire(&task, now_ms)?;
@@ -403,37 +321,6 @@ fn request_delivery(request: &CronCreateRequest) -> Result<Delivery, String> {
         .map(delivery_from_value)
         .transpose()
         .map(|delivery| delivery.unwrap_or(Delivery::Chat))
-}
-
-fn delivery_response(delivery: &Delivery) -> DeliveryResponse {
-    match delivery {
-        Delivery::Chat => DeliveryResponse::Chat,
-        Delivery::Webhook { url, token } => DeliveryResponse::Webhook {
-            url: url.clone(),
-            has_token: token.as_ref().is_some_and(|token| !token.trim().is_empty()),
-        },
-        Delivery::Notifier {
-            integration_id,
-            target,
-        } => DeliveryResponse::Notifier {
-            integration_id: integration_id.clone(),
-            target: target.clone(),
-        },
-        Delivery::None => DeliveryResponse::None,
-    }
-}
-
-fn job_is_isolated(task: &Job) -> bool {
-    matches!(
-        &task.action,
-        Action::AgentTurn {
-            target: AgentTarget::Isolated,
-            ..
-        } | Action::Command {
-            target: AgentTarget::Isolated,
-            ..
-        }
-    )
 }
 
 fn apply_http_action(task: &mut Job, request: &CronCreateRequest) -> Result<(), String> {
@@ -532,7 +419,7 @@ fn apply_update(task: &mut Job, request: CronUpdateRequest, now_ms: u64) -> Resu
             task.recurring = false;
             task.auto_expire_after_ms = 0;
         }
-        task.trigger = trigger;
+        task.set_trigger(trigger);
         validate_next_fire(task, now_ms)?;
     } else if request.tz.is_some() {
         return Err("tz can only be changed with a cron schedule".to_string());
@@ -564,53 +451,18 @@ fn set_job_prompt(task: &mut Job, value: String) -> Result<(), String> {
 }
 
 fn validate_next_fire(task: &Job, now_ms: u64) -> Result<(), String> {
+    if matches!(
+        task.trigger,
+        Trigger::Webhook { .. } | Trigger::Manual | Trigger::OnProcessExit { .. }
+    ) {
+        return Ok(());
+    }
     let next =
         next_run_ms(task, now_ms, scheduler_timezone()).ok_or_else(no_match_in_year_error)?;
     if matches!(task.trigger, Trigger::Cron { .. }) && next.saturating_sub(now_ms) > ONE_YEAR_MS {
         return Err(no_match_in_year_error());
     }
     Ok(())
-}
-
-fn trigger_response_fields(
-    trigger: &Trigger,
-) -> (String, Option<String>, Option<u64>, Option<u64>) {
-    match trigger {
-        Trigger::Cron { tz, .. } => ("cron".to_string(), tz.clone(), None, None),
-        Trigger::Interval { every_ms } => ("interval".to_string(), None, Some(*every_ms), None),
-        Trigger::Once { at_ms } => ("once".to_string(), None, None, Some(*at_ms)),
-        Trigger::Manual => ("manual".to_string(), None, None, None),
-        Trigger::Webhook { .. } => ("webhook".to_string(), None, None, None),
-        Trigger::OnProcessExit { .. } => ("manual".to_string(), None, None, None),
-    }
-}
-
-fn job_human_schedule(task: &Job) -> String {
-    match &task.trigger {
-        Trigger::Cron { expr, .. } => human_schedule(expr),
-        Trigger::Interval { every_ms } => format!("every {}", duration_label(*every_ms)),
-        Trigger::Once { at_ms } => format!("at {at_ms}"),
-        Trigger::Manual => "manual".to_string(),
-        Trigger::Webhook { .. } => "webhook".to_string(),
-        Trigger::OnProcessExit { .. } => "process exit".to_string(),
-    }
-}
-
-fn duration_label(ms: u64) -> String {
-    const SECOND: u64 = 1_000;
-    const MINUTE: u64 = 60 * SECOND;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    for (unit_ms, suffix) in [(DAY, "d"), (HOUR, "h"), (MINUTE, "m"), (SECOND, "s")] {
-        if ms >= unit_ms && ms % unit_ms == 0 {
-            return format!("{}{}", ms / unit_ms, suffix);
-        }
-    }
-    format!("{ms}ms")
-}
-
-fn default_recurring_for_trigger(trigger: &Trigger) -> bool {
-    !matches!(trigger, Trigger::Once { .. })
 }
 
 fn trigger_cron_expr(trigger: &Trigger) -> Option<&str> {
@@ -620,12 +472,69 @@ fn trigger_cron_expr(trigger: &Trigger) -> Option<&str> {
     }
 }
 
-fn no_match_in_year_error() -> String {
-    "matches no calendar date in the next year".to_string()
+fn request_trigger(request: &CronCreateRequest, now_ms: u64) -> Result<Trigger, String> {
+    if let Some(trigger) = request_webhook_trigger(request)? {
+        if request.cron.is_some()
+            || request.every.is_some()
+            || request.at.is_some()
+            || request.tz.is_some()
+        {
+            return Err(
+                "webhook trigger is mutually exclusive with cron, every, at, and tz".to_string(),
+            );
+        }
+        return Ok(trigger);
+    }
+    parse_schedule(
+        request.cron.as_deref(),
+        request.every.as_deref(),
+        request.at.as_deref(),
+        request.tz.as_deref(),
+        now_ms,
+    )
 }
 
-fn first_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+fn request_webhook_trigger(request: &CronCreateRequest) -> Result<Option<Trigger>, String> {
+    let hook_id = request
+        .hook_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|hook_id| !hook_id.is_empty())
+        .map(str::to_string);
+    let Some(trigger) = request.trigger.as_ref() else {
+        return Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id }));
+    };
+    match trigger {
+        serde_json::Value::Object(map) => {
+            let kind = map
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("webhook");
+            if kind != "webhook" {
+                return Err(format!("unsupported trigger `{kind}`"));
+            }
+            let hook_id = map
+                .get("hook_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|hook_id| !hook_id.is_empty())
+                .map(str::to_string)
+                .or(hook_id)
+                .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Ok(Some(Trigger::Webhook { hook_id }))
+        }
+        serde_json::Value::String(kind) if kind == "webhook" => {
+            let hook_id =
+                hook_id.ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
+            Ok(Some(Trigger::Webhook { hook_id }))
+        }
+        serde_json::Value::Null => Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id })),
+        other => Err(format!("argument `trigger` is invalid: {other:?}")),
+    }
+}
+
+fn no_match_in_year_error() -> String {
+    "matches no calendar date in the next year".to_string()
 }
 
 async fn validate_chat_target(app: &AppState, chat_id: &str) -> Result<(), ScratchError> {
@@ -665,6 +574,9 @@ async fn validate_create_target(
         .prompt
         .as_ref()
         .is_some_and(|prompt| !prompt.trim().is_empty());
+    if agent_turn && request.isolated == Some(true) {
+        return Ok(());
+    }
     if agent_turn || matches!(delivery, Delivery::Chat) {
         validate_chat_target(app, &request.chat_id).await?;
     }

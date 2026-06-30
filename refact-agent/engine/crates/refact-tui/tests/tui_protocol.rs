@@ -207,11 +207,28 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Plan(plan) => {
                 format!("plan:{}:{}:{}", plan.mode, plan.version, plan.content)
             }
+            TranscriptItem::Goal(goal) => {
+                format!("goal:{}:{}", goal.version, goal.content)
+            }
+            TranscriptItem::PlanStream(lines) => format!(
+                "plan_stream:{}",
+                lines
+                    .iter()
+                    .map(|line| line
+                        .line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
             TranscriptItem::Citation(text) => format!("citation:{text}"),
             TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
             TranscriptItem::Info(lines) => format!("info:{}", lines.join("|")),
+            TranscriptItem::Status(_, _) => "status".to_string(),
             TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
             TranscriptItem::Session { title, subtitle } => {
                 format!(
@@ -530,21 +547,21 @@ fn streaming_final_output_matches_fixture_source_after_ticks() {
 fn render_snapshot_for_assistant_streaming_fixture() {
     let run = run_fixture("assistant_streaming.jsonl");
     let snapshot = rendered_snapshot(&run.app, 72, 16);
-    let expected = r#"refact fixture  Ctrl-N new · Ctrl-P projects · Ctrl-M model · Ctrl-O mod
-you
-render a table
+    let expected = r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mod
 
-assistant
-A   │ B
-━━━━━━━━━
-one │ two
-code · rust
-  fn main() {}
+  › render a table
 
-────────────────────────────────────────────────────────────────────────
-┌ message ─────────────────────────────────────────────────────────────┐
-│Ask Refact…                                                           │
-└──────────────────────────────────────────────────────────────────────┘
+  •  A      B
+    ━━━━━  ━━━━━
+     one    two
+
+
+    fn main() {}
+
+
+
+› Ask Refact…
+  Enter send   Ctrl-J newline
  30 used · fixture · gpt-demo · agent · reason:off · ● idle · daemon on…"#;
     assert_eq!(snapshot, expected);
 }
@@ -640,7 +657,7 @@ async fn daemon_info_env_override_selects_custom_port_and_token() {
 }
 
 #[tokio::test]
-async fn explicit_url_override_preserves_discovered_token() {
+async fn explicit_url_override_drops_discovered_token_on_origin_change() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("daemon.json"),
@@ -652,7 +669,7 @@ async fn explicit_url_override_preserves_discovered_token() {
     let endpoint = resolve_daemon_endpoint(Some("http://127.0.0.1:45454".to_string())).unwrap();
 
     assert_eq!(endpoint.base_url, "http://127.0.0.1:45454");
-    assert_eq!(endpoint.auth_token.as_deref(), Some("secret-token"));
+    assert_eq!(endpoint.auth_token, None);
 }
 
 #[tokio::test]

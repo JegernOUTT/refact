@@ -1,14 +1,13 @@
 import { useCallback } from "react";
-import { HoverCard, Text } from "@radix-ui/themes";
 import { WandSparkles } from "lucide-react";
-import { IconButton } from "../ui";
+import { IconButton, Tooltip } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
-  selectCurrentThreadId,
-  selectManualPreviewItems,
+  selectManualPreviewItemsById,
   setManualPreviewItems,
   clearManualPreviewItems,
-} from "../../features/Chat";
+  useThreadId,
+} from "../../features/Chat/Thread";
 import { usePreviewMemoryEnrichmentMutation } from "../../services/refact/memoryEnrichment";
 import { selectLspPort } from "../../features/Config/configSlice";
 
@@ -24,9 +23,11 @@ export const WandButton = ({
   onUpdateText,
 }: WandButtonProps) => {
   const dispatch = useAppDispatch();
-  const chatId = useAppSelector(selectCurrentThreadId);
+  const chatId = useThreadId();
   const port = useAppSelector(selectLspPort);
-  const previewItems = useAppSelector(selectManualPreviewItems);
+  const previewItems = useAppSelector((state) =>
+    selectManualPreviewItemsById(state, chatId),
+  );
   const [previewEnrichment, { isLoading }] =
     usePreviewMemoryEnrichmentMutation();
 
@@ -65,8 +66,8 @@ export const WandButton = ({
     : "Preview related memories & context";
 
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <Tooltip>
+      <Tooltip.Trigger asChild>
         <IconButton
           aria-label={label}
           data-testid="wand-button"
@@ -76,13 +77,9 @@ export const WandButton = ({
           size="sm"
           variant={hasItems ? "primary" : "ghost"}
         />
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
-        <Text as="p" size="2">
-          {label}
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="top">{label}</Tooltip.Content>
+    </Tooltip>
   );
 };
 

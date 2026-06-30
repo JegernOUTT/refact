@@ -218,7 +218,10 @@ class AsyncConnection : Disposable {
 
                     override fun buildResult(): String {
                         if (statusCode !in 200..299) {
-                            throw HttpStatusException(statusCode, bufferStr, uri)
+                            val error = HttpStatusException(statusCode, bufferStr, uri)
+                            InferenceGlobalContext.status = ConnectionStatus.ERROR
+                            InferenceGlobalContext.lastErrorMsg = error.message
+                            throw error
                         }
                         return bufferStr
                     }
@@ -234,6 +237,9 @@ class AsyncConnection : Disposable {
                         if (ex is java.net.SocketException ||
                             ex is java.net.UnknownHostException) {
                             InferenceGlobalContext.status = ConnectionStatus.DISCONNECTED
+                        } else {
+                            InferenceGlobalContext.status = ConnectionStatus.ERROR
+                            InferenceGlobalContext.lastErrorMsg = requestFailureMessage(ex)
                         }
                         failedDataReceiveEnded(ex)
                     }
@@ -246,6 +252,15 @@ class AsyncConnection : Disposable {
                 }
             )
         }
+    }
+
+
+    private fun requestFailureMessage(ex: Throwable?): String {
+        val chain = generateSequence(ex) { it.cause }
+        return chain.firstNotNullOfOrNull { it.message?.takeIf { message -> message.isNotBlank() } }
+            ?: generateSequence(ex) { it.cause }
+                .firstNotNullOfOrNull { it.javaClass.simpleName.takeIf { name -> name.isNotBlank() } }
+            ?: "Inference request failed"
     }
 
 

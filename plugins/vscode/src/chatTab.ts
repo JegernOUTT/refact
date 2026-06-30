@@ -37,6 +37,7 @@ import {
     // RecieveTools,
     // QuestionFromChat
 } from "refact-chat-js/dist/events";
+import { backendConfigForStatus, effectiveLspPortForStatus } from "./backendStatus";
 
 
 
@@ -910,10 +911,9 @@ export class ChatTab {
 
         const fontSize = vscode.workspace.getConfiguration().get<number>("editor.fontSize") ?? 12;
         const scaling = fontSize < 14 ? "90%" : "100%";
-        const rawPort = global.rust_binary_blob?.get_port();
-        const port = typeof rawPort === "number" && Number.isFinite(rawPort) && rawPort > 0
-            ? rawPort
-            : 0;
+        const backendStatus = global.rust_binary_blob?.backend_status?.() ?? "connecting";
+        const rawPort = global.rust_binary_blob?.get_port() ?? 0;
+        const port = effectiveLspPortForStatus(rawPort, backendStatus);
         const config = {
             host: "vscode",
             tabbed: isTab,
@@ -926,6 +926,7 @@ export class ChatTab {
                 ast,
             },
             lspPort: port,
+            ...backendConfigForStatus(backendStatus),
         };
         const serializedConfig = JSON.stringify(config).replace(
             /<\/script>/gi,

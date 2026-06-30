@@ -1,8 +1,8 @@
 import React, { forwardRef } from "react";
-import { Flex, HoverCard, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { FileText, LogOut, Puzzle, Send, X } from "lucide-react";
 import classNames from "classnames";
-import { Button, ButtonGroup, IconButton } from "../ui";
+import { Button, ButtonGroup, IconButton, Tooltip } from "../ui";
 import styles from "./button.module.css";
 
 type KitIconButtonProps = Omit<
@@ -40,8 +40,8 @@ export const AgentIntegrationsButton = forwardRef<
   HTMLButtonElement,
   PlainButtonProps
 >((props, ref) => (
-  <HoverCard.Root>
-    <HoverCard.Trigger>
+  <Tooltip>
+    <Tooltip.Trigger asChild>
       <IconButton
         {...props}
         ref={ref}
@@ -50,13 +50,9 @@ export const AgentIntegrationsButton = forwardRef<
         size="sm"
         variant="ghost"
       />
-    </HoverCard.Trigger>
-    <HoverCard.Content size="1" side="top">
-      <Text as="p" size="2">
-        Set up Agent Integrations
-      </Text>
-    </HoverCard.Content>
-  </HoverCard.Root>
+    </Tooltip.Trigger>
+    <Tooltip.Content side="top">Set up Agent Integrations</Tooltip.Content>
+  </Tooltip>
 ));
 
 AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
@@ -75,8 +71,8 @@ export const ThreadHistoryButton: React.FC<KitIconButtonProps> = ({
 
 export function BackToSideBarButton(props: PlainButtonProps) {
   return (
-    <HoverCard.Root>
-      <HoverCard.Trigger>
+    <Tooltip>
+      <Tooltip.Trigger asChild>
         <IconButton
           {...props}
           aria-label="Return to sidebar"
@@ -85,13 +81,9 @@ export function BackToSideBarButton(props: PlainButtonProps) {
           size="sm"
           variant="ghost"
         />
-      </HoverCard.Trigger>
-      <HoverCard.Content size="1" side="top">
-        <Text as="p" size="2">
-          Return to sidebar
-        </Text>
-      </HoverCard.Content>
-    </HoverCard.Root>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="top">Return to sidebar</Tooltip.Content>
+    </Tooltip>
   );
 }
 
