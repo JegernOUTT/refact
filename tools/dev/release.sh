@@ -56,6 +56,17 @@ fi
 
 echo "▶ Bumping version → $VERSION"
 python3 tools/bump_release_version.py "$VERSION"
+notes_template="docs/release-notes/TEMPLATE.md"
+notes_file="docs/release-notes/v${VERSION}.md"
+if [ ! -f "$notes_file" ]; then
+  if [ -f "$notes_template" ]; then
+    mkdir -p "$(dirname "$notes_file")"
+    sed "s/vX\.Y\.Z/v${VERSION}/g" "$notes_template" > "$notes_file"
+    echo "▶ Scaffolded $notes_file from $notes_template; edit the summary and highlights before pushing the release."
+  else
+    echo "⚠ $notes_template is missing; create $notes_file before pushing so the release has curated notes." >&2
+  fi
+fi
 echo
 echo "▶ Changed manifests:"
 git diff --stat
