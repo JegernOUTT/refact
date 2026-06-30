@@ -52,6 +52,7 @@ normalize_version() {
     case "$value" in
         engine/v*) value=${value#engine/v} ;;
         engine/*) value=${value#engine/} ;;
+        release/v*) value=${value#release/v} ;;
         v*) value=${value#v} ;;
     esac
     if [ -z "$value" ]; then
@@ -62,9 +63,20 @@ normalize_version() {
 
 latest_version() {
     need_cmd curl
-    tag=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api_url/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    need_cmd tr
+    releases_url="$api_url/releases?per_page=100"
+    releases_json=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$releases_url") || fail "could not fetch releases from $releases_url"
+    tag=""
+    for candidate in $(printf '%s\n' "$releases_json" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'); do
+        case "$candidate" in
+            engine/v*)
+                tag=$candidate
+                break
+                ;;
+        esac
+    done
     if [ -z "$tag" ]; then
-        fail "could not resolve latest release from $api_url/releases/latest"
+        fail "could not find an engine/v* release in $releases_url"
     fi
     normalize_version "$tag"
 }
