@@ -1,47 +1,16 @@
-use std::sync::Arc;
 use std::path::Path;
-use serde::Deserialize;
-use tokio::time::Duration;
-use tokio::fs;
-use tracing::error;
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use tokio::fs;
+use tokio::time::Duration;
+use tracing::error;
 
 use crate::files_correction::any_glob_matches_path;
 use crate::files_correction::canonical_path;
 use crate::global_context::GlobalContext;
 
-#[derive(Debug, PartialEq, PartialOrd)]
-pub enum FilePrivacyLevel {
-    Blocked = 0,
-    OnlySendToServersIControl = 1,
-    AllowToSendAnywhere = 2,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PrivacySettings {
-    pub privacy_rules: FilePrivacySettings,
-    #[serde(default)]
-    pub loaded_ts: u64,
-}
-
-#[allow(non_snake_case)]
-#[derive(Debug, Deserialize)]
-pub struct FilePrivacySettings {
-    pub only_send_to_servers_I_control: Vec<String>,
-    pub blocked: Vec<String>,
-}
-
-impl Default for PrivacySettings {
-    fn default() -> Self {
-        PrivacySettings {
-            privacy_rules: FilePrivacySettings {
-                blocked: vec!["*".to_string()],
-                only_send_to_servers_I_control: vec![],
-            },
-            loaded_ts: 0,
-        }
-    }
-}
+pub use refact_core::privacy_types::{FilePrivacyLevel, FilePrivacySettings, PrivacySettings};
 
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
