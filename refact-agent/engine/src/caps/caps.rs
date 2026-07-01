@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::global_context::GlobalContext;
@@ -30,57 +29,7 @@ pub use refact_caps_core::model_records::{
     default_hf_tokenizer_template, default_pricing, normalize_string,
 };
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CodeAssistantCaps {
-    #[serde(skip_deserializing)]
-    pub completion_models: IndexMap<String, Arc<CompletionModelRecord>>,
-    #[serde(skip_deserializing)]
-    pub chat_models: IndexMap<String, Arc<ChatModelRecord>>,
-    #[serde(skip_deserializing)]
-    pub embedding_model: EmbeddingModelRecord,
-
-    #[serde(flatten, skip_deserializing)]
-    pub defaults: DefaultModels,
-
-    #[serde(default)]
-    pub caps_version: i64,
-
-    #[serde(default)]
-    pub customization: String,
-
-    #[serde(default = "default_hf_tokenizer_template")]
-    pub hf_tokenizer_template: String,
-
-    #[serde(default)]
-    pub metadata: CapsMetadata,
-
-    #[serde(skip)]
-    pub model_caps: Arc<HashMap<String, ModelCapabilities>>,
-
-    #[serde(skip)]
-    pub user_defaults: ProviderDefaults,
-
-    #[serde(skip)]
-    pub provider_base_names: HashMap<String, Vec<String>>,
-}
-
-impl Default for CodeAssistantCaps {
-    fn default() -> Self {
-        Self {
-            completion_models: IndexMap::new(),
-            chat_models: IndexMap::new(),
-            embedding_model: EmbeddingModelRecord::default(),
-            defaults: DefaultModels::default(),
-            caps_version: 0,
-            customization: String::new(),
-            hf_tokenizer_template: default_hf_tokenizer_template(),
-            metadata: CapsMetadata::default(),
-            model_caps: Arc::new(std::collections::HashMap::new()),
-            user_defaults: crate::providers::config::ProviderDefaults::default(),
-            provider_base_names: HashMap::new(),
-        }
-    }
-}
+pub use refact_caps_core::code_assistant_caps::CodeAssistantCaps;
 
 fn resolve_model_caps_for_provider_model(
     model_caps: &HashMap<String, ModelCapabilities>,
