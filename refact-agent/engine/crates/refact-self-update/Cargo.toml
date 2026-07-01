@@ -1,0 +1,20 @@
+[package]
+name = "refact-self-update"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-core = { path = "../refact-core" }
+flate2 = "1.0"
+hex = "0.4.3"
+percent-encoding = "2.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.8"
+tar = "0.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

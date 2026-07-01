@@ -7,6 +7,7 @@ pub mod model_caps;
 pub mod models_dev;
 pub mod net_utils;
 pub mod provider_types;
+pub mod semver;
 pub mod string_utils;
 pub mod subagent_config;
 pub mod vecdb_types;

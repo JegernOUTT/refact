@@ -33,6 +33,7 @@ pub use refact_files;
 pub use refact_pricing_core;
 pub use refact_runtime_api;
 pub use refact_scope_utils;
+pub use refact_self_update;
 pub use refact_tasks;
 pub use refact_chat_api;
 pub use refact_chat_history;
