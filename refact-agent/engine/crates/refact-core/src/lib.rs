@@ -1,3 +1,4 @@
+pub mod at_commands_preview_cache;
 pub mod buddy_meta;
 pub mod chat_types;
 pub mod custom_error;
