@@ -27,32 +27,7 @@ const SIDEBAR_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 const SIDEBAR_RETRY_DELAY: Duration = Duration::from_secs(5);
 const SIDEBAR_CHATS_PAGE_SIZE: usize = 50;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum NotificationEvent {
-    TaskDone {
-        chat_id: String,
-        tool_call_id: String,
-        summary: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        knowledge_path: Option<String>,
-    },
-    AskQuestions {
-        chat_id: String,
-        tool_call_id: String,
-        questions: Vec<NotificationQuestion>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NotificationQuestion {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub question_type: String,
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<String>>,
-}
+pub use refact_chat_api::notification_event::{NotificationEvent, NotificationQuestion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
