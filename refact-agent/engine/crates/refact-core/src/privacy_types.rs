@@ -40,14 +40,19 @@ mod tests {
     #[test]
     fn privacy_level_order_allows_minimum_comparison() {
         assert!(FilePrivacyLevel::Blocked < FilePrivacyLevel::OnlySendToServersIControl);
-        assert!(FilePrivacyLevel::OnlySendToServersIControl < FilePrivacyLevel::AllowToSendAnywhere);
+        assert!(
+            FilePrivacyLevel::OnlySendToServersIControl < FilePrivacyLevel::AllowToSendAnywhere
+        );
     }
 
     #[test]
     fn default_privacy_settings_block_all_paths() {
         let settings = PrivacySettings::default();
         assert_eq!(settings.privacy_rules.blocked, vec!["*".to_string()]);
-        assert!(settings.privacy_rules.only_send_to_servers_I_control.is_empty());
+        assert!(settings
+            .privacy_rules
+            .only_send_to_servers_I_control
+            .is_empty());
         assert_eq!(settings.loaded_ts, 0);
     }
 }

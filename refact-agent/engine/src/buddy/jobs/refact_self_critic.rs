@@ -46,8 +46,8 @@ fn hash_prompt_tree_at(defaults_dir: &Path) -> String {
 }
 
 fn default_prompt_fingerprint() -> String {
-    let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/refact-yaml-configs/src/defaults");
+    let defaults_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/refact-yaml-configs/src/defaults");
     hash_prompt_tree_at(&defaults_dir)
 }
 
@@ -88,7 +88,13 @@ impl BuddyJob for RefactSelfCriticJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(gcx, &ctx, build_self_critic_spec(&ctx), self.cooldown_seconds()).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_self_critic_spec(&ctx),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 

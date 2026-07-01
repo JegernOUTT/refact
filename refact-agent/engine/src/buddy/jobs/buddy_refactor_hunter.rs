@@ -48,7 +48,13 @@ impl BuddyJob for BuddyRefactorHunterJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(gcx, &ctx, build_refactor_hunter_spec(&ctx), self.cooldown_seconds()).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_refactor_hunter_spec(&ctx),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 

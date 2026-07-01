@@ -9,9 +9,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
 use crate::chat::diagnostics::{
     filter_ui_only_messages, is_ui_only_message, safe_provider_error_diagnostic,
 };
-use crate::chat::history_limit::{
-    compute_context_budget, pressure_for_used_tokens, ContextPressure,
-};
+use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
@@ -2748,7 +2746,9 @@ async fn run_reserved_segment_summarization(
     let episode_start_tokens = crate::chat::trajectory_ops::approx_token_count(&raw_messages);
     let target_saved_tokens =
         episode_start_tokens.saturating_mul(COMPRESSION_TARGET_REDUCTION_PERCENT) / 100;
-    let safety_iterations = raw_messages.len().saturating_add(COMPRESSION_SAFETY_ITERATION_SLACK);
+    let safety_iterations = raw_messages
+        .len()
+        .saturating_add(COMPRESSION_SAFETY_ITERATION_SLACK);
 
     let mut tried_source_hashes: HashSet<String> = known_insufficient_hashes;
     let mut insufficient_hashes_to_record: Vec<String> = Vec::new();
@@ -2970,7 +2970,8 @@ async fn run_reserved_segment_summarization(
         } else {
             CompressionReason::NoEligibleSegment
         };
-        if emit_compression_skipped_if_owned(&mut session, attempt, reason) && forced_context_limit {
+        if emit_compression_skipped_if_owned(&mut session, attempt, reason) && forced_context_limit
+        {
             append_compression_outcome_event(&mut session, reason);
         }
         CompactionOutcome::NothingToCompact

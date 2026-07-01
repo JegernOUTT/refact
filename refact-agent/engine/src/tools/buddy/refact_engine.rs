@@ -579,7 +579,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mirror");
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src").join("lib.rs"), "fn refact_engine_marker() {}\n").unwrap();
+        fs::write(
+            root.join("src").join("lib.rs"),
+            "fn refact_engine_marker() {}\n",
+        )
+        .unwrap();
 
         let output = search_refact_engine_at(&root, "refact_engine_marker", Some("*.rs")).unwrap();
         assert!(output.contains("src"));
@@ -612,6 +616,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
         let err = require_fresh_mirror(&missing).unwrap_err();
-        assert_eq!(err, "engine mirror missing or stale; run refact_engine_clone");
+        assert_eq!(
+            err,
+            "engine mirror missing or stale; run refact_engine_clone"
+        );
     }
 }

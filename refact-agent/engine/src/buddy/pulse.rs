@@ -103,7 +103,10 @@ fn unique_fact_payload_ids(facts: &[&crate::buddy::types::BuddyFact], fields: &[
     for fact in facts {
         for field in fields {
             if let Some(arr) = fact.payload.get(*field).and_then(|v| v.as_array()) {
-                ids.extend(arr.iter().filter_map(|v| v.as_str().map(ToString::to_string)));
+                ids.extend(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(ToString::to_string)),
+                );
             }
         }
     }

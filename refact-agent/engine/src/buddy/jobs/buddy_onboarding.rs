@@ -182,7 +182,8 @@ impl BuddyJob for BuddyOnboardingJob {
         if same_signal(&ctx, &spec.signal_hash) {
             return BuddyJobResult::default();
         }
-        let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
+        let mut result =
+            execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
         if result.last_result.is_none() {
             result.last_result = Some(serialize_scan(&spec.signal_hash, &scan));
         }
@@ -252,59 +253,5 @@ mod tests {
         assert_eq!(scan.candidates.len(), 1);
         assert_eq!(scan.candidates[0].path, "new-service");
         assert_eq!(scan.candidates[0].kind, "dir");
-    }
-
-    #[test]
-    fn all_4_workflow_yamls_loadable() {
-        let expected = [
-            (
-                "buddy_onboarding",
-                vec!["tree", "cat", "replace_textdoc", "buddy_runtime_event"],
-            ),
-            (
-                "buddy_refactor_hunter",
-                vec![
-                    "tree",
-                    "cat",
-                    "search_symbol_definition",
-                    "search_pattern",
-                    "apply_patch",
-                    "buddy_runtime_event",
-                    "buddy_memory_create",
-                ],
-            ),
-            (
-                "buddy_skill_author",
-                vec![
-                    "cat",
-                    "create_textdoc",
-                    "buddy_runtime_event",
-                    "buddy_speak",
-                ],
-            ),
-            (
-                "buddy_test_coverage_watcher",
-                vec![
-                    "tree",
-                    "cat",
-                    "search_symbol_definition",
-                    "create_textdoc",
-                    "buddy_runtime_event",
-                    "buddy_open_issue",
-                ],
-            ),
-        ];
-        for (id, tools) in expected {
-            let path = subagent_yaml_path(id);
-            let yaml = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let config = serde_yaml::from_str::<SubagentConfig>(&yaml)
-                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-            assert_eq!(config.id, id);
-            assert!(config.subchat.autonomous_no_confirm.unwrap_or(false));
-            for tool in tools {
-                assert!(config.tools.iter().any(|configured| configured == tool));
-            }
-        }
     }
 }

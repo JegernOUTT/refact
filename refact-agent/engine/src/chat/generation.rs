@@ -930,7 +930,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
     if matches!(
         outcome,
         crate::chat::summarization::CompactionOutcome::LlmUnavailable
-    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc).await
+    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc)
+        .await
     {
         warn!("High-pressure length stop recovered via deterministic full sweep");
         return true;
@@ -1435,8 +1436,8 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                let is_context_limit = error.retry_decision().is_context_limit()
-                    && !abort_flag.load(Ordering::SeqCst);
+                let is_context_limit =
+                    error.retry_decision().is_context_limit() && !abort_flag.load(Ordering::SeqCst);
                 if is_context_limit {
                     let original_error = error.message.clone();
                     let round = {

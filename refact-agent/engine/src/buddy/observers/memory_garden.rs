@@ -1050,7 +1050,10 @@ mod tests {
         assert!(unchanged.is_empty());
         assert!(unchanged_counter.is_none());
 
-        let changed_entries = vec![orphan_candidate("old-memory"), orphan_candidate("new-memory")];
+        let changed_entries = vec![
+            orphan_candidate("old-memory"),
+            orphan_candidate("new-memory"),
+        ];
         let changed_facts = memory_garden_facts_from_entries(&changed_entries, now);
         let (changed, changed_counter) =
             transition_memory_garden_facts(changed_facts, &persisted, now);

@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::app_state::AppState;
-use crate::buddy::autonomous_workflows::{
-    autonomous_workflow_meta, REFACT_COMPILE_SNIFFER_WORKFLOW_ID,
-};
+use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_COMPILE_SNIFFER_WORKFLOW_ID};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use crate::tools::tool_buddy_get_logs::{is_log_candidate, resolve_log_dir};
@@ -144,7 +142,13 @@ impl BuddyJob for RefactCompileSnifferJob {
         let Some(evidence) = evidence else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_compile_sniffer_spec(&ctx, evidence), self.cooldown_seconds()).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_compile_sniffer_spec(&ctx, evidence),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 

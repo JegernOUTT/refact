@@ -280,7 +280,6 @@ async fn run_for_current_version(options: SelfUpdateOptions, current_version: &s
     run_with_io_for_current_version(options, current_version, &mut stdout, &mut stderr).await
 }
 
-
 async fn run_with_io_for_current_version(
     options: SelfUpdateOptions,
     current_version: &str,

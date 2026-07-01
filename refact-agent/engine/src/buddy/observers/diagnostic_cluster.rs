@@ -187,7 +187,10 @@ mod tests {
         }
 
         let facts = detect_diagnostic_cluster_facts(&diagnostics, now);
-        let keys = facts.iter().map(|fact| fact.key.as_str()).collect::<Vec<_>>();
+        let keys = facts
+            .iter()
+            .map(|fact| fact.key.as_str())
+            .collect::<Vec<_>>();
         assert!(keys.contains(&"diag:cluster:provider_error:frontend"));
         assert!(keys.contains(&"diag:cluster:provider_error:mcp_tool"));
     }

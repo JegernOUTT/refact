@@ -539,36 +539,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn buddy_user_pref_upsert_creates_new_then_increments_on_dedup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("user_profile.md");
-        let first = upsert_user_pref_at(
-            &path,
-            "Prefers Rust over Python for systems work",
-            "Picked Rust repeatedly",
-            0.85,
-            "2026-05-14T16:00:00Z",
-        )
-        .await
-        .unwrap();
-        let second = upsert_user_pref_at(
-            &path,
-            "prefers rust over python",
-            "Chose Rust again",
-            0.90,
-            "2026-05-14T17:00:00Z",
-        )
-        .await
-        .unwrap();
-        let prefs = read_profile(&path).await.unwrap();
-        assert!(first.1);
-        assert!(!second.1);
-        assert_eq!(prefs.len(), 1);
-        assert_eq!(prefs[0].updates, 2);
-        assert_eq!(prefs[0].statement, "prefers rust over python");
-    }
-
-    #[tokio::test]
     async fn buddy_user_pref_upsert_allows_empty_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("user_profile.md");

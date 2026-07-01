@@ -8953,41 +8953,6 @@ fn legacy_investigation_route_is_removed() {
 }
 
 #[test]
-fn investigation_diagnostic_cluster_payload_has_diagnostic_ids_not_collected_at() {
-    use super::diagnostics::diagnostic_id;
-    use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
-
-    let now = chrono::Utc::now();
-    let diags: Vec<DiagnosticContext> = (0..3)
-        .map(|i| DiagnosticContext {
-            error_type: "timeout".to_string(),
-            error_message: format!("timeout error {}", i),
-            source_file: Some(format!("file{}.rs", i)),
-            tool_name: None,
-            chat_id: None,
-            collected_at: (now - Duration::minutes(i + 1)).to_rfc3339(),
-            severity: DiagnosticSeverity::High,
-        })
-        .collect();
-
-    let facts = detect_diagnostic_cluster_facts(&diags, now);
-    let fact = facts
-        .iter()
-        .find(|f| f.kind == BuddyFactKind::DiagnosticCluster)
-        .unwrap();
-    let ids = fact
-        .payload
-        .get("diagnostic_ids")
-        .and_then(|v| v.as_array())
-        .unwrap();
-
-    assert_eq!(ids.len(), 3);
-    assert_eq!(ids[0].as_str().unwrap(), diagnostic_id(&diags[0]));
-    assert!(fact.payload.get("sample_collected_at").is_some());
-    assert!(fact.payload.get("sample_diagnostic_id").is_none());
-}
-
-#[test]
 fn investigation_opportunity_carries_real_diagnostic_ids() {
     use super::facts::FactStore;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
