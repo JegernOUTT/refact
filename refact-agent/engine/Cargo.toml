@@ -119,6 +119,12 @@ pnet_datalink = "0.35.0"
 
 [dependencies]
 
+# Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
+# aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI
+# toolchain, breaking the x86_64-unknown-linux-gnu engine build. 0.38.0 builds cleanly
+# and is compatible with aws-lc-rs 1.16.x. Cargo.lock is gitignored, so pin here.
+aws-lc-sys = "=0.38.0"
+
 refact-core = { path = "crates/refact-core" }
 refact-ast = { path = "crates/refact-ast" }
 refact-chat-api = { path = "crates/refact-chat-api" }
