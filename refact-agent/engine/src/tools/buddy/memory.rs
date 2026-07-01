@@ -11,10 +11,11 @@ use walkdir::WalkDir;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::memory_lifecycle::{
-    archive_memory_file_checked, compute_content_hash, normalize_kind, normalize_tags,
-    MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus, MemoryOpType,
-    MemorySource,
+    archive_memory_file_checked, compute_content_hash, find_memory_by_source, normalize_kind,
+    normalize_tags, MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus,
+    MemoryOpType, MemorySource,
 };
+use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
 use crate::buddy::storage::enqueue_memory_op;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
@@ -455,6 +456,12 @@ async fn find_duplicate_content(gcx: Arc<GlobalContext>, hash: &str) -> Option<P
                 continue;
             };
             let (frontmatter, body) = parse_memory_text(&text);
+            // Status is authoritative: only skip docs whose status marks them inactive. Do not
+            // skip an explicitly-active/pinned doc just because it carries a stale
+            // deprecated_at/superseded_by field, or dedup would miss live canonicals.
+            if frontmatter.is_archived() || frontmatter.is_deprecated() {
+                continue;
+            }
             if frontmatter.content_hash.as_deref() == Some(hash)
                 || compute_content_hash(&body) == hash
             {
@@ -482,14 +489,26 @@ async fn create_memory(
     }
     let kind = validate_kind(kind, WRITABLE_KINDS)?;
     let tags = tags_with_buddy(tags);
-    let content_hash = compute_content_hash(content);
+    let title = redact_and_cap_text(title, 160);
+    let content = redact_and_cap_text(content, 4000);
+    let content_hash = compute_content_hash(&content);
+    if let Some(path) = find_memory_by_source(
+        gcx.clone(),
+        MemorySource::Buddy,
+        Some(source_id),
+        Some(&content_hash),
+    )
+    .await
+    {
+        return Ok(CreateOutcome::Skipped(path));
+    }
     if let Some(path) = find_duplicate_content(gcx.clone(), &content_hash).await {
         return Ok(CreateOutcome::Skipped(path));
     }
     let now = Local::now().format("%Y-%m-%d").to_string();
     let frontmatter = KnowledgeFrontmatter {
         id: Some(uuid::Uuid::new_v4().to_string()),
-        title: Some(title.to_string()),
+        title: Some(title.clone()),
         tags: tags.clone(),
         created: Some(now.clone()),
         updated: Some(now),
@@ -502,12 +521,13 @@ async fn create_memory(
         ),
         created_at: Some(Utc::now().to_rfc3339()),
         content_hash: Some(content_hash.clone()),
+        source_id: Some(source_id.to_string()),
+        source_content_hash: Some(content_hash.clone()),
         source_tool: Some("buddy_memory_create".to_string()),
         source_confidence: Some(confidence),
-        source_message_range: Some(source_id.to_string()),
         ..Default::default()
     };
-    let path = memories_add(gcx.clone(), &frontmatter, content).await?;
+    let path = memories_add(gcx.clone(), &frontmatter, &content).await?;
     let mut op = MemoryLifecycleOp::pending(
         op_id("create", &[source_id, &content_hash]),
         MemorySource::Buddy,
@@ -518,15 +538,18 @@ async fn create_memory(
         Utc::now().to_rfc3339(),
     );
     op.payload = MemoryLifecyclePayload {
-        title: Some(title.to_string()),
-        content: Some(content.to_string()),
+        title: Some(title),
+        content: Some(content.clone()),
         tags: Some(tags),
         kind: Some(kind),
         source_id: Some(source_id.to_string()),
         source_content_hash: Some(content_hash),
         ..Default::default()
     };
-    append_audit_op(gcx, op).await?;
+    if let Err(err) = append_audit_op(gcx, op).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(err);
+    }
     Ok(CreateOutcome::Created(path))
 }
 
@@ -834,9 +857,19 @@ impl Tool for ToolBuddyMemoryMerge {
         {
             CreateOutcome::Created(path) | CreateOutcome::Skipped(path) => path,
         };
+        // D3: never archive the canonical itself. With source/content dedup, create_memory may
+        // return an existing (possibly superseded) path as the canonical; archiving it would
+        // leave the merged cluster with no active canonical.
+        let canonical_canon = tokio::fs::canonicalize(&canonical_path).await.ok();
         let mut archived = 0usize;
         for raw in &superseded {
             let path = resolve_memory_path(gcx.clone(), raw).await?;
+            let path_canon = tokio::fs::canonicalize(&path).await.ok();
+            let is_canonical = path == canonical_path
+                || (canonical_canon.is_some() && path_canon == canonical_canon);
+            if is_canonical {
+                continue;
+            }
             if archive_memory_file_checked(
                 app.clone(),
                 &path,
@@ -1031,6 +1064,57 @@ mod tests {
         assert!(cards.iter().any(|card| card.title == "Create Test"));
         let state = load_memory_ops(dir.path()).await;
         assert_eq!(state.applied_count, 1);
+        let memory_path = std::fs::read_dir(dir.path().join(KNOWLEDGE_FOLDER_NAME))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = tokio::fs::read_to_string(memory_path).await.unwrap();
+        let (frontmatter, _) = KnowledgeFrontmatter::parse(&text);
+        assert_eq!(frontmatter.source_id.as_deref(), Some("src-1"));
+        assert_eq!(
+            frontmatter.source_content_hash.as_deref(),
+            Some(compute_content_hash("remember the frog").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_create_skips_same_source_id_reworded_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let ccx = ccx(dir.path()).await;
+        let mut tool = ToolBuddyMemoryCreate {
+            config_path: String::new(),
+        };
+        let base_args = |content: &str| {
+            args(vec![
+                ("title", serde_json::json!("Source Test")),
+                ("content", serde_json::json!(content)),
+                ("tags", serde_json::json!(["test"])),
+                ("kind", serde_json::json!("lesson")),
+                ("source_id", serde_json::json!("same-source")),
+            ])
+        };
+        let first = tool
+            .tool_execute(
+                ccx.clone(),
+                &"call".to_string(),
+                &base_args("first wording"),
+            )
+            .await
+            .unwrap();
+        let second = tool
+            .tool_execute(ccx, &"call".to_string(), &base_args("second wording"))
+            .await
+            .unwrap();
+        assert!(text(&first).contains("Created memory:"));
+        assert!(text(&second).contains("Skipped: identical memory exists"));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(KNOWLEDGE_FOLDER_NAME))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1062,6 +1146,43 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_create_ignores_archived_exact_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let body = "same archived body";
+        tokio::fs::write(
+            knowledge_dir.join("archived.md"),
+            format!(
+                "---\ntitle: Archived\nkind: lesson\nstatus: archived\ncontent_hash: {}\ndeprecated_at: 2026-01-01\n---\n\n{body}\n",
+                compute_content_hash(body)
+            ),
+        )
+        .await
+        .unwrap();
+        let ccx = ccx(dir.path()).await;
+        let mut tool = ToolBuddyMemoryCreate {
+            config_path: String::new(),
+        };
+        let result = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(vec![
+                    ("title", serde_json::json!("Fresh")),
+                    ("content", serde_json::json!(body)),
+                    ("tags", serde_json::json!([])),
+                    ("kind", serde_json::json!("lesson")),
+                    ("source_id", serde_json::json!("fresh-source")),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert!(text(&result).contains("Created memory:"));
+        assert_eq!(std::fs::read_dir(knowledge_dir).unwrap().count(), 2);
     }
 
     #[cfg(unix)]

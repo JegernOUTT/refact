@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_security_whisperer
 title: Security Whisperer
 description: Review security-sensitive evidence and nudge the user toward safer defaults.

@@ -1,7 +1,7 @@
 schema_version: 2
 id: refact_self_critic
 title: Self-Critic
-description: Periodic critique of engine prompts and recent trajectories
+description: Periodic critique of the engine's own subagent and mode prompt configs
 expose_as_tool: false
 has_code: false
 subchat:

@@ -262,6 +262,9 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
                 signal_hash: spec.signal_hash.clone(),
                 chat_id: autonomous.chat_id,
                 completed_at: autonomous.completed_at,
+                status: None,
+                failure_category: None,
+                consecutive_failures: None,
             })
         }) {
             return BuddyJobResult {
@@ -273,7 +276,7 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
                 ..Default::default()
             };
         }
-        let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone()).await;
+        let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
         if let Some(last) = parse_last_autonomous_result(result.last_result.as_deref()) {
             result.last_result = Some(serialize_scan_with_autonomous(
                 &spec.signal_hash,

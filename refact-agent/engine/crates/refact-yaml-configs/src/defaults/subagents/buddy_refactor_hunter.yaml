@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_refactor_hunter
 title: Refactor Hunter
 description: Weekly hunt for small refactor wins
@@ -20,7 +20,7 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You are hunting for low-risk refactor wins. Use tree + search_pattern to find duplicated code patterns or long functions, then:
+    You are hunting for low-risk refactor wins. Use tree + regex_search to find duplicated code patterns or long functions, then:
     1. Pick 1 high-confidence candidate.
     2. Optionally use apply_patch to propose a small refactor.
     3. If you found a generalizable lesson, use buddy_memory_create with kind=lesson.
@@ -35,8 +35,8 @@ messages:
 tools:
   - tree
   - cat
-  - search_symbol_definition
-  - search_pattern
+  - symbol_def
+  - regex_search
   - apply_patch
   - buddy_runtime_event
   - buddy_memory_create

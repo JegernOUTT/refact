@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_knowledge_conflict_resolver
 title: Knowledge Conflict Resolver
 description: Resolve conflicting or obsolete memories with safe merges and archives.
@@ -25,10 +25,13 @@ messages:
     Leave uncertain conflicts alone and report what needs human review.
 
     Steps:
-    1. Search memories related to the conflict signal.
-    2. Compare records for contradiction, duplication, or stale guidance.
-    3. Merge or archive only the clearly superseded memory records.
-    4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
+    1. Search memories related to the conflict signal (buddy_memory_search).
+    2. Before any merge/archive, cat the full memory files (the paths returned by search) so
+       you decide on real content, not just search summaries.
+    3. Compare records for contradiction, duplication, or stale guidance.
+    4. Merge or archive only the clearly superseded memory records; leave uncertain ones for
+       human review.
+    5. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
     Workflow: {{workflow_id}}
@@ -44,6 +47,7 @@ messages:
 
 tools:
   - buddy_memory_search
+  - cat
   - buddy_memory_archive
   - buddy_memory_merge
   - buddy_runtime_event

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_friday_retro
 title: Friday Retro
 description: Weekly reflection on wins, rough edges, and tiny improvements
@@ -17,11 +17,15 @@ subchat:
 messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
-    You are closing the week with a lightweight retro. Read recent commits & saved Buddy chats, then:
+    You are closing the week with a lightweight retro. Use only the supplied evidence about recent commits and Buddy activity, then:
     1. Summarize the week's main win and one recurring friction point.
     2. Use buddy_speak intent=insight for a short supportive retro.
     3. End with buddy_runtime_event titled "Friday retro" with the summary.
+    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}
+    Task: {{prompt}}
+    Evidence:
+    {{evidence}}
 tools: [buddy_speak, buddy_runtime_event]

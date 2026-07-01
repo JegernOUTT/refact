@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use chrono::Utc;
 
@@ -71,12 +71,12 @@ async fn build_trajectories_pulse(project_root: &std::path::Path) -> TrajectoryP
 async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactStore) -> MemoryPulse {
     let mut pulse = MemoryPulse::default();
     let orphan_facts = fact_store.recent(BuddyFactKind::MemoryOrphan, chrono::Duration::hours(24));
-    pulse.orphan = orphan_facts.len() as u32;
+    pulse.orphan = unique_fact_payload_ids(&orphan_facts, &["memory_ids"]);
     let stale_facts = fact_store.recent(
         BuddyFactKind::MemoryStaleConflict,
         chrono::Duration::hours(24),
     );
-    pulse.stale_conflicts = stale_facts.len() as u32;
+    pulse.stale_conflicts = unique_fact_payload_ids(&stale_facts, &["memory_ids", "doc_ids"]);
     let knowledge_dir = project_root.join(".refact").join("knowledge");
     if knowledge_dir.exists() {
         if let Ok(rd) = std::fs::read_dir(&knowledge_dir) {
@@ -96,6 +96,22 @@ async fn build_memory_pulse(project_root: &std::path::Path, fact_store: &FactSto
     pulse.review_candidates = counts.review_candidates;
     pulse.conflict_candidates = counts.conflict_candidates;
     pulse
+}
+
+fn unique_fact_payload_ids(facts: &[&crate::buddy::types::BuddyFact], fields: &[&str]) -> u32 {
+    let mut ids = HashSet::new();
+    for fact in facts {
+        for field in fields {
+            if let Some(arr) = fact.payload.get(*field).and_then(|v| v.as_array()) {
+                ids.extend(arr.iter().filter_map(|v| v.as_str().map(ToString::to_string)));
+            }
+        }
+    }
+    if ids.is_empty() {
+        facts.len() as u32
+    } else {
+        ids.len() as u32
+    }
 }
 
 async fn build_providers_pulse(gcx: AppState) -> ProviderPulse {
@@ -370,6 +386,7 @@ fn compute_diff_lines_4h(repo: &git2::Repository) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::types::BuddyFact;
     use crate::buddy::memory_lifecycle::{
         MemoryLifecycleOp, MemoryOpStatus, MemoryOpType, MemorySource,
     };
@@ -395,6 +412,17 @@ mod tests {
             dest_name: name.to_string(),
             destination_path: PathBuf::from(format!("commands/{name}.md")),
             metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn memory_fact(key: &str, payload: serde_json::Value) -> BuddyFact {
+        BuddyFact {
+            kind: BuddyFactKind::MemoryOrphan,
+            key: key.to_string(),
+            source: "test",
+            payload,
+            seen_at: Utc::now(),
+            confidence: 0.9,
         }
     }
 
@@ -448,6 +476,24 @@ mod tests {
         assert_eq!(pulse.pending_ops, 1);
         assert_eq!(pulse.merge_candidates, 1);
         assert_eq!(pulse.duplicate_candidates, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_pulse_orphan_count_dedupes_memory_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = FactStore::new();
+        store.ingest(memory_fact(
+            "orphan-a",
+            serde_json::json!({ "memory_ids": ["memory-1", "memory-2"] }),
+        ));
+        store.ingest(memory_fact(
+            "orphan-b",
+            serde_json::json!({ "memory_ids": ["memory-1", "memory-2"] }),
+        ));
+
+        let pulse = build_memory_pulse(temp.path(), &store).await;
+
+        assert_eq!(pulse.orphan, 2);
     }
 
     #[tokio::test]

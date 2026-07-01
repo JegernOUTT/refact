@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_setup_coach
 title: Setup Coach
 description: Help smooth project setup by spotting missing onboarding or setup files.

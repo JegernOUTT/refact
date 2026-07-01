@@ -6,14 +6,11 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::buddy::actor::redact_sensitive;
 use crate::call_validation::ContextEnum;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const TITLE_MAX_CHARS: usize = 120;
 const BODY_MAX_CHARS: usize = 4000;
-const LABEL_MAX_CHARS: usize = 50;
-const MAX_LABELS: usize = 5;
 const TRUNCATED_SUFFIX: &str = "...[truncated]";
 
 pub struct ToolBuddyOpenIssue {
@@ -40,7 +37,7 @@ fn truncate_with_suffix(value: &str, max_chars: usize) -> String {
 }
 
 fn capped_redacted(value: &str, max_chars: usize) -> String {
-    truncate_with_suffix(&redact_sensitive(value), max_chars)
+    truncate_with_suffix(&crate::buddy::actor::redact_sensitive(value), max_chars)
 }
 
 fn valid_provider(provider: &Value) -> bool {
@@ -90,7 +87,7 @@ fn prepare_forwarded_args(args: &HashMap<String, Value>) -> Result<HashMap<Strin
         .map(|b| capped_redacted(b, BODY_MAX_CHARS));
 
     let validated_labels = if let Some(labels_value) = args.get("labels") {
-        let raw: Vec<Value> = labels_value
+        let raw: Vec<String> = labels_value
             .as_array()
             .ok_or("labels must be an array of strings")?
             .iter()
@@ -98,16 +95,12 @@ fn prepare_forwarded_args(args: &HashMap<String, Value>) -> Result<HashMap<Strin
             .map(|(i, v)| {
                 v.as_str()
                     .ok_or_else(|| format!("labels[{}] must be a string", i))
-                    .map(|s| Value::String(redact_sensitive(s)))
+                    .map(|s| s.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let processed: Vec<Value> = raw
+        let processed: Vec<Value> = crate::buddy::issues::sanitize_labels(&raw)
             .into_iter()
-            .filter(|v| {
-                v.as_str()
-                    .map_or(false, |s| s.chars().count() <= LABEL_MAX_CHARS)
-            })
-            .take(MAX_LABELS)
+            .map(Value::String)
             .collect();
         Some(Value::Array(processed))
     } else {

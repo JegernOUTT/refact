@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 
 use crate::buddy::observers::{BuddyObserver, ObserverContext};
 use crate::buddy::settings::BuddySettings;
@@ -28,6 +29,8 @@ const MEMORY_GARDEN_DAILY_COUNTER_JOB_ID: &str = "memory_garden";
 struct MemoryGardenDailyCounter {
     day: String,
     count: usize,
+    #[serde(default)]
+    last_fact_set_fingerprint: Option<String>,
 }
 
 struct KnowledgeEntry {
@@ -464,7 +467,8 @@ fn daily_counter_from_job_state(
         .and_then(|value| serde_json::from_str::<MemoryGardenDailyCounter>(value).ok())
         .unwrap_or_default();
     if counter.day != day {
-        counter = MemoryGardenDailyCounter { day, count: 0 };
+        counter.day = day;
+        counter.count = 0;
     }
     counter
 }
@@ -480,6 +484,62 @@ fn apply_daily_cap_to_memory_garden_facts(
     facts.truncate(remaining);
     counter.count = counter.count.saturating_add(facts.len());
     (facts, counter)
+}
+
+fn memory_garden_fact_set_fingerprint(facts: &[BuddyFact]) -> String {
+    let mut parts = facts
+        .iter()
+        .map(|fact| {
+            let mut ids = fact
+                .payload
+                .get("memory_ids")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .chain(
+                    fact.payload
+                        .get("doc_ids")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten(),
+                )
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>();
+            ids.sort();
+            format!("{}\u{0}{}", fact.key, ids.join("\u{0}"))
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(parts.join("\u{1}").as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn memory_garden_fact_set_changed(facts: &[BuddyFact], counter: &MemoryGardenDailyCounter) -> bool {
+    let fingerprint = memory_garden_fact_set_fingerprint(facts);
+    counter.last_fact_set_fingerprint.as_deref() != Some(fingerprint.as_str())
+}
+
+fn transition_memory_garden_facts(
+    facts: Vec<BuddyFact>,
+    job_state: &BuddyJobState,
+    now: DateTime<Utc>,
+) -> (Vec<BuddyFact>, Option<MemoryGardenDailyCounter>) {
+    let counter = daily_counter_from_job_state(job_state, now);
+    let fingerprint = memory_garden_fact_set_fingerprint(&facts);
+    if !memory_garden_fact_set_changed(&facts, &counter) {
+        return (vec![], None);
+    }
+    if facts.is_empty() {
+        let mut counter = counter;
+        counter.last_fact_set_fingerprint = Some(fingerprint);
+        return (vec![], Some(counter));
+    }
+
+    let (facts, mut counter) = apply_daily_cap_to_memory_garden_facts(facts, job_state, now);
+    counter.last_fact_set_fingerprint = Some(fingerprint);
+    (facts, Some(counter))
 }
 
 #[cfg(test)]
@@ -679,8 +739,10 @@ impl BuddyObserver for MemoryGardenObserver {
     async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let facts = detect_memory_garden(gcx.clone(), ctx.now).await;
         let job_state = memory_garden_job_state(gcx.clone()).await;
-        let (facts, counter) = apply_daily_cap_to_memory_garden_facts(facts, &job_state, ctx.now);
-        persist_memory_garden_daily_counter(gcx, &counter).await;
+        let (facts, counter) = transition_memory_garden_facts(facts, &job_state, ctx.now);
+        if let Some(counter) = counter {
+            persist_memory_garden_daily_counter(gcx, &counter).await;
+        }
         facts
     }
 }
@@ -932,6 +994,7 @@ mod tests {
         let previous = MemoryGardenDailyCounter {
             day: "2026-05-02".to_string(),
             count: MAX_PROPOSALS_PER_DAY - 2,
+            ..Default::default()
         };
         let job_state = BuddyJobState {
             last_result: Some(serde_json::to_string(&previous).unwrap()),
@@ -963,5 +1026,36 @@ mod tests {
         assert_eq!(reset_capped.len(), MAX_PROPOSALS_PER_TICK);
         assert_eq!(reset_counter.day, "2026-05-03");
         assert_eq!(reset_counter.count, MAX_PROPOSALS_PER_TICK);
+    }
+
+    #[test]
+    fn memory_garden_transition_emits_nothing_when_unchanged_and_again_when_changed() {
+        let now = DateTime::parse_from_rfc3339("2026-05-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let entries = vec![orphan_candidate("old-memory")];
+        let first_facts = memory_garden_facts_from_entries(&entries, now);
+
+        let (emitted, counter) =
+            transition_memory_garden_facts(first_facts.clone(), &BuddyJobState::default(), now);
+
+        assert!(!emitted.is_empty());
+        let persisted = BuddyJobState {
+            last_result: Some(serde_json::to_string(&counter.unwrap()).unwrap()),
+            ..Default::default()
+        };
+        let (unchanged, unchanged_counter) =
+            transition_memory_garden_facts(first_facts, &persisted, now);
+
+        assert!(unchanged.is_empty());
+        assert!(unchanged_counter.is_none());
+
+        let changed_entries = vec![orphan_candidate("old-memory"), orphan_candidate("new-memory")];
+        let changed_facts = memory_garden_facts_from_entries(&changed_entries, now);
+        let (changed, changed_counter) =
+            transition_memory_garden_facts(changed_facts, &persisted, now);
+
+        assert!(!changed.is_empty());
+        assert!(changed_counter.is_some());
     }
 }

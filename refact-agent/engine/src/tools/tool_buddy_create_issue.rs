@@ -73,6 +73,11 @@ impl Tool for ToolBuddyCreateIssue {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Optional GitHub labels for MCP issue creation."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Issue tracker provider: 'github' or 'gitlab'. Defaults to the configured tracker.",
+                        "enum": ["github", "gitlab"]
                     }
                 },
                 "required": ["title", "body", "confidence"],
@@ -97,6 +102,7 @@ impl Tool for ToolBuddyCreateIssue {
             .ok_or_else(|| {
                 "buddy_create_issue: missing required string argument 'title'".to_string()
             })?;
+        let title = crate::buddy::issues::sanitize_issue_title(title);
         let body = args
             .get("body")
             .and_then(|v| v.as_str())
@@ -105,6 +111,7 @@ impl Tool for ToolBuddyCreateIssue {
             .ok_or_else(|| {
                 "buddy_create_issue: missing required string argument 'body'".to_string()
             })?;
+        let body = crate::buddy::issues::sanitize_issue_body(body);
         let confidence = args
             .get("confidence")
             .and_then(|v| v.as_str())
@@ -154,6 +161,13 @@ impl Tool for ToolBuddyCreateIssue {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec!["bug".to_string(), "buddy".to_string()]);
+        let labels = crate::buddy::issues::sanitize_labels(&labels);
+        let provider = args
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|s| s.to_string());
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
@@ -166,16 +180,17 @@ impl Tool for ToolBuddyCreateIssue {
             error,
             source_file,
             tool_name,
-            title,
-            body,
+            &title,
+            &body,
         )
         .await?;
-        let result = crate::buddy::issues::create_confirmed_issue(
+        let result = crate::buddy::issues::create_confirmed_issue_with_provider(
             app.clone(),
             &context,
-            title,
-            body,
+            &title,
+            &body,
             labels,
+            provider,
         )
         .await?;
 

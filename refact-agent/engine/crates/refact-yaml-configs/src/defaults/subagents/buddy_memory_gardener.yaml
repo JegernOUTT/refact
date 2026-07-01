@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_memory_gardener
 title: Memory Gardener
 description: Maintain Buddy memories by creating, archiving, retagging, or merging notes.

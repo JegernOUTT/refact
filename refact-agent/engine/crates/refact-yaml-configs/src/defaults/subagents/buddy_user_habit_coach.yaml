@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_user_habit_coach
 title: User Habit Coach
 description: Offer gentle coaching based on useful memories and recurring work habits.

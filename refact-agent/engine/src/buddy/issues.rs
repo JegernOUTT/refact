@@ -41,7 +41,7 @@ fn trusted_issue_binary(binary: &str) -> PathBuf {
 
 #[derive(Debug)]
 pub struct IssueGate {
-    pub has_diagnostics: bool,
+    pub has_issue_text: bool,
     pub has_repro_context: bool,
     pub integration_configured: bool,
     pub auto_creation_enabled: bool,
@@ -49,7 +49,7 @@ pub struct IssueGate {
 }
 
 pub fn check_issue_gate(gate: &IssueGate) -> bool {
-    gate.has_diagnostics
+    gate.has_issue_text
         && gate.has_repro_context
         && gate.integration_configured
         && gate.auto_creation_enabled
@@ -57,12 +57,13 @@ pub fn check_issue_gate(gate: &IssueGate) -> bool {
 }
 
 pub fn check_manual_issue_gate(gate: &IssueGate) -> bool {
-    gate.has_diagnostics && gate.integration_configured
+    gate.has_issue_text && gate.integration_configured
 }
 
 fn gate_error(gate: &IssueGate, manual: bool) -> String {
-    if !gate.has_diagnostics {
-        return "gate blocked: no diagnostic information (need non-empty error with source file or tool name)".to_string();
+    if !gate.has_issue_text {
+        return "gate blocked: no issue text (need non-empty error or issue title/body)"
+            .to_string();
     }
     if !manual && !gate.has_repro_context {
         return "gate blocked: no reproduction context (source file or tool name required)"
@@ -251,7 +252,11 @@ pub(crate) async fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo
     parse_remote_url(&url)
 }
 
-async fn detect_provider(gcx: AppState, repo: &RepoInfo) -> Result<Option<IssueProvider>, String> {
+async fn detect_provider(
+    gcx: AppState,
+    repo: &RepoInfo,
+    preferred_provider: Option<&str>,
+) -> Result<Option<IssueProvider>, String> {
     let active = crate::files_correction::get_active_project_path(gcx.gcx.clone()).await;
     let (config_dirs, global_config_dir) =
         crate::integrations::setting_up_integrations::get_config_dirs(gcx.gcx.clone(), &active)
@@ -271,9 +276,13 @@ async fn detect_provider(gcx: AppState, repo: &RepoInfo) -> Result<Option<IssueP
         }
     }
 
-    Ok(match &repo.host {
-        RepoHost::GitHub => gh_provider,
-        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => gl_provider,
+    Ok(match preferred_provider {
+        Some("github") => gh_provider,
+        Some("gitlab") => gl_provider,
+        _ => match &repo.host {
+            RepoHost::GitHub => gh_provider,
+            RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => gl_provider,
+        },
     })
 }
 
@@ -570,7 +579,8 @@ pub async fn resolve_or_synthesize_context(
     if !has_error && source_file.is_none() && tool_name.is_none() {
         return Err(
             "provide a diagnostic reference (diagnostic_id, diagnostic_index, or collected_at), \
-             or an `error` with a `source_file` or `tool_name`"
+             OR reproduction context (source_file or tool_name) together with either an `error` \
+             or the issue title/body"
                 .to_string(),
         );
     }
@@ -595,22 +605,20 @@ pub async fn create_confirmed_issue(
     body: &str,
     labels: Vec<String>,
 ) -> Result<BuddyIssueCreateResult, String> {
-    if has_github_mcp(gcx.clone()).await {
-        return create_issue_via_mcp(gcx, context, title, body, labels, false).await;
-    }
+    create_confirmed_issue_with_provider(gcx, context, title, body, labels, None).await
+}
 
-    let (auto_enabled, last_issue_at, recent_errors) = issue_control_snapshot(gcx.clone()).await?;
-    let (url, _activity) = create_issue(
-        gcx.clone(),
-        context,
-        Some(title),
-        Some(body),
-        auto_enabled,
-        false,
-        last_issue_at,
-        &recent_errors,
-    )
-    .await?;
+pub async fn create_confirmed_issue_with_provider(
+    gcx: AppState,
+    context: &DiagnosticContext,
+    title: &str,
+    body: &str,
+    labels: Vec<String>,
+    provider: Option<String>,
+) -> Result<BuddyIssueCreateResult, String> {
+    let provider = provider.as_deref();
+    // Detect the repo once; validate any explicit provider override against the actual host so a
+    // mismatched override cannot file to the wrong backend or mislabel the result.
     let project_root = crate::files_correction::get_project_dirs(gcx.gcx.clone())
         .await
         .into_iter()
@@ -619,10 +627,42 @@ pub async fn create_confirmed_issue(
     let repo = detect_repo_from_git(&project_root)
         .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
+    let host_provider = match &repo.host {
+        RepoHost::GitHub => "github",
+        RepoHost::GitLab | RepoHost::GitLabSelfHosted(_) => "gitlab",
+    };
+    if let Some(requested) = provider {
+        if requested != host_provider {
+            return Err(format!(
+                "requested provider '{requested}' does not match the detected repository host '{host_provider}'"
+            ));
+        }
+    }
+
+    // Only take the GitHub MCP path when the repo is actually GitHub; GitLab/self-hosted repos
+    // fall through to the native glab path.
+    if matches!(repo.host, RepoHost::GitHub) && has_github_mcp(gcx.clone()).await {
+        return create_issue_via_mcp(gcx, context, title, body, labels, false).await;
+    }
+
+    let (auto_enabled, last_issue_at, recent_errors) = issue_control_snapshot(gcx.clone()).await?;
+    let (url, _activity) = create_issue_with_options(
+        gcx.clone(),
+        context,
+        Some(title),
+        Some(body),
+        labels,
+        provider,
+        auto_enabled,
+        false,
+        last_issue_at,
+        &recent_errors,
+    )
+    .await?;
 
     Ok(BuddyIssueCreateResult {
         url,
-        provider: "native".to_string(),
+        provider: host_provider.to_string(),
         repo: repo.full_name(),
     })
 }
@@ -700,12 +740,58 @@ fn redact_issue_text(text: &str) -> String {
     result
 }
 
-fn sanitize_issue_title(raw: &str) -> String {
+pub fn sanitize_issue_title(raw: &str) -> String {
     sanitize_title(&redact_issue_text(raw))
 }
 
-fn sanitize_issue_body(raw: &str) -> String {
+pub fn sanitize_issue_body(raw: &str) -> String {
     sanitize_body(&redact_issue_text(raw))
+}
+
+pub fn sanitize_labels(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .map(|label| redact_sensitive(label))
+        .map(|label| label.chars().take(50).collect::<String>())
+        .filter(|label| !label.trim().is_empty())
+        .take(5)
+        .collect()
+}
+
+fn native_issue_args(
+    repo_name: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+    github: bool,
+) -> Vec<String> {
+    let mut args = if github {
+        vec![
+            "issue".to_string(),
+            "create".to_string(),
+            "-R".to_string(),
+            repo_name.to_string(),
+            "--title".to_string(),
+            title.to_string(),
+            "--body".to_string(),
+            body.to_string(),
+        ]
+    } else {
+        vec![
+            "issue".to_string(),
+            "create".to_string(),
+            "-R".to_string(),
+            repo_name.to_string(),
+            "--title".to_string(),
+            title.to_string(),
+            "--description".to_string(),
+            body.to_string(),
+        ]
+    };
+    for label in labels {
+        args.push("--label".to_string());
+        args.push(label.clone());
+    }
+    args
 }
 
 pub(crate) fn issue_dedupe_text(context: &DiagnosticContext) -> String {
@@ -730,8 +816,9 @@ pub(crate) fn prepare_issue_content(
     recent_errors: &[(String, chrono::DateTime<chrono::Utc>)],
 ) -> Result<PreparedIssue, String> {
     let gate = IssueGate {
-        has_diagnostics: !context.error_message.is_empty()
-            && (context.source_file.is_some() || context.tool_name.is_some()),
+        has_issue_text: !context.error_message.trim().is_empty()
+            || raw_title.map(|t| !t.trim().is_empty()).unwrap_or(false)
+            || raw_body.map(|b| !b.trim().is_empty()).unwrap_or(false),
         has_repro_context: context.source_file.is_some() || context.tool_name.is_some(),
         integration_configured,
         auto_creation_enabled,
@@ -801,6 +888,33 @@ pub async fn create_issue(
     last_issue_at: Option<std::time::Instant>,
     recent_errors: &[(String, chrono::DateTime<chrono::Utc>)],
 ) -> Result<(String, BuddyActivity), String> {
+    create_issue_with_options(
+        gcx,
+        context,
+        raw_title,
+        raw_body,
+        Vec::new(),
+        None,
+        auto_creation_enabled,
+        manual,
+        last_issue_at,
+        recent_errors,
+    )
+    .await
+}
+
+async fn create_issue_with_options(
+    gcx: AppState,
+    context: &DiagnosticContext,
+    raw_title: Option<&str>,
+    raw_body: Option<&str>,
+    labels: Vec<String>,
+    preferred_provider: Option<&str>,
+    auto_creation_enabled: bool,
+    manual: bool,
+    last_issue_at: Option<std::time::Instant>,
+    recent_errors: &[(String, chrono::DateTime<chrono::Utc>)],
+) -> Result<(String, BuddyActivity), String> {
     let project_root = crate::files_correction::get_project_dirs(gcx.gcx.clone())
         .await
         .into_iter()
@@ -810,7 +924,7 @@ pub async fn create_issue(
     let repo = detect_repo_from_git(&project_root)
         .await
         .ok_or_else(|| "could not detect issue repository from git origin remote".to_string())?;
-    let provider = detect_provider(gcx.clone(), &repo).await?;
+    let provider = detect_provider(gcx.clone(), &repo, preferred_provider).await?;
 
     let prepared = prepare_issue_content(
         context,
@@ -831,6 +945,7 @@ pub async fn create_issue(
         &project_root,
         &prepared.title,
         &prepared.body,
+        &labels,
     )
     .await?;
 
@@ -856,14 +971,14 @@ async fn run_issue_create(
     project_root: &Path,
     title: &str,
     body: &str,
+    labels: &[String],
 ) -> Result<String, String> {
     let repo_name = repo.full_name();
     match provider {
         IssueProvider::GitHub { binary, token } => {
+            let args = native_issue_args(&repo_name, title, body, labels, true);
             let out = Command::new(trusted_issue_binary(&binary))
-                .args([
-                    "issue", "create", "-R", &repo_name, "--title", title, "--body", body,
-                ])
+                .args(&args)
                 .current_dir(project_root)
                 .env("PATH", TRUSTED_COMMAND_PATH)
                 .env("GH_TOKEN", &token)
@@ -879,17 +994,9 @@ async fn run_issue_create(
             }
         }
         IssueProvider::GitLab { binary, token } => {
+            let args = native_issue_args(&repo_name, title, body, labels, false);
             let out = Command::new(trusted_issue_binary(&binary))
-                .args([
-                    "issue",
-                    "create",
-                    "-R",
-                    &repo_name,
-                    "--title",
-                    title,
-                    "--description",
-                    body,
-                ])
+                .args(&args)
                 .current_dir(project_root)
                 .env("PATH", TRUSTED_COMMAND_PATH)
                 .env("GITLAB_TOKEN", &token)

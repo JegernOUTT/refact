@@ -62,6 +62,12 @@ pub struct KnowledgeFrontmatter {
     pub last_injected_at: Option<String>,
     #[serde(default)]
     pub dismissed_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_needed: Option<bool>,
 }
 
 impl KnowledgeFrontmatter {
@@ -242,6 +248,18 @@ impl KnowledgeFrontmatter {
         }
         if self.dismissed_count > 0 {
             lines.push(format!("dismissed_count: {}", self.dismissed_count));
+        }
+        if let Some(source_id) = &self.source_id {
+            lines.push(format!("source_id: \"{}\"", source_id.replace('"', "\\\"")));
+        }
+        if let Some(source_content_hash) = &self.source_content_hash {
+            lines.push(format!(
+                "source_content_hash: \"{}\"",
+                source_content_hash.replace('"', "\\\"")
+            ));
+        }
+        if let Some(review_needed) = self.review_needed {
+            lines.push(format!("review_needed: {}", review_needed));
         }
         lines.push("---".to_string());
         lines.join("\n")

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_docs_gardener
 title: Docs Gardener
 description: Find documentation gaps and make small safe doc improvements.
@@ -45,7 +45,7 @@ messages:
 tools:
   - tree
   - cat
-  - search_pattern
+  - regex_search
   - create_textdoc
   - update_textdoc
   - update_textdoc_regex

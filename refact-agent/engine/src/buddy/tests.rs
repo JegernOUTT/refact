@@ -189,7 +189,7 @@ fn make_suggestion(id: &str, stype: &str, created_at: &str) -> BuddySuggestion {
 #[test]
 fn test_auto_gate_requires_all_conditions() {
     let gate = IssueGate {
-        has_diagnostics: true,
+        has_issue_text: true,
         has_repro_context: true,
         integration_configured: true,
         auto_creation_enabled: true,
@@ -201,7 +201,7 @@ fn test_auto_gate_requires_all_conditions() {
 #[test]
 fn test_auto_gate_blocks_without_repro() {
     let gate = IssueGate {
-        has_diagnostics: true,
+        has_issue_text: true,
         has_repro_context: false,
         integration_configured: true,
         auto_creation_enabled: true,
@@ -213,7 +213,7 @@ fn test_auto_gate_blocks_without_repro() {
 #[test]
 fn test_manual_gate_allows_without_auto_enabled() {
     let gate = IssueGate {
-        has_diagnostics: true,
+        has_issue_text: true,
         has_repro_context: false,
         integration_configured: true,
         auto_creation_enabled: false,
@@ -225,7 +225,7 @@ fn test_manual_gate_allows_without_auto_enabled() {
 #[test]
 fn test_manual_gate_requires_integration() {
     let gate = IssueGate {
-        has_diagnostics: true,
+        has_issue_text: true,
         has_repro_context: true,
         integration_configured: false,
         auto_creation_enabled: true,

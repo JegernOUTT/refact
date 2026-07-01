@@ -1,14 +1,17 @@
+use std::path::Path;
+
 use chrono::{Datelike, Timelike, Utc, Weekday};
 
+use crate::app_state::AppState;
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_FRIDAY_RETRO_WORKFLOW_ID};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use crate::app_state::AppState;
 
 pub struct BuddyFridayRetroJob;
 
 const COOLDOWN_SECONDS: u64 = 6 * 24 * 60 * 60;
 const PRIORITY: u32 = 31;
+const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 fn digest_hour(ctx: &BuddyJobContext) -> u32 {
     ctx.settings.daily_digest_hour.unwrap_or(18).min(23) as u32
@@ -18,15 +21,71 @@ fn should_run_at(ctx: &BuddyJobContext, now: chrono::DateTime<Utc>) -> bool {
     now.weekday() == Weekday::Fri && now.hour() >= digest_hour(ctx)
 }
 
-fn build_friday_retro_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
+async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(project_root)
+        .args(args)
+        .env("PATH", TRUSTED_COMMAND_PATH)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Bound the git invocation so a hung repo/filesystem cannot stall the Tokio worker.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn recent_activity_evidence(ctx: &BuddyJobContext) -> String {
+    let activities = ctx
+        .recent_activities
+        .iter()
+        .rev()
+        .take(20)
+        .map(|activity| {
+            format!(
+                "- {} [{}] {} — {}",
+                activity.timestamp, activity.activity_type, activity.title, activity.description
+            )
+        })
+        .collect::<Vec<_>>();
+    if activities.is_empty() {
+        "none".to_string()
+    } else {
+        activities.join("\n")
+    }
+}
+
+async fn weekly_git_evidence(ctx: &BuddyJobContext) -> String {
+    trusted_git_output(
+        &ctx.project_root,
+        &["log", "--oneline", "-40", "--since", "7 days ago"],
+    )
+    .await
+    .unwrap_or_else(|| "none".to_string())
+}
+
+async fn build_friday_retro_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
     let meta = autonomous_workflow_meta(BUDDY_FRIDAY_RETRO_WORKFLOW_ID).unwrap();
     let now = Utc::now();
     let project_root = ctx.project_root.to_string_lossy().to_string();
     let evidence = format!(
-        "week_ending={}\nproject_root={}\ndigest_hour={}",
+        "week_ending={}\nproject_root={}\ndigest_hour={}\n\nRecent git commits from the last 7 days:\n{}\n\nRecent Buddy activity / saved chats:\n{}",
         now.date_naive(),
         project_root,
-        digest_hour(ctx)
+        digest_hour(ctx),
+        weekly_git_evidence(ctx).await,
+        recent_activity_evidence(ctx)
     );
     AutonomousBuddyChatSpec::new(
         meta.id,
@@ -57,7 +116,13 @@ impl BuddyJob for BuddyFridayRetroJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        execute_autonomous_spec(gcx, &ctx, build_friday_retro_spec(&ctx)).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_friday_retro_spec(&ctx).await,
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 
