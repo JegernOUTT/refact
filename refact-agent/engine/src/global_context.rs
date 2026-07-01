@@ -37,6 +37,7 @@ use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
 use crate::knowledge_index::KnowledgeIndex;
 use refact_context_api::{HttpClientAccess, PathsAccess, ShutdownAccess};
+pub use refact_core::at_commands_preview_cache::AtCommandsPreviewCache;
 
 fn daemon_auth_token_from_env() -> Option<String> {
     std::env::var("REFACT_DAEMON_TOKEN")
@@ -240,35 +241,6 @@ impl Default for EngineGlobalConfig {
             scheduler: SchedulerConfig::default(),
             hooks: HooksConfig::default(),
         }
-    }
-}
-
-pub struct AtCommandsPreviewCache {
-    pub cache: HashMap<String, String>,
-}
-
-impl AtCommandsPreviewCache {
-    pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-    pub fn get(&self, key: &str) -> Option<String> {
-        let val = self.cache.get(key).cloned();
-        // if val.is_some() {
-        //     info!("AtCommandsPreviewCache: SOME: key={:?}", key);
-        // } else {
-        //     info!("AtCommandsPreviewCache: NONE: key={:?}", key);
-        // }
-        val
-    }
-    pub fn insert(&mut self, key: String, value: String) {
-        self.cache.insert(key.clone(), value);
-        // info!("AtCommandsPreviewCache: insert: key={:?}. new_len: {:?}", key, self.cache.len());
-    }
-    pub fn clear(&mut self) {
-        self.cache.clear();
-        // info!("AtCommandsPreviewCache: clear; new_len: {:?}", self.cache.len());
     }
 }
 
