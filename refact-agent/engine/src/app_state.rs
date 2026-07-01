@@ -13,7 +13,6 @@ use refact_runtime_api::{
     ActivitySink, BuddyEventSink, ToolConfirmationCheck, ToolExecutionResult, ToolPolicyInfo,
     ToolRegistry, ToolRegistryIndex,
 };
-use tokenizers::Tokenizer;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
 use crate::ast::ast_indexer_thread::AstIndexService;
@@ -41,6 +40,7 @@ use crate::stats::event::LlmCallEvent;
 use crate::tasks::events::TaskEventEnvelope;
 use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
+pub use refact_core::tokenizer_state::TokenizerState;
 use refact_core::vecdb_types::VecdbSearch;
 use refact_runtime_api::{
     ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
@@ -77,12 +77,6 @@ pub struct CapsState {
     pub last_error: String,
     pub last_attempted_ts: u64,
     pub models_dev_startup_refresh_attempted: bool,
-}
-
-#[derive(Clone)]
-pub struct TokenizerState {
-    pub map: HashMap<String, Option<Arc<Tokenizer>>>,
-    pub download_lock: Arc<AMutex<bool>>,
 }
 
 #[derive(Clone)]
