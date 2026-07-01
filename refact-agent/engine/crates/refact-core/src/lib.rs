@@ -9,6 +9,7 @@ pub mod net_utils;
 pub mod provider_types;
 pub mod privacy_types;
 pub mod semver;
+pub mod scheduler_config;
 pub mod string_utils;
 pub mod subagent_config;
 pub mod vecdb_types;

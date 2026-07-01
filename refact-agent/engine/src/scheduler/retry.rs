@@ -1,10 +1,10 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 3;
-pub const DEFAULT_RETRY_BACKOFF_MS: [u64; 3] = [60_000, 120_000, 300_000];
+pub use refact_core::scheduler_config::{
+    DEFAULT_RETRY_BACKOFF_MS, DEFAULT_RETRY_MAX_ATTEMPTS, RetryConfig,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetryCategory {
@@ -13,23 +13,6 @@ pub enum RetryCategory {
     Network,
     Timeout,
     ServerError,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetryConfig {
-    #[serde(default = "default_retry_max_attempts")]
-    pub max_attempts: u32,
-    #[serde(default = "default_retry_backoff_ms")]
-    pub backoff_ms: Vec<u64>,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-            backoff_ms: default_retry_backoff_ms(),
-        }
-    }
 }
 
 pub fn classify(error: &str) -> Option<RetryCategory> {
@@ -70,14 +53,6 @@ pub fn retry_delay_ms(config: &RetryConfig, completed_retry_attempts: u32) -> Op
         .copied()
         .or_else(|| config.backoff_ms.last().copied())?;
     (delay > 0).then_some(delay)
-}
-
-fn default_retry_max_attempts() -> u32 {
-    DEFAULT_RETRY_MAX_ATTEMPTS
-}
-
-fn default_retry_backoff_ms() -> Vec<u64> {
-    DEFAULT_RETRY_BACKOFF_MS.to_vec()
 }
 
 static RATE_LIMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
