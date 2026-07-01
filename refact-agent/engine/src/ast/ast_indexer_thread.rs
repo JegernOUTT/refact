@@ -1,5 +1,5 @@
 use std::io::Write;
-use indexmap::{IndexSet, IndexMap};
+use indexmap::IndexMap;
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AMutex, Notify as ANotify};
 use tokio::task::JoinHandle;
@@ -8,18 +8,13 @@ use crate::custom_error::trace_and_default;
 use crate::files_in_workspace::Document;
 use crate::global_context::GlobalContext;
 
-use crate::ast::ast_structs::{AstDB, AstStatus, AstCounters, AstErrorStats};
+use crate::ast::ast_structs::{AstStatus, AstCounters, AstErrorStats};
 use crate::ast::ast_db::{
     ast_index_init, fetch_counters, doc_add, doc_remove, connect_usages,
     connect_usages_look_if_full_reset_needed,
 };
 
-pub struct AstIndexService {
-    pub ast_index: Arc<AstDB>,
-    pub ast_status: Arc<AMutex<AstStatus>>,
-    pub ast_sleeping_point: Arc<ANotify>,
-    pub ast_todo: IndexSet<String>,
-}
+pub use refact_ast::ast_indexer_service::AstIndexService;
 
 fn is_atomic_tmp_path(cpath: &str) -> bool {
     let file_name = std::path::Path::new(cpath)
@@ -447,12 +442,7 @@ pub async fn ast_service_init(
         ast_index_usages_total: 0,
         ast_max_files_hit: false,
     }));
-    let ast_service = AstIndexService {
-        ast_sleeping_point: Arc::new(ANotify::new()),
-        ast_index,
-        ast_status,
-        ast_todo: IndexSet::new(),
-    };
+    let ast_service = AstIndexService::new(ast_index, ast_status, Arc::new(ANotify::new()));
     Arc::new(AMutex::new(ast_service))
 }
 
