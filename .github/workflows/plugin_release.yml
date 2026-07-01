@@ -109,7 +109,12 @@ jobs:
 
   intellij:
     name: JetBrains plugin
-    needs: [gui]
+    # Wait for the engine release to publish FIRST so a freshly-installed plugin can always
+    # download its pinned engine/v{version} (otherwise early installers hit
+    # "engine release unavailable"). engine-release is skipped on non-release dispatch (EAP),
+    # in which case we still run.
+    needs: [gui, engine-release]
+    if: ${{ always() && needs.gui.result == 'success' && (needs.engine-release.result == 'success' || needs.engine-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.setupvars.outputs.plugin_version }}
@@ -300,7 +305,12 @@ jobs:
 
   vscode:
     name: VS Code plugin
-    needs: [gui]
+    # Wait for the engine release to publish FIRST so a freshly-installed plugin can always
+    # download its pinned engine/v{version} (otherwise early installers hit
+    # "engine release unavailable"). engine-release is skipped on non-release dispatch (EAP),
+    # in which case we still run.
+    needs: [gui, engine-release]
+    if: ${{ always() && needs.gui.result == 'success' && (needs.engine-release.result == 'success' || needs.engine-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -276,7 +276,8 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
                 ..Default::default()
             };
         }
-        let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
+        let mut result =
+            execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
         if let Some(last) = parse_last_autonomous_result(result.last_result.as_deref()) {
             result.last_result = Some(serialize_scan_with_autonomous(
                 &spec.signal_hash,
@@ -364,6 +365,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: Utc::now().to_rfc3339(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = test_context(
             dir.path(),
@@ -412,6 +416,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: Utc::now().to_rfc3339(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let stale_cache = CoverageScanCache {
             scanned_at: old_scanned_at,

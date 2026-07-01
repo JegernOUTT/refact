@@ -3897,6 +3897,9 @@ mod tests {
             signal_hash: "hash-a".to_string(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let serialized = serialize_last_autonomous_result(&result);
 
@@ -3987,6 +3990,9 @@ mod tests {
             signal_hash: "same".to_string(),
             chat_id: "chat".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
         let malformed_ctx = context_with_last_result(Some("same".to_string()));
@@ -4616,6 +4622,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         }));
 
         assert!(same_signal(&ctx, &spec.signal_hash));
@@ -5088,6 +5097,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
 
@@ -5109,6 +5121,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
 
@@ -5166,6 +5181,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         });
         let ctx = context_with_last_result(Some(stored.clone()));
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
@@ -5187,8 +5205,10 @@ mod tests {
             "Prompt",
             "Evidence",
         );
+        let ctx = context_with_last_result(None);
 
         let model = autonomous_failure_result(
+            &ctx,
             &spec,
             "OpenAI 404: model refact/gpt-4.1-nano not found".to_string(),
         )
@@ -5198,6 +5218,7 @@ mod tests {
         assert!(model.summary.contains("Model unavailable"));
 
         let context = autonomous_failure_result(
+            &ctx,
             &spec,
             "This model's maximum context length is 128000 tokens".to_string(),
         )
@@ -5206,6 +5227,7 @@ mod tests {
         assert_eq!(context.category, WorkflowFailureCategory::ContextTooLarge);
 
         let tool = autonomous_failure_result(
+            &ctx,
             &spec,
             "Error: tool 'buddy_log_activity' not found".to_string(),
         )
