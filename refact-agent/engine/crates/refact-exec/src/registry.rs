@@ -2486,7 +2486,9 @@ mod tests {
         let process_id = result.snapshot.meta.process_id.clone();
         assert_eq!(result.snapshot.status, ExecStatus::Running);
 
-        let summary = registry.cleanup_shutdown(Duration::from_secs(2)).await;
+        // Generous grace so spawn -> SIGKILL -> reap completes even on slow emulated CI
+        // runners (e.g. cross/QEMU aarch64), where a 2s window races the process teardown.
+        let summary = registry.cleanup_shutdown(Duration::from_secs(30)).await;
 
         assert_eq!(summary.removed_count, 1);
         assert_eq!(summary.runtime_stop_attempts, 1);
