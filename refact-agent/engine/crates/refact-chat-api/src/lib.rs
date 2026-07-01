@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod notification_event;
+
+pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{ChatMessage, ContextFile};
 pub use refact_core::worktree_meta::WorktreeMeta;
