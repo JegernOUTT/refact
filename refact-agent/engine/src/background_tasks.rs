@@ -71,6 +71,9 @@ pub async fn start_background_tasks(
         tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(
             gcx.clone(),
         )),
+        tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
+            gcx.clone(),
+        )),
         tokio::spawn(
             crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
         ),
@@ -122,12 +125,6 @@ pub async fn start_background_tasks(
         bg.push_back(tokio::spawn(crate::daemon_link::daemon_link_task(
             gcx.clone(),
         )));
-    }
-    let ast = gcx.clone().ast_service.lock().unwrap().clone();
-    if let Some(ast_service) = ast {
-        bg.extend(
-            crate::ast::ast_indexer_thread::ast_indexer_start(ast_service, gcx.clone()).await,
-        );
     }
     let files_jsonl_path = gcx.clone().cmdline.files_jsonl_path.clone();
     if !files_jsonl_path.is_empty() {

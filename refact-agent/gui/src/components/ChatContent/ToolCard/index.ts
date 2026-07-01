@@ -15,6 +15,7 @@ export { ShellTool } from "./ShellTool";
 export { SubagentTool } from "./SubagentTool";
 export { PlanningTool } from "./PlanningTool";
 export { CodeReviewTool } from "./CodeReviewTool";
+export { EngineAnalysisTool } from "./EngineAnalysisTool";
 export { ResearchTool } from "./ResearchTool";
 export { ShellServiceTool } from "./ShellServiceTool";
 export { EditTool } from "./EditTool";

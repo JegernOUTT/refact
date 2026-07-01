@@ -115,7 +115,7 @@ async fn tool_available_from_gcx(
 ) -> impl Fn(&Box<dyn Tool + Send>) -> bool {
     let (ast_on, vecdb_on, allow_experimental) = {
         let vecdb_on = gcx.vec_db.lock().await.is_some();
-        let ast_on = gcx.ast_service.lock().unwrap().is_some();
+        let ast_on = gcx.codegraph.lock().await.is_some();
         (ast_on, vecdb_on, gcx.cmdline.experimental)
     };
 
@@ -232,6 +232,24 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_search::ToolSearch {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolCodegraphOverview {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolCodeHealth {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolGitRisk {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolCodeWhy {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolCodeDuplication {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_codegraph::ToolCodeMap {
             config_path: config_path.clone(),
         }),
     ];
@@ -899,8 +917,9 @@ mod tests {
         )
         .await
         .unwrap();
-        *gcx.ast_service.lock().unwrap() =
-            Some(crate::ast::ast_indexer_thread::ast_service_init(String::new(), 100).await);
+        *gcx.codegraph.lock().await = Some(Arc::new(
+            refact_codegraph::CodeGraphService::open_in_memory().unwrap(),
+        ));
         *gcx.vec_db.lock().await = Some(Arc::new(PromptContractVecdb));
         gcx
     }

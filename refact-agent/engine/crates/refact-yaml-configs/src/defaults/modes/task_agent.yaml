@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -212,6 +212,12 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - tree
   - cat
   - add_workspace_folder
@@ -258,6 +264,18 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "code_map"
+      action: auto
     - match: "cron_update"
       action: auto
     - match: "*"

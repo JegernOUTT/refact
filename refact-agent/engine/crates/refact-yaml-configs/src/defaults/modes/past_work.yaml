@@ -1,4 +1,4 @@
-schema_version: 10
+schema_version: 11
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -71,6 +71,12 @@ allow_mcp: false
 allow_subagents: true
 
 tools:
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - add_workspace_folder
   - search_trajectories
   - get_trajectory_context
@@ -85,5 +91,17 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "code_map"
+      action: auto
     - match: "*"
       action: auto

@@ -1,0 +1,11 @@
+[package]
+name = "refact-git-intel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+git2 = "0.20.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

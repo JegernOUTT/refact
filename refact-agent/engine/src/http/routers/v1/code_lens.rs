@@ -1,15 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::collections::HashMap;
 use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
 use url::Url;
 
-use crate::ast::ast_structs::AstDefinition;
+use refact_core::ast_types::AstDefinition;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::ast::treesitter::structs::SymbolType;
+use refact_core::ast_types::SymbolType;
 
 #[derive(Deserialize)]
 pub struct CodeLensPost {
@@ -32,22 +31,6 @@ struct CodeLensOutput {
     debug_string: Option<String>,
 }
 
-struct CodeLensCacheEntry {
-    response: CodeLensResponse,
-    ts: f64,
-}
-
-#[derive(Default)]
-pub struct CodeLensCache {
-    store: HashMap<String, CodeLensCacheEntry>,
-}
-
-impl CodeLensCache {
-    pub fn clean_up_old_entries(&mut self, now: f64) {
-        self.store.retain(|_, entry| now - entry.ts <= 600.0);
-    }
-}
-
 pub async fn handle_v1_code_lens(
     State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
@@ -57,7 +40,6 @@ pub async fn handle_v1_code_lens(
         tracing::info!("chat handler cannot parse input:\n{:?}", body_bytes);
         ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))
     })?;
-    let codelens_cache = global_context.codelens_cache.clone();
 
     let cpath = crate::files_correction::canonical_path(
         &post
@@ -69,43 +51,17 @@ pub async fn handle_v1_code_lens(
     );
     let cpath_str = cpath.to_string_lossy().to_string();
 
-    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
-    let defs: Vec<Arc<AstDefinition>> = if let Some(ast_service) = ast_service_opt {
-        let indexing_finished = crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
-            ast_service.clone(),
-            300,
-            true,
-        )
-        .await;
-        let ast_index = ast_service.lock().await.ast_index.clone();
-        let defs = crate::ast::ast_db::doc_defs(ast_index, &cpath_str);
-        if !indexing_finished || defs.len() <= 1 {
-            tracing::info!(
-                "indexing_finished={} defs.len()=={}",
-                indexing_finished,
-                defs.len()
-            );
-            if let Some(cache_entry) = codelens_cache.lock().await.store.get(&cpath_str) {
-                tracing::info!(
-                    "therefore return cached {} records",
-                    cache_entry.response.code_lens.len()
-                );
-                return Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(
-                        serde_json::to_string(&cache_entry.response).unwrap(),
-                    ))
-                    .unwrap());
-            }
+    let codegraph_opt = global_context.codegraph.lock().await.clone();
+    let defs: Vec<Arc<AstDefinition>> = match codegraph_opt {
+        Some(service) => service.doc_defs(&cpath_str).await.unwrap_or_default(),
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(
+                    serde_json::json!({"detail": "codegraph turned off"}).to_string(),
+                ))
+                .unwrap());
         }
-        defs
-    } else {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from(
-                serde_json::json!({"detail": "AST turned off"}).to_string(),
-            ))
-            .unwrap());
     };
 
     let mut output: Vec<CodeLensOutput> = Vec::new();
@@ -177,18 +133,6 @@ pub async fn handle_v1_code_lens(
         code_lens: output,
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    codelens_cache.lock().await.store.insert(
-        cpath_str.clone(),
-        CodeLensCacheEntry {
-            response: response.clone(),
-            ts: now,
-        },
-    );
-    codelens_cache.lock().await.clean_up_old_entries(now);
     Ok(Response::builder()
         .status(StatusCode::OK)
         .body(Body::from(serde_json::to_string(&response).unwrap()))

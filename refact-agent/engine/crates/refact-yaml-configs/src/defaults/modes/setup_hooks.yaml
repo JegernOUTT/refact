@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: setup_hooks
 title: Setup Hooks
 description: Guided setup for lifecycle hooks that run shell commands on agent events
@@ -144,6 +144,12 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - tree
   - cat
   - add_workspace
@@ -173,6 +179,18 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "code_map"
+      action: auto
     - match: "tree"
       action: auto
     - match: "cat"

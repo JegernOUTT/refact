@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 
-use crate::ast::ast_structs::{AstDB, SymbolType};
 use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::at_commands::execute_at::AtCommandMember;
@@ -151,31 +150,33 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn print_symbols(db: Arc<AstDB>, path: &Path) -> String {
-    let cpath = path.to_string_lossy().to_string();
-    let defs = crate::ast::ast_db::doc_defs(db.clone(), &cpath);
-    let symbols: Vec<String> = defs
-        .iter()
-        .filter(|x| {
-            matches!(
-                x.symbol_type,
-                SymbolType::StructDeclaration
-                    | SymbolType::TypeAlias
-                    | SymbolType::FunctionDeclaration
-            )
-        })
-        .map(|x| x.name())
-        .collect();
-    if symbols.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", symbols.join(", "))
+pub enum TreeSymbols {
+    Precomputed(HashMap<String, String>),
+}
+
+fn collect_source_paths(node: &TreeNode, out: &mut Vec<String>) {
+    if !node.is_dir() {
+        if let Some(sp) = &node.source_path {
+            out.push(sp.to_string_lossy().to_string());
+        }
+    }
+    for child in node.children.values() {
+        collect_source_paths(child, out);
+    }
+}
+
+fn print_symbols(src: &TreeSymbols, path: &Path) -> String {
+    match src {
+        TreeSymbols::Precomputed(map) => map
+            .get(&path.to_string_lossy().to_string())
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
 fn print_files_tree(
     tree: &TreeNode,
-    ast_db: Option<Arc<AstDB>>,
+    ast_db: Option<Arc<TreeSymbols>>,
     maxdepth: usize,
     max_files: usize,
     is_root_query: bool,
@@ -187,7 +188,7 @@ fn print_files_tree(
         maxdepth: usize,
         max_files: usize,
         is_root_level: bool,
-        ast_db: Option<Arc<AstDB>>,
+        ast_db: Option<Arc<TreeSymbols>>,
     ) -> Option<String> {
         if depth > maxdepth {
             return None;
@@ -208,9 +209,9 @@ fn print_files_tree(
             if let Some(lines) = node.line_count {
                 info.push_str(&format!(" {}L", lines));
             }
-            if let Some(db) = ast_db.clone() {
+            if let Some(src) = ast_db.clone() {
                 let symbol_path = node.source_path.as_deref().unwrap_or(&path);
-                info.push_str(&print_symbols(db, symbol_path));
+                info.push_str(&print_symbols(&src, symbol_path));
             }
             return Some(format!("{}{}{}\n", indent, name, info));
         }
@@ -296,7 +297,7 @@ fn print_files_tree(
 fn print_files_tree_with_budget(
     tree: &TreeNode,
     char_limit: usize,
-    ast_db: Option<Arc<AstDB>>,
+    ast_db: Option<Arc<TreeSymbols>>,
     max_files: usize,
     is_root_query: bool,
 ) -> String {
@@ -326,27 +327,33 @@ pub async fn tree_for_tools(
     max_files: usize,
     is_root_query: bool,
 ) -> Result<String, String> {
-    let (ast_service, tokens_for_rag) = {
+    let (tokens_for_rag, gcx) = {
         let cgcx = ccx.lock().await;
-        (cgcx.app.workspace.ast_service.clone(), cgcx.tokens_for_rag)
+        (cgcx.tokens_for_rag, cgcx.app.gcx.clone())
     };
     const CHARS_PER_TOKEN: f32 = 3.5;
     let char_limit = ((tokens_for_rag as f32) * CHARS_PER_TOKEN) as usize;
 
-    let ast_db = if use_ast {
-        if let Some(ast_module) = ast_service {
-            crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
-                ast_module.clone(),
-                20_000,
-                true,
-            )
-            .await;
-            Some(ast_module.lock().await.ast_index.clone())
-        } else {
-            None
-        }
-    } else {
+    let ast_db: Option<Arc<TreeSymbols>> = if !use_ast {
         None
+    } else {
+        let codegraph_opt = gcx.codegraph.lock().await.clone();
+        match codegraph_opt {
+            Some(service) => {
+                let mut source_paths = Vec::new();
+                collect_source_paths(tree, &mut source_paths);
+                let mut map = HashMap::new();
+                for sp in source_paths {
+                    let defs = service.doc_defs(&sp).await.unwrap_or_default();
+                    let formatted = refact_codegraph::symbols_fmt::format_symbols_from_defs(&defs);
+                    if !formatted.is_empty() {
+                        map.insert(sp, formatted);
+                    }
+                }
+                Some(Arc::new(TreeSymbols::Precomputed(map)))
+            }
+            None => None,
+        }
     };
 
     Ok(print_files_tree_with_budget(

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use async_trait::async_trait;
-use refact_ast::ast::ast_structs::AstDefinition;
+use refact_core::ast_types::AstDefinition;
 
 #[async_trait]
 pub trait PPContextTrait: Send + Sync {

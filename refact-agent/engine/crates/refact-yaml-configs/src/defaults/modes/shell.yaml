@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 12
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -54,6 +54,12 @@ allow_mcp: false
 allow_subagents: false
 
 tools:
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - add_workspace_folder
   - shell
   - process_start
@@ -70,6 +76,18 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "code_map"
+      action: auto
     - match: "shell"
       action: ask
     - match: "cron_update"

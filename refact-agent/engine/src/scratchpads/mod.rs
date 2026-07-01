@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
-use tokio::sync::Mutex as AMutex;
 
 pub mod multimodality;
 pub mod scratchpad_utils;
@@ -9,7 +8,6 @@ pub use refact_scratchpads::code_completion_fim;
 pub use crate::chat::history_limit as chat_utils_limit_history;
 pub use crate::chat::prompts as chat_utils_prompts;
 
-use crate::ast::ast_indexer_thread::AstIndexService;
 use crate::call_validation::CodeCompletionPost;
 use crate::caps::CompletionModelRecord;
 use crate::global_context::GlobalContext;
@@ -21,14 +19,10 @@ pub async fn create_code_completion_scratchpad(
     model_rec: &CompletionModelRecord,
     post: &CodeCompletionPost,
     cache_arc: Arc<StdRwLock<completion_cache::CompletionCache>>,
-    ast_module: Option<Arc<AMutex<AstIndexService>>>,
 ) -> Result<Box<dyn ScratchpadAbstract>, String> {
     let tokenizer =
         crate::tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await?;
-    let ast_index = match ast_module {
-        Some(ast) => Some(ast.lock().await.ast_index.clone()),
-        None => None,
-    };
+    let codegraph = global_context.codegraph.lock().await.clone();
     let pp_context = Arc::new(crate::postprocessing::gcx_pp_context::GcxPPContext(
         global_context.clone(),
     )) as Arc<dyn refact_postprocessing::pp_context_provider::PPContextTrait>;
@@ -39,7 +33,7 @@ pub async fn create_code_completion_scratchpad(
         &model_rec.scratchpad_patch,
         post,
         cache_arc,
-        ast_index,
+        codegraph,
         pp_context,
         project_dirs,
     )

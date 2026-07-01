@@ -194,7 +194,7 @@ async fn initialize_vecdb_with_context(
     let file_reader: refact_core::vecdb_types::FileReader = Arc::new(move |path| {
         let gcx = gcx_clone.clone();
         Box::pin(async move {
-            let mut doc = refact_ast::Document::new(&path);
+            let mut doc = refact_core::ast_types::Document::new(&path);
             crate::files_in_workspace::update_document_text_from_disk(&mut doc, gcx).await?;
             doc.text_as_string()
         })

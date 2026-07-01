@@ -1,6 +1,4 @@
-use refact_ast::ast::ast_structs::{AstDB, AstDefinition};
 use refact_core::chat_types::{ContextFile, CursorPosition, PostprocessSettings};
-use refact_core::custom_error::trace_and_default;
 use refact_postprocessing::pp_context_files::postprocess_context_files;
 use refact_postprocessing::pp_context_provider::PPContextTrait;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
@@ -75,58 +73,33 @@ async fn _render_context_files(
     }
 }
 
-async fn _cursor_position_to_context_file(
-    ast_index: Arc<AstDB>,
+async fn _cursor_position_to_context_file_cg(
+    service: Arc<refact_codegraph::CodeGraphService>,
     cpath: String,
     cursor_line: i32,
     context_used: &mut Value,
 ) -> Vec<ContextFile> {
     if cursor_line < 0 || cursor_line > 65535 {
-        tracing::error!("cursor line {} out of range", cursor_line);
         return vec![];
     }
     let cursor_line = (cursor_line + 1) as usize;
-    let usages: Vec<(usize, String)> =
-        refact_ast::ast::ast_db::doc_usages(ast_index.clone(), &cpath).await;
+    let usages = service.doc_usages(&cpath).await.unwrap_or_default();
 
-    let mut distances: Vec<(i32, String, usize)> = usages
+    let mut distances: Vec<(i32, String)> = usages
         .into_iter()
-        .map(|(line, usage)| {
-            let distance = (line as i32 - cursor_line as i32).abs();
-            (distance, usage, line)
-        })
+        .map(|(line, name)| ((line as i32 - cursor_line as i32).abs(), name))
         .collect();
-    distances.sort_by_key(|&(distance, _, _)| distance);
-    let nearest_usages: Vec<(usize, String)> = distances
+    distances.sort_by_key(|&(distance, _)| distance);
+    let unique_names: HashSet<String> = distances
         .into_iter()
         .take(TAKE_USAGES_AROUND_CURSOR)
-        .map(|(_, usage, line)| (line, usage))
+        .map(|(_, name)| name)
         .collect();
 
-    if DEBUG {
-        info!("nearest_usages\n{:#?}", nearest_usages);
-    }
-
-    let unique_paths: HashSet<_> = nearest_usages
-        .into_iter()
-        .map(|(_line, double_colon_path)| double_colon_path)
-        .collect();
     let mut output = vec![];
     let mut bucket_declarations = vec![];
-    for double_colon_path in unique_paths {
-        if DEBUG {
-            info!("adding {} to context", double_colon_path);
-        }
-        let defs: Vec<Arc<AstDefinition>> =
-            refact_ast::ast::ast_db::definitions(ast_index.clone(), double_colon_path.as_str())
-                .unwrap_or_else(trace_and_default);
-        if defs.len() != 1 {
-            tracing::warn!(
-                "hmm, number of definitions for {} is {} which is not one",
-                double_colon_path,
-                defs.len()
-            );
-        }
+    for name in unique_names {
+        let defs = service.definitions(&name).await.unwrap_or_default();
         for def in defs {
             output.push(ContextFile {
                 file_name: def.cpath.clone(),
@@ -139,25 +112,22 @@ async fn _cursor_position_to_context_file(
                 usefulness: 100.,
                 skip_pp: false,
             });
-            let usage_dict = json!({
+            bucket_declarations.push(json!({
                 "file_path": def.cpath.clone(),
                 "line1": def.full_line1(),
                 "line2": def.full_line2(),
                 "name": def.path_drop0(),
-            });
-            bucket_declarations.push(usage_dict);
+            }));
         }
     }
     context_used["bucket_declarations"] = json!(bucket_declarations);
-
-    info!("FIM context\n{:#?}", output);
     output
 }
 
 pub async fn retrieve_ast_based_extra_context(
     pp_context: Arc<dyn PPContextTrait>,
     project_dirs: Vec<PathBuf>,
-    ast_index: Option<Arc<AstDB>>,
+    codegraph: Option<Arc<refact_codegraph::CodeGraphService>>,
     t: &HasTokenizerAndEot,
     cpath: &PathBuf,
     pos: &CursorPosition,
@@ -173,9 +143,9 @@ pub async fn retrieve_ast_based_extra_context(
     }
 
     let rag_t0 = Instant::now();
-    let mut ast_context_file_vec: Vec<ContextFile> = if let Some(ast_idx) = ast_index {
-        _cursor_position_to_context_file(
-            ast_idx.clone(),
+    let mut ast_context_file_vec: Vec<ContextFile> = if let Some(service) = codegraph {
+        _cursor_position_to_context_file_cg(
+            service,
             cpath.to_string_lossy().to_string(),
             pos.line,
             context_used,

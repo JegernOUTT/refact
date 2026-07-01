@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: review
 title: Review
 description: Autonomous code review that fans out waves of parallel reviews
@@ -118,6 +118,12 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - tree
   - cat
   - add_workspace_folder
@@ -157,6 +163,18 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "code_map"
+      action: auto
     - match: "cron_create"
       action: ask
     - match: "cron_update"

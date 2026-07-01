@@ -20,7 +20,6 @@ use crate::git::operations::git_ls_files;
 use crate::global_context::{get_app_searchable_id, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
 use crate::file_filter::{is_valid_file, SOURCE_FILE_EXTENSIONS};
-use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, PrivacySettings, FilePrivacyLevel};
 use crate::files_blocklist::{IndexingEverywhere, is_blocklisted, reload_indexing_everywhere_if_needed};
 use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
@@ -49,7 +48,7 @@ pub use refact_files::correction_cache::CacheCorrection;
 //   ~/.config/refact/indexing.yaml
 //   ~/path/to/your/project/.refact/indexing.yaml
 
-pub use refact_ast::Document;
+pub use refact_core::ast_types::Document;
 
 fn normalize_path_for_workspace_state(gcx: &Arc<GlobalContext>, path: &Path) -> PathBuf {
     let worktree_mappings =
@@ -768,17 +767,7 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
     if normalized_paths.len() > 5 {
         info!("    ...");
     }
-    let (vec_db_module, ast_service) = {
-        let cx = gcx.clone();
-        let ast_service = cx.ast_service.lock().unwrap().clone();
-        (cx.vec_db.clone(), ast_service)
-    };
-    if let Some(ref mut db) = *vec_db_module.lock().await {
-        db.vectorizer_enqueue_files(&normalized_paths, force).await;
-    }
-    if let Some(ast) = &ast_service {
-        ast_indexer_enqueue_files(ast.clone(), &normalized_paths, force).await;
-    }
+    crate::indexing_routing::route_index_enqueue(gcx.clone(), &normalized_paths, force).await;
     let cache_correction_arc =
         crate::files_correction::files_cache_rebuild_as_needed(gcx.clone()).await;
     let mut moar_files: Vec<PathBuf> = Vec::new();
@@ -870,13 +859,6 @@ pub async fn enqueue_all_files_from_workspace_folders(
         .unwrap()
         .as_secs_f64();
 
-    let (vec_db_module, ast_service) = {
-        let ast_service = gcx.ast_service.lock().unwrap().clone();
-        (gcx.vec_db.clone(), ast_service)
-    };
-
-    // Both vecdb and ast support paths to non-existant files (possibly previously existing files) as a way to remove them from index
-
     let mut updated_or_removed: IndexSet<String> = IndexSet::new();
     updated_or_removed.extend(
         all_files
@@ -890,16 +872,10 @@ pub async fn enqueue_all_files_from_workspace_folders(
     );
     let paths_nodups: Vec<String> = updated_or_removed.into_iter().collect();
 
-    if let Some(ref mut db) = *vec_db_module.lock().await {
-        db.vectorizer_enqueue_files(&paths_nodups, wake_up_indexers)
-            .await;
-    }
+    let _ = vecdb_only;
+    crate::indexing_routing::route_index_enqueue(gcx.clone(), &paths_nodups, wake_up_indexers)
+        .await;
 
-    if let Some(ast) = ast_service {
-        if !vecdb_only {
-            ast_indexer_enqueue_files(ast.clone(), &paths_nodups, wake_up_indexers).await;
-        }
-    }
     all_files.len() as i32
 }
 
@@ -1039,13 +1015,13 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
     );
 
-    let (vec_db_module, ast_service, dirty_arc) = {
+    let (vec_db_module, codegraph, dirty_arc) = {
         let cx = gcx.clone();
         remove_memory_document_for_path(cx.clone(), path).await;
-        let ast_service = cx.ast_service.lock().unwrap().clone();
+        let codegraph = cx.codegraph.lock().await.clone();
         (
             cx.vec_db.clone(),
-            ast_service,
+            codegraph,
             cx.documents_state.cache_dirty.clone(),
         )
     };
@@ -1071,9 +1047,10 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         },
         None => {}
     }
-    if let Some(ast) = &ast_service {
-        let cpath = delete_path.to_string_lossy().to_string();
-        ast_indexer_enqueue_files(ast.clone(), &vec![cpath], false).await;
+    if let Some(service) = &codegraph {
+        let _ = service
+            .remove_path(&delete_path.to_string_lossy().to_string())
+            .await;
     }
 }
 

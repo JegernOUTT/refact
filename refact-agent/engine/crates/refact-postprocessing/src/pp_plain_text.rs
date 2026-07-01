@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 use refact_core::chat_types::{ChatContent, ChatMessage, MultimodalElement};
-use refact_ast::ast::chunk_utils::count_text_tokens_with_fallback;
+use refact_core::chunk_utils::count_text_tokens_with_fallback;
 use crate::pp_command_output::output_mini_postprocessing;
 
 const MIN_PLAIN_TEXT_MESSAGE_TOKENS: usize = 50;

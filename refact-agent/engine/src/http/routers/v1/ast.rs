@@ -111,19 +111,16 @@ pub async fn handle_v1_ast_file_symbols(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     doc.update_text(&file_text);
 
-    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
-    let search_res = match &ast_service_opt {
-        Some(ast_service) => {
-            let ast_index = ast_service.lock().await.ast_index.clone();
-            crate::ast::ast_db::doc_defs(
-                ast_index.clone(),
-                &doc.doc_path.to_string_lossy().to_string(),
-            )
-        }
+    let codegraph_opt = global_context.codegraph.lock().await.clone();
+    let search_res = match codegraph_opt {
+        Some(service) => service
+            .doc_defs(&doc.doc_path.to_string_lossy().to_string())
+            .await
+            .unwrap_or_default(),
         None => {
             return Err(ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Ast module is not available".to_string(),
+                "codegraph is not available".to_string(),
             ));
         }
     };
@@ -144,26 +141,15 @@ pub async fn handle_v1_ast_status(
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let global_context = app.gcx.clone();
-    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
-    match &ast_service_opt {
-        Some(ast_service) => {
-            let ast_status: std::sync::Arc<tokio::sync::Mutex<crate::ast::ast_structs::AstStatus>> =
-                ast_service.lock().await.ast_status.clone();
-            let json_string =
-                serde_json::to_string_pretty(&*ast_status.lock().await).map_err(|e| {
-                    ScratchError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("JSON serialization problem: {}", e),
-                    )
-                })?;
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(json_string))
-                .unwrap())
-        }
-        None => Err(ScratchError::new(
+    let status = crate::codegraph::cg_status::get_codegraph_status(global_context).await;
+    let json_string = serde_json::to_string_pretty(&status).map_err(|e| {
+        ScratchError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "ast module is turned off".to_string(),
-        )),
-    }
+            format!("JSON serialization problem: {}", e),
+        )
+    })?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(json_string))
+        .unwrap())
 }

@@ -939,7 +939,8 @@ fn goal_meta_string(meta: Option<&serde_json::Value>, key: &str) -> Option<Strin
 }
 
 fn goal_meta_u64(meta: Option<&serde_json::Value>, key: &str) -> Option<u64> {
-    meta.and_then(|meta| meta.get(key)).and_then(|value| value.as_u64())
+    meta.and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_u64())
 }
 
 fn goal_meta_value<T: serde::de::DeserializeOwned>(
@@ -958,7 +959,10 @@ fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
             if !matches!(subkind, "goal_delta" | "goal_pursuit") {
                 return None;
             }
-            let payload = message.extra.get("event").and_then(|event| event.get("payload"));
+            let payload = message
+                .extra
+                .get("event")
+                .and_then(|event| event.get("payload"));
             let at_ms = payload
                 .and_then(|payload| payload.get("at_ms"))
                 .or_else(|| payload.and_then(|payload| payload.get("created_at_ms")))
@@ -1057,7 +1061,10 @@ fn set_goal_message_metadata(
         .unwrap_or_default();
     meta.insert("mode".to_string(), serde_json::json!(mode));
     meta.insert("version".to_string(), serde_json::json!(goal.version));
-    meta.insert("created_at_ms".to_string(), serde_json::json!(created_at_ms));
+    meta.insert(
+        "created_at_ms".to_string(),
+        serde_json::json!(created_at_ms),
+    );
     meta.insert("supersedes".to_string(), serde_json::json!(supersedes));
     meta.insert("active".to_string(), serde_json::json!(goal.active));
     meta.insert("status".to_string(), serde_json::json!(goal.status));
@@ -1091,12 +1098,14 @@ fn target_goal_supersedes(
 ) -> Option<String> {
     current_base_goal_message(target_existing_messages)
         .and_then(|message| (!message.message_id.is_empty()).then(|| message.message_id.clone()))
-        .or_else(|| {
-            (!source_base.message_id.is_empty()).then(|| source_base.message_id.clone())
-        })
+        .or_else(|| (!source_base.message_id.is_empty()).then(|| source_base.message_id.clone()))
 }
 
-fn transfer_event(source_chat_id: &str, target_chat_id: &str, at_ms: u64) -> (ChatMessage, GoalEvent) {
+fn transfer_event(
+    source_chat_id: &str,
+    target_chat_id: &str,
+    at_ms: u64,
+) -> (ChatMessage, GoalEvent) {
     let content = format!("Goal ownership transferred from {source_chat_id} to {target_chat_id}.");
     let mut extra = serde_json::Map::new();
     extra.insert(
@@ -1194,7 +1203,8 @@ pub fn transfer_goal_ownership(
         .iter_mut()
         .find(|message| message.message_id == source_base.message_id && message.role == "goal")
     {
-        let created_at_ms = goal_meta_u64(goal_meta(source_message), "created_at_ms").unwrap_or(at_ms);
+        let created_at_ms =
+            goal_meta_u64(goal_meta(source_message), "created_at_ms").unwrap_or(at_ms);
         let mode = goal_meta_string(goal_meta(source_message), "mode").unwrap_or_default();
         set_goal_message_metadata(source_message, &source_goal, &mode, created_at_ms, None);
     }
@@ -1400,7 +1410,9 @@ pub fn insert_goal_messages_before_plan(
         .collect();
     let mut deduped = goal_messages
         .into_iter()
-        .filter(|message| message.message_id.is_empty() || !existing_ids.contains(&message.message_id))
+        .filter(|message| {
+            message.message_id.is_empty() || !existing_ids.contains(&message.message_id)
+        })
         .collect::<Vec<_>>();
     if deduped.is_empty() {
         return;

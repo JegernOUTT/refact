@@ -89,18 +89,19 @@ pub fn is_generated_index_path(path: &Path) -> bool {
             _ => None,
         })
         .collect();
-    let Some(refact_pos) = parts.iter().position(|part| part == ".refact") else {
+    if !parts
+        .iter()
+        .any(|part| part == ".refact" || part == "refact")
+    {
         return false;
-    };
-    let rest = &parts[refact_pos..];
-    matches!(rest, [refact, trajectories, index] if refact == ".refact" && trajectories == "trajectories" && index == "index.json")
-        || matches!(rest, [refact, tasks, index] if refact == ".refact" && tasks == "tasks" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, planner, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && planner == "planner" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
-        || matches!(rest, [refact, tasks, _task_id, trajectories, agents, _agent_id, index]
-            if refact == ".refact" && tasks == "tasks" && trajectories == "trajectories" && agents == "agents" && index == "index.json")
+    }
+    let n = parts.len();
+    if n < 2 {
+        return false;
+    }
+    let parent = parts[n - 2].as_str();
+    matches!(parent, "trajectories" | "tasks" | "planner" | "agents")
+        || (n >= 3 && parts[n - 3] == "agents")
 }
 
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {

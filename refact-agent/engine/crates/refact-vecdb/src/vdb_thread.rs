@@ -11,10 +11,9 @@ use tokio::sync::{Mutex as AMutex, Notify as ANotify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use refact_ast::Document;
+use refact_core::ast_types::Document;
 use refact_core::vecdb_types::FileReader;
 
-use crate::ast_file_splitter::AstBasedFileSplitter;
 use crate::fetch_embedding::get_embedding_with_retries;
 use crate::vdb_markdown_splitter::MarkdownFileSplitter;
 use crate::vdb_sqlite::VecDBSqlite;
@@ -429,9 +428,9 @@ async fn vectorize_thread(
                     vec![]
                 })
         } else {
-            let file_splitter = AstBasedFileSplitter::new(constants.splitter_window_size);
-            file_splitter
-                .vectorization_split(&text, &doc.doc_path, None, constants.embedding_model.n_ctx)
+            let md_splitter = MarkdownFileSplitter::new(constants.embedding_model.n_ctx);
+            md_splitter
+                .split(&text, &doc.doc_path)
                 .await
                 .unwrap_or_else(|err| {
                     info!("{}", err);
@@ -445,7 +444,7 @@ async fn vectorize_thread(
                 splits.push(SplitResult {
                     file_path: doc.doc_path.clone(),
                     window_text: filename_str.clone(),
-                    window_text_hash: refact_ast::ast::chunk_utils::official_text_hashing_function(
+                    window_text_hash: refact_core::chunk_utils::official_text_hashing_function(
                         &filename_str,
                     ),
                     start_line: 0,
@@ -568,7 +567,7 @@ pub async fn vectorizer_enqueue_files(
     {
         {
             let mut vecdb_todo_locked = vecdb_todo.lock().await;
-            for doc in documents.iter() {
+            for doc in documents_my_copy.iter() {
                 if process_immediately {
                     vecdb_todo_locked.push_back(MessageToVecdbThread::ImmediatelyRegularDocument(
                         doc.clone(),

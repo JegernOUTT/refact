@@ -62,15 +62,46 @@ fn results2message(results: &Vec<vecdb::vdb_structs::VecdbRecord>) -> Vec<Contex
     vector_of_context_file
 }
 
+pub fn hits_to_context_files(hits: Vec<refact_codegraph::CodeHit>) -> Vec<ContextFile> {
+    let max_score = hits
+        .first()
+        .map(|h| h.score)
+        .unwrap_or(1.0)
+        .max(f32::EPSILON);
+    hits.into_iter()
+        .map(|h| ContextFile {
+            file_name: h.path,
+            file_content: "".to_string(),
+            line1: h.line1.max(1),
+            line2: h.line2.max(1),
+            symbols: h.symbol.map(|s| vec![s]).unwrap_or_default(),
+            gradient_type: 4,
+            usefulness: (h.score / max_score * 100.0).clamp(0.0, 100.0),
+            skip_pp: false,
+            file_rev: None,
+        })
+        .collect()
+}
+
 pub async fn execute_at_search(
     ccx: Arc<AMutex<AtCommandsContext>>,
     query: &String,
     vecdb_scope_filter_mb: Option<String>,
 ) -> Result<Vec<ContextFile>, String> {
-    let (vec_db, top_n) = {
+    let (vec_db, top_n, gcx) = {
         let cgcx = ccx.lock().await;
-        (cgcx.app.workspace.vec_db.clone(), cgcx.top_n)
+        (
+            cgcx.app.workspace.vec_db.clone(),
+            cgcx.top_n,
+            cgcx.app.gcx.clone(),
+        )
     };
+
+    let codegraph_opt = gcx.codegraph.lock().await.clone();
+    if let Some(service) = codegraph_opt {
+        let hits = service.search_hybrid(query, top_n * 2).await?;
+        return Ok(hits_to_context_files(hits));
+    }
 
     let r = match *vec_db.lock().await {
         Some(ref db) => {

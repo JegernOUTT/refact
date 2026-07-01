@@ -319,10 +319,34 @@ mod tests {
                     config_path: "".to_string(),
                 },
             ),
+            Box::new(crate::tools::tool_codegraph::ToolCodegraphOverview {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_codegraph::ToolCodeHealth {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_codegraph::ToolGitRisk {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_codegraph::ToolCodeWhy {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_codegraph::ToolCodeDuplication {
+                config_path: "".to_string(),
+            }),
+            Box::new(crate::tools::tool_codegraph::ToolCodeMap {
+                config_path: "".to_string(),
+            }),
         ];
 
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tool in &tools {
             let desc = tool.tool_description();
+            assert!(
+                names.insert(desc.name.clone()),
+                "duplicate tool name '{}'",
+                desc.name
+            );
             let schema = &desc.input_schema;
             assert_eq!(
                 schema["type"],

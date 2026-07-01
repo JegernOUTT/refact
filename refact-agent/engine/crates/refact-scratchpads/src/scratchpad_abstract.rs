@@ -5,7 +5,7 @@ use tokenizers::Tokenizer;
 use tracing::warn;
 
 use refact_core::chat_types::{PostprocessSettings, SamplingParameters};
-use refact_ast::ast::chunk_utils::count_text_tokens;
+use refact_core::chunk_utils::count_text_tokens;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FinishReason {

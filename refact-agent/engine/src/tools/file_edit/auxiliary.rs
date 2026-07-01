@@ -1,4 +1,3 @@
-use crate::ast::ast_indexer_thread::{ast_indexer_block_until_finished, ast_indexer_enqueue_files};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::call_validation::DiffChunk;
@@ -407,22 +406,24 @@ pub fn convert_edit_to_diffchunks(
 }
 
 pub async fn await_ast_indexing(gcx: Arc<GlobalContext>) -> Result<(), String> {
-    let ast_service_mb = gcx.ast_service.lock().unwrap().clone();
-    if let Some(ast_service) = &ast_service_mb {
-        ast_indexer_block_until_finished(ast_service.clone(), 20_000, true).await;
+    let codegraph_mb = gcx.codegraph.lock().await.clone();
+    if let Some(service) = codegraph_mb {
+        service.wait_until_ready(20_000).await;
     }
     Ok(())
 }
 
 pub async fn sync_documents_ast(gcx: Arc<GlobalContext>, doc: &PathBuf) -> Result<(), String> {
-    let ast_service_mb = gcx.ast_service.lock().unwrap().clone();
-    if let Some(ast_service) = &ast_service_mb {
-        ast_indexer_enqueue_files(
-            ast_service.clone(),
-            &vec![doc.to_string_lossy().to_string()],
-            true,
-        )
-        .await;
+    let codegraph_mb = gcx.codegraph.lock().await.clone();
+    if let Some(service) = codegraph_mb {
+        let path = doc.to_string_lossy().to_string();
+        if let Ok(text) =
+            crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), doc).await
+        {
+            let lang = refact_codegraph::lang_from_path(&path);
+            let _ = service.index_file(&path, &text, lang).await;
+            let _ = service.connect_usages().await;
+        }
     }
     Ok(())
 }

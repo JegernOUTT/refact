@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use serde_json::Value;
 
-use refact_ast::ast::chunk_utils::official_text_hashing_function;
+use refact_core::chunk_utils::official_text_hashing_function;
 use refact_core::vecdb_types::SplitResult;
 
 const MESSAGES_PER_CHUNK: usize = 4;
@@ -230,8 +230,9 @@ fn message_compression_kind(msg: &Value) -> Option<&str> {
 }
 
 pub fn is_trajectory_file(path: &PathBuf) -> bool {
-    path.to_string_lossy().contains(".refact/trajectories/")
-        && path.extension().map(|e| e == "json").unwrap_or(false)
+    let s = path.to_string_lossy().replace('\\', "/");
+    path.extension().map(|e| e == "json").unwrap_or(false)
+        && (s.contains("/trajectories/") || s.contains("/buddy/chats/conversations/"))
 }
 
 #[cfg(test)]
@@ -325,5 +326,27 @@ mod tests {
 
         assert!(!text.contains("legacy top-level summary must not be indexed"));
         assert!(text.contains("malformed compression metadata remains normal assistant"));
+    }
+
+    #[test]
+    fn recognizes_project_task_and_global_trajectories() {
+        assert!(is_trajectory_file(&std::path::PathBuf::from(
+            "/w/.refact/trajectories/abc.json"
+        )));
+        assert!(is_trajectory_file(&std::path::PathBuf::from(
+            "/w/.refact/tasks/T-1/trajectories/planner/abc.json"
+        )));
+        assert!(is_trajectory_file(&std::path::PathBuf::from(
+            "/home/u/.config/refact/trajectories/abc.json"
+        )));
+        assert!(is_trajectory_file(&std::path::PathBuf::from(
+            "/w/.refact/buddy/chats/conversations/abc.json"
+        )));
+        assert!(!is_trajectory_file(&std::path::PathBuf::from(
+            "/w/.refact/trajectories/abc.md"
+        )));
+        assert!(!is_trajectory_file(&std::path::PathBuf::from(
+            "/w/.refact/knowledge/note.md"
+        )));
     }
 }

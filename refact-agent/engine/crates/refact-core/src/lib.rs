@@ -1,5 +1,7 @@
+pub mod ast_types;
 pub mod buddy_meta;
 pub mod chat_types;
+pub mod chunk_utils;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
 pub mod llm_types;

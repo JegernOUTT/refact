@@ -15,5 +15,8 @@ async-trait = "0.1.73"
 base64 = "0.22.1"
 image = "0.25.2"
 tokenizers.workspace = true
+ropey.workspace = true
+itertools.workspace = true
+md5.workspace = true
 regex.workspace = true
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

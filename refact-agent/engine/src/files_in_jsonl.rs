@@ -10,7 +10,6 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 
 use crate::global_context::GlobalContext;
-use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;
 
 pub async fn enqueue_all_docs_from_jsonl(
     gcx: Arc<GlobalContext>,
@@ -25,7 +24,7 @@ pub async fn enqueue_all_docs_from_jsonl(
     for d in paths.iter() {
         docs.push(d.to_string_lossy().to_string());
     }
-    let (vec_db_module, ast_service) = {
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -34,19 +33,9 @@ pub async fn enqueue_all_docs_from_jsonl(
         let jsonl_files = &mut gcx.documents_state.jsonl_files.lock().unwrap();
         jsonl_files.clear();
         jsonl_files.extend(paths);
-        let vec_db_module = gcx.vec_db.clone();
-        let ast_service = gcx.ast_service.lock().unwrap().clone();
-        (vec_db_module, ast_service)
-    };
-    if let Some(ast) = &ast_service {
-        if !vecdb_only {
-            ast_indexer_enqueue_files(ast.clone(), &docs, force).await;
-        }
     }
-    match *vec_db_module.lock().await {
-        Some(ref mut db) => db.vectorizer_enqueue_files(&docs, false).await,
-        None => {}
-    };
+    let _ = (force, vecdb_only);
+    crate::indexing_routing::route_index_enqueue(gcx.clone(), &docs, false).await;
 }
 
 pub async fn enqueue_all_docs_from_jsonl_but_read_first(

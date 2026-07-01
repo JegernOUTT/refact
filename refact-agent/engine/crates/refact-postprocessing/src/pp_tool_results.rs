@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tracing::warn;
 
-use refact_ast::ast::chunk_utils::{official_text_hashing_function, count_text_tokens_with_fallback};
+use refact_core::chunk_utils::{official_text_hashing_function, count_text_tokens_with_fallback};
 use refact_core::chat_types::{
     ChatContent, ChatMessage, ContextFile, PostprocessSettings, SearchResult, format_search_results,
 };

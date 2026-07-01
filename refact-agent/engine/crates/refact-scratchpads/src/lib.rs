@@ -10,7 +10,6 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
-use refact_ast::ast::ast_structs::AstDB;
 use refact_core::chat_types::CodeCompletionPost;
 use refact_postprocessing::pp_context_provider::PPContextTrait;
 
@@ -22,7 +21,7 @@ pub async fn create_code_completion_scratchpad(
     scratchpad_patch: &Value,
     post: &CodeCompletionPost,
     cache_arc: Arc<StdRwLock<completion_cache::CompletionCache>>,
-    ast_index: Option<Arc<AstDB>>,
+    codegraph: Option<Arc<refact_codegraph::CodeGraphService>>,
     pp_context: Arc<dyn PPContextTrait>,
     project_dirs: Vec<PathBuf>,
 ) -> Result<Box<dyn ScratchpadAbstract>, String> {
@@ -32,7 +31,7 @@ pub async fn create_code_completion_scratchpad(
             post,
             "PSM".to_string(),
             cache_arc,
-            ast_index,
+            codegraph,
             pp_context,
             project_dirs,
         ))
@@ -42,7 +41,7 @@ pub async fn create_code_completion_scratchpad(
             post,
             "SPM".to_string(),
             cache_arc,
-            ast_index,
+            codegraph,
             pp_context,
             project_dirs,
         ))

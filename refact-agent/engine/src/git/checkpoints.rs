@@ -7,7 +7,7 @@ use tokio::time::Instant;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::ast::chunk_utils::official_text_hashing_function;
+use refact_core::chunk_utils::official_text_hashing_function;
 use crate::background_tasks::BackgroundTasksHolder;
 use crate::custom_error::MapErrToString;
 use crate::files_blocklist::reload_indexing_everywhere_if_needed;

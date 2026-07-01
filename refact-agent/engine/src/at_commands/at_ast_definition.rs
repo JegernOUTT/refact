@@ -2,7 +2,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
 
-use crate::ast::ast_db::definition_paths_fuzzy;
 use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::call_validation::{ContextFile, ContextEnum};
 use crate::at_commands::execute_at::{AtCommandMember, correct_at_arg};
@@ -67,15 +66,15 @@ impl AtParam for AtParamSymbolPathQuery {
             (cgcx.app.clone(), cgcx.top_n)
         };
 
-        let ast_service_opt = app.workspace.ast_service.clone();
-        if ast_service_opt.is_none() {
-            return vec![];
+        let gcx = app.gcx.clone();
+        let codegraph_opt = gcx.codegraph.lock().await.clone();
+        match codegraph_opt {
+            Some(service) => service
+                .definition_paths_fuzzy(value, top_n)
+                .await
+                .unwrap_or_else(trace_and_default),
+            None => vec![],
         }
-        let ast_index = ast_service_opt.unwrap().lock().await.ast_index.clone();
-
-        definition_paths_fuzzy(ast_index, value, top_n, 1000)
-            .await
-            .unwrap_or_else(trace_and_default)
     }
 
     fn param_completion_valid(&self) -> bool {
@@ -110,59 +109,63 @@ impl AtCommand for AtAstDefinition {
         args.push(arg_symbol.clone());
 
         let app = ccx.lock().await.app.clone();
-        let ast_service_opt = app.workspace.ast_service.clone();
-        if let Some(ast_service) = ast_service_opt {
-            let gcx = app.gcx.clone();
-            let ast_index = ast_service.lock().await.ast_index.clone();
-            let defs: Vec<Arc<crate::ast::ast_structs::AstDefinition>> =
-                crate::ast::ast_db::definitions(ast_index, arg_symbol.text.as_str())?;
-            let file_paths = defs.iter().map(|x| x.cpath.clone()).collect::<Vec<_>>();
-            let short_file_paths =
-                crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
+        let gcx = app.gcx.clone();
 
-            let text = if let Some(path0) = short_file_paths.get(0) {
-                if short_file_paths.len() > 1 {
-                    format!(
-                        "`{}` (defined in {} and other files)",
-                        &arg_symbol.text, path0
-                    )
-                } else {
-                    format!("`{}` (defined in {})", &arg_symbol.text, path0)
-                }
-            } else {
-                format!(
-                    "`{}` (definition not found in the AST tree)",
-                    &arg_symbol.text
-                )
-            };
-
-            let mut result = vec![];
-            for (res, cpath) in defs.iter().zip(file_paths.iter()) {
-                result.push(ContextFile {
-                    file_name: cpath.clone(),
-                    file_content: "".to_string(),
-                    line1: res.full_line1(),
-                    line2: res.full_line2(),
-                    file_rev: None,
-                    symbols: vec![res.path_drop0()],
-                    gradient_type: 4,
-                    usefulness: 100.0,
-                    skip_pp: false,
-                });
+        let codegraph_opt = gcx.codegraph.lock().await.clone();
+        match codegraph_opt {
+            Some(service) => {
+                let defs = service
+                    .definitions(arg_symbol.text.as_str())
+                    .await
+                    .unwrap_or_default();
+                Ok(build_definition_context(gcx.clone(), &arg_symbol.text, &defs).await)
             }
-            Ok((
-                result
-                    .into_iter()
-                    .map(|x| ContextEnum::ContextFile(x))
-                    .collect::<Vec<ContextEnum>>(),
-                text,
-            ))
-        } else {
-            Err("attempt to use @definition with no ast turned on".to_string())
+            None => Err("codegraph is not available".to_string()),
         }
     }
 
     fn depends_on(&self) -> Vec<String> {
-        vec!["ast".to_string()]
+        vec!["codegraph".to_string()]
     }
+}
+
+async fn build_definition_context(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    symbol_text: &str,
+    defs: &[Arc<refact_core::ast_types::AstDefinition>],
+) -> (Vec<ContextEnum>, String) {
+    let file_paths = defs.iter().map(|x| x.cpath.clone()).collect::<Vec<_>>();
+    let short_file_paths = crate::files_correction::shortify_paths(gcx.clone(), &file_paths).await;
+
+    let text = if let Some(path0) = short_file_paths.get(0) {
+        if short_file_paths.len() > 1 {
+            format!("`{}` (defined in {} and other files)", symbol_text, path0)
+        } else {
+            format!("`{}` (defined in {})", symbol_text, path0)
+        }
+    } else {
+        format!("`{}` (definition not found in the AST tree)", symbol_text)
+    };
+
+    let mut result = vec![];
+    for (res, cpath) in defs.iter().zip(file_paths.iter()) {
+        result.push(ContextFile {
+            file_name: cpath.clone(),
+            file_content: "".to_string(),
+            line1: res.full_line1(),
+            line2: res.full_line2(),
+            file_rev: None,
+            symbols: vec![res.path_drop0()],
+            gradient_type: 4,
+            usefulness: 100.0,
+            skip_pp: false,
+        });
+    }
+    (
+        result
+            .into_iter()
+            .map(ContextEnum::ContextFile)
+            .collect::<Vec<ContextEnum>>(),
+        text,
+    )
 }

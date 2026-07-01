@@ -38,7 +38,7 @@ fn uri_to_filename(uri: &str) -> String {
             }
         })
         .collect();
-    let hash = crate::ast::chunk_utils::official_text_hashing_function(uri);
+    let hash = refact_core::chunk_utils::official_text_hashing_function(uri);
     let prefix = sanitized.chars().take(40).collect::<String>();
     format!("{}_{}.md", prefix, &hash[..8])
 }

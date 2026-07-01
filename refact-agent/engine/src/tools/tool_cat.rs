@@ -372,8 +372,6 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
             cgcx.execution_scope.clone(),
         )
     };
-    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
-
     let mut not_found_messages = vec![];
     let mut scope_notices = vec![];
     let mut corrected_paths = vec![];
@@ -494,13 +492,13 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
     let mut filenames_present = vec![];
     let mut multimodal: Vec<MultimodalElement> = vec![];
 
-    if let Some(ast_service) = ast_service_opt {
-        let ast_index = ast_service.lock().await.ast_index.clone();
+    let codegraph_opt = gcx.codegraph.lock().await.clone();
+    if let Some(service) = &codegraph_opt {
         for p in unique_paths.iter() {
             let original_path = corrected_path_to_original.get(p).unwrap_or(p);
             let line_range = path_line_ranges.get(original_path).cloned().flatten();
 
-            let doc_syms = crate::ast::ast_db::doc_defs(ast_index.clone(), &p);
+            let doc_syms = service.doc_defs(p).await.unwrap_or_default();
             // s.name() means the last part of the path
             // symbols.contains means exact match in comma-separated list
             let mut syms_def_in_this_file = vec![];

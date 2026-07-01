@@ -13,7 +13,6 @@ use tokio::signal;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use tracing::{error, info};
 
-use crate::ast::ast_indexer_thread::AstIndexService;
 use crate::agents::registry::BackgroundAgentRegistry;
 use crate::app_state::{
     AppActivitySink, AppBuddyEventSink, AppState, AppToolRegistry, BuddyServices, CapsState,
@@ -285,7 +284,7 @@ pub struct GlobalContext {
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn refact_core::vecdb_types::VecdbSearch>>>>,
     pub vec_db_error: Arc<StdMutex<String>>,
-    pub ast_service: Arc<StdMutex<Option<Arc<AMutex<AstIndexService>>>>>,
+    pub codegraph: Arc<AMutex<Option<Arc<crate::codegraph::CodeGraphService>>>>,
     pub ask_shutdown_sender: Arc<StdMutex<std::sync::mpsc::Sender<String>>>,
     pub documents_state: DocumentsState,
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
@@ -294,7 +293,6 @@ pub struct GlobalContext {
     pub integration_sessions:
         Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
     pub browser_runtimes: Arc<AMutex<HashMap<String, Arc<AMutex<BrowserRuntime>>>>>,
-    pub codelens_cache: Arc<AMutex<crate::http::routers::v1::code_lens::CodeLensCache>>,
     pub init_shadow_repos_background_task_holder: BackgroundTasksHolder,
     pub init_shadow_repos_lock: Arc<AMutex<bool>>,
     pub git_operations_abort_flag: Arc<AtomicBool>,
@@ -357,7 +355,6 @@ impl GlobalContext {
                 completions_cache: self.completions_cache.clone(),
                 vec_db: self.vec_db.clone(),
                 vec_db_error: self.vec_db_error.clone(),
-                ast_service: self.ast_service.lock().unwrap().clone(),
                 knowledge_index: self.knowledge_index.clone(),
                 at_commands_preview_cache: self.at_commands_preview_cache.clone(),
             },
@@ -399,7 +396,6 @@ impl GlobalContext {
                 browser_runtimes: self.browser_runtimes.clone(),
                 ext_cache_generation: self.ext_cache_generation.clone(),
                 project_registry_cache: self.project_registry_cache.clone(),
-                codelens_cache: self.codelens_cache.clone(),
                 init_shadow_repos_lock: self.init_shadow_repos_lock.clone(),
                 git_operations_abort_flag: self.git_operations_abort_flag.clone(),
             },
@@ -760,7 +756,7 @@ pub async fn create_global_context(
         completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
         vec_db: Arc::new(AMutex::new(None)),
         vec_db_error: Arc::new(StdMutex::new(String::new())),
-        ast_service: Arc::new(StdMutex::new(None)),
+        codegraph: Arc::new(AMutex::new(None)),
         ask_shutdown_sender: Arc::new(StdMutex::new(ask_shutdown_sender)),
         documents_state: DocumentsState::new(workspace_dirs.clone()).await,
         at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
@@ -768,9 +764,6 @@ pub async fn create_global_context(
         indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
         integration_sessions: Arc::new(AMutex::new(HashMap::new())),
         browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
-        codelens_cache: Arc::new(AMutex::new(
-            crate::http::routers::v1::code_lens::CodeLensCache::default(),
-        )),
         init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),
         init_shadow_repos_lock: Arc::new(AMutex::new(false)),
         git_operations_abort_flag: Arc::new(AtomicBool::new(false)),
@@ -964,7 +957,7 @@ pub mod tests {
             completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
             vec_db: Arc::new(AMutex::new(None)),
             vec_db_error: Arc::new(StdMutex::new(String::new())),
-            ast_service: Arc::new(StdMutex::new(None)),
+            codegraph: Arc::new(AMutex::new(None)),
             ask_shutdown_sender: Arc::new(StdMutex::new(ask_shutdown_sender)),
             documents_state: DocumentsState::new(vec![]).await,
             at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
@@ -972,9 +965,6 @@ pub mod tests {
             indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
             integration_sessions: Arc::new(AMutex::new(HashMap::new())),
             browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
-            codelens_cache: Arc::new(AMutex::new(
-                crate::http::routers::v1::code_lens::CodeLensCache::default(),
-            )),
             init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),
             init_shadow_repos_lock: Arc::new(AMutex::new(false)),
             git_operations_abort_flag: Arc::new(AtomicBool::new(false)),

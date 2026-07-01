@@ -26,6 +26,7 @@ mod tool_clean_background_processes;
 #[cfg(test)]
 pub mod tool_cmdline;
 mod tool_code_review;
+mod tool_codegraph;
 pub(crate) mod tool_compress_chat;
 pub mod tool_config_subagent;
 pub(crate) mod tool_cron_create;
