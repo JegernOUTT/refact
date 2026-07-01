@@ -17,6 +17,9 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | GitHub metadata | `.github/` | repo-level GitHub config | `PULL_REQUEST_TEMPLATE.md` mirrors the minimum pre-commit checks (engine/GUI/plugins); `FUNDING.yml` lists the maintainer |
 | Root `.gitignore` | `.gitignore` | repository ignore rules | includes local editor and build output exclusions; check before adding new generated files |
 | JetBrains local release helper | `build-jb-plugin-local.sh` | shell script | local JetBrains packaging helper; root `.gitignore` excludes copied `/refact-*.zip` archives |
+| Root README | `README.md` | Markdown | primary human entry point; mirrors the subproject layout in the Repository Map and links to engine/GUI/plugin docs |
+| Contributing guide | `CONTRIBUTING.md` | Markdown | repo-level contributor workflow; defer to sub-project `CONTRIBUTING.md` (engine, IntelliJ) for component-specific rules |
+| License | `LICENSE` | Apache-2.0 | applies repo-wide; sub-project `LICENSE.txt` files (GUI, plugins) are equivalent copies |
 
 Sub-project `AGENTS.md` files contain detailed architecture, patterns, and checklists. Read them before working in those directories.
 

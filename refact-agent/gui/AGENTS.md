@@ -239,7 +239,12 @@ Status semantics mirror the backend: `active=true` means this chat owns the goal
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
-Largest component (~1180 lines). Handles 10+ tool types including nested subchats (max 5 deep), knowledge results, file browser, multi-modal results. OpenAI-specific tool components: AudioTool, ComputerCallTool, CodeInterpreterCallTool, FileSearchCallTool.
+Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `delegate`, `strategic_planning`, `code_review`, `deep_research`, `tasks_set`, `task_done`, `sleep`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
+
+- Subagent/delegate results are decorated with a `BackgroundAgentCard` built from `BackgroundAgentSummary` (kind, status, progress, edited/target files, diff/conflict/result summaries).
+- Multimodal results (`MultiModalToolResult` with image content) are rendered by `MultiModalToolContent` and surface inline image previews via `DialogImage`.
+- Per-tool-group collapsible state is persisted in `CollapsibleStore` (`useStoredOpen`); the `ToolUsageSummary` header shows call counts, the latest subchat step (`step: text` progress entries), and attached-file chips.
+- Background-agent trajectory links dispatch `createChatWithId` + `switchToThread` so opening a child chat routes the user into the right tab.
 
 **Tool status**: ⏳ thinking · ✅ success · ❌ error · ☁️ server (`srvtoolu_*` prefix)
 
