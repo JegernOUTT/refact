@@ -493,6 +493,7 @@ pub struct ChatSession {
     /// Kept in sync by `emit_background_agent_update` and snapshot enrichment paths so
     /// every `ChatEvent::Snapshot` carries the current agent set instead of an empty list.
     pub background_agents: HashMap<String, BackgroundAgentSummary>,
+    pub goal_stopped_by_abort: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -186,12 +186,17 @@ pub async fn handle_v1_chat_command(
 
     if matches!(request.command, ChatCommand::Abort {}) {
         session.abort_stream();
+        let goal_stopped = session.stop_goal_on_manual_abort();
         session.remember_accepted_request(&request.client_request_id);
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id,
             accepted: true,
             result: Some(serde_json::json!({"aborted": true})),
         });
+        drop(session);
+        if goal_stopped {
+            super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        }
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")

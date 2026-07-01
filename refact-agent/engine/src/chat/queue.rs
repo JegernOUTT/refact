@@ -133,6 +133,7 @@ fn command_triggers_generation(cmd: &ChatCommand) -> bool {
 
 fn note_user_turn_resets_goal_pursuit(session: &mut ChatSession) {
     session.goal_reset_no_progress();
+    session.reactivate_goal_stopped_by_manual_abort();
 }
 
 pub async fn inject_priority_messages_if_any(
@@ -787,6 +788,7 @@ fn handle_goal_control_command(
         "stop" => GoalStatus::Stopped,
         _ => return Err("goal_control action must be pause, resume, or stop".to_string()),
     };
+    session.clear_goal_stopped_by_abort_marker();
     session.goal_set_status(status);
     Ok(serde_json::json!({
         "action": normalized,
@@ -1604,6 +1606,11 @@ pub async fn process_command_queue(
             ChatCommand::Abort {} => {
                 let mut session = session_arc.lock().await;
                 session.abort_stream();
+                let goal_stopped = session.stop_goal_on_manual_abort();
+                drop(session);
+                if goal_stopped {
+                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                }
             }
             ChatCommand::CleanBackgroundProcesses { include_services } => {
                 let chat_id = {
@@ -1694,6 +1701,7 @@ pub async fn process_command_queue(
                     if regenerate && idx + 1 < session.messages.len() {
                         session.truncate_messages(idx + 1);
                         session.set_runtime_state(SessionState::Generating, None);
+                        session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background(app.clone(), session_arc.clone());
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
@@ -1717,6 +1725,7 @@ pub async fn process_command_queue(
                     if regenerate && idx < session.messages.len() {
                         session.truncate_messages(idx);
                         session.set_runtime_state(SessionState::Generating, None);
+                        session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background(app.clone(), session_arc.clone());
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
@@ -1729,6 +1738,10 @@ pub async fn process_command_queue(
                 }
             }
             ChatCommand::Regenerate {} => {
+                {
+                    let mut session = session_arc.lock().await;
+                    session.reactivate_goal_stopped_by_manual_abort();
+                }
                 maybe_save_trajectory_background(app.clone(), session_arc.clone());
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
@@ -3754,6 +3767,32 @@ mod tests {
         assert_eq!(stopped, json!({"action": "stop", "status": "stopped"}));
         assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
         assert!(!session.goal_can_pursue());
+    }
+
+    #[test]
+    fn explicit_goal_control_stop_is_not_reactivated_by_next_user_turn() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+
+        handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+
+        note_user_turn_resets_goal_pursuit(&mut session);
+
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+    }
+
+    #[test]
+    fn manual_abort_stop_is_reactivated_by_next_user_turn() {
+        let mut session = ChatSession::new("goal-command".to_string());
+        handle_set_goal_command(&mut session, "Base".to_string(), None).unwrap();
+
+        assert!(session.stop_goal_on_manual_abort());
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+
+        note_user_turn_resets_goal_pursuit(&mut session);
+
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
     }
 
     #[test]

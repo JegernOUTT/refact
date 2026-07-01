@@ -429,6 +429,7 @@ impl ChatSession {
             waiting_for_card_ids: Vec::new(),
             background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
+            goal_stopped_by_abort: false,
         }
     }
 
@@ -520,6 +521,7 @@ impl ChatSession {
             waiting_for_card_ids,
             background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
+            goal_stopped_by_abort: false,
         }
     }
 
@@ -640,6 +642,57 @@ impl ChatSession {
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
+    }
+
+    pub fn stop_goal_on_manual_abort(&mut self) -> bool {
+        let should_stop = self.goal.as_ref().is_some_and(|goal| {
+            goal.active
+                && matches!(
+                    goal.status,
+                    GoalStatus::Active
+                        | GoalStatus::Verifying
+                        | GoalStatus::BudgetExhausted
+                        | GoalStatus::NoProgress
+                )
+        });
+        if !should_stop {
+            return false;
+        }
+        self.goal_set_status(GoalStatus::Stopped);
+        self.goal_stopped_by_abort = true;
+        self.add_message(event(
+            EventSubkind::GoalPursuit,
+            "chat.session",
+            json!({"kind": "stopped", "trigger": "manual_abort"}),
+            "Goal pursuit stopped: chat aborted.".to_string(),
+        ));
+        true
+    }
+
+    pub fn reactivate_goal_stopped_by_manual_abort(&mut self) -> bool {
+        if !self.goal_stopped_by_abort {
+            return false;
+        }
+        self.goal_stopped_by_abort = false;
+        let can_reactivate = self
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.active && goal.status == GoalStatus::Stopped);
+        if !can_reactivate {
+            return false;
+        }
+        self.goal_set_status(GoalStatus::Active);
+        self.add_message(event(
+            EventSubkind::GoalPursuit,
+            "chat.session",
+            json!({"kind": "resumed", "trigger": "manual_abort_recovery"}),
+            "Goal pursuit resumed.".to_string(),
+        ));
+        true
+    }
+
+    pub fn clear_goal_stopped_by_abort_marker(&mut self) {
+        self.goal_stopped_by_abort = false;
     }
 
     pub fn goal_push_attempt(&mut self, attempt: GoalAttempt) -> bool {
@@ -1161,6 +1214,7 @@ impl ChatSession {
     ) -> crate::chat::goal_role::GoalInstallReport {
         let report = crate::chat::goal_role::install_goal(self, mode, body, active, budget);
         self.rebuild_goal_projection_from_messages();
+        self.goal_stopped_by_abort = false;
         self.emit_goal_status();
         report
     }
@@ -2707,6 +2761,103 @@ mod tests {
             assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
             assert_eq!(session.goal_status, Some(GoalStatus::Active));
             assert!(session.goal_can_pursue());
+        }
+
+        #[test]
+        fn stop_goal_on_manual_abort_is_noop_without_goal() {
+            let mut session = make_session();
+            assert!(!session.stop_goal_on_manual_abort());
+        }
+
+        #[test]
+        fn stop_goal_on_manual_abort_stops_pursuable_statuses() {
+            for status in [
+                GoalStatus::Active,
+                GoalStatus::Verifying,
+                GoalStatus::BudgetExhausted,
+                GoalStatus::NoProgress,
+            ] {
+                let mut session = make_session();
+                session.install_goal("agent", "ship it", true, budget());
+                session.goal_set_status(status);
+
+                assert!(session.stop_goal_on_manual_abort(), "{status:?}");
+
+                assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+                assert!(session.messages.iter().any(|message| {
+                    message.role == "event"
+                        && message
+                            .extra
+                            .get("event")
+                            .and_then(|event| event.get("payload"))
+                            .and_then(|payload| payload.get("kind"))
+                            .and_then(|kind| kind.as_str())
+                            == Some("stopped")
+                }));
+            }
+        }
+
+        #[test]
+        fn stop_goal_on_manual_abort_leaves_held_or_terminal_statuses_untouched() {
+            for status in [
+                GoalStatus::Paused,
+                GoalStatus::Stopped,
+                GoalStatus::Completed,
+                GoalStatus::Transferred,
+            ] {
+                let mut session = make_session();
+                session.install_goal("agent", "ship it", true, budget());
+                session.goal_set_status(status);
+
+                assert!(!session.stop_goal_on_manual_abort(), "{status:?}");
+                assert_eq!(session.goal_status, Some(status));
+            }
+        }
+
+        #[test]
+        fn reactivate_goal_stopped_by_manual_abort_restores_active_status() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+            assert!(session.stop_goal_on_manual_abort());
+
+            assert!(session.reactivate_goal_stopped_by_manual_abort());
+
+            assert_eq!(session.goal_status, Some(GoalStatus::Active));
+            assert!(!session.goal_stopped_by_abort);
+            assert!(session.messages.iter().any(|message| {
+                message.role == "event"
+                    && message
+                        .extra
+                        .get("event")
+                        .and_then(|event| event.get("payload"))
+                        .and_then(|payload| payload.get("kind"))
+                        .and_then(|kind| kind.as_str())
+                        == Some("resumed")
+            }));
+        }
+
+        #[test]
+        fn reactivate_goal_stopped_by_manual_abort_is_noop_without_marker() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+            session.goal_set_status(GoalStatus::Stopped);
+
+            assert!(!session.reactivate_goal_stopped_by_manual_abort());
+            assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        }
+
+        #[test]
+        fn explicit_goal_control_clears_manual_abort_marker() {
+            let mut session = make_session();
+            session.install_goal("agent", "ship it", true, budget());
+            assert!(session.stop_goal_on_manual_abort());
+            assert!(session.goal_stopped_by_abort);
+
+            session.clear_goal_stopped_by_abort_marker();
+
+            assert!(!session.goal_stopped_by_abort);
+            assert!(!session.reactivate_goal_stopped_by_manual_abort());
+            assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
         }
 
         #[test]
