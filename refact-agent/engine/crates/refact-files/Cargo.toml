@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
+refact-ast = { path = "../refact-ast" }
 dunce = "1.0.5"
 glob = "0.3.1"
+notify = { version = "8.0.0", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9.31"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 itertools = { workspace = true }
 tracing = { workspace = true }
 

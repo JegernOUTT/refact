@@ -4154,6 +4154,8 @@ dependencies = [
  "dunce",
  "glob",
  "itertools 0.14.0",
+ "notify",
+ "refact-ast",
  "refact-core",
  "serde",
  "serde_yaml",
