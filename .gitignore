@@ -181,6 +181,9 @@ workdir
 
 # rust
 Cargo.lock
+# ...but track the engine workspace lock so CI builds are reproducible
+# (a gitignored lock let rust-cache pin a bad aws-lc-sys 0.42.0 that build-aborts on CI gcc).
+!refact-agent/engine/Cargo.lock
 
 # Misc
 zutils/
