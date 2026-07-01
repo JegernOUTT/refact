@@ -409,10 +409,16 @@ where
         }
     });
 
-    let mut buddy = gcx.buddy.buddy.lock().await;
-    if let Some(svc) = buddy.as_mut() {
-        svc.track_background_task(handle);
-    } else {
+    let untracked_handle = {
+        let mut buddy = gcx.buddy.buddy.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            svc.track_background_task(handle);
+            None
+        } else {
+            Some(handle)
+        }
+    };
+    if let Some(handle) = untracked_handle {
         let _ = handle.await;
     }
 
