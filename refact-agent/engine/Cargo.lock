@@ -4621,6 +4621,7 @@ dependencies = [
  "dunce",
  "md5",
  "refact-core",
+ "refact-files",
  "rust-embed",
  "serde",
  "serde_json",
