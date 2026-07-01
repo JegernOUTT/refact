@@ -4230,7 +4230,7 @@ dependencies = [
 
 [[package]]
 name = "refact-lsp"
-version = "8.2.1"
+version = "8.2.2"
 dependencies = [
  "astral-tokio-tar",
  "async-stream",
