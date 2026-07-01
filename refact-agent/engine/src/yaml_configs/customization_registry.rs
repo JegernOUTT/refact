@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
@@ -11,55 +9,12 @@ use crate::yaml_configs::project_configs_bootstrap::{
     get_default_checksum,
 };
 
+pub use refact_yaml_configs::registry_cache::{RegistryCache, RegistryCacheManager};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigScope {
     Global,
     Local,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RegistryCache {
-    pub project_root: PathBuf,
-    pub registry: ProjectRegistry,
-    pub last_scan: SystemTime,
-}
-
-pub struct RegistryCacheManager {
-    pub cache: HashMap<PathBuf, RegistryCache>,
-}
-
-impl RegistryCacheManager {
-    pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, project_root: &Path) -> Option<&RegistryCache> {
-        self.cache.get(project_root).or_else(|| {
-            let normalized =
-                crate::files_correction::canonicalize_normalized_path(project_root.to_path_buf());
-            self.cache.get(&normalized)
-        })
-    }
-
-    pub fn insert(&mut self, project_root: PathBuf, registry: ProjectRegistry) {
-        let project_root = crate::files_correction::canonicalize_normalized_path(project_root);
-        self.cache.insert(
-            project_root.clone(),
-            RegistryCache {
-                project_root,
-                registry,
-                last_scan: SystemTime::now(),
-            },
-        );
-    }
-
-    #[allow(dead_code)]
-    pub fn remove(&mut self, project_root: &Path) {
-        self.cache.remove(project_root);
-    }
 }
 
 pub async fn load_registry_from_dir(dir: &Path) -> ProjectRegistry {
