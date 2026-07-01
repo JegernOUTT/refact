@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
-use std::collections::HashMap;
 use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
@@ -18,35 +17,9 @@ pub struct CodeLensPost {
     pub debug: bool,
 }
 
-#[derive(Serialize, Clone)]
-struct CodeLensResponse {
-    success: u8,
-    code_lens: Vec<CodeLensOutput>,
-}
-
-#[derive(Serialize, Clone)]
-struct CodeLensOutput {
-    spath: String,
-    line1: usize,
-    line2: usize,
-    debug_string: Option<String>,
-}
-
-struct CodeLensCacheEntry {
-    response: CodeLensResponse,
-    ts: f64,
-}
-
-#[derive(Default)]
-pub struct CodeLensCache {
-    store: HashMap<String, CodeLensCacheEntry>,
-}
-
-impl CodeLensCache {
-    pub fn clean_up_old_entries(&mut self, now: f64) {
-        self.store.retain(|_, entry| now - entry.ts <= 600.0);
-    }
-}
+pub use refact_chat_api::code_lens::{
+    CodeLensCache, CodeLensCacheEntry, CodeLensOutput, CodeLensResponse,
+};
 
 pub async fn handle_v1_code_lens(
     State(app): State<AppState>,
