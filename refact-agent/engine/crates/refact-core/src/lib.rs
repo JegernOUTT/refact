@@ -3,6 +3,7 @@ pub mod buddy_meta;
 pub mod chat_types;
 pub mod custom_error;
 pub mod knowledge_frontmatter;
+pub mod knowledge_index;
 pub mod llm_types;
 pub mod model_caps;
 pub mod models_dev;
