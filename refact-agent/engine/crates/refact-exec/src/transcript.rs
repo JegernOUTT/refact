@@ -411,7 +411,7 @@ impl ExecTranscript {
         self.last_spill_error.as_deref()
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub(crate) fn set_spill_target_for_test(&mut self, target: SpillTarget) {
         self.spill = Some(Arc::new(Mutex::new(SpillState {
             target,

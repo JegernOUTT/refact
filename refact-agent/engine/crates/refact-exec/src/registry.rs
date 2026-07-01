@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 use crate::transcript::{ExecRawCapture, ExecRawOutput, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES};
-#[cfg(test)]
 use crate::spill::SpillTarget;
 use crate::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
@@ -689,8 +688,8 @@ impl ExecRegistry {
             .and_then(|record| record.transcript.disk_log_path().cloned())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn set_spill_target_for_test(
+    #[doc(hidden)]
+    pub async fn set_spill_target_for_test(
         &self,
         process_id: &ExecProcessId,
         target: SpillTarget,
