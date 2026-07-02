@@ -21,7 +21,6 @@ use crate::buddy::actor::BuddyService;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
 use crate::chat::types::EnqueueCommandOutcome;
-use crate::caps::CodeAssistantCaps;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
 use crate::completion_cache::CompletionCache;
@@ -40,6 +39,7 @@ use crate::stats::event::LlmCallEvent;
 use crate::tasks::events::TaskEventEnvelope;
 use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
+pub use refact_caps_core::caps_state::CapsState;
 pub use refact_core::tokenizer_state::TokenizerState;
 use refact_core::vecdb_types::VecdbSearch;
 use refact_runtime_api::{
@@ -68,15 +68,6 @@ pub struct ModelServices {
     pub tokenizers: Arc<StdRwLock<TokenizerState>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
     pub llm_stats_sender: Option<tokio::sync::mpsc::Sender<LlmCallEvent>>,
-}
-
-#[derive(Clone)]
-pub struct CapsState {
-    pub caps: Option<Arc<CodeAssistantCaps>>,
-    pub reading_lock: Arc<AMutex<bool>>,
-    pub last_error: String,
-    pub last_attempted_ts: u64,
-    pub models_dev_startup_refresh_attempted: bool,
 }
 
 #[derive(Clone)]
