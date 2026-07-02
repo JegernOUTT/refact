@@ -3,27 +3,15 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::app_state::AppState;
 use crate::ext::config_dirs::{get_ext_dirs, CommandSource, ExtDirs};
 use crate::ext::hooks::{load_hooks, HookConfig, HookEvent};
 use crate::files_correction::canonical_path;
-/// Engine-level hooks configuration, loaded from the global `privacy.yaml`.
-///
-/// Project-local hooks are NOT executed by default: a cloned repository could
-/// otherwise ship a `.refact/hooks.yaml` that runs arbitrary shell commands on
-/// session start. Global hooks (`~/.config/refact/hooks.yaml`) always run.
-///
-/// To run project hooks, the user lists the trusted project roots in
-/// `hooks.trusted_projects`. Only hooks whose project root matches an entry are
-/// executed, so trusting one repository never trusts another.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct HooksConfig {
-    #[serde(default)]
-    pub trusted_projects: Vec<String>,
-}
+
+pub use crate::ext::hooks::HooksConfig;
 
 const HOOK_MAX_OUTPUT_BYTES: usize = 10 * 1024;
 const HOOK_DEFAULT_TIMEOUT_SECS: u64 = 30;

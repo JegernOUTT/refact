@@ -4,6 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::config_dirs::{is_claude_dir, source_for_dir, CommandSource, ExtDirs};
 
+/// Engine-level hooks configuration, loaded from the global `privacy.yaml`.
+///
+/// Project-local hooks are NOT executed by default: a cloned repository could
+/// otherwise ship a `.refact/hooks.yaml` that runs arbitrary shell commands on
+/// session start. Global hooks (`~/.config/refact/hooks.yaml`) always run.
+///
+/// To run project hooks, the user lists the trusted project roots in
+/// `hooks.trusted_projects`. Only hooks whose project root matches an entry are
+/// executed, so trusting one repository never trusts another.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub trusted_projects: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum HookEvent {
     PreToolUse,
