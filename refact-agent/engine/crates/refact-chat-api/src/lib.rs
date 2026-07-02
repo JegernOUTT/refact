@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod internal_roles;
+pub mod plan_role;
+pub mod goal_role;
+pub mod diagnostics;
 pub mod notification_event;
 
 pub use notification_event::{NotificationEvent, NotificationQuestion};

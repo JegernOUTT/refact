@@ -8,6 +8,7 @@ pub mod models_dev;
 pub mod net_utils;
 pub mod provider_types;
 pub mod privacy_types;
+pub mod retry_policy;
 pub mod semver;
 pub mod string_utils;
 pub mod subagent_config;
