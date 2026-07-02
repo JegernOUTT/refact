@@ -18,9 +18,11 @@ DEBUG=* npm run dev     # debug logging
 ## Architecture
 
 ```
-React App → Redux (RTK Query) → LSP Server (:8001)   [chat, tools, caps, models]
+React App → Redux (RTK Query) → LSP Server (:8001)   [chat, tools, caps, models, rag-status]
                                → IDE (postMessage)     [file ops, theme, context]
 ```
+
+CodeGraph status is a first-class GUI surface: RTK Query polls `/v1/rag-status`, stores the typed `RagStatus` payload in the Knowledge slice, and renders mini CodeGraph/VecDB/AST status chips in the toolbar.
 
 ### Directory Layout
 
@@ -36,7 +38,7 @@ src/
 │   ├── FIM/          # Fill-in-Middle debug
 │   ├── History/      # Chat history
 │   ├── Integrations/ # Integration config
-│   ├── Knowledge/    # Memory system + knowledge graph view
+│   ├── Knowledge/    # Memory system, VecDB/CodeGraph status, knowledge graph view
 │   ├── Login/        # Login page
 │   ├── Pages/        # Navigation stack
 │   ├── PatchesAndDiffsTracker/
@@ -166,6 +168,9 @@ All generate hooks (`useGetCapsQuery`, etc.). Dynamic base URL from Redux state.
 | tasksApi                        | Tasks CRUD                                                             |
 | chatModesApi, customizationApi  | Agent modes/customization                                              |
 | knowledgeApi, knowledgeGraphApi | Knowledge/memory                                                       |
+| ragStatusApi                    | `/v1/rag-status`                                                      |
+
+`RagStatus` includes `codegraph: { counts: { nodes, edges, files, fts_docs }, queued, state, error } | null`, `codegraph_alive`, and `codegraph_error`; CodeGraph states are `turned_off`, `indexing`, `working`, and `error`. Keep `services/refact/types.ts`, `features/Knowledge/knowledgeSlice.ts`, and `components/ConnectionStatus/RagStatusIndicators.tsx` in sync with the backend shape.
 
 Chat uses **Commands API** + **SSE subscription**, not RTK Query.
 
@@ -247,6 +252,8 @@ Largest component (~1900 lines). Dispatches a `ToolCall` list to the right speci
 - Background-agent trajectory links dispatch `createChatWithId` + `switchToThread` so opening a child chat routes the user into the right tab.
 
 **Tool status**: ⏳ thinking · ✅ success · ❌ error · ☁️ server (`srvtoolu_*` prefix)
+
+CodeGraph tools render through the engine-analysis tool-card path. The recognized names are `codegraph_overview`, `code_health`, `git_risk`, `code_why`, `code_duplication`, and `code_map`; keep icons/status rendering aligned with the backend tool descriptions.
 
 ### Tool Confirmation
 
@@ -458,6 +465,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 - **Customization**: Agent modes, subagent forms, tool parameter editor.
 - **Tour/Onboarding**: Welcome screen, guided tour bubbles.
 - **FIM Debug**: Fill-in-Middle debug panel with search context and symbol list.
+- **CodeGraph status**: Toolbar mini indicators surface CodeGraph/VecDB/AST indexing state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
 - **Docker**: Container list, start/stop/kill/remove, env vars, smart links.
 - **Compression Hints**: 🗜️ icon when context approaches limit. `compression_strength: "absent" | "weak" | "strong"`.
 - **Queued Messages**: Send while streaming. Priority queue bypasses tool wait.

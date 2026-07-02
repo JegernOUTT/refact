@@ -66,7 +66,7 @@ cargo check
 cargo build
 
 # Run a local HTTP + LSP dev server for the current workspace
-cargo run -- --http-port 8001 --lsp-port 8002 --logs-stderr --vecdb --ast --workspace-folder ../..
+cargo run -- --http-port 8001 --lsp-port 8002 --logs-stderr --vecdb --workspace-folder ../..
 ```
 
 Useful current engine flags are defined in `refact-agent/engine/src/global_context.rs` and wired through `refact-agent/engine/src/main.rs`/`src/lib.rs`:
@@ -74,9 +74,9 @@ Useful current engine flags are defined in `refact-agent/engine/src/global_conte
 - `--http-port 8001` starts the local HTTP API used by the GUI and IDE integrations.
 - `--lsp-port 8002` starts a TCP LSP server; use `--lsp-stdin-stdout 1` for stdio LSP mode instead.
 - `--logs-stderr` prints logs in the terminal; otherwise logs go under `~/.cache/refact/logs/`.
-- `--vecdb` enables vector search indexing when an embedding model is configured.
-- `--ast` enables AST indexing.
-- `--workspace-folder <path>` seeds the workspace files for AST/VecDB and project state.
+- `--vecdb` enables memory-plane vector search indexing when an embedding model is configured.
+- CodeGraph source indexing starts with the engine and stores project databases under `~/.cache/refact/codegraph/`; check `/v1/codegraph-status` or `/v1/rag-status` for readiness.
+- `--workspace-folder <path>` seeds the workspace files for CodeGraph and VecDB.
 
 ### Setting Up the React Frontend (GUI)
 
@@ -323,6 +323,7 @@ npm run build
 # Test local engine endpoints
 curl http://127.0.0.1:8001/v1/caps
 curl http://127.0.0.1:8001/v1/rag-status
+curl http://127.0.0.1:8001/v1/codegraph-status
 
 # Validate engine code
 cd refact-agent/engine
