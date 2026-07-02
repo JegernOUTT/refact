@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use tracing::{error, info, warn};
 
-use refact_codegraph::{lang_from_path, CodeGraphService, Counts};
+use refact_codegraph::{lang_from_path, CodeGraphService, Counts, QueuedPath};
 
 use crate::global_context::GlobalContext;
 
@@ -38,6 +38,20 @@ fn path_is_genuinely_absent(path: &Path) -> bool {
     matches!(std::fs::metadata(path), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
 }
 
+async fn remove_missing_path(
+    service: Arc<CodeGraphService>,
+    store_path: &str,
+    err: String,
+) -> Result<(), String> {
+    service
+        .remove_path(store_path)
+        .await
+        .map_err(|remove_err| format!("codegraph: remove {store_path} failed: {remove_err}"))
+        .map(|_| {
+            warn!("codegraph: removed missing path after read failure: {store_path}: {err}");
+        })
+}
+
 fn stale_stored_paths(stored_paths: Vec<String>) -> Vec<String> {
     stored_paths
         .into_iter()
@@ -57,35 +71,43 @@ async fn reconcile_deleted_paths(service: Arc<CodeGraphService>) -> Result<usize
 async fn index_or_remove_path(
     gcx: Arc<GlobalContext>,
     service: Arc<CodeGraphService>,
-    path: String,
+    path: QueuedPath,
 ) -> Result<(), String> {
-    let path_buf = PathBuf::from(&path);
-    match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &path_buf).await {
-        Ok(text) => {
-            let lang = lang_from_path(&path);
-            service
-                .index_file(&path, &text, lang)
-                .await
-                .map_err(|err| format!("codegraph: index {path} failed: {err}"))
+    let store_path = path.store_path;
+    let read_path = path.read_path;
+    let store_path_buf = PathBuf::from(&store_path);
+    let read_path_buf = PathBuf::from(&read_path);
+    if let Err(err) =
+        crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &store_path_buf).await
+    {
+        if path_is_genuinely_absent(&read_path_buf) {
+            return remove_missing_path(service, &store_path, err).await;
         }
-        Err(err) if path_is_genuinely_absent(&path_buf) => service
-            .remove_path(&path)
-            .await
-            .map_err(|remove_err| format!("codegraph: remove {path} failed: {remove_err}"))
-            .map(|_| {
-                warn!("codegraph: removed missing path after read failure: {path}: {err}");
-            }),
+        warn!("codegraph: read {read_path} failed for {store_path}, keeping existing index: {err}");
+        return Ok(());
+    }
+    match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &read_path_buf).await {
+        Ok(text) => {
+            let lang = lang_from_path(&store_path);
+            service
+                .index_file(&store_path, &text, lang)
+                .await
+                .map_err(|err| format!("codegraph: index {store_path} failed: {err}"))
+        }
+        Err(err) if path_is_genuinely_absent(&read_path_buf) => {
+            remove_missing_path(service, &store_path, err).await
+        }
         Err(err) => {
-            warn!("codegraph: read {path} failed, keeping existing index: {err}");
+            warn!("codegraph: read {read_path} failed for {store_path}, keeping existing index: {err}");
             Ok(())
         }
     }
 }
 
-async fn process_index_batch(
+pub(crate) async fn process_index_batch(
     gcx: Arc<GlobalContext>,
     service: Arc<CodeGraphService>,
-    batch: Vec<String>,
+    batch: Vec<QueuedPath>,
 ) {
     let mut results = stream::iter(batch)
         .map(|path| {
@@ -164,7 +186,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             info!("codegraph: {remaining} unprocessed files in queue");
         }
 
-        let batch = service.drain_batch(DRAIN_BATCH);
+        let batch = service.drain_batch_entries(DRAIN_BATCH);
         if batch.is_empty() {
             reported_unprocessed = 0;
             match service.has_dirty_usage_paths().await {
@@ -345,7 +367,15 @@ mod tests {
         let first = first.to_string_lossy().to_string();
         let second = second.to_string_lossy().to_string();
 
-        process_index_batch(gcx, service.clone(), vec![first.clone(), second.clone()]).await;
+        process_index_batch(
+            gcx,
+            service.clone(),
+            vec![
+                QueuedPath::new(first.clone(), first.clone()),
+                QueuedPath::new(second.clone(), second.clone()),
+            ],
+        )
+        .await;
 
         let mut paths = service.all_paths().await.unwrap();
         paths.sort();
@@ -366,9 +396,13 @@ mod tests {
             .unwrap();
         set_privacy(&gcx, vec![file.clone()]);
 
-        index_or_remove_path(gcx, service.clone(), file.clone())
-            .await
-            .unwrap();
+        index_or_remove_path(
+            gcx,
+            service.clone(),
+            QueuedPath::new(file.clone(), file.clone()),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(service.all_paths().await.unwrap(), vec![file.clone()]);
         assert_eq!(

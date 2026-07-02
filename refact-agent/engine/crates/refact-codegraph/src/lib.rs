@@ -12,7 +12,7 @@ pub mod symbols_fmt;
 
 pub use retrieval::CodeHit;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -88,6 +88,21 @@ impl AnalyticsRebuildPause {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedPath {
+    pub store_path: String,
+    pub read_path: String,
+}
+
+impl QueuedPath {
+    pub fn new(store_path: String, read_path: String) -> Self {
+        Self {
+            store_path,
+            read_path,
+        }
+    }
+}
+
 #[cfg(test)]
 struct AnalyticsRebuildGate {
     after_rebuild: tokio::sync::Barrier,
@@ -116,11 +131,10 @@ impl AnalyticsRebuildGate {
         self.resume.notify_waiters();
     }
 }
-
 #[derive(Default)]
 struct PendingQueue {
-    paths: VecDeque<String>,
-    pending: HashSet<String>,
+    order: VecDeque<String>,
+    entries: HashMap<String, QueuedPath>,
 }
 
 impl CodeGraphService {
@@ -184,11 +198,25 @@ impl CodeGraphService {
         if paths.is_empty() {
             return;
         }
+        let entries = paths
+            .iter()
+            .map(|path| QueuedPath::new(path.clone(), path.clone()))
+            .collect::<Vec<_>>();
+        self.enqueue_paths_with_read_paths(&entries);
+    }
+
+    pub fn enqueue_paths_with_read_paths(&self, paths: &[QueuedPath]) {
+        if paths.is_empty() {
+            return;
+        }
         let mut queue = self.queue.lock().unwrap();
         let mut added = false;
         for path in paths {
-            if queue.pending.insert(path.clone()) {
-                queue.paths.push_back(path.clone());
+            if queue.entries.contains_key(&path.store_path) {
+                queue.entries.insert(path.store_path.clone(), path.clone());
+            } else {
+                queue.order.push_back(path.store_path.clone());
+                queue.entries.insert(path.store_path.clone(), path.clone());
                 added = true;
             }
         }
@@ -199,17 +227,28 @@ impl CodeGraphService {
     }
 
     pub fn drain_batch(&self, max: usize) -> Vec<String> {
+        self.drain_batch_entries(max)
+            .into_iter()
+            .map(|path| path.store_path)
+            .collect()
+    }
+
+    pub fn drain_batch_entries(&self, max: usize) -> Vec<QueuedPath> {
         let mut queue = self.queue.lock().unwrap();
-        let take = max.min(queue.paths.len());
-        let drained = queue.paths.drain(..take).collect::<Vec<_>>();
-        for path in &drained {
-            queue.pending.remove(path);
+        let take = max.min(queue.order.len());
+        let mut drained = Vec::with_capacity(take);
+        for _ in 0..take {
+            if let Some(path) = queue.order.pop_front() {
+                if let Some(entry) = queue.entries.remove(&path) {
+                    drained.push(entry);
+                }
+            }
         }
         drained
     }
 
     pub fn queue_len(&self) -> usize {
-        self.queue.lock().unwrap().paths.len()
+        self.queue.lock().unwrap().entries.len()
     }
 
     pub async fn wait_for_enqueue(&self) {
@@ -491,6 +530,28 @@ mod tests {
         assert_eq!(
             service.drain_batch(10),
             vec!["src/b.rs".to_string(), "src/a.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn enqueue_paths_updates_pending_read_path_without_reordering() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+
+        service.enqueue_paths_with_read_paths(&[
+            QueuedPath::new("src/a.rs".to_string(), "worktree/a.rs".to_string()),
+            QueuedPath::new("src/b.rs".to_string(), "worktree/b.rs".to_string()),
+        ]);
+        service.enqueue_paths_with_read_paths(&[QueuedPath::new(
+            "src/a.rs".to_string(),
+            "worktree/a-new.rs".to_string(),
+        )]);
+
+        assert_eq!(
+            service.drain_batch_entries(10),
+            vec![
+                QueuedPath::new("src/a.rs".to_string(), "worktree/a-new.rs".to_string()),
+                QueuedPath::new("src/b.rs".to_string(), "worktree/b.rs".to_string()),
+            ]
         );
     }
 

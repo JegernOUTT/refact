@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak, Mutex as StdMutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use indexmap::IndexSet;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use ropey::Rope;
-use tokio::sync::{RwLock as ARwLock, Mutex as AMutex};
+use tokio::sync::{RwLock as ARwLock, Mutex as AMutex, Notify};
 use walkdir::WalkDir;
 use which::which;
 use tracing::info;
@@ -55,6 +55,13 @@ fn normalize_path_for_workspace_state(gcx: &Arc<GlobalContext>, path: &Path) -> 
         crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
     crate::files_correction::normalize_path_for_unscoped_root_selection(path, &worktree_mappings)
         .unwrap_or_else(|| crate::files_correction::canonical_path(path.to_string_lossy()))
+}
+
+fn normalize_path_for_index_store(gcx: &Arc<GlobalContext>, path: &Path) -> PathBuf {
+    let worktree_mappings =
+        crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    crate::files_correction::normalize_path_for_unscoped_root_selection(path, &worktree_mappings)
+        .unwrap_or_else(|| normalize_path_for_workspace_state(gcx, path))
 }
 
 fn path_for_blocklist(path: &Path, roots: &[PathBuf]) -> PathBuf {
@@ -224,7 +231,8 @@ pub struct DocumentsState {
     pub git_branch_heads: Arc<StdMutex<HashMap<PathBuf, String>>>,
     pub branch_reindex_last_ts: Arc<AtomicU64>,
     pub file_event_debounce: Arc<StdMutex<HashMap<PathBuf, Instant>>>,
-    file_event_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
+    file_event_debounce_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
+    file_event_debounce_notify: Arc<Notify>,
     branch_head_debounce: Arc<StdMutex<HashMap<PathBuf, PendingBranchHeadChange>>>,
     branch_head_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
 }
@@ -266,7 +274,8 @@ impl DocumentsState {
             git_branch_heads: Arc::new(StdMutex::new(HashMap::new())),
             branch_reindex_last_ts: Arc::new(AtomicU64::new(0)),
             file_event_debounce: Arc::new(StdMutex::new(HashMap::new())),
-            file_event_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
+            file_event_debounce_task: Arc::new(StdMutex::new(None)),
+            file_event_debounce_notify: Arc::new(Notify::new()),
             branch_head_debounce: Arc::new(StdMutex::new(HashMap::new())),
             branch_head_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -1105,13 +1114,7 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         .as_secs_f64();
     (*dirty_arc.lock().await) = now;
 
-    let canonical_path = crate::files_correction::canonical_path(path.to_string_lossy());
-    let normalized_path = normalize_path_for_workspace_state(&gcx, path);
-    let delete_path = if normalized_path != canonical_path && normalized_path.exists() {
-        canonical_path
-    } else {
-        normalized_path
-    };
+    let delete_path = normalize_path_for_index_store(&gcx, path);
 
     match *vec_db_module.lock().await {
         Some(ref mut db) => match db.remove_file(&delete_path).await {
@@ -1547,74 +1550,138 @@ fn schedule_debounced_file_event(gcx: Arc<GlobalContext>, path: PathBuf, now: In
         let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
         debounce
             .retain(|_, last| now.saturating_duration_since(*last) <= FILE_EVENT_DEBOUNCE_RETAIN);
-        debounce.insert(path.clone(), now);
+        debounce.insert(path, now);
     }
 
-    let mut tasks = gcx
-        .documents_state
-        .file_event_debounce_tasks
-        .lock()
-        .unwrap();
-    if tasks.contains_key(&path) {
-        return;
+    let mut task = gcx.documents_state.file_event_debounce_task.lock().unwrap();
+    let should_spawn = task
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(true);
+    if should_spawn {
+        let task_gcx = gcx.clone();
+        *task = Some(tokio::spawn(async move {
+            flush_debounced_file_event_worker(task_gcx).await;
+        }));
     }
-    let task_gcx = gcx.clone();
-    let task_path = path.clone();
-    let handle = tokio::spawn(async move {
-        flush_debounced_file_event(task_gcx, task_path).await;
-    });
-    tasks.insert(path, handle);
+    drop(task);
+    gcx.documents_state.file_event_debounce_notify.notify_one();
 }
 
-async fn flush_debounced_file_event(gcx: Arc<GlobalContext>, path: PathBuf) {
+fn take_all_debounced_file_events(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+    let mut paths = debounce.keys().cloned().collect::<Vec<_>>();
+    debounce.clear();
+    paths.sort();
+    paths
+}
+
+fn take_due_debounced_file_events(
+    gcx: &Arc<GlobalContext>,
+    now: Instant,
+) -> (Vec<PathBuf>, Option<Duration>) {
+    let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+    debounce.retain(|_, last| now.saturating_duration_since(*last) <= FILE_EVENT_DEBOUNCE_RETAIN);
+    let mut due = Vec::new();
+    let mut wait_for: Option<Duration> = None;
+    for (path, last) in debounce.iter() {
+        let elapsed = now.saturating_duration_since(*last);
+        if elapsed >= FILE_EVENT_DEBOUNCE_WINDOW {
+            due.push(path.clone());
+        } else {
+            let remaining = FILE_EVENT_DEBOUNCE_WINDOW.saturating_sub(elapsed);
+            wait_for = Some(wait_for.map_or(remaining, |current| current.min(remaining)));
+        }
+    }
+    for path in &due {
+        debounce.remove(path);
+    }
+    due.sort();
+    (due, wait_for)
+}
+
+fn finish_file_event_debounce_worker(gcx: &Arc<GlobalContext>) -> bool {
+    let debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
+    if debounce.is_empty() {
+        *gcx.documents_state.file_event_debounce_task.lock().unwrap() = None;
+        true
+    } else {
+        false
+    }
+}
+
+async fn wait_for_shutdown_flag(shutdown_flag: Arc<AtomicBool>) {
+    while !shutdown_flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_file_debounce_signal(gcx: &Arc<GlobalContext>, wait_for: Option<Duration>) {
+    let notify = gcx.documents_state.file_event_debounce_notify.clone();
+    let shutdown_flag = gcx.shutdown_flag.clone();
+    match wait_for {
+        Some(wait_for) => {
+            tokio::select! {
+                _ = tokio::time::sleep(wait_for) => {}
+                _ = notify.notified() => {}
+                _ = wait_for_shutdown_flag(shutdown_flag) => {}
+            }
+        }
+        None => {
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = wait_for_shutdown_flag(shutdown_flag) => {}
+            }
+        }
+    }
+}
+
+async fn flush_debounced_file_paths(gcx: Arc<GlobalContext>, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    for path in &paths {
+        if !path.exists() {
+            on_did_delete(gcx.clone(), path).await;
+        }
+    }
+    let docs = paths
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    enqueue_some_docs(gcx, &docs, false).await;
+}
+
+async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
-            gcx.documents_state
-                .file_event_debounce_tasks
-                .lock()
-                .unwrap()
-                .remove(&path);
-            return;
-        }
-        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW).await;
-        if gcx.shutdown_flag.load(Ordering::Relaxed) {
-            gcx.documents_state
-                .file_event_debounce_tasks
-                .lock()
-                .unwrap()
-                .remove(&path);
-            return;
-        }
-        let should_enqueue = {
-            let now = Instant::now();
-            let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
-            let Some(last) = debounce.get(&path).copied() else {
-                gcx.documents_state
-                    .file_event_debounce_tasks
-                    .lock()
-                    .unwrap()
-                    .remove(&path);
+            let paths = take_all_debounced_file_events(&gcx);
+            flush_debounced_file_paths(gcx.clone(), paths).await;
+            if finish_file_event_debounce_worker(&gcx) {
                 return;
-            };
-            if now.saturating_duration_since(last) < FILE_EVENT_DEBOUNCE_WINDOW {
-                false
-            } else {
-                debounce.remove(&path);
-                gcx.documents_state
-                    .file_event_debounce_tasks
-                    .lock()
-                    .unwrap()
-                    .remove(&path);
-                true
             }
-        };
-        if should_enqueue {
-            if !path.exists() {
-                on_did_delete(gcx.clone(), &path).await;
-            }
-            enqueue_some_docs(gcx, &vec![path.to_string_lossy().to_string()], false).await;
-            return;
+            continue;
         }
+
+        let (paths, wait_for) = take_due_debounced_file_events(&gcx, Instant::now());
+        if !paths.is_empty() {
+            flush_debounced_file_paths(gcx.clone(), paths).await;
+            continue;
+        }
+
+        if gcx
+            .documents_state
+            .file_event_debounce
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            if finish_file_event_debounce_worker(&gcx) {
+                return;
+            }
+            continue;
+        }
+        wait_for_file_debounce_signal(&gcx, wait_for).await;
     }
 }
 
@@ -2236,6 +2303,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_did_delete_registered_worktree_file_removes_source_keyed_codegraph_row() {
+        let source_temp = tempfile::Builder::new()
+            .prefix("refact-src-")
+            .tempdir()
+            .unwrap();
+        let source = source_temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        let source_key = normalized(&source_file).to_string_lossy().to_string();
+        service
+            .index_file(&source_key, "fn source() {}\n", "rust")
+            .await
+            .unwrap();
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        std::fs::remove_file(&worktree_file).unwrap();
+        on_did_delete(gcx.clone(), &worktree_file).await;
+
+        assert_eq!(service.counts().await.unwrap().files, 0);
+        assert!(source_file.exists());
+    }
+
+    #[tokio::test]
     async fn on_did_open_ignores_refact_import_internal_paths() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
@@ -2476,6 +2573,65 @@ mod tests {
                 "pub fn debounce() -> &'static str { \"second\" }\n".to_string(),
             ),]
         );
+    }
+
+    #[tokio::test]
+    async fn debounced_file_event_worker_is_bounded_and_flushes_pending_on_shutdown() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("src").join("first.rs");
+        let second = temp.path().join("src").join("second.rs");
+        write_file(&first, "pub fn first() {}\n");
+        write_file(&second, "pub fn second() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        let now = Instant::now();
+        schedule_debounced_file_event(gcx.clone(), normalized(&first), now);
+        schedule_debounced_file_event(gcx.clone(), normalized(&second), now);
+        {
+            let task = gcx.documents_state.file_event_debounce_task.lock().unwrap();
+            assert!(task.is_some());
+        }
+        assert_eq!(service.queue_len(), 0);
+
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        gcx.documents_state.file_event_debounce_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if service.queue_len() == 2
+                    && gcx
+                        .documents_state
+                        .file_event_debounce
+                        .lock()
+                        .unwrap()
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let mut queued = service.drain_batch(10);
+        queued.sort();
+        assert_eq!(
+            queued,
+            vec![
+                normalized(&first).to_string_lossy().to_string(),
+                normalized(&second).to_string_lossy().to_string(),
+            ]
+        );
+        assert!(gcx
+            .documents_state
+            .file_event_debounce_task
+            .lock()
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
