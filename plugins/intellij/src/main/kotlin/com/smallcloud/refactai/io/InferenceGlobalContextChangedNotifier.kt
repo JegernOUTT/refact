@@ -16,6 +16,8 @@ interface InferenceGlobalContextChangedNotifier {
     fun astFileLimitChanged(newValue: Int) {}
     fun vecdbFlagChanged(newValue: Boolean) {}
     fun vecdbFileLimitChanged(newValue: Int) {}
+    fun codegraphFlagChanged(newValue: Boolean) {}
+    fun codegraphFileLimitChanged(newValue: Int) {}
     fun xDebugLSPPortChanged(newPort: Int?) {}
     fun insecureSSLChanged(newValue: Boolean) {}
     fun completionMaxTokensChanged(newMaxTokens: Int) {}
