@@ -91,7 +91,15 @@ tools:
   - search_pattern
   - search_symbol_definition
   - search_semantic
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - code_map
   - knowledge
+  - search_trajectories
+  - get_trajectory_context
   - web
   - web_search
   - shell
