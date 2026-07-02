@@ -8,6 +8,7 @@ refact-core = { path = "../refact-core" }
 refact-ext = { path = "../refact-ext" }
 chrono = { version = "0.4.31", features = ["serde"] }
 rand = "0.8.5"
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9.31"
