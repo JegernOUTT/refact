@@ -75,7 +75,7 @@ pub(crate) fn origin_is_trusted_ide_webview(origin: &str) -> bool {
         .split_once("://")
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("vscode-webview"))
         .map(|(_, host)| {
-            !host.is_empty() && host.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+            !host.is_empty() && host.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
         })
         .unwrap_or(false)
 }
@@ -891,6 +891,9 @@ mod tests {
             "vscode-webview://11112222-3333-4444-5555-666677778888"
         ));
         assert!(origin_is_trusted_ide_webview("vscode-webview://deadBEEF"));
+        assert!(origin_is_trusted_ide_webview(
+            "vscode-webview://0ddd89pf9tgcs7jvdpe0qs2lctosmhsfsbhj2q7ncq6jv6cq2us4"
+        ));
     }
 
     #[test]
