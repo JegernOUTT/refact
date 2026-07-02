@@ -1,11 +1,10 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use refact_codegraph::{lang_from_path, CodeGraphService, Counts};
 
@@ -35,28 +34,19 @@ fn completion_message(counts: &Counts) -> String {
     )
 }
 
-fn stale_stored_paths(stored_paths: Vec<String>, existing_paths: &HashSet<String>) -> Vec<String> {
+fn path_is_genuinely_absent(path: &Path) -> bool {
+    matches!(std::fs::metadata(path), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn stale_stored_paths(stored_paths: Vec<String>) -> Vec<String> {
     stored_paths
         .into_iter()
-        .filter(|path| !existing_paths.contains(path) || !PathBuf::from(path).exists())
+        .filter(|path| path_is_genuinely_absent(Path::new(path)))
         .collect()
 }
 
-fn workspace_existing_paths(gcx: &Arc<GlobalContext>) -> HashSet<String> {
-    gcx.documents_state
-        .workspace_files
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect()
-}
-
-async fn reconcile_deleted_paths(
-    service: Arc<CodeGraphService>,
-    existing_paths: &HashSet<String>,
-) -> Result<usize, String> {
-    let stale_paths = stale_stored_paths(service.all_paths().await?, existing_paths);
+async fn reconcile_deleted_paths(service: Arc<CodeGraphService>) -> Result<usize, String> {
+    let stale_paths = stale_stored_paths(service.all_paths().await?);
     let removed = stale_paths.len();
     for path in stale_paths {
         service.remove_path(&path).await?;
@@ -69,9 +59,8 @@ async fn index_or_remove_path(
     service: Arc<CodeGraphService>,
     path: String,
 ) -> Result<(), String> {
-    match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &PathBuf::from(&path))
-        .await
-    {
+    let path_buf = PathBuf::from(&path);
+    match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &path_buf).await {
         Ok(text) => {
             let lang = lang_from_path(&path);
             service
@@ -79,10 +68,38 @@ async fn index_or_remove_path(
                 .await
                 .map_err(|err| format!("codegraph: index {path} failed: {err}"))
         }
-        Err(_) => service
+        Err(err) if path_is_genuinely_absent(&path_buf) => service
             .remove_path(&path)
             .await
-            .map_err(|err| format!("codegraph: remove {path} failed: {err}")),
+            .map_err(|remove_err| format!("codegraph: remove {path} failed: {remove_err}"))
+            .map(|_| {
+                warn!("codegraph: removed missing path after read failure: {path}: {err}");
+            }),
+        Err(err) => {
+            warn!("codegraph: read {path} failed, keeping existing index: {err}");
+            Ok(())
+        }
+    }
+}
+
+async fn process_index_batch(
+    gcx: Arc<GlobalContext>,
+    service: Arc<CodeGraphService>,
+    batch: Vec<String>,
+) {
+    let mut results = stream::iter(batch)
+        .map(|path| {
+            let gcx = gcx.clone();
+            let service = service.clone();
+            async move { index_or_remove_path(gcx, service, path).await }
+        })
+        .buffer_unordered(DRAIN_CONCURRENCY);
+
+    while let Some(result) = results.next().await {
+        if let Err(err) = result {
+            error!("{err}");
+            *gcx.codegraph_error.lock().unwrap() = err;
+        }
     }
 }
 
@@ -126,8 +143,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     let initial_enqueued = service.queue_len().saturating_sub(queue_len_before_enqueue);
     info!("codegraph: start_background_tasks, enqueued {initial_enqueued} initial files");
 
-    let existing_paths = workspace_existing_paths(&gcx);
-    match reconcile_deleted_paths(service.clone(), &existing_paths).await {
+    match reconcile_deleted_paths(service.clone()).await {
         Ok(removed) if removed > 0 => info!("codegraph: removed {removed} stale stored files"),
         Ok(_) => {}
         Err(err) => {
@@ -188,34 +204,29 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             continue;
         }
 
-        let mut results = stream::iter(batch)
-            .map(|path| {
-                let gcx = gcx.clone();
-                let service = service.clone();
-                async move {
-                    if gcx.shutdown_flag.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    index_or_remove_path(gcx, service, path).await
-                }
-            })
-            .buffer_unordered(DRAIN_CONCURRENCY);
-
-        while let Some(result) = results.next().await {
-            if gcx.shutdown_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Err(err) = result {
-                error!("{err}");
-                *gcx.codegraph_error.lock().unwrap() = err;
-            }
-        }
+        process_index_batch(gcx.clone(), service.clone(), batch).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
+
+    fn set_privacy(gcx: &Arc<GlobalContext>, blocked: Vec<String>) {
+        let loaded_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: Vec::new(),
+                blocked,
+            },
+            loaded_ts,
+        });
+    }
 
     #[tokio::test]
     async fn codegraph_db_path_uses_cache_dir_for_project() {
@@ -264,13 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_stored_paths_diffs_against_existing_workspace_paths() {
+    fn stale_stored_paths_only_removes_paths_absent_on_disk() {
         let temp = tempfile::tempdir().unwrap();
         let kept = temp.path().join("src").join("kept.rs");
-        let outside = temp.path().join("outside.rs");
+        let jsonl_only = temp.path().join("jsonl_only.rs");
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
         std::fs::write(&kept, "fn kept() {}\n").unwrap();
-        std::fs::write(&outside, "fn outside() {}\n").unwrap();
+        std::fs::write(&jsonl_only, "fn jsonl_only() {}\n").unwrap();
         let kept = kept.to_string_lossy().to_string();
         let missing = temp
             .path()
@@ -278,23 +289,25 @@ mod tests {
             .join("gone.rs")
             .to_string_lossy()
             .to_string();
-        let outside = outside.to_string_lossy().to_string();
-        let existing = HashSet::from([kept.clone()]);
+        let jsonl_only = jsonl_only.to_string_lossy().to_string();
 
-        let stale = stale_stored_paths(vec![kept, missing.clone(), outside.clone()], &existing);
+        let stale = stale_stored_paths(vec![kept, missing.clone(), jsonl_only]);
 
-        assert_eq!(stale, vec![missing, outside]);
+        assert_eq!(stale, vec![missing]);
     }
 
     #[tokio::test]
-    async fn reconcile_deleted_paths_removes_stale_store_entries() {
+    async fn reconcile_deleted_paths_preserves_live_jsonl_only_entries() {
         let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
         let temp = tempfile::tempdir().unwrap();
         let kept = temp.path().join("src").join("kept.rs");
+        let jsonl_only = temp.path().join("jsonl_only.rs");
         let gone = temp.path().join("src").join("gone.rs");
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
         std::fs::write(&kept, "fn kept() {}\n").unwrap();
+        std::fs::write(&jsonl_only, "fn jsonl_only() {}\n").unwrap();
         let kept = kept.to_string_lossy().to_string();
+        let jsonl_only = jsonl_only.to_string_lossy().to_string();
         let gone = gone.to_string_lossy().to_string();
 
         service
@@ -302,18 +315,65 @@ mod tests {
             .await
             .unwrap();
         service
+            .index_file(&jsonl_only, "fn jsonl_only() {}\n", "rust")
+            .await
+            .unwrap();
+        service
             .index_file(&gone, "fn gone() {}\n", "rust")
             .await
             .unwrap();
-        let existing = HashSet::from([kept.clone()]);
 
-        let removed = reconcile_deleted_paths(service.clone(), &existing)
-            .await
-            .unwrap();
+        let removed = reconcile_deleted_paths(service.clone()).await.unwrap();
 
         assert_eq!(removed, 1);
         let mut paths = service.all_paths().await.unwrap();
         paths.sort();
-        assert_eq!(paths, vec![kept]);
+        assert_eq!(paths, vec![jsonl_only, kept]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_set_during_drained_batch_still_indexes_paths() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_privacy(&gcx, Vec::new());
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.rs");
+        let second = temp.path().join("second.rs");
+        std::fs::write(&first, "fn first() {}\n").unwrap();
+        std::fs::write(&second, "fn second() {}\n").unwrap();
+        let first = first.to_string_lossy().to_string();
+        let second = second.to_string_lossy().to_string();
+
+        process_index_batch(gcx, service.clone(), vec![first.clone(), second.clone()]).await;
+
+        let mut paths = service.all_paths().await.unwrap();
+        paths.sort();
+        assert_eq!(paths, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn read_error_for_existing_path_keeps_existing_index() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("blocked.rs");
+        std::fs::write(&file, "fn newer() {}\n").unwrap();
+        let file = file.to_string_lossy().to_string();
+        service
+            .index_file(&file, "fn indexed() {}\n", "rust")
+            .await
+            .unwrap();
+        set_privacy(&gcx, vec![file.clone()]);
+
+        index_or_remove_path(gcx, service.clone(), file.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(service.all_paths().await.unwrap(), vec![file.clone()]);
+        assert_eq!(
+            service.all_files_with_text().await.unwrap(),
+            vec![(file, "fn indexed() {}\n".to_string())]
+        );
     }
 }
