@@ -328,6 +328,8 @@ export function activate(context: vscode.ExtensionContext)
             e.affectsConfiguration("refactai.astFileLimit") ||
             e.affectsConfiguration("refactai.vecdb") ||
             e.affectsConfiguration("refactai.vecdbFileLimit") ||
+            e.affectsConfiguration("refactai.codegraph") ||
+            e.affectsConfiguration("refactai.codegraphFileLimit") ||
             e.affectsConfiguration("refactai.daemonPort") ||
             e.affectsConfiguration("refactai.binaryPath") ||
             e.affectsConfiguration("refactai.xperimental")
@@ -346,7 +348,9 @@ export function activate(context: vscode.ExtensionContext)
             e.affectsConfiguration("refactai.ast") ||
             e.affectsConfiguration("refactai.astFileLimit") ||
             e.affectsConfiguration("refactai.vecdb") ||
-            e.affectsConfiguration("refactai.vecdbFileLimit")
+            e.affectsConfiguration("refactai.vecdbFileLimit") ||
+            e.affectsConfiguration("refactai.codegraph") ||
+            e.affectsConfiguration("refactai.codegraphFileLimit")
         )  {
             const hasAst = vscode.workspace.getConfiguration().get<boolean>("refactai.ast");
             if(hasAst) {
@@ -356,13 +360,19 @@ export function activate(context: vscode.ExtensionContext)
             if(hasVecdb) {
                 fetchAPI.maybe_show_rag_status();
             }
+            const hasCodegraph = vscode.workspace.getConfiguration().get<boolean>("refactai.codegraph");
+            if(hasCodegraph) {
+                fetchAPI.maybe_show_rag_status();
+            }
         }
 
         if (
             e.affectsConfiguration("refactai.ast") ||
             e.affectsConfiguration("refactai.astFileLimit") ||
             e.affectsConfiguration("refactai.vecdb") ||
-            e.affectsConfiguration("refactai.vecdbFileLimit")
+            e.affectsConfiguration("refactai.vecdbFileLimit") ||
+            e.affectsConfiguration("refactai.codegraph") ||
+            e.affectsConfiguration("refactai.codegraphFileLimit")
         ) {
             vscode.window.showInformationMessage("Refact indexing setting changes are sent to the daemon. Existing workers may need `refact restart <project>` to apply them.");
         }
@@ -466,9 +476,9 @@ export async function status_bar_clicked()
     let editor = vscode.window.activeTextEditor;
     let selection: string | undefined;
 
-    if (global.status_bar.ast_limit_hit || global.status_bar.vecdb_limit_hit) {
+    if (global.status_bar.ast_limit_hit || global.status_bar.vecdb_limit_hit || global.status_bar.codegraph_limit_hit) {
         selection = await vscode.window.showInformationMessage(
-            "AST or VecDB file number limit reached, you can increase the limit in settings if your computer has enough memory, or disable these features.",
+            "AST, VecDB, or CodeGraph file number limit reached, you can increase the limit in settings if your computer has enough memory, or disable these features.",
             "Open Settings",
         );
         if (selection === "Open Settings") {

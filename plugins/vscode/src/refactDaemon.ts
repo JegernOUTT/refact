@@ -45,8 +45,10 @@ export type DaemonStatus = {
 export type ProjectSettings = {
     ast: boolean;
     vecdb: boolean;
+    codegraph: boolean;
     ast_max_files: number;
     vecdb_max_files: number;
+    codegraph_max_files: number;
 };
 
 export type OpenProjectResponse = {

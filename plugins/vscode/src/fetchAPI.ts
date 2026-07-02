@@ -592,6 +592,18 @@ export type AstStatus = {
 	state: "starting" | "parsing" | "indexing" | "done";
 };
 
+export type CodeGraphStatus = {
+    counts: {
+        nodes: number;
+        edges: number;
+        files: number;
+        fts_docs: number;
+    };
+    queued: number;
+    state: "turned_off" | "indexing" | "working" | "error";
+    error: string;
+};
+
 export interface RagStatus {
     ast: {
         files_unparsed: number;
@@ -614,9 +626,12 @@ export interface RagStatus {
     } | null;
     vecdb_alive: string | null;
     vec_db_error: string;
+    codegraph: CodeGraphStatus | null;
+    codegraph_alive: string | null;
+    codegraph_error: string;
 }
 
-async function fetch_rag_status()
+async function fetch_rag_status(): Promise<RagStatus>
 {
     const endpoint = "/v1/rag-status";
     const url = rust_url(endpoint);
@@ -636,7 +651,7 @@ async function fetch_rag_status()
         if (response.status !== 200) {
             console.log(["rag-status http status", response.status]);
         }
-        const json = await response.json();
+        const json = await response.json() as RagStatus;
         return json;
     } catch (e) {
         statusBar.send_network_problems_to_status_bar(
@@ -651,6 +666,11 @@ async function fetch_rag_status()
 }
 
 let ragstat_timeout: NodeJS.Timeout | undefined;
+
+function codegraph_max_files_hit(status: CodeGraphStatus): boolean {
+    const with_limit = status as CodeGraphStatus & { codegraph_max_files_hit?: boolean };
+    return with_limit.codegraph_max_files_hit === true;
+}
 
 export function maybe_show_rag_status(statusbar: statusBar.StatusBarMenu = global.status_bar)
 {
@@ -673,15 +693,29 @@ export function maybe_show_rag_status(statusbar: statusBar.StatusBarMenu = globa
                 return;
             }
 
+            if (res.codegraph && codegraph_max_files_hit(res.codegraph)) {
+                statusbar.codegraph_status_limit_reached();
+                ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 5000);
+                return;
+            }
+
             statusbar.ast_limit_hit = false;
             statusbar.vecdb_limit_hit = false;
+            statusbar.codegraph_limit_hit = false;
+            statusbar.vecdb_warning = res.vec_db_error;
+            statusbar.codegraph_warning = res.codegraph_error || res.codegraph?.error || "";
 
             if (res.vec_db_error !== '') {
                 statusbar.vecdb_error(res.vec_db_error);
             }
 
+            if (statusbar.codegraph_warning !== '') {
+                statusbar.codegraph_error(statusbar.codegraph_warning);
+            }
+
             if ((res.ast && ["starting", "parsing", "indexing"].includes(res.ast.state)) ||
-                (res.vecdb && ["starting", "parsing", "cooldown"].includes(res.vecdb.state)))
+                (res.vecdb && ["starting", "parsing", "cooldown"].includes(res.vecdb.state)) ||
+                (res.codegraph && ["indexing"].includes(res.codegraph.state)))
             {
                 // console.log("ast or vecdb is still indexing");
                 ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 700);

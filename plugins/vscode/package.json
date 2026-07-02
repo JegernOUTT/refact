@@ -183,53 +183,65 @@
 					"default": 35000,
 					"order": 9
 				},
+				"refactai.codegraph": {
+					"type": "boolean",
+					"markdownDescription": "Enable code graph indexing. This powers symbol search, definitions, references, and code graph tools.",
+					"default": true,
+					"order": 10
+				},
+				"refactai.codegraphFileLimit": {
+					"type": "number",
+					"description": "Limit the number of files for CodeGraph to process, to avoid memory issues. Increase if you have a large project and sufficient memory.",
+					"default": 35000,
+					"order": 11
+				},
 				"refactai.vecdb": {
 					"type": "boolean",
 					"markdownDescription": "Enable vector database. This adds semantic search over your codebase and the @workspace command for adding context manually.",
 					"default": true,
-					"order": 11
+					"order": 12
 				},
 				"refactai.vecdbFileLimit": {
 					"type": "number",
 					"description": "Limit the number of files for VecDB to process. Increase if you have a lot of files.",
 					"default": 15000,
-					"order": 12
+					"order": 13
 				},
 				"refactai.xDebug": {
 					"type": "number|undefined",
 					"description": "Set this to debug the Rust binary in console. If set, the plugin will not attempt to start its own, it will connect HTTP on the port 8001, LSP on the port 8002 instead.",
-					"order": 13
+					"order": 14
 				},
 				"refactai.xperimental": {
 					"type": "boolean",
 					"description": "Enable experimental features.",
 					"default": false,
-					"order": 14
+					"order": 15
 				},
 				"refactai.daemonPort": {
 					"type": "number",
 					"description": "Port for the local Refact daemon control API.",
 					"default": 8488,
-					"order": 15
+					"order": 16
 				},
 				"refactai.binaryPath": {
 					"type": "string",
 					"markdownDescription": "Optional path to a standalone `refact` binary. Leave empty to use a compatible `refact` on PATH or in `~/.refact/bin`, otherwise the extension downloads its pinned release.",
 					"default": "",
-					"order": 16
+					"order": 17
 				},
 				"refactai.httpHost": {
 					"type": "string",
 					"markdownDescription": "Deprecated. Refact now uses the daemon project proxy instead of a VS Code-managed worker HTTP bind host.",
 					"deprecationMessage": "Refact now connects through the local daemon and ignores this worker-spawn setting.",
 					"default": "0.0.0.0",
-					"order": 17
+					"order": 18
 				},
 				"refactai.browserHost": {
 					"type": "string",
 					"markdownDescription": "Host/IP to open for the daemon-served Refact UI. Leave empty to open loopback `127.0.0.1`. For LAN access, set this to this machine's LAN IP or mDNS name, for example `192.168.1.20` or `machine.local`.",
 					"default": "",
-					"order": 18
+					"order": 19
 				}
 			}
 		},
