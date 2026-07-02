@@ -72,6 +72,51 @@ pub struct CodeGraphService {
     analytics_rebuild_count: AtomicUsize,
 }
 
+enum AnalyticsRebuildPause {
+    None,
+    #[cfg(test)]
+    Gate(std::sync::Arc<AnalyticsRebuildGate>),
+}
+
+impl AnalyticsRebuildPause {
+    async fn wait(self) {
+        match self {
+            AnalyticsRebuildPause::None => {}
+            #[cfg(test)]
+            AnalyticsRebuildPause::Gate(gate) => gate.pause().await,
+        }
+    }
+}
+
+#[cfg(test)]
+struct AnalyticsRebuildGate {
+    after_rebuild: tokio::sync::Barrier,
+    resume: Notify,
+}
+
+#[cfg(test)]
+impl AnalyticsRebuildGate {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            after_rebuild: tokio::sync::Barrier::new(2),
+            resume: Notify::new(),
+        })
+    }
+
+    async fn pause(&self) {
+        self.after_rebuild.wait().await;
+        self.resume.notified().await;
+    }
+
+    async fn wait_paused(&self) {
+        self.after_rebuild.wait().await;
+    }
+
+    fn resume(&self) {
+        self.resume.notify_waiters();
+    }
+}
+
 #[derive(Default)]
 struct PendingQueue {
     paths: VecDeque<String>,
@@ -185,7 +230,7 @@ impl CodeGraphService {
     }
 
     fn bump_graph_generation(&self) {
-        self.graph_generation.fetch_add(1, Ordering::Relaxed);
+        self.graph_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     #[cfg(test)]
@@ -236,16 +281,64 @@ impl CodeGraphService {
     }
 
     pub async fn cached_graph_analytics(&self) -> Result<CachedGraphAnalytics, String> {
-        let generation = self.graph_generation.load(Ordering::Relaxed);
-        let mut cache = self.analytics_cache.lock().await;
-        if let Some(cached) = cache
-            .as_ref()
-            .filter(|cached| cached.generation == generation)
-        {
-            return Ok(cached.clone());
+        self.cached_graph_analytics_with_pause(AnalyticsRebuildPause::None)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn cached_graph_analytics_with_gate(
+        &self,
+        gate: std::sync::Arc<AnalyticsRebuildGate>,
+    ) -> Result<CachedGraphAnalytics, String> {
+        self.cached_graph_analytics_with_pause(AnalyticsRebuildPause::Gate(gate))
+            .await
+    }
+
+    async fn cached_graph_analytics_with_pause(
+        &self,
+        pause: AnalyticsRebuildPause,
+    ) -> Result<CachedGraphAnalytics, String> {
+        let mut pause = Some(pause);
+        loop {
+            {
+                let cache = self.analytics_cache.lock().await;
+                let generation = self.graph_generation.load(Ordering::Acquire);
+                if let Some(cached) = cache
+                    .as_ref()
+                    .filter(|cached| cached.generation == generation)
+                {
+                    return Ok(cached.clone());
+                }
+            }
+
+            let generation = self.graph_generation.load(Ordering::Acquire);
+            let rebuilt = self.rebuild_graph_analytics(generation).await?;
+            self.analytics_rebuild_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(pause) = pause.take() {
+                pause.wait().await;
+            }
+
+            let mut cache = self.analytics_cache.lock().await;
+            let current_generation = self.graph_generation.load(Ordering::Acquire);
+            if let Some(cached) = cache
+                .as_ref()
+                .filter(|cached| cached.generation == current_generation)
+            {
+                return Ok(cached.clone());
+            }
+            if current_generation == rebuilt.generation {
+                *cache = Some(rebuilt.clone());
+                return Ok(rebuilt);
+            }
         }
-        let rebuilt = self
-            .with_read_store(|store| {
+    }
+
+    async fn rebuild_graph_analytics(
+        &self,
+        generation: u64,
+    ) -> Result<CachedGraphAnalytics, String> {
+        self.with_read_store(|store| {
+            store.read_snapshot(|store| {
                 let data = analytics::GraphData::from_store(store)?;
                 let analytics = analytics::compute_graph_analytics_from_data(&data);
                 let communities = communities::detect_communities_from_data(&data)?;
@@ -256,10 +349,8 @@ impl CodeGraphService {
                     communities,
                 })
             })
-            .await?;
-        self.analytics_rebuild_count.fetch_add(1, Ordering::Relaxed);
-        *cache = Some(rebuilt.clone());
-        Ok(rebuilt)
+        })
+        .await
     }
 
     pub async fn overview(&self, top_n: usize) -> Result<analytics::GraphOverview, String> {
@@ -466,6 +557,48 @@ mod tests {
 
         assert_eq!(service.analytics_rebuild_count(), 2);
         assert_ne!(first.node_count, third.node_count);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn analytics_rebuild_in_flight_does_not_publish_or_block_stale_generation() {
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/a.rs", "pub fn helper() {}\n", "rust")
+            .await
+            .unwrap();
+
+        let generation_before = service.graph_generation.load(Ordering::Acquire);
+        let gate = AnalyticsRebuildGate::new();
+        let first = {
+            let service = service.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move { service.cached_graph_analytics_with_gate(gate).await })
+        };
+        gate.wait_paused().await;
+
+        service
+            .index_file("src/b.rs", "pub fn added() {}\n", "rust")
+            .await
+            .unwrap();
+        let generation_after = service.graph_generation.load(Ordering::Acquire);
+        assert!(generation_after > generation_before);
+
+        let second =
+            tokio::time::timeout(Duration::from_millis(500), service.cached_graph_analytics())
+                .await
+                .expect("analytics cache lock must not be held while another rebuild is paused")
+                .unwrap();
+        assert_eq!(second.generation, generation_after);
+        assert!(second.data.nodes.iter().any(|(_, name, _)| name == "added"));
+
+        gate.resume();
+        let first = first.await.unwrap().unwrap();
+        assert_eq!(first.generation, generation_after);
+        assert!(first.data.nodes.iter().any(|(_, name, _)| name == "added"));
+
+        let cached = service.analytics_cache.lock().await.clone().unwrap();
+        assert_eq!(cached.generation, generation_after);
+        assert!(cached.data.nodes.iter().any(|(_, name, _)| name == "added"));
     }
 
     #[tokio::test]

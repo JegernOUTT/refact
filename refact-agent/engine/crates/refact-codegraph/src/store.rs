@@ -208,6 +208,27 @@ impl Store {
         Ok(Self { conn })
     }
 
+    pub fn read_snapshot<T>(
+        &self,
+        f: impl FnOnce(&Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(|e| format!("codegraph read snapshot begin: {e}"))?;
+        let result = f(self);
+        let finish = if result.is_ok() {
+            self.conn.execute_batch("COMMIT")
+        } else {
+            self.conn.execute_batch("ROLLBACK")
+        };
+        match (result, finish) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(e)) => Err(format!("codegraph read snapshot commit: {e}")),
+            (Err(e), Ok(())) => Err(e),
+            (Err(err), Err(e)) => Err(format!("{err}; codegraph read snapshot rollback: {e}")),
+        }
+    }
+
     fn tune_persistent_connection(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| format!("codegraph pragma journal_mode: {e}"))?;
