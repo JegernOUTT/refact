@@ -104,6 +104,17 @@ pub fn is_generated_index_path(path: &Path) -> bool {
         || (n >= 3 && parts[n - 3] == "agents")
 }
 
+pub fn is_refact_codegraph_path(path: &Path) -> bool {
+    let mut last_was_refact = false;
+    for component in path.components() {
+        if last_was_refact && component == Component::Normal("codegraph".as_ref()) {
+            return true;
+        }
+        last_was_refact = component == Component::Normal(".refact".as_ref());
+    }
+    false
+}
+
 fn is_in_allowed_hidden_folder(path: &PathBuf) -> bool {
     path.ancestors().any(|ancestor| {
         ancestor
@@ -120,6 +131,10 @@ pub fn is_valid_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !path.is_file() {
         return Err("Path is not a file".into());
+    }
+
+    if is_refact_codegraph_path(path) {
+        return Err(".refact/codegraph is internal".into());
     }
 
     let in_allowed_hidden = is_in_allowed_hidden_folder(path);

@@ -533,8 +533,12 @@ fn path_is_refact_import_internal(path: &Path) -> bool {
     false
 }
 
+fn path_is_refact_internal(path: &Path) -> bool {
+    path_is_refact_import_internal(path) || crate::file_filter::is_refact_codegraph_path(path)
+}
+
 fn path_triggers_registry_reload(path: &Path) -> bool {
-    if path_is_refact_import_internal(path) {
+    if path_is_refact_internal(path) {
         return false;
     }
     if !path
@@ -557,8 +561,8 @@ fn is_valid_file_for_scan(
     allow_hidden_folders: bool,
     ignore_size_thresholds: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if path_is_refact_import_internal(path) {
-        return Err(".refact/imports is internal".into());
+    if path_is_refact_internal(path) {
+        return Err(".refact internal path".into());
     }
     if crate::file_filter::is_generated_index_path(path) {
         return Err(".refact/**/index.json is a generated index".into());
@@ -916,7 +920,7 @@ pub async fn on_did_open(
     text: &String,
     _language_id: &String,
 ) {
-    if path_is_refact_import_internal(cpath) {
+    if path_is_refact_internal(cpath) {
         return;
     }
     let normalized_path = normalize_path_for_workspace_state(&gcx, cpath);
@@ -952,7 +956,7 @@ pub async fn on_did_close(gcx: Arc<GlobalContext>, cpath: &PathBuf) {
 }
 
 pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &String) {
-    if path_is_refact_import_internal(path) {
+    if path_is_refact_internal(path) {
         return;
     }
     let t0 = Instant::now();
@@ -1007,7 +1011,7 @@ pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &Strin
 }
 
 pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
-    if path_is_refact_import_internal(path) {
+    if path_is_refact_internal(path) {
         return;
     }
     info!(
@@ -1243,7 +1247,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             return;
         };
         for p in &event.paths {
-            if path_is_refact_import_internal(p) {
+            if path_is_refact_internal(p) {
                 continue;
             }
             let normalized_path =
@@ -1594,6 +1598,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_scan_excludes_refact_codegraph_db_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let regular = temp.path().join("src").join("lib.rs");
+        let db_wal = temp
+            .path()
+            .join(".refact")
+            .join("codegraph")
+            .join("codegraph.sqlite-wal");
+        write_file(&regular, "pub fn ok() {}\n");
+        write_file(&db_wal, "sqlite wal content\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&regular)));
+        assert!(!files.contains(&normalized(&db_wal)));
+        assert!(is_valid_file(&normalized(&db_wal), false, false).is_err());
+        assert!(!path_triggers_registry_reload(&db_wal));
+    }
+
+    #[tokio::test]
     async fn on_did_change_maps_registered_worktree_file_to_source_cache_path() {
         let source_temp = tempfile::Builder::new()
             .prefix("refact-src-")
@@ -1791,6 +1815,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watcher_ignores_refact_codegraph_db_changes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join(".refact")
+            .join("codegraph")
+            .join("codegraph.sqlite-wal");
+        write_file(&path, "sqlite wal content\n");
+
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(path.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+
+        let workspace_files_len = gcx.documents_state.workspace_files.lock().unwrap().len();
+        assert_eq!(workspace_files_len, 0);
+        assert_eq!(cache_dirty_value(&gcx).await, 0.0);
+    }
+
+    #[tokio::test]
     async fn on_did_delete_ignores_refact_import_internal_paths() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
@@ -1981,6 +2025,9 @@ mod tests {
         )));
         assert!(!path_triggers_registry_reload(Path::new(
             "/repo/.refact/imports/staging/source/.refact/subagents/agent.yaml"
+        )));
+        assert!(!path_triggers_registry_reload(Path::new(
+            "/repo/.refact/codegraph/codegraph.sqlite-wal"
         )));
         assert!(path_triggers_registry_reload(Path::new(
             "/repo/.refact/modes/agent.yaml"

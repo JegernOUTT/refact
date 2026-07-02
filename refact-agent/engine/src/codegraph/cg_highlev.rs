@@ -15,8 +15,10 @@ const DRAIN_BATCH: usize = 64;
 pub async fn codegraph_db_path(gcx: Arc<GlobalContext>) -> PathBuf {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     if let Some(root) = project_dirs.first() {
-        root.join(".refact")
+        let project_hash = refact_worktrees::service::project_hash_for_path(root);
+        gcx.cache_dir
             .join("codegraph")
+            .join(project_hash)
             .join(CODEGRAPH_DB_FILE)
     } else {
         gcx.cache_dir.join("codegraph").join(CODEGRAPH_DB_FILE)
@@ -92,5 +94,26 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn codegraph_db_path_uses_cache_dir_for_project() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let project = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().to_path_buf()];
+
+        let path = codegraph_db_path(gcx.clone()).await;
+
+        assert!(path.starts_with(gcx.cache_dir.join("codegraph")));
+        assert!(!path.starts_with(project.path().join(".refact")));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(CODEGRAPH_DB_FILE)
+        );
     }
 }
