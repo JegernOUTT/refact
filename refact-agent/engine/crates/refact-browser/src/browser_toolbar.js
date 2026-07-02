@@ -76,7 +76,6 @@
     var bar = document.createElement('div');
     bar.className = 'refact-bar';
 
-    // Logo toggle
     var logo = document.createElement('button');
     logo.className = 'refact-logo';
     logo.title = 'Refact';
@@ -91,7 +90,6 @@
     });
     bar.appendChild(logo);
 
-    // Buttons container
     var buttonsContainer = document.createElement('div');
     buttonsContainer.className = 'refact-buttons expanded';
 
@@ -167,7 +165,6 @@
         } catch(e) {}
     };
 
-    // Wait for body
     function mount() {
         if (document.body) {
             document.body.appendChild(host);

@@ -15,6 +15,7 @@ members = [
     "crates/refact-tool-api",
     "crates/refact-chat-history",
     "crates/refact-integrations",
+    "crates/refact-browser",
     "crates/refact-ext",
     "crates/refact-yaml-configs",
     "crates/refact-worktrees",
@@ -140,6 +141,7 @@ refact-providers = { path = "crates/refact-providers" }
 refact-tool-api = { path = "crates/refact-tool-api" }
 refact-chat-history = { path = "crates/refact-chat-history" }
 refact-integrations = { path = "crates/refact-integrations" }
+refact-browser = { path = "crates/refact-browser" }
 refact-ext = { path = "crates/refact-ext" }
 refact-yaml-configs = { path = "crates/refact-yaml-configs" }
 refact-worktrees = { path = "crates/refact-worktrees" }
