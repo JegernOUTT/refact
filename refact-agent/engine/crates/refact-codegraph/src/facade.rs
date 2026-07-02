@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use refact_core::ast_types::{AstCounters, AstDefinition, AstUsage, SymbolType};
@@ -17,25 +16,6 @@ fn symbol_type_of(kind: &SymbolKind) -> SymbolType {
         SymbolKind::Function => SymbolType::FunctionDeclaration,
         SymbolKind::Comment => SymbolType::CommentDefinition,
         SymbolKind::Unknown => SymbolType::Unknown,
-    }
-}
-
-fn file_stem(cpath: &str) -> String {
-    Path::new(cpath)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| cpath.to_string())
-}
-
-fn friendly_dcp(dcp: &str) -> String {
-    if let Some((namespace, symbol_path)) = dcp.split_once("::") {
-        if symbol_path.is_empty() {
-            file_stem(namespace)
-        } else {
-            format!("{}::{}", file_stem(namespace), symbol_path)
-        }
-    } else {
-        dcp.to_string()
     }
 }
 
@@ -110,11 +90,7 @@ pub fn definitions(
 ) -> Result<Vec<Arc<AstDefinition>>, String> {
     let mut rows = store.symbol_data_by_dcp(double_colon_path)?;
     if rows.is_empty() {
-        for stored_dcp in store.all_symbol_dcps()? {
-            if friendly_dcp(&stored_dcp) == double_colon_path {
-                rows.extend(store.symbol_data_by_dcp(&stored_dcp)?);
-            }
-        }
+        rows = store.symbol_data_by_friendly_dcp(double_colon_path)?;
     }
     rows_to_defs(store, rows)
 }
@@ -124,18 +100,7 @@ pub fn definition_paths_fuzzy(
     pattern: &str,
     top_n: usize,
 ) -> Result<Vec<String>, String> {
-    let needle = pattern.to_lowercase();
-    let mut matches: Vec<String> = store
-        .all_symbol_dcps()?
-        .into_iter()
-        .filter(|p| {
-            p.to_lowercase().contains(&needle) || friendly_dcp(p).to_lowercase().contains(&needle)
-        })
-        .collect();
-    matches.sort();
-    matches.dedup();
-    matches.truncate(top_n);
-    Ok(matches)
+    store.symbol_paths_fuzzy(pattern, top_n)
 }
 
 pub fn type_hierarchy(store: &Store, subtree_of: &str) -> Result<String, String> {

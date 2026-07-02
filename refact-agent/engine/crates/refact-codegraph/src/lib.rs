@@ -54,6 +54,7 @@ pub fn lang_from_path(path: &str) -> &'static str {
 
 pub struct CodeGraphService {
     store: AMutex<Store>,
+    read_store: Option<AMutex<Store>>,
     queue: StdMutex<PendingQueue>,
     queue_notify: Notify,
     db_path: PathBuf,
@@ -69,8 +70,10 @@ struct PendingQueue {
 impl CodeGraphService {
     pub fn open(db_path: PathBuf) -> Result<Self, String> {
         let store = Store::open(&db_path)?;
+        let read_store = Store::open_readonly(&db_path)?;
         Ok(Self {
             store: AMutex::new(store),
+            read_store: Some(AMutex::new(read_store)),
             queue: StdMutex::new(PendingQueue::default()),
             queue_notify: Notify::new(),
             db_path,
@@ -82,6 +85,7 @@ impl CodeGraphService {
         let store = Store::open_in_memory()?;
         Ok(Self {
             store: AMutex::new(store),
+            read_store: None,
             queue: StdMutex::new(PendingQueue::default()),
             queue_notify: Notify::new(),
             db_path: PathBuf::from(":memory:"),
@@ -150,6 +154,19 @@ impl CodeGraphService {
         self.queue_notify.notified().await;
     }
 
+    async fn with_read_store<T>(
+        &self,
+        f: impl FnOnce(&Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if let Some(store) = &self.read_store {
+            let store = store.lock().await;
+            f(&store)
+        } else {
+            let store = self.store.lock().await;
+            f(&store)
+        }
+    }
+
     pub async fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(), String> {
         let store = self.store.lock().await;
         store.index_file_graph(path, text, lang).map(|_| ())
@@ -161,8 +178,7 @@ impl CodeGraphService {
     }
 
     pub async fn counts(&self) -> Result<Counts, String> {
-        let store = self.store.lock().await;
-        store.counts()
+        self.with_read_store(|store| store.counts()).await
     }
 
     pub async fn connect_usages(&self) -> Result<(), String> {
@@ -171,90 +187,83 @@ impl CodeGraphService {
     }
 
     pub async fn has_dirty_usage_paths(&self) -> Result<bool, String> {
-        let store = self.store.lock().await;
-        store.has_dirty_paths()
+        self.with_read_store(|store| store.has_dirty_paths()).await
     }
 
     pub async fn doc_usages(&self, cpath: &str) -> Result<Vec<(usize, String)>, String> {
-        let store = self.store.lock().await;
-        store.doc_usages(cpath)
+        self.with_read_store(|store| store.doc_usages(cpath)).await
     }
 
     pub async fn overview(&self, top_n: usize) -> Result<analytics::GraphOverview, String> {
-        let store = self.store.lock().await;
-        analytics::compute_overview(&store, top_n)
+        self.with_read_store(|store| analytics::compute_overview(store, top_n))
+            .await
     }
 
     pub async fn all_files_with_text(&self) -> Result<Vec<(String, String)>, String> {
-        let store = self.store.lock().await;
-        store.all_files_with_text()
+        self.with_read_store(|store| store.all_files_with_text())
+            .await
     }
 
     pub async fn all_paths(&self) -> Result<Vec<String>, String> {
-        let store = self.store.lock().await;
-        store.all_paths()
+        self.with_read_store(|store| store.all_paths()).await
     }
 
     pub async fn graph_nodes(&self) -> Result<Vec<(i64, String, String)>, String> {
-        let store = self.store.lock().await;
-        store.node_names()
+        self.with_read_store(|store| store.node_names()).await
     }
 
     pub async fn graph_edges(&self) -> Result<Vec<(i64, i64, String)>, String> {
-        let store = self.store.lock().await;
-        store.graph_edges()
+        self.with_read_store(|store| store.graph_edges()).await
     }
 
     pub async fn per_file_centrality(
         &self,
         top_n: usize,
     ) -> Result<crate::analytics::FileCentrality, String> {
-        let store = self.store.lock().await;
-        analytics::per_file_centrality(&store, top_n)
+        self.with_read_store(|store| analytics::per_file_centrality(store, top_n))
+            .await
     }
 
     pub async fn communities(&self) -> Result<Vec<communities::Community>, String> {
-        let store = self.store.lock().await;
-        communities::detect_communities(&store)
+        self.with_read_store(communities::detect_communities).await
     }
 
     pub async fn execution_flows(
         &self,
         max_flows: usize,
     ) -> Result<Vec<communities::ExecFlow>, String> {
-        let store = self.store.lock().await;
-        communities::execution_flows(&store, max_flows)
+        self.with_read_store(|store| communities::execution_flows(store, max_flows))
+            .await
     }
 
     pub async fn dead_code(&self) -> Result<Vec<dead_code::DeadSymbol>, String> {
-        let store = self.store.lock().await;
-        dead_code::dead_code(&store)
+        self.with_read_store(dead_code::dead_code).await
     }
 
     pub async fn type_hierarchy(&self, subtree_of: &str) -> Result<String, String> {
-        let store = self.store.lock().await;
-        facade::type_hierarchy(&store, subtree_of)
+        self.with_read_store(|store| facade::type_hierarchy(store, subtree_of))
+            .await
     }
 
     pub async fn search_hybrid(&self, query: &str, limit: usize) -> Result<Vec<CodeHit>, String> {
-        let store = self.store.lock().await;
-        retrieval::search_hybrid(&store, query, limit)
+        self.with_read_store(|store| retrieval::search_hybrid(store, query, limit))
+            .await
     }
 
     pub async fn doc_defs(
         &self,
         cpath: &str,
     ) -> Result<Vec<std::sync::Arc<refact_core::ast_types::AstDefinition>>, String> {
-        let store = self.store.lock().await;
-        facade::doc_defs(&store, cpath)
+        self.with_read_store(|store| facade::doc_defs(store, cpath))
+            .await
     }
 
     pub async fn definitions(
         &self,
         double_colon_path: &str,
     ) -> Result<Vec<std::sync::Arc<refact_core::ast_types::AstDefinition>>, String> {
-        let store = self.store.lock().await;
-        facade::definitions(&store, double_colon_path)
+        self.with_read_store(|store| facade::definitions(store, double_colon_path))
+            .await
     }
 
     pub async fn definition_paths_fuzzy(
@@ -262,19 +271,20 @@ impl CodeGraphService {
         pattern: &str,
         top_n: usize,
     ) -> Result<Vec<String>, String> {
-        let store = self.store.lock().await;
-        facade::definition_paths_fuzzy(&store, pattern, top_n)
+        self.with_read_store(|store| facade::definition_paths_fuzzy(store, pattern, top_n))
+            .await
     }
 
     pub async fn fetch_counters(&self) -> Result<refact_core::ast_types::AstCounters, String> {
-        let store = self.store.lock().await;
-        facade::fetch_counters(&store)
+        self.with_read_store(facade::fetch_counters).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn enqueue_files_deduplicates_pending_paths_fifo() {
@@ -354,5 +364,64 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), notified)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_backed_doc_defs_reads_while_writer_mutex_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = CodeGraphService::open(dir.path().join("codegraph.sqlite")).unwrap();
+        service
+            .index_file("src/a.rs", "pub fn ready() {}\n", "rust")
+            .await
+            .unwrap();
+
+        let writer_guard = service.store.lock().await;
+        let defs = tokio::time::timeout(Duration::from_millis(200), service.doc_defs("src/a.rs"))
+            .await
+            .expect("doc_defs should use the read connection instead of waiting for writer mutex")
+            .unwrap();
+        drop(writer_guard);
+
+        assert!(defs.iter().any(|def| def.name() == "ready"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_backed_definitions_read_during_uncommitted_writer_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let service =
+            Arc::new(CodeGraphService::open(dir.path().join("codegraph.sqlite")).unwrap());
+        service
+            .index_file("src/a.rs", "pub fn ready() {}\n", "rust")
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_path = service.db_path().to_path_buf();
+        let writer_barrier = barrier.clone();
+        let writer = thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&writer_path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO nodes(kind, path, name, lang, line1, line2) \
+                 VALUES('file', 'src/held.rs', 'held.rs', 'rust', 1, 1)",
+                [],
+            )
+            .unwrap();
+            writer_barrier.wait();
+            std::thread::sleep(Duration::from_millis(300));
+            tx.rollback().unwrap();
+        });
+        tokio::task::spawn_blocking(move || barrier.wait())
+            .await
+            .unwrap();
+
+        let defs = tokio::time::timeout(Duration::from_millis(200), service.definitions("ready"))
+            .await
+            .expect("definitions should read the last committed snapshot while a writer is active")
+            .unwrap();
+        writer.join().unwrap();
+
+        assert!(defs.iter().any(|def| def.name() == "ready"));
     }
 }

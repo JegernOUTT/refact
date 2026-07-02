@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use refact_codegraph_parsers::Resolver;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::debug;
@@ -57,6 +57,57 @@ fn qualify(path: &str, in_file_path: &str) -> String {
     format!("{}::{}", normalized_file_namespace(path), in_file_path)
 }
 
+fn file_stem(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn friendly_dcp(dcp: &str) -> String {
+    if let Some((namespace, symbol_path)) = dcp.split_once("::") {
+        if symbol_path.is_empty() {
+            file_stem(namespace)
+        } else {
+            format!("{}::{}", file_stem(namespace), symbol_path)
+        }
+    } else {
+        dcp.to_string()
+    }
+}
+
+fn symbol_path(dcp: &str) -> String {
+    dcp.split_once("::")
+        .map(|(_, symbol_path)| symbol_path.to_string())
+        .unwrap_or_else(|| dcp.to_string())
+}
+
+fn reverse_segments(path: &str) -> String {
+    path.rsplit("::").collect::<Vec<_>>().join("::")
+}
+
+fn prefix_upper_bound(prefix: &str) -> String {
+    let mut upper = String::with_capacity(prefix.len() + 4);
+    upper.push_str(prefix);
+    upper.push(char::MAX);
+    upper
+}
+
+fn pattern_has_path_separator(pattern: &str) -> bool {
+    pattern.contains("::") || pattern.contains('/') || pattern.contains('\\')
+}
+
+fn escape_like(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for ch in term.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn content_hash(text: &str, lang: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(lang.as_bytes());
@@ -103,6 +154,23 @@ pub struct SymbolData {
     pub data: String,
 }
 
+const SYMBOL_FUZZY_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
+         SELECT double_colon_path FROM symbols \
+         WHERE reverse_symbol_path COLLATE NOCASE >= ?1 AND reverse_symbol_path COLLATE NOCASE < ?2 \
+         UNION ALL SELECT double_colon_path FROM symbol_search \
+         WHERE symbol_search MATCH ?3 \
+     ) ORDER BY double_colon_path LIMIT ?4";
+
+const SYMBOL_FUZZY_PATH_SQL: &str = "SELECT double_colon_path FROM symbol_search \
+         WHERE symbol_search MATCH ?1 ORDER BY double_colon_path LIMIT ?2";
+
+const SYMBOL_FUZZY_SHORT_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
+         SELECT double_colon_path FROM symbols \
+         WHERE reverse_symbol_path COLLATE NOCASE >= ?1 AND reverse_symbol_path COLLATE NOCASE < ?2 \
+         UNION ALL SELECT double_colon_path FROM symbol_search \
+         WHERE double_colon_path LIKE ?3 ESCAPE '\\' OR friendly_path LIKE ?3 ESCAPE '\\' \
+     ) ORDER BY double_colon_path LIMIT ?4";
+
 pub struct Store {
     conn: Connection,
 }
@@ -133,6 +201,13 @@ impl Store {
         Ok(store)
     }
 
+    pub fn open_readonly(path: &Path) -> Result<Self, String> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("codegraph open readonly {path:?}: {e}"))?;
+        Self::tune_readonly_connection(&conn)?;
+        Ok(Self { conn })
+    }
+
     fn tune_persistent_connection(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| format!("codegraph pragma journal_mode: {e}"))?;
@@ -144,6 +219,22 @@ impl Store {
             .map_err(|e| format!("codegraph pragma cache_size: {e}"))?;
         conn.pragma_update(None, "mmap_size", 268_435_456i64)
             .map_err(|e| format!("codegraph pragma mmap_size: {e}"))?;
+        Ok(())
+    }
+
+    fn tune_readonly_connection(conn: &Connection) -> Result<(), String> {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| format!("codegraph readonly pragma journal_mode: {e}"))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| format!("codegraph readonly pragma synchronous: {e}"))?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(|e| format!("codegraph readonly pragma temp_store: {e}"))?;
+        conn.pragma_update(None, "cache_size", -65_536i64)
+            .map_err(|e| format!("codegraph readonly pragma cache_size: {e}"))?;
+        conn.pragma_update(None, "mmap_size", 268_435_456i64)
+            .map_err(|e| format!("codegraph readonly pragma mmap_size: {e}"))?;
+        conn.pragma_update(None, "query_only", "ON")
+            .map_err(|e| format!("codegraph readonly pragma query_only: {e}"))?;
         Ok(())
     }
 
@@ -297,10 +388,51 @@ impl Store {
     }
 
     pub fn symbol_data_by_dcp(&self, dcp: &str) -> Result<Vec<SymbolData>, String> {
+        if dcp.contains("::") {
+            let reversed = reverse_segments(dcp);
+            let reversed_prefix = format!("{reversed}::");
+            let reversed_upper = prefix_upper_bound(&reversed_prefix);
+            let mut stmt = self
+                .conn
+                .prepare(
+                "SELECT n.id, n.path, s.double_colon_path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
+                 WHERE (s.double_colon_path = ?1 OR s.symbol_path = ?1 \
+                 OR s.reverse_symbol_path COLLATE NOCASE = ?2 \
+                 OR (s.reverse_symbol_path COLLATE NOCASE >= ?3 AND s.reverse_symbol_path COLLATE NOCASE < ?4)) \
+                 AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
+            )
+                .map_err(|e| format!("codegraph symbol_data_by_dcp prepare: {e}"))?;
+            let rows = stmt
+                .query_map(
+                    params![dcp, reversed, reversed_prefix, reversed_upper],
+                    |row| {
+                        Ok(SymbolData {
+                            node_id: row.get(0)?,
+                            path: row.get(1)?,
+                            double_colon_path: row.get(2)?,
+                            data: row.get(3)?,
+                        })
+                    },
+                )
+                .map_err(|e| format!("codegraph symbol_data_by_dcp: {e}"))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| format!("codegraph symbol_data_by_dcp row: {e}"))?);
+            }
+            Ok(out)
+        } else {
+            self.query_symbol_data(
+                "SELECT n.id, n.path, s.double_colon_path, n.data FROM nodes n JOIN symbols s ON s.node_id = n.id \
+                 WHERE n.name = ?1 AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
+                dcp,
+            )
+        }
+    }
+
+    pub fn symbol_data_by_friendly_dcp(&self, dcp: &str) -> Result<Vec<SymbolData>, String> {
         self.query_symbol_data(
             "SELECT n.id, n.path, s.double_colon_path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
-             WHERE (s.double_colon_path = ?1 OR s.double_colon_path LIKE '%::' || ?1) \
-             AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
+             WHERE s.friendly_path = ?1 AND n.data IS NOT NULL ORDER BY n.path, n.line1, s.double_colon_path",
             dcp,
         )
     }
@@ -356,17 +488,47 @@ impl Store {
         Ok(out)
     }
 
-    pub fn all_symbol_dcps(&self) -> Result<Vec<String>, String> {
+    pub fn symbol_paths_fuzzy(&self, pattern: &str, limit: usize) -> Result<Vec<String>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let pattern = pattern.to_lowercase();
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let fts_pattern = format!("\"{}\"", pattern.replace('"', "\"\""));
+        if pattern_has_path_separator(&pattern) {
+            return self
+                .query_symbol_paths_fuzzy(SYMBOL_FUZZY_PATH_SQL, params![fts_pattern, limit]);
+        }
+        let suffix_prefix = reverse_segments(&pattern);
+        let suffix_upper = prefix_upper_bound(&suffix_prefix);
+        if pattern.chars().count() < 3 {
+            let contains_pattern = format!("%{}%", escape_like(&pattern));
+            self.query_symbol_paths_fuzzy(
+                SYMBOL_FUZZY_SHORT_SQL,
+                params![suffix_prefix, suffix_upper, contains_pattern, limit],
+            )
+        } else {
+            self.query_symbol_paths_fuzzy(
+                SYMBOL_FUZZY_SQL,
+                params![suffix_prefix, suffix_upper, fts_pattern, limit],
+            )
+        }
+    }
+
+    fn query_symbol_paths_fuzzy<P>(&self, sql: &str, params: P) -> Result<Vec<String>, String>
+    where
+        P: rusqlite::Params,
+    {
         let mut stmt = self
             .conn
-            .prepare("SELECT double_colon_path FROM symbols")
-            .map_err(|e| format!("codegraph all_symbol_dcps prepare: {e}"))?;
+            .prepare(sql)
+            .map_err(|e| format!("codegraph symbol_paths_fuzzy prepare: {e}"))?;
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("codegraph all_symbol_dcps: {e}"))?;
+            .query_map(params, |row| row.get::<_, String>(0))
+            .map_err(|e| format!("codegraph symbol_paths_fuzzy: {e}"))?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(|e| format!("codegraph all_symbol_dcps row: {e}"))?);
+            out.push(r.map_err(|e| format!("codegraph symbol_paths_fuzzy row: {e}"))?);
         }
         Ok(out)
     }
@@ -426,11 +588,25 @@ impl Store {
         double_colon_path: &str,
         node_id: i64,
     ) -> Result<(), String> {
+        let short_path = symbol_path(double_colon_path);
+        let friendly_path = friendly_dcp(double_colon_path);
         conn.execute(
-            "INSERT INTO symbols(double_colon_path, node_id) VALUES(?1, ?2)",
-            params![double_colon_path, node_id],
+            "INSERT INTO symbols(double_colon_path, symbol_path, reverse_symbol_path, friendly_path, node_id) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                double_colon_path,
+                short_path,
+                reverse_segments(&short_path),
+                friendly_path,
+                node_id
+            ],
         )
         .map_err(|e| format!("codegraph add_symbol: {e}"))?;
+        conn.execute(
+            "INSERT INTO symbol_search(double_colon_path, friendly_path) VALUES(?1, ?2)",
+            params![double_colon_path, friendly_path],
+        )
+        .map_err(|e| format!("codegraph add_symbol_search: {e}"))?;
         Ok(())
     }
 
@@ -697,6 +873,13 @@ impl Store {
             params![path],
         )
         .map_err(|e| format!("codegraph remove edges: {e}"))?;
+        conn.execute(
+            "DELETE FROM symbol_search WHERE double_colon_path IN \
+             (SELECT double_colon_path FROM symbols \
+              WHERE node_id IN (SELECT id FROM nodes WHERE path = ?1))",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove symbol_search: {e}"))?;
         conn.execute(
             "DELETE FROM symbols WHERE node_id IN (SELECT id FROM nodes WHERE path = ?1)",
             params![path],
@@ -1211,6 +1394,28 @@ mod tests {
         assert_eq!(counts.nodes, 2);
         assert_eq!(counts.edges, 1);
         assert_eq!(counts.files, 1);
+    }
+
+    #[test]
+    fn fuzzy_symbol_lookup_uses_symbol_index() {
+        let store = Store::open_in_memory().unwrap();
+        let mut stmt = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOL_FUZZY_SQL}"))
+            .unwrap();
+        let rows = stmt
+            .query_map(
+                params!["helper", prefix_upper_bound("helper"), "\"helper\"", 10i64],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap();
+        let plan: Vec<String> = rows.map(|row| row.unwrap()).collect();
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_symbols_reverse_symbol_path")),
+            "fuzzy lookup should be backed by a symbols index, got {plan:?}"
+        );
     }
 
     #[test]
