@@ -60,10 +60,14 @@ pub fn hidden_coupling(
     import_pairs: &HashSet<(String, String)>,
     min_co: u32,
 ) -> Vec<CouplingEdge> {
+    let canonical_import_pairs: HashSet<(String, String)> = import_pairs
+        .iter()
+        .map(|(left, right)| sorted_pair(left, right))
+        .collect();
     collapsed_edges(intel)
         .into_iter()
         .filter(|edge| edge.co_changes >= min_co)
-        .filter(|edge| !import_pairs.contains(&(edge.a.clone(), edge.b.clone())))
+        .filter(|edge| !canonical_import_pairs.contains(&(edge.a.clone(), edge.b.clone())))
         .collect()
 }
 
@@ -219,7 +223,7 @@ mod tests {
         intel.co_change.insert(("a.rs".into(), "b.rs".into()), 5);
         intel.co_change.insert(("c.rs".into(), "d.rs".into()), 4);
         intel.co_change.insert(("e.rs".into(), "f.rs".into()), 1);
-        let import_pairs = HashSet::from([("a.rs".to_string(), "b.rs".to_string())]);
+        let import_pairs = HashSet::from([("b.rs".to_string(), "a.rs".to_string())]);
 
         let hidden = hidden_coupling(&intel, &import_pairs, 3);
 

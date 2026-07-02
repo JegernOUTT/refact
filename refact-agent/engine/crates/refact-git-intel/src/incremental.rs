@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::{CommitRecord, GitIntel};
+use crate::{push_head_or_empty, CommitRecord, GitIntel};
 use git2::{Commit, Repository, Sort};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,8 @@ pub enum GitTier {
 pub struct IncrementalConfig {
     pub tier: GitTier,
     pub since_ts: Option<i64>,
+    #[serde(default)]
+    pub seen_oids: HashSet<String>,
     pub max_commits: usize,
     pub deep_walk_limit: usize,
 }
@@ -26,6 +28,7 @@ impl Default for IncrementalConfig {
         Self {
             tier: GitTier::Full,
             since_ts: None,
+            seen_oids: HashSet::new(),
             max_commits: 500,
             deep_walk_limit: 20_000,
         }
@@ -35,9 +38,9 @@ impl Default for IncrementalConfig {
 pub fn mine_incremental(repo_path: &Path, cfg: &IncrementalConfig) -> Result<GitIntel, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
     let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
-    revwalk
-        .push_head()
-        .map_err(|e| format!("git push_head: {e}"))?;
+    if !push_head_or_empty(&mut revwalk)? {
+        return Ok(GitIntel::default());
+    }
     revwalk
         .set_sorting(Sort::TIME)
         .map_err(|e| format!("git sort: {e}"))?;
@@ -51,15 +54,27 @@ pub fn mine_incremental(repo_path: &Path, cfg: &IncrementalConfig) -> Result<Git
         walked += 1;
 
         let oid = oid.map_err(|e| format!("git oid: {e}"))?;
+        let oid_string = oid.to_string();
+        if cfg.seen_oids.contains(&oid_string) {
+            continue;
+        }
         let commit = repo
             .find_commit(oid)
             .map_err(|e| format!("git find_commit: {e}"))?;
         let ts = commit.time().seconds();
-        if matches!(cfg.since_ts, Some(since_ts) if ts <= since_ts) {
-            break;
+        if let Some(since_ts) = cfg.since_ts {
+            if ts < since_ts || (ts == since_ts && cfg.seen_oids.is_empty()) {
+                break;
+            }
         }
 
-        collect_commit(&repo, &commit, &mut intel, cfg.tier == GitTier::Full);
+        collect_commit(
+            &repo,
+            &commit,
+            oid_string,
+            &mut intel,
+            cfg.tier == GitTier::Full,
+        );
     }
 
     Ok(intel)
@@ -69,10 +84,7 @@ pub fn newest_commit_ts(repo_path: &Path) -> Result<Option<i64>, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
     let head = match repo.head() {
         Ok(head) => head,
-        Err(e)
-            if e.code() == git2::ErrorCode::UnbornBranch
-                || e.code() == git2::ErrorCode::NotFound =>
-        {
+        Err(e) if crate::is_empty_head_error(&e) => {
             return Ok(None);
         }
         Err(e) => return Err(format!("git head: {e}")),
@@ -117,6 +129,7 @@ pub fn merge_intel(base: &mut GitIntel, delta: &GitIntel) {
 fn collect_commit(
     repo: &Repository,
     commit: &Commit,
+    oid: String,
     intel: &mut GitIntel,
     include_co_change: bool,
 ) {
@@ -148,6 +161,7 @@ fn collect_commit(
     }
 
     intel.commit_records.push(CommitRecord {
+        oid: Some(oid),
         ts,
         author,
         committer,
@@ -204,6 +218,7 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
 mod tests {
     use super::*;
     use git2::{Signature, Time};
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -244,7 +259,7 @@ mod tests {
         name: &str,
         email: &str,
         ts: i64,
-    ) {
+    ) -> git2::Oid {
         let workdir = repo.workdir().unwrap().to_path_buf();
         for (p, c) in files {
             let path = workdir.join(p);
@@ -271,7 +286,7 @@ mod tests {
             .collect();
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
         repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
-            .unwrap();
+            .unwrap()
     }
 
     fn fixture_repo() -> TempRepo {
@@ -320,6 +335,57 @@ mod tests {
         assert!(intel.commit_records.iter().all(|c| c.ts > 1_700_000_000));
         assert_eq!(intel.file_churn.get("a.rs"), Some(&2));
         assert_eq!(intel.file_churn.get("b.rs"), Some(&1));
+    }
+
+    #[test]
+    fn unborn_repo_returns_empty_incremental_history() {
+        let dir = TempRepo::new();
+        Repository::init(dir.path()).unwrap();
+
+        let intel = mine_incremental(dir.path(), &IncrementalConfig::default()).unwrap();
+
+        assert_eq!(intel.commits_analyzed, 0);
+        assert!(intel.commit_records.is_empty());
+        assert_eq!(newest_commit_ts(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn same_second_frontier_keeps_unseen_commit() {
+        let dir = TempRepo::new();
+        let repo = Repository::init(dir.path()).unwrap();
+        let ts = 1_700_000_000;
+        let first_oid = commit_files_at(
+            &repo,
+            &[("same.rs", "old\n")],
+            "first same second",
+            "Alice",
+            "alice@x.com",
+            ts,
+        );
+        let second_oid = commit_files_at(
+            &repo,
+            &[("same.rs", "new\n")],
+            "second same second",
+            "Bob",
+            "bob@x.com",
+            ts,
+        );
+        let cfg = IncrementalConfig {
+            since_ts: Some(ts),
+            seen_oids: HashSet::from([first_oid.to_string()]),
+            max_commits: 10,
+            ..IncrementalConfig::default()
+        };
+
+        let intel = mine_incremental(dir.path(), &cfg).unwrap();
+
+        assert_eq!(intel.commits_analyzed, 1);
+        let second_oid = second_oid.to_string();
+        assert_eq!(
+            intel.commit_records[0].oid.as_deref(),
+            Some(second_oid.as_str())
+        );
+        assert_eq!(intel.commit_records[0].message, "second same second");
     }
 
     #[test]

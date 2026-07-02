@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use git2::{Commit, Repository};
+use git2::{Commit, ErrorClass, ErrorCode, Repository, Revwalk};
 use serde::{Deserialize, Serialize};
 
 pub mod blame;
@@ -28,6 +28,8 @@ pub struct GitIntel {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oid: Option<String>,
     pub ts: i64,
     pub author: String,
     pub committer: String,
@@ -100,16 +102,43 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
     files
 }
 
-fn changed_files(repo: &Repository, commit: &Commit) -> Vec<String> {
-    changed_files_with_stats(repo, commit)
-        .into_iter()
-        .map(|(path, _, _)| path)
-        .collect()
+pub(crate) fn is_empty_head_error(error: &git2::Error) -> bool {
+    error.code() == ErrorCode::UnbornBranch
+        || error.code() == ErrorCode::NotFound
+        || (error.class() == ErrorClass::Reference
+            && error.message().to_lowercase().contains("not found"))
+        || error.message().to_lowercase().contains("unborn")
+}
+
+pub(crate) fn push_head_or_empty(revwalk: &mut Revwalk) -> Result<bool, String> {
+    match revwalk.push_head() {
+        Ok(()) => Ok(true),
+        Err(error) if is_empty_head_error(&error) => Ok(false),
+        Err(error) => Err(format!("git push_head: {error}")),
+    }
 }
 
 fn temporal_weight(now_ts: i64, ts: i64) -> f64 {
-    let age_days = (now_ts - ts) as f64 / 86_400.0;
-    (-std::f64::consts::LN_2 * age_days / TEMPORAL_HALFLIFE_DAYS).exp()
+    let age_days = now_ts.saturating_sub(ts).max(0) as f64 / 86_400.0;
+    (-std::f64::consts::LN_2 * age_days / TEMPORAL_HALFLIFE_DAYS)
+        .exp()
+        .clamp(0.0, 1.0)
+}
+
+fn window_secs(days: i64) -> Option<i64> {
+    if days < 0 {
+        return None;
+    }
+    days.checked_mul(86_400)
+}
+
+fn commit_in_window(commit: &CommitRecord, now_ts: i64, window_secs: i64) -> bool {
+    commit
+        .ts
+        .le(&now_ts)
+        .then(|| now_ts.checked_sub(commit.ts))
+        .flatten()
+        .is_some_and(|age_secs| age_secs <= window_secs)
 }
 
 fn percentile(values: &[f64], target: f64) -> f64 {
@@ -122,9 +151,9 @@ fn percentile(values: &[f64], target: f64) -> f64 {
 pub fn collect_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<String>, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
     let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
-    revwalk
-        .push_head()
-        .map_err(|e| format!("git push_head: {e}"))?;
+    if !push_head_or_empty(&mut revwalk)? {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for (i, oid) in revwalk.enumerate() {
         if i >= max {
@@ -142,9 +171,9 @@ pub fn collect_commit_messages(repo_path: &Path, max: usize) -> Result<Vec<Strin
 pub fn mine_history(repo_path: &Path, max_commits: usize) -> Result<GitIntel, String> {
     let repo = Repository::open(repo_path).map_err(|e| format!("git open: {e}"))?;
     let mut revwalk = repo.revwalk().map_err(|e| format!("git revwalk: {e}"))?;
-    revwalk
-        .push_head()
-        .map_err(|e| format!("git push_head: {e}"))?;
+    if !push_head_or_empty(&mut revwalk)? {
+        return Ok(GitIntel::default());
+    }
 
     let mut intel = GitIntel::default();
     for (i, oid) in revwalk.enumerate() {
@@ -181,6 +210,7 @@ pub fn mine_history(repo_path: &Path, max_commits: usize) -> Result<GitIntel, St
             }
         }
         intel.commit_records.push(CommitRecord {
+            oid: Some(oid.to_string()),
             ts,
             author,
             committer,
@@ -232,25 +262,32 @@ impl GitIntel {
     }
 
     pub fn commit_count_in_window(&self, file: &str, now_ts: i64, days: i64) -> u32 {
-        let window_secs = days * 86_400;
+        let Some(window_secs) = window_secs(days) else {
+            return 0;
+        };
         self.commit_records
             .iter()
-            .filter(|commit| commit.ts <= now_ts && now_ts - commit.ts <= window_secs)
+            .filter(|commit| commit_in_window(commit, now_ts, window_secs))
             .filter(|commit| commit.files.iter().any(|(path, _, _)| path == file))
             .count() as u32
     }
 
     pub fn lines_in_window(&self, file: &str, now_ts: i64, days: i64) -> (u32, u32) {
-        let window_secs = days * 86_400;
+        let Some(window_secs) = window_secs(days) else {
+            return (0, 0);
+        };
         self.commit_records
             .iter()
-            .filter(|commit| commit.ts <= now_ts && now_ts - commit.ts <= window_secs)
+            .filter(|commit| commit_in_window(commit, now_ts, window_secs))
             .flat_map(|commit| commit.files.iter())
             .filter(|(path, _, _)| path == file)
             .fold(
                 (0_u32, 0_u32),
                 |(total_added, total_deleted), (_, added, deleted)| {
-                    (total_added + *added, total_deleted + *deleted)
+                    (
+                        total_added.saturating_add(*added),
+                        total_deleted.saturating_add(*deleted),
+                    )
                 },
             )
     }
@@ -263,12 +300,14 @@ impl GitIntel {
     }
 
     pub fn recent_owner(&self, file: &str, now_ts: i64, days: i64) -> (String, f64) {
-        let window_secs = days * 86_400;
+        let Some(window_secs) = window_secs(days) else {
+            return (String::new(), 0.0);
+        };
         let mut counts: HashMap<String, u32> = HashMap::new();
         for commit in self
             .commit_records
             .iter()
-            .filter(|commit| commit.ts <= now_ts && now_ts - commit.ts <= window_secs)
+            .filter(|commit| commit_in_window(commit, now_ts, window_secs))
         {
             if commit.files.iter().any(|(path, _, _)| path == file) {
                 *counts.entry(commit.author.clone()).or_default() += 1;
@@ -285,10 +324,12 @@ impl GitIntel {
     }
 
     pub fn active_contributors_in_window(&self, now_ts: i64, days: i64) -> u32 {
-        let window_secs = days * 86_400;
+        let Some(window_secs) = window_secs(days) else {
+            return 0;
+        };
         self.commit_records
             .iter()
-            .filter(|commit| commit.ts <= now_ts && now_ts - commit.ts <= window_secs)
+            .filter(|commit| commit_in_window(commit, now_ts, window_secs))
             .map(|commit| commit.author.clone())
             .collect::<HashSet<_>>()
             .len() as u32
@@ -618,6 +659,7 @@ mod tests {
         intel.co_change.insert(("c.rs".into(), "a.rs".into()), 1);
         intel.commit_records = vec![
             CommitRecord {
+                oid: None,
                 ts: now - 40 * day,
                 author: "alice@x.com".into(),
                 committer: "alice@x.com".into(),
@@ -625,6 +667,7 @@ mod tests {
                 files: vec![("a.rs".into(), 10, 1)],
             },
             CommitRecord {
+                oid: None,
                 ts: now - 3 * day,
                 author: "alice@x.com".into(),
                 committer: "alice@x.com".into(),
@@ -632,6 +675,7 @@ mod tests {
                 files: vec![("a.rs".into(), 2, 3), ("b.rs".into(), 1, 0)],
             },
             CommitRecord {
+                oid: None,
                 ts: now - day,
                 author: "bob@x.com".into(),
                 committer: "bob@x.com".into(),
@@ -639,6 +683,7 @@ mod tests {
                 files: vec![("a.rs".into(), 5, 1)],
             },
             CommitRecord {
+                oid: None,
                 ts: now + day,
                 author: "carol@x.com".into(),
                 committer: "carol@x.com".into(),
@@ -661,6 +706,65 @@ mod tests {
         assert_eq!(intel.lines_in_window("missing.rs", now, 10), (0, 0));
         assert_eq!(intel.active_contributors_in_window(now, 10), 2);
         assert_eq!(intel.active_contributors_in_window(now, 1), 1);
+    }
+
+    #[test]
+    fn empty_repo_history_helpers_return_empty_results() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+
+        assert_eq!(
+            collect_commit_messages(dir.path(), 10).unwrap(),
+            Vec::<String>::new()
+        );
+        let intel = mine_history(dir.path(), 10).unwrap();
+        assert_eq!(intel.commits_analyzed, 0);
+        assert!(intel.commit_records.is_empty());
+    }
+
+    #[test]
+    fn windowed_helpers_reject_invalid_day_windows_without_overflow() {
+        let now = 1_700_000_000;
+        let intel = windowed_intel();
+
+        assert_eq!(intel.commit_count_in_window("a.rs", now, -1), 0);
+        assert_eq!(intel.commit_count_in_window("a.rs", now, i64::MAX), 0);
+        assert_eq!(intel.lines_in_window("a.rs", now, -1), (0, 0));
+        assert_eq!(intel.lines_in_window("a.rs", now, i64::MAX), (0, 0));
+        assert_eq!(intel.recent_owner("a.rs", now, -1), (String::new(), 0.0));
+        assert_eq!(
+            intel.recent_owner("a.rs", now, i64::MAX),
+            (String::new(), 0.0)
+        );
+        assert_eq!(intel.active_contributors_in_window(now, -1), 0);
+        assert_eq!(intel.active_contributors_in_window(now, i64::MAX), 0);
+    }
+
+    #[test]
+    fn temporal_weight_clamps_future_commits_to_one() {
+        let future = CommitRecord {
+            oid: None,
+            ts: 2_000_000,
+            author: "future@x.com".into(),
+            committer: "future@x.com".into(),
+            message: "future".into(),
+            files: vec![("future.rs".into(), 100, 0)],
+        };
+        let past = CommitRecord {
+            oid: None,
+            ts: 1_000_000,
+            author: "past@x.com".into(),
+            committer: "past@x.com".into(),
+            message: "past".into(),
+            files: vec![("past.rs".into(), 100, 0)],
+        };
+        let mut intel = GitIntel::default();
+        intel.commit_records = vec![future, past];
+
+        let hotspots = intel.temporal_hotspots(1_500_000, 2);
+
+        assert_eq!(hotspots[0], ("future.rs".into(), 1.0));
+        assert!(hotspots[1].1 < 1.0);
     }
 
     #[test]
@@ -755,6 +859,7 @@ mod tests {
         assert_eq!(intel.commit_records.len(), 2);
         let newest = &intel.commit_records[0];
         assert_eq!(newest.ts, 1_600_000_100);
+        assert!(newest.oid.is_some());
         assert_eq!(newest.author, "bob@x.com");
         assert_eq!(newest.committer, "bob@x.com");
         assert_eq!(newest.message, "rewrite line stats");
@@ -787,6 +892,7 @@ mod tests {
         let mut intel = GitIntel::default();
         intel.commit_records = vec![
             CommitRecord {
+                oid: None,
                 ts: 1_000_000,
                 author: "a@x.com".into(),
                 committer: "a@x.com".into(),
@@ -794,6 +900,7 @@ mod tests {
                 files: vec![("old.rs".into(), 300, 0)],
             },
             CommitRecord {
+                oid: None,
                 ts: 1_000_000 + 180 * 86_400,
                 author: "b@x.com".into(),
                 committer: "b@x.com".into(),
@@ -812,6 +919,7 @@ mod tests {
         let mut intel = GitIntel::default();
         intel.commit_records = vec![
             CommitRecord {
+                oid: None,
                 ts: 100,
                 author: "a@x.com".into(),
                 committer: "a@x.com".into(),
@@ -819,6 +927,7 @@ mod tests {
                 files: vec![("a.rs".into(), 1, 0), ("b.rs".into(), 1, 0)],
             },
             CommitRecord {
+                oid: None,
                 ts: 100,
                 author: "a@x.com".into(),
                 committer: "a@x.com".into(),
@@ -835,6 +944,7 @@ mod tests {
     fn commit_features_compute_kamei_values() {
         let mut intel = GitIntel::default();
         intel.commit_records.push(CommitRecord {
+            oid: None,
             ts: 1,
             author: "a@x.com".into(),
             committer: "a@x.com".into(),
@@ -870,6 +980,7 @@ mod tests {
             .file_authors
             .insert("calm.rs".into(), HashMap::from([("a@x.com".into(), 2)]));
         intel.commit_records = vec![CommitRecord {
+            oid: None,
             ts: 1,
             author: "a@x.com".into(),
             committer: "a@x.com".into(),
@@ -888,6 +999,7 @@ mod tests {
         let mut intel = GitIntel::default();
         intel.commit_records = vec![
             CommitRecord {
+                oid: None,
                 ts: 1,
                 author: "dev@x.com".into(),
                 committer: "dev@x.com".into(),
@@ -895,6 +1007,7 @@ mod tests {
                 files: vec![],
             },
             CommitRecord {
+                oid: None,
                 ts: 2,
                 author: "dev@x.com".into(),
                 committer: "dev@x.com".into(),
@@ -902,6 +1015,7 @@ mod tests {
                 files: vec![],
             },
             CommitRecord {
+                oid: None,
                 ts: 3,
                 author: "dev@x.com".into(),
                 committer: "dev@x.com".into(),
@@ -909,6 +1023,7 @@ mod tests {
                 files: vec![],
             },
             CommitRecord {
+                oid: None,
                 ts: 4,
                 author: "dependabot@github.com".into(),
                 committer: "dependabot@github.com".into(),
@@ -916,6 +1031,7 @@ mod tests {
                 files: vec![],
             },
             CommitRecord {
+                oid: None,
                 ts: 5,
                 author: "dev@x.com".into(),
                 committer: "dev@x.com".into(),
@@ -951,10 +1067,27 @@ mod tests {
             .tier,
             3
         );
+        assert_eq!(
+            classify_commit(
+                "human@x.com",
+                "human@x.com",
+                "fix\n\nco-authored-by: claude <bot@anthropic.com>"
+            )
+            .unwrap()
+            .tier,
+            2
+        );
+        assert_eq!(
+            classify_commit("Dev (AIDER)", "human@x.com", "change")
+                .unwrap()
+                .tier,
+            2
+        );
 
         let mut intel = GitIntel::default();
         intel.commit_records = vec![
             CommitRecord {
+                oid: None,
                 ts: 1,
                 author: "copilot-swe-agent@github.com".into(),
                 committer: "human@x.com".into(),
@@ -962,6 +1095,7 @@ mod tests {
                 files: vec![],
             },
             CommitRecord {
+                oid: None,
                 ts: 2,
                 author: "human@x.com".into(),
                 committer: "human@x.com".into(),

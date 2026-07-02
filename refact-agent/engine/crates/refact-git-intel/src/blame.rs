@@ -77,43 +77,44 @@ pub fn code_age(repo_path: &Path, file: &str, now_ts: i64) -> Result<CodeAge, St
         }
     };
 
-    let mut ages = Vec::new();
+    let mut age_buckets = Vec::new();
+    let mut total_lines = 0_u64;
     for hunk in blame.iter() {
         let lines = hunk.lines_in_hunk();
         if lines == 0 {
             continue;
         }
         let ts = hunk.final_signature().when().seconds();
-        let age = (now_ts - ts) as f64 / 86_400.0;
-        for _ in 0..lines {
-            ages.push(age);
-        }
+        let age = now_ts.saturating_sub(ts).max(0) as f64 / 86_400.0;
+        let lines = lines as u64;
+        total_lines = total_lines.saturating_add(lines);
+        age_buckets.push((age, lines));
     }
 
-    if ages.is_empty() {
+    if total_lines == 0 {
         return Ok(CodeAge {
             median_age_days: 0.0,
             volatility: 0.0,
         });
     }
 
-    ages.sort_by(f64::total_cmp);
-    let median = median_sorted(&ages);
-    let mean = ages.iter().sum::<f64>() / ages.len() as f64;
-    let variance = ages
+    age_buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let median = weighted_median_sorted(&age_buckets, total_lines);
+    let mean = age_buckets
         .iter()
-        .map(|age| {
+        .map(|(age, lines)| age * *lines as f64)
+        .sum::<f64>()
+        / total_lines as f64;
+    let variance = age_buckets
+        .iter()
+        .map(|(age, lines)| {
             let diff = age - mean;
-            diff * diff
+            diff * diff * *lines as f64
         })
         .sum::<f64>()
-        / ages.len() as f64;
+        / total_lines as f64;
     let std_dev = variance.sqrt();
-    let volatility = if median + 1.0 == 0.0 {
-        0.0
-    } else {
-        std_dev / (median + 1.0)
-    };
+    let volatility = std_dev / (median + 1.0);
 
     Ok(CodeAge {
         median_age_days: median,
@@ -121,13 +122,23 @@ pub fn code_age(repo_path: &Path, file: &str, now_ts: i64) -> Result<CodeAge, St
     })
 }
 
-fn median_sorted(values: &[f64]) -> f64 {
-    let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
-        (values[mid - 1] + values[mid]) / 2.0
-    } else {
-        values[mid]
+fn weighted_median_sorted(age_buckets: &[(f64, u64)], total_lines: u64) -> f64 {
+    let lower_pos = (total_lines - 1) / 2;
+    let upper_pos = total_lines / 2;
+    let lower = weighted_age_at(age_buckets, lower_pos);
+    let upper = weighted_age_at(age_buckets, upper_pos);
+    (lower + upper) / 2.0
+}
+
+fn weighted_age_at(age_buckets: &[(f64, u64)], pos: u64) -> f64 {
+    let mut seen = 0_u64;
+    for (age, lines) in age_buckets {
+        seen = seen.saturating_add(*lines);
+        if pos < seen {
+            return *age;
+        }
     }
+    age_buckets.last().map(|(age, _)| *age).unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -222,5 +233,25 @@ mod tests {
         assert!(age.median_age_days >= 0.0);
         assert!(age.volatility.is_finite());
         assert!(!age.volatility.is_nan());
+    }
+
+    #[test]
+    fn code_age_clamps_future_dated_blame_to_zero_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_file(
+            &repo,
+            "future.txt",
+            "one\ntwo\n",
+            "future",
+            "Future",
+            "future@example.com",
+            1_700_086_400,
+        );
+
+        let age = code_age(dir.path(), "future.txt", 1_700_000_000).unwrap();
+
+        assert_eq!(age.median_age_days, 0.0);
+        assert_eq!(age.volatility, 0.0);
     }
 }

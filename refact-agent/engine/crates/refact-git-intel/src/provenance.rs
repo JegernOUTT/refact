@@ -28,6 +28,7 @@ const AGENT_DOMAINS: &[&str] = &[
 
 pub fn classify_commit(author: &str, committer: &str, message: &str) -> Option<AgentProvenance> {
     let identities = format!("{} {}", author, committer).to_lowercase();
+    let lower_message = message.to_lowercase();
     for agent in KNOWN_AGENTS {
         if identities.contains(agent) {
             return Some(AgentProvenance {
@@ -38,25 +39,24 @@ pub fn classify_commit(author: &str, committer: &str, message: &str) -> Option<A
         }
     }
 
-    if message.contains("Generated with Claude Code") {
+    if lower_message.contains("generated with claude code") {
         return Some(agent("claude", 2, 0.85));
     }
-    if message.contains("Co-Authored-By: Claude") {
+    if lower_message.contains("co-authored-by: claude") {
         return Some(agent("claude", 2, 0.85));
     }
-    if message.contains("opencode") {
+    if lower_message.contains("opencode") {
         return Some(agent("opencode", 2, 0.85));
     }
-    if message.contains("Codex") {
+    if lower_message.contains("codex") {
         return Some(agent("codex", 2, 0.85));
     }
-    if author.trim_end().ends_with("(aider)") {
+    if author.trim_end().to_lowercase().ends_with("(aider)") {
         return Some(agent("aider", 2, 0.85));
     }
 
-    for line in message.lines() {
-        let lower = line.to_lowercase();
-        if lower.starts_with("co-authored-by:") && AGENT_DOMAINS.iter().any(|d| lower.contains(d)) {
+    for line in lower_message.lines() {
+        if line.starts_with("co-authored-by:") && AGENT_DOMAINS.iter().any(|d| line.contains(d)) {
             return Some(agent("agent-domain", 3, 0.7));
         }
     }
