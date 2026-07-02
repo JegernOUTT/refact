@@ -110,7 +110,9 @@ impl CodeGraphService {
         }
         let mut queue = self.queue.lock().unwrap();
         for path in paths {
-            queue.push_back(path.clone());
+            if !queue.contains(path) {
+                queue.push_back(path.clone());
+            }
         }
     }
 
@@ -162,6 +164,11 @@ impl CodeGraphService {
     pub async fn all_files_with_text(&self) -> Result<Vec<(String, String)>, String> {
         let store = self.store.lock().await;
         store.all_files_with_text()
+    }
+
+    pub async fn all_paths(&self) -> Result<Vec<String>, String> {
+        let store = self.store.lock().await;
+        store.all_paths()
     }
 
     pub async fn graph_nodes(&self) -> Result<Vec<(i64, String, String)>, String> {
@@ -238,5 +245,35 @@ impl CodeGraphService {
     pub async fn fetch_counters(&self) -> Result<refact_core::ast_types::AstCounters, String> {
         let store = self.store.lock().await;
         facade::fetch_counters(&store)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_files_deduplicates_pending_paths_fifo() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+
+        service.enqueue_files(&[
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/a.rs".to_string(),
+        ]);
+        service.enqueue_files(&["src/b.rs".to_string(), "src/c.rs".to_string()]);
+
+        assert_eq!(service.queue_len(), 3);
+        assert_eq!(
+            service.drain_batch(10),
+            vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string()
+            ]
+        );
+
+        service.enqueue_files(&["src/a.rs".to_string()]);
+        assert_eq!(service.drain_batch(10), vec!["src/a.rs".to_string()]);
     }
 }

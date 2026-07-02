@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
 use tracing::{error, info};
 
 use refact_codegraph::{lang_from_path, CodeGraphService, Counts};
@@ -10,7 +12,8 @@ use refact_codegraph::{lang_from_path, CodeGraphService, Counts};
 use crate::global_context::GlobalContext;
 
 const CODEGRAPH_DB_FILE: &str = "codegraph.sqlite";
-const DRAIN_BATCH: usize = 64;
+const DRAIN_BATCH: usize = 512;
+const DRAIN_CONCURRENCY: usize = 8;
 const PROGRESS_REPORT_GRANULARITY: usize = 100;
 
 fn progress_bucket(remaining: usize) -> usize {
@@ -30,6 +33,57 @@ fn completion_message(counts: &Counts) -> String {
         "codegraph: index complete — {} nodes, {} edges, {} files",
         counts.nodes, counts.edges, counts.files
     )
+}
+
+fn stale_stored_paths(stored_paths: Vec<String>, existing_paths: &HashSet<String>) -> Vec<String> {
+    stored_paths
+        .into_iter()
+        .filter(|path| !existing_paths.contains(path) || !PathBuf::from(path).exists())
+        .collect()
+}
+
+fn workspace_existing_paths(gcx: &Arc<GlobalContext>) -> HashSet<String> {
+    gcx.documents_state
+        .workspace_files
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
+async fn reconcile_deleted_paths(
+    service: Arc<CodeGraphService>,
+    existing_paths: &HashSet<String>,
+) -> Result<usize, String> {
+    let stale_paths = stale_stored_paths(service.all_paths().await?, existing_paths);
+    let removed = stale_paths.len();
+    for path in stale_paths {
+        service.remove_path(&path).await?;
+    }
+    Ok(removed)
+}
+
+async fn index_or_remove_path(
+    gcx: Arc<GlobalContext>,
+    service: Arc<CodeGraphService>,
+    path: String,
+) -> Result<(), String> {
+    match crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &PathBuf::from(&path))
+        .await
+    {
+        Ok(text) => {
+            let lang = lang_from_path(&path);
+            service
+                .index_file(&path, &text, lang)
+                .await
+                .map_err(|err| format!("codegraph: index {path} failed: {err}"))
+        }
+        Err(_) => service
+            .remove_path(&path)
+            .await
+            .map_err(|err| format!("codegraph: remove {path} failed: {err}")),
+    }
 }
 
 pub async fn codegraph_db_path(gcx: Arc<GlobalContext>) -> PathBuf {
@@ -71,6 +125,16 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
         .await;
     let initial_enqueued = service.queue_len().saturating_sub(queue_len_before_enqueue);
     info!("codegraph: start_background_tasks, enqueued {initial_enqueued} initial files");
+
+    let existing_paths = workspace_existing_paths(&gcx);
+    match reconcile_deleted_paths(service.clone(), &existing_paths).await {
+        Ok(removed) if removed > 0 => info!("codegraph: removed {removed} stale stored files"),
+        Ok(_) => {}
+        Err(err) => {
+            error!("codegraph: startup deletion reconciliation failed: {err}");
+            *gcx.codegraph_error.lock().unwrap() = err;
+        }
+    }
 
     let mut reported_unprocessed = 0;
 
@@ -123,29 +187,26 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             continue;
         }
 
-        for path in batch {
+        let mut results = stream::iter(batch)
+            .map(|path| {
+                let gcx = gcx.clone();
+                let service = service.clone();
+                async move {
+                    if gcx.shutdown_flag.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    index_or_remove_path(gcx, service, path).await
+                }
+            })
+            .buffer_unordered(DRAIN_CONCURRENCY);
+
+        while let Some(result) = results.next().await {
             if gcx.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
-            match crate::files_in_workspace::get_file_text_from_memory_or_disk(
-                gcx.clone(),
-                &PathBuf::from(&path),
-            )
-            .await
-            {
-                Ok(text) => {
-                    let lang = lang_from_path(&path);
-                    if let Err(err) = service.index_file(&path, &text, lang).await {
-                        error!("codegraph: index {path} failed: {err}");
-                        *gcx.codegraph_error.lock().unwrap() = err;
-                    }
-                }
-                Err(_) => {
-                    if let Err(err) = service.remove_path(&path).await {
-                        error!("codegraph: remove {path} failed: {err}");
-                        *gcx.codegraph_error.lock().unwrap() = err;
-                    }
-                }
+            if let Err(err) = result {
+                error!("{err}");
+                *gcx.codegraph_error.lock().unwrap() = err;
             }
         }
     }
@@ -199,5 +260,59 @@ mod tests {
             completion_message(&counts),
             "codegraph: index complete — 11 nodes, 22 edges, 3 files"
         );
+    }
+
+    #[test]
+    fn stale_stored_paths_diffs_against_existing_workspace_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let kept = temp.path().join("src").join("kept.rs");
+        let outside = temp.path().join("outside.rs");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "fn kept() {}\n").unwrap();
+        std::fs::write(&outside, "fn outside() {}\n").unwrap();
+        let kept = kept.to_string_lossy().to_string();
+        let missing = temp
+            .path()
+            .join("src")
+            .join("gone.rs")
+            .to_string_lossy()
+            .to_string();
+        let outside = outside.to_string_lossy().to_string();
+        let existing = HashSet::from([kept.clone()]);
+
+        let stale = stale_stored_paths(vec![kept, missing.clone(), outside.clone()], &existing);
+
+        assert_eq!(stale, vec![missing, outside]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_deleted_paths_removes_stale_store_entries() {
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let kept = temp.path().join("src").join("kept.rs");
+        let gone = temp.path().join("src").join("gone.rs");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "fn kept() {}\n").unwrap();
+        let kept = kept.to_string_lossy().to_string();
+        let gone = gone.to_string_lossy().to_string();
+
+        service
+            .index_file(&kept, "fn kept() {}\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file(&gone, "fn gone() {}\n", "rust")
+            .await
+            .unwrap();
+        let existing = HashSet::from([kept.clone()]);
+
+        let removed = reconcile_deleted_paths(service.clone(), &existing)
+            .await
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        let mut paths = service.all_paths().await.unwrap();
+        paths.sort();
+        assert_eq!(paths, vec![kept]);
     }
 }
