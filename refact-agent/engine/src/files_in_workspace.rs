@@ -66,13 +66,17 @@ fn path_for_blocklist(path: &Path, roots: &[PathBuf]) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
-fn event_path_is_valid_file(path: &PathBuf, roots: &[PathBuf]) -> bool {
+fn event_path_is_valid_file(
+    path: &PathBuf,
+    roots: &[PathBuf],
+    global_config_roots: &[PathBuf],
+) -> bool {
     let scan_root = roots
         .iter()
         .filter(|root| path.starts_with(root))
         .max_by_key(|root| root.components().count());
     match scan_root {
-        Some(root) => is_valid_file_for_scan(path, root, false, false).is_ok(),
+        Some(root) => is_valid_file_for_scan(path, root, false, false, global_config_roots).is_ok(),
         None => is_valid_file(path, false, false).is_ok(),
     }
 }
@@ -543,6 +547,18 @@ fn path_has_hidden_component(path: &Path) -> bool {
 }
 
 fn path_has_allowed_hidden_component(path: &Path) -> bool {
+    let parts = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.first().is_some_and(|part| part == ".config")
+        && parts.get(1).is_some_and(|part| part == "refact")
+    {
+        return true;
+    }
     path.components().any(|component| {
         matches!(component, Component::Normal(name) if name.to_string_lossy() == ".refact")
     })
@@ -586,12 +602,16 @@ fn is_valid_file_for_scan(
     scan_root: &Path,
     allow_hidden_folders: bool,
     ignore_size_thresholds: bool,
+    global_config_roots: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
     if path_is_refact_internal(path) {
         return Err(".refact internal path".into());
     }
-    if crate::file_filter::is_generated_index_path(path) {
-        return Err(".refact/**/index.json is a generated index".into());
+    if crate::file_filter::is_generated_index_path_with_global_config_roots(
+        path,
+        global_config_roots,
+    ) {
+        return Err("generated index.json".into());
     }
     is_valid_file(path, true, ignore_size_thresholds)?;
     if !allow_hidden_folders {
@@ -612,6 +632,7 @@ async fn _ls_files_under_version_control_recursive(
     allow_files_in_hidden_folders: bool,
     ignore_size_thresholds: bool,
     check_blocklist: bool,
+    global_config_roots: &[PathBuf],
 ) {
     let scan_root = crate::files_correction::canonical_path(&path.to_string_lossy().to_string());
     let mut candidates: Vec<PathBuf> = vec![scan_root.clone()];
@@ -625,6 +646,7 @@ async fn _ls_files_under_version_control_recursive(
                 &scan_root,
                 allow_files_in_hidden_folders,
                 ignore_size_thresholds,
+                global_config_roots,
             );
             match maybe_valid {
                 Ok(_) => {
@@ -687,6 +709,7 @@ async fn _ls_files_under_version_control_recursive(
                         &scan_root,
                         allow_files_in_hidden_folders,
                         ignore_size_thresholds,
+                        global_config_roots,
                     );
                     match maybe_valid {
                         Ok(_) => {
@@ -741,6 +764,7 @@ pub async fn retrieve_files_in_workspace_folders(
     indexing_everywhere: &mut IndexingEverywhere,
     allow_files_in_hidden_folders: bool,
     ignore_size_thresholds: bool,
+    global_config_roots: &[PathBuf],
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut all_files: Vec<PathBuf> = Vec::new();
     let mut vcs_folders: Vec<PathBuf> = Vec::new();
@@ -755,6 +779,7 @@ pub async fn retrieve_files_in_workspace_folders(
             allow_files_in_hidden_folders,
             ignore_size_thresholds,
             true,
+            global_config_roots,
         )
         .await;
     }
@@ -867,8 +892,15 @@ pub async fn enqueue_all_files_from_workspace_folders(
     );
     let mut indexing_everywhere =
         crate::files_blocklist::reload_global_indexing_only(gcx.clone()).await;
-    let (all_files, vcs_folders) =
-        retrieve_files_in_workspace_folders(folders, &mut indexing_everywhere, false, false).await;
+    let global_config_roots = vec![gcx.config_dir.clone()];
+    let (all_files, vcs_folders) = retrieve_files_in_workspace_folders(
+        folders,
+        &mut indexing_everywhere,
+        false,
+        false,
+        &global_config_roots,
+    )
+    .await;
     info!(
         "enqueue_all_files_from_workspace_folders found {} files => workspace_files",
         all_files.len()
@@ -1617,6 +1649,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         blocklist_roots.dedup();
         let worktree_mappings =
             crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        let global_config_roots = vec![gcx.config_dir.clone()];
         let debounce_paths = !matches!(&event.kind, EventKind::Remove(_));
         let debounce_now = Instant::now();
         for p in &event.paths {
@@ -1634,11 +1667,18 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             if is_blocklisted(&indexing_settings, &blocklist_path) {
                 continue;
             }
-            if crate::file_filter::is_generated_index_path(&normalized_path) {
+            if crate::file_filter::is_generated_index_path_with_global_config_roots(
+                &normalized_path,
+                &global_config_roots,
+            ) {
                 continue;
             }
             if normalized_path.exists()
-                && event_path_is_valid_file(&normalized_path, &blocklist_roots)
+                && event_path_is_valid_file(
+                    &normalized_path,
+                    &blocklist_roots,
+                    &global_config_roots,
+                )
             {
                 if debounce_paths {
                     schedule_debounced_file_event(
@@ -1889,6 +1929,24 @@ mod tests {
             &mut indexing_everywhere,
             false,
             false,
+            &[],
+        )
+        .await;
+        files
+    }
+
+    async fn scan_workspace_with_global_config_root(
+        root: &Path,
+        global_config_root: &Path,
+    ) -> Vec<PathBuf> {
+        let mut indexing_everywhere = IndexingEverywhere::default();
+        let roots = vec![global_config_root.to_path_buf()];
+        let (files, _) = retrieve_files_in_workspace_folders(
+            vec![root.to_path_buf()],
+            &mut indexing_everywhere,
+            false,
+            false,
+            &roots,
         )
         .await;
         files
@@ -1985,6 +2043,37 @@ mod tests {
 
         assert!(files.contains(&normalized(&regular)));
         assert!(!files.contains(&normalized(&generated)));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_keeps_repo_local_config_refact_index_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_index = temp
+            .path()
+            .join(".config")
+            .join("refact")
+            .join("trajectories")
+            .join("index.json");
+        write_file(&config_index, "{\"user\":true}\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(files.contains(&normalized(&config_index)));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_excludes_configured_global_config_index_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_root = temp.path().join("global_config").join("refact");
+        let generated = config_root.join("trajectories").join("index.json");
+        let regular = config_root.join("knowledge").join("index.json");
+        write_file(&generated, "{\"schema_version\":1}\n");
+        write_file(&regular, "{\"user\":true}\n");
+
+        let files = scan_workspace_with_global_config_root(&config_root, &config_root).await;
+
+        assert!(!files.contains(&normalized(&generated)));
+        assert!(files.contains(&normalized(&regular)));
     }
 
     #[tokio::test]
