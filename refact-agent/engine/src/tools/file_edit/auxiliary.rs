@@ -1466,6 +1466,65 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn edit_fast_enqueue_upgrades_pending_source_entry_to_worktree_read_path() {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            set_privacy(gcx.clone(), Vec::new()).await;
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            fs::create_dir_all(source.join("src")).unwrap();
+            let source = dunce::simplified(&fs::canonicalize(source).unwrap()).to_path_buf();
+            let hash = refact_worktrees::service::project_hash_for_path(&source);
+            let worktree_root = gcx.cache_dir.join("worktrees").join(&hash).join("wt-tools");
+            fs::create_dir_all(worktree_root.join("src")).unwrap();
+            let worktree_root =
+                dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
+            let source_file = source.join("src/fast.rs");
+            let worktree_file = worktree_root.join("src/fast.rs");
+            fs::write(&source_file, "fn source() {}\n").unwrap();
+            fs::write(&worktree_file, "fn worktree_edited() {}\n").unwrap();
+            let worktree = WorktreeMeta {
+                id: "wt-tools".to_string(),
+                kind: "task_agent".to_string(),
+                root: worktree_root,
+                source_workspace_root: source.clone(),
+                repo_root: source.clone(),
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some("base".to_string()),
+                task_id: Some("task".to_string()),
+                card_id: Some("card".to_string()),
+                agent_id: Some("agent".to_string()),
+                enforce: true,
+            };
+            write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+            let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+            *gcx.codegraph.lock().await = Some(service.clone());
+            let source_key = source_file.to_string_lossy().to_string();
+            let worktree_read_path = worktree_file.to_string_lossy().to_string();
+
+            service.enqueue_files(&[source_key.clone()]);
+            fast_enqueue_for_edit(gcx.clone(), &[worktree_file.clone()])
+                .await
+                .unwrap();
+
+            let queued = service.drain_batch_entries(10);
+            assert_eq!(
+                queued,
+                vec![refact_codegraph::QueuedPath::new(
+                    source_key.clone(),
+                    worktree_read_path,
+                )]
+            );
+            crate::codegraph::cg_highlev::process_index_batch(gcx.clone(), service.clone(), queued)
+                .await;
+
+            assert_eq!(
+                service.all_files_with_text().await.unwrap(),
+                vec![(source_key, "fn worktree_edited() {}\n".to_string())]
+            );
+        }
+
+        #[tokio::test]
         async fn worktree_scope_tools_absolute_warnings_and_privacy() {
             let f = fixture().await;
             fs::write(f.root.join("src/absolute.txt"), "old\n").unwrap();
