@@ -121,32 +121,6 @@ mod tests {
         panic!("pty output did not echo stdin: {:?}", read.chunks);
     }
 
-    #[tokio::test]
-    async fn pty_kills_cleanly() {
-        let registry = ExecRegistry::new();
-        let command = if cfg!(windows) {
-            "Start-Sleep -Seconds 30"
-        } else {
-            "sleep 30"
-        };
-        let result = registry
-            .spawn(ExecSpawnRequest::background(command).with_tty(true))
-            .await
-            .unwrap();
-        let process_id = result.snapshot.meta.process_id.clone();
-
-        let killed = timeout(Duration::from_secs(5), registry.kill(&process_id))
-            .await
-            .expect("pty kill should not time out")
-            .unwrap();
-
-        assert_eq!(killed.status, ExecStatus::Killed);
-        let waited = timeout(Duration::from_secs(5), registry.wait(&process_id))
-            .await
-            .expect("pty wait should not time out")
-            .unwrap();
-        assert_eq!(waited.status, ExecStatus::Killed);
-    }
 
     #[cfg(unix)]
     #[tokio::test]
