@@ -400,7 +400,7 @@ impl BackgroundAgentRegistry {
         self.runtime.read().await.contains_key(agent_id)
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub async fn set_last_update_at_for_test(
         &self,
         agent_id: &str,
@@ -414,7 +414,7 @@ impl BackgroundAgentRegistry {
         storage::save_record(&self.storage_root, record).await
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub async fn set_deferred_at_for_test(
         &self,
         agent_id: &str,
@@ -428,7 +428,7 @@ impl BackgroundAgentRegistry {
         storage::save_record(&self.storage_root, record).await
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub async fn clear_result_summary_for_test(&self, agent_id: &str) -> Result<(), String> {
         let mut records = self.records.write().await;
         let record = records
@@ -585,7 +585,7 @@ impl BackgroundAgentRegistry {
     }
 }
 
-pub(crate) fn normalize_path_for_overlap(path: &str) -> String {
+pub fn normalize_path_for_overlap(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let mut collapsed = String::with_capacity(normalized.len());
     let mut previous_slash = false;
