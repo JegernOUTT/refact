@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -48,6 +48,11 @@ CREATE INDEX IF NOT EXISTS idx_pending_name ON pending_refs(name);
 
 CREATE TABLE IF NOT EXISTS dirty_paths (
     path TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS file_hashes (
+    path TEXT PRIMARY KEY,
+    hash TEXT NOT NULL
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_code USING fts5(path UNINDEXED, text);

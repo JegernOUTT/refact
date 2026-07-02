@@ -56,6 +56,21 @@ fn qualify(path: &str, in_file_path: &str) -> String {
     format!("{}::{}", normalized_file_namespace(path), in_file_path)
 }
 
+fn content_hash(text: &str, lang: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in lang.bytes().chain([0xff]).chain(text.bytes()) {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn reference_last_segment(name: &str) -> &str {
+    name.rsplit([':', '.', '/'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(name)
+}
+
 fn add_symbol_reference_keys(keys: &mut HashSet<String>, dcp: &str, name: &str) {
     if !name.is_empty() {
         keys.insert(name.to_string());
@@ -104,6 +119,7 @@ impl Store {
         } else {
             conn
         };
+        Self::tune_persistent_connection(&conn)?;
         let store = Self { conn };
         store.apply_schema()?;
         Ok(store)
@@ -114,6 +130,20 @@ impl Store {
         let store = Self { conn };
         store.apply_schema()?;
         Ok(store)
+    }
+
+    fn tune_persistent_connection(conn: &Connection) -> Result<(), String> {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| format!("codegraph pragma journal_mode: {e}"))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| format!("codegraph pragma synchronous: {e}"))?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(|e| format!("codegraph pragma temp_store: {e}"))?;
+        conn.pragma_update(None, "cache_size", -65_536i64)
+            .map_err(|e| format!("codegraph pragma cache_size: {e}"))?;
+        conn.pragma_update(None, "mmap_size", 268_435_456i64)
+            .map_err(|e| format!("codegraph pragma mmap_size: {e}"))?;
+        Ok(())
     }
 
     fn schema_mismatch(conn: &Connection) -> Result<bool, String> {
@@ -203,14 +233,25 @@ impl Store {
         line1: i64,
         line2: i64,
     ) -> Result<i64, String> {
-        self.conn
-            .execute(
-                "INSERT INTO nodes(kind, path, name, lang, line1, line2) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![kind, path, name, lang, line1, line2],
-            )
-            .map_err(|e| format!("codegraph insert_node: {e}"))?;
-        Ok(self.conn.last_insert_rowid())
+        Self::insert_node_on(&self.conn, kind, path, name, lang, line1, line2)
+    }
+
+    fn insert_node_on(
+        conn: &Connection,
+        kind: &str,
+        path: &str,
+        name: &str,
+        lang: &str,
+        line1: i64,
+        line2: i64,
+    ) -> Result<i64, String> {
+        conn.execute(
+            "INSERT INTO nodes(kind, path, name, lang, line1, line2) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![kind, path, name, lang, line1, line2],
+        )
+        .map_err(|e| format!("codegraph insert_node: {e}"))?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn insert_node_with_data(
@@ -223,14 +264,26 @@ impl Store {
         line2: i64,
         data: &str,
     ) -> Result<i64, String> {
-        self.conn
-            .execute(
-                "INSERT INTO nodes(kind, path, name, lang, line1, line2, data) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![kind, path, name, lang, line1, line2, data],
-            )
-            .map_err(|e| format!("codegraph insert_node_with_data: {e}"))?;
-        Ok(self.conn.last_insert_rowid())
+        Self::insert_node_with_data_on(&self.conn, kind, path, name, lang, line1, line2, data)
+    }
+
+    fn insert_node_with_data_on(
+        conn: &Connection,
+        kind: &str,
+        path: &str,
+        name: &str,
+        lang: &str,
+        line1: i64,
+        line2: i64,
+        data: &str,
+    ) -> Result<i64, String> {
+        conn.execute(
+            "INSERT INTO nodes(kind, path, name, lang, line1, line2, data) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![kind, path, name, lang, line1, line2, data],
+        )
+        .map_err(|e| format!("codegraph insert_node_with_data: {e}"))?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn symbol_data_for_path(&self, path: &str) -> Result<Vec<SymbolData>, String> {
@@ -315,13 +368,22 @@ impl Store {
     }
 
     pub fn add_edge(&self, src: i64, dst: i64, kind: &str, confidence: f64) -> Result<i64, String> {
-        self.conn
-            .execute(
-                "INSERT INTO edges(src, dst, kind, confidence) VALUES(?1, ?2, ?3, ?4)",
-                params![src, dst, kind, confidence],
-            )
-            .map_err(|e| format!("codegraph add_edge: {e}"))?;
-        Ok(self.conn.last_insert_rowid())
+        Self::add_edge_on(&self.conn, src, dst, kind, confidence)
+    }
+
+    fn add_edge_on(
+        conn: &Connection,
+        src: i64,
+        dst: i64,
+        kind: &str,
+        confidence: f64,
+    ) -> Result<i64, String> {
+        conn.execute(
+            "INSERT INTO edges(src, dst, kind, confidence) VALUES(?1, ?2, ?3, ?4)",
+            params![src, dst, kind, confidence],
+        )
+        .map_err(|e| format!("codegraph add_edge: {e}"))?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn add_edge_line(
@@ -332,22 +394,39 @@ impl Store {
         confidence: f64,
         line: i64,
     ) -> Result<i64, String> {
-        self.conn
-            .execute(
-                "INSERT INTO edges(src, dst, kind, confidence, line) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![src, dst, kind, confidence, line],
-            )
-            .map_err(|e| format!("codegraph add_edge_line: {e}"))?;
-        Ok(self.conn.last_insert_rowid())
+        Self::add_edge_line_on(&self.conn, src, dst, kind, confidence, line)
+    }
+
+    fn add_edge_line_on(
+        conn: &Connection,
+        src: i64,
+        dst: i64,
+        kind: &str,
+        confidence: f64,
+        line: i64,
+    ) -> Result<i64, String> {
+        conn.execute(
+            "INSERT INTO edges(src, dst, kind, confidence, line) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![src, dst, kind, confidence, line],
+        )
+        .map_err(|e| format!("codegraph add_edge_line: {e}"))?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn add_symbol(&self, double_colon_path: &str, node_id: i64) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT INTO symbols(double_colon_path, node_id) VALUES(?1, ?2)",
-                params![double_colon_path, node_id],
-            )
-            .map_err(|e| format!("codegraph add_symbol: {e}"))?;
+        Self::add_symbol_on(&self.conn, double_colon_path, node_id)
+    }
+
+    fn add_symbol_on(
+        conn: &Connection,
+        double_colon_path: &str,
+        node_id: i64,
+    ) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO symbols(double_colon_path, node_id) VALUES(?1, ?2)",
+            params![double_colon_path, node_id],
+        )
+        .map_err(|e| format!("codegraph add_symbol: {e}"))?;
         Ok(())
     }
 
@@ -358,12 +437,21 @@ impl Store {
         kind: &str,
         line: i64,
     ) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT INTO pending_refs(from_node_id, name, kind, line) VALUES(?1, ?2, ?3, ?4)",
-                params![from_node_id, name, kind, line],
-            )
-            .map_err(|e| format!("codegraph add_pending_ref: {e}"))?;
+        Self::add_pending_ref_on(&self.conn, from_node_id, name, kind, line)
+    }
+
+    fn add_pending_ref_on(
+        conn: &Connection,
+        from_node_id: i64,
+        name: &str,
+        kind: &str,
+        line: i64,
+    ) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO pending_refs(from_node_id, name, kind, line) VALUES(?1, ?2, ?3, ?4)",
+            params![from_node_id, name, kind, line],
+        )
+        .map_err(|e| format!("codegraph add_pending_ref: {e}"))?;
         Ok(())
     }
 
@@ -426,14 +514,17 @@ impl Store {
         Ok(out)
     }
 
-    fn all_pending_refs(&self) -> Result<Vec<(i64, String, String, String, i64)>, String> {
+    fn pending_refs_for_dirty_paths(
+        &self,
+    ) -> Result<Vec<(i64, String, String, String, i64)>, String> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT p.from_node_id, n.path, p.name, p.kind, p.line \
-                 FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id",
+                 FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
+                 WHERE n.path IN (SELECT path FROM dirty_paths)",
             )
-            .map_err(|e| format!("codegraph all_pending_refs prepare: {e}"))?;
+            .map_err(|e| format!("codegraph dirty pending_refs prepare: {e}"))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -444,10 +535,42 @@ impl Store {
                     row.get::<_, i64>(4)?,
                 ))
             })
-            .map_err(|e| format!("codegraph all_pending_refs: {e}"))?;
+            .map_err(|e| format!("codegraph dirty pending_refs: {e}"))?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(|e| format!("codegraph all_pending_refs row: {e}"))?);
+            out.push(r.map_err(|e| format!("codegraph dirty pending_refs row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    fn symbols_for_refs(
+        &self,
+        refs: &[(i64, String, String, String, i64)],
+    ) -> Result<Vec<(String, i64)>, String> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.double_colon_path, s.node_id FROM symbols s \
+                 JOIN nodes n ON n.id = s.node_id \
+                 WHERE s.double_colon_path = ?1 OR s.double_colon_path = ?2 OR n.name = ?3",
+            )
+            .map_err(|e| format!("codegraph symbols_for_refs prepare: {e}"))?;
+        for (_, from_path, name, _, _) in refs {
+            let local_name = qualify(from_path, name);
+            let last = reference_last_segment(name);
+            let rows = stmt
+                .query_map(params![local_name, name, last], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| format!("codegraph symbols_for_refs: {e}"))?;
+            for r in rows {
+                let item = r.map_err(|e| format!("codegraph symbols_for_refs row: {e}"))?;
+                if seen.insert(item.clone()) {
+                    out.push(item);
+                }
+            }
         }
         Ok(out)
     }
@@ -471,19 +594,24 @@ impl Store {
         Ok(self.scalar_i64("SELECT COUNT(*) FROM dirty_paths")? > 0)
     }
 
-    fn mark_path_dirty(&self, path: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO dirty_paths(path) VALUES(?1)",
-                params![path],
-            )
-            .map_err(|e| format!("codegraph mark dirty path: {e}"))?;
+    fn mark_path_dirty_on(conn: &Connection, path: &str) -> Result<(), String> {
+        conn.execute(
+            "INSERT OR IGNORE INTO dirty_paths(path) VALUES(?1)",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph mark dirty path: {e}"))?;
         Ok(())
     }
 
     fn symbol_reference_keys_for_path(&self, path: &str) -> Result<HashSet<String>, String> {
-        let mut stmt = self
-            .conn
+        Self::symbol_reference_keys_for_path_on(&self.conn, path)
+    }
+
+    fn symbol_reference_keys_for_path_on(
+        conn: &Connection,
+        path: &str,
+    ) -> Result<HashSet<String>, String> {
+        let mut stmt = conn
             .prepare(
                 "SELECT s.double_colon_path, n.name FROM symbols s JOIN nodes n ON n.id = s.node_id \
                  WHERE n.path = ?1",
@@ -503,16 +631,80 @@ impl Store {
         Ok(out)
     }
 
-    fn mark_paths_referencing_keys(&self, keys: &HashSet<String>) -> Result<(), String> {
+    fn mark_paths_referencing_keys_on(
+        conn: &Connection,
+        keys: &HashSet<String>,
+    ) -> Result<(), String> {
         for key in keys {
-            self.conn
-                .execute(
-                    "INSERT OR IGNORE INTO dirty_paths(path) \
-                     SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
-                     WHERE p.name = ?1",
-                    params![key],
-                )
-                .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+            conn.execute(
+                "INSERT OR IGNORE INTO dirty_paths(path) \
+                 SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
+                 WHERE p.name = ?1 OR p.name LIKE '%::' || ?1 OR p.name LIKE '%.' || ?1 \
+                 OR p.name LIKE '%/' || ?1",
+                params![key],
+            )
+            .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn stored_file_hash(&self, path: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT hash FROM file_hashes WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("codegraph file hash lookup: {e}"))
+    }
+
+    fn file_node_id(&self, path: &str) -> Result<Option<i64>, String> {
+        self.conn
+            .query_row(
+                "SELECT id FROM nodes WHERE kind = 'file' AND path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("codegraph file node lookup: {e}"))
+    }
+
+    fn set_file_hash_on(conn: &Connection, path: &str, hash: &str) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO file_hashes(path, hash) VALUES(?1, ?2) \
+             ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
+            params![path, hash],
+        )
+        .map_err(|e| format!("codegraph file hash update: {e}"))?;
+        Ok(())
+    }
+
+    fn remove_path_on(conn: &Connection, path: &str, delete_hash: bool) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM pending_refs WHERE from_node_id IN \
+             (SELECT id FROM nodes WHERE path = ?1)",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove pending_refs: {e}"))?;
+        conn.execute(
+            "DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE path = ?1) \
+             OR dst IN (SELECT id FROM nodes WHERE path = ?1)",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove edges: {e}"))?;
+        conn.execute(
+            "DELETE FROM symbols WHERE node_id IN (SELECT id FROM nodes WHERE path = ?1)",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove symbols: {e}"))?;
+        conn.execute("DELETE FROM nodes WHERE path = ?1", params![path])
+            .map_err(|e| format!("codegraph remove nodes: {e}"))?;
+        conn.execute("DELETE FROM fts_code WHERE path = ?1", params![path])
+            .map_err(|e| format!("codegraph remove fts: {e}"))?;
+        if delete_hash {
+            conn.execute("DELETE FROM file_hashes WHERE path = ?1", params![path])
+                .map_err(|e| format!("codegraph remove file hash: {e}"))?;
         }
         Ok(())
     }
@@ -527,8 +719,8 @@ impl Store {
             dirty_paths.len()
         );
 
-        let dirty_set: HashSet<String> = dirty_paths.iter().cloned().collect();
-        let symbols = self.all_symbols()?;
+        let refs = self.pending_refs_for_dirty_paths()?;
+        let symbols = self.symbols_for_refs(&refs)?;
         let mut resolver = Resolver::new();
         let mut dcp_to_node: HashMap<String, i64> = HashMap::new();
         for (dcp, node_id) in &symbols {
@@ -544,10 +736,7 @@ impl Store {
             )
             .map_err(|e| format!("codegraph connect_usages clear: {e}"))?;
 
-        for (from_node_id, from_path, name, kind, line) in self.all_pending_refs()? {
-            if !dirty_set.contains(&from_path) {
-                continue;
-            }
+        for (from_node_id, from_path, name, kind, line) in refs {
             let local_name = qualify(&from_path, &name);
             if let Some(res) = resolver
                 .resolve(&local_name)
@@ -555,7 +744,8 @@ impl Store {
             {
                 if let Some(&dst_id) = dcp_to_node.get(&res.target) {
                     if dst_id != from_node_id {
-                        self.add_edge_line(
+                        Self::add_edge_line_on(
+                            &self.conn,
                             from_node_id,
                             dst_id,
                             &kind,
@@ -631,56 +821,70 @@ impl Store {
 
     pub fn remove_path(&self, path: &str) -> Result<(), String> {
         let affected_keys = self.symbol_reference_keys_for_path(path)?;
-        self.mark_path_dirty(path)?;
-        self.mark_paths_referencing_keys(&affected_keys)?;
-        self.conn
-            .execute(
-                "DELETE FROM pending_refs WHERE from_node_id IN \
-                 (SELECT id FROM nodes WHERE path = ?1)",
-                params![path],
-            )
-            .map_err(|e| format!("codegraph remove pending_refs: {e}"))?;
-        self.conn
-            .execute(
-                "DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE path = ?1) \
-                 OR dst IN (SELECT id FROM nodes WHERE path = ?1)",
-                params![path],
-            )
-            .map_err(|e| format!("codegraph remove edges: {e}"))?;
-        self.conn
-            .execute(
-                "DELETE FROM symbols WHERE node_id IN (SELECT id FROM nodes WHERE path = ?1)",
-                params![path],
-            )
-            .map_err(|e| format!("codegraph remove symbols: {e}"))?;
-        self.conn
-            .execute("DELETE FROM nodes WHERE path = ?1", params![path])
-            .map_err(|e| format!("codegraph remove nodes: {e}"))?;
-        self.conn
-            .execute("DELETE FROM fts_code WHERE path = ?1", params![path])
-            .map_err(|e| format!("codegraph remove fts: {e}"))?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("codegraph remove_path transaction: {e}"))?;
+        Self::mark_path_dirty_on(&tx, path)?;
+        Self::mark_paths_referencing_keys_on(&tx, &affected_keys)?;
+        Self::remove_path_on(&tx, path, true)?;
+        tx.commit()
+            .map_err(|e| format!("codegraph remove_path commit: {e}"))?;
         Ok(())
     }
 
     pub fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<i64, String> {
-        self.remove_path(path)?;
+        let hash = content_hash(text, lang);
+        if self.stored_file_hash(path)?.as_deref() == Some(hash.as_str()) {
+            if let Some(file_id) = self.file_node_id(path)? {
+                debug!("codegraph: index_file hash-skip {path}");
+                return Ok(file_id);
+            }
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("codegraph index_file transaction: {e}"))?;
+        let node_id = Self::index_file_on(&tx, path, text, lang, &hash)?;
+        tx.commit()
+            .map_err(|e| format!("codegraph index_file commit: {e}"))?;
+        Ok(node_id)
+    }
+
+    fn index_file_on(
+        conn: &Connection,
+        path: &str,
+        text: &str,
+        lang: &str,
+        hash: &str,
+    ) -> Result<i64, String> {
+        let affected_keys = Self::symbol_reference_keys_for_path_on(conn, path)?;
+        Self::mark_path_dirty_on(conn, path)?;
+        Self::mark_paths_referencing_keys_on(conn, &affected_keys)?;
+        Self::remove_path_on(conn, path, false)?;
         let line_count = text.lines().count() as i64;
         let name = Path::new(path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string());
-        let node_id = self.insert_node("file", path, &name, lang, 1, line_count.max(1))?;
-        self.conn
-            .execute(
-                "INSERT INTO fts_code(path, text) VALUES(?1, ?2)",
-                params![path, text],
-            )
-            .map_err(|e| format!("codegraph fts insert: {e}"))?;
+        let node_id = Self::insert_node_on(conn, "file", path, &name, lang, 1, line_count.max(1))?;
+        conn.execute(
+            "INSERT INTO fts_code(path, text) VALUES(?1, ?2)",
+            params![path, text],
+        )
+        .map_err(|e| format!("codegraph fts insert: {e}"))?;
+        Self::set_file_hash_on(conn, path, hash)?;
         Ok(node_id)
     }
 
     pub fn index_file_graph(&self, path: &str, text: &str, lang: &str) -> Result<i64, String> {
-        let file_id = self.index_file(path, text, lang)?;
+        let hash = content_hash(text, lang);
+        if self.stored_file_hash(path)?.as_deref() == Some(hash.as_str()) {
+            if let Some(file_id) = self.file_node_id(path)? {
+                debug!("codegraph: index_file_graph hash-skip {path}");
+                return Ok(file_id);
+            }
+        }
 
         let (symbols, refs) = extract_symbols(lang, text);
         let routes = refact_codegraph_parsers::frameworks::detect_routes(lang, text);
@@ -690,9 +894,12 @@ impl Store {
             refs.len(),
             routes.len()
         );
-        if symbols.is_empty() && refs.is_empty() && routes.is_empty() {
-            return Ok(file_id);
-        }
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("codegraph index_file_graph transaction: {e}"))?;
+        let file_id = Self::index_file_on(&tx, path, text, lang, &hash)?;
 
         let mut resolver = Resolver::new();
         for symbol in &symbols {
@@ -704,15 +911,15 @@ impl Store {
             let dcp = qualify(path, &symbol.double_colon_path());
             add_symbol_reference_keys(&mut affected_keys, &dcp, &symbol.name());
         }
-        self.mark_paths_referencing_keys(&affected_keys)?;
-        self.mark_path_dirty(path)?;
+        Self::mark_paths_referencing_keys_on(&tx, &affected_keys)?;
 
         let mut path_to_node: HashMap<String, i64> = HashMap::new();
         for symbol in &symbols {
             let kind = format!("{:?}", symbol.kind).to_lowercase();
             let data = serde_json::to_string(symbol)
                 .map_err(|e| format!("codegraph serialize symbol: {e}"))?;
-            let node_id = self.insert_node_with_data(
+            let node_id = Self::insert_node_with_data_on(
+                &tx,
                 &kind,
                 path,
                 &symbol.name(),
@@ -722,8 +929,8 @@ impl Store {
                 &data,
             )?;
             let dcp = qualify(path, &symbol.double_colon_path());
-            self.add_symbol(&dcp, node_id)?;
-            self.add_edge(node_id, file_id, "defined_in", 1.0)?;
+            Self::add_symbol_on(&tx, &dcp, node_id)?;
+            Self::add_edge_on(&tx, node_id, file_id, "defined_in", 1.0)?;
             path_to_node.insert(dcp, node_id);
         }
 
@@ -734,7 +941,13 @@ impl Store {
             let from_dcp = qualify(path, &symbol.double_colon_path());
             if let Some(&from_id) = path_to_node.get(&from_dcp) {
                 for base in &symbol.this_class_derived_from {
-                    self.add_pending_ref(from_id, base, "inherits", symbol.decl_line1 as i64)?;
+                    Self::add_pending_ref_on(
+                        &tx,
+                        from_id,
+                        base,
+                        "inherits",
+                        symbol.decl_line1 as i64,
+                    )?;
                 }
             }
         }
@@ -744,7 +957,7 @@ impl Store {
             let Some(&src_id) = path_to_node.get(&from_dcp) else {
                 continue;
             };
-            self.add_pending_ref(src_id, &r.name, edge_kind_str(r.kind), r.line as i64)?;
+            Self::add_pending_ref_on(&tx, src_id, &r.name, edge_kind_str(r.kind), r.line as i64)?;
             let local_name = qualify(path, &r.name);
             if let Some(res) = resolver
                 .resolve(&local_name)
@@ -752,7 +965,8 @@ impl Store {
             {
                 if let Some(&dst_id) = path_to_node.get(&res.target) {
                     if src_id != dst_id {
-                        self.add_edge_line(
+                        Self::add_edge_line_on(
+                            &tx,
                             src_id,
                             dst_id,
                             edge_kind_str(r.kind),
@@ -765,11 +979,13 @@ impl Store {
         }
 
         for route in routes {
-            let route_id = self.insert_node("route", path, &route.label(), lang, 0, 0)?;
-            self.add_edge(route_id, file_id, "defined_in", 1.0)?;
-            self.add_pending_ref(route_id, &route.handler, "route_handler", 0)?;
+            let route_id = Self::insert_node_on(&tx, "route", path, &route.label(), lang, 0, 0)?;
+            Self::add_edge_on(&tx, route_id, file_id, "defined_in", 1.0)?;
+            Self::add_pending_ref_on(&tx, route_id, &route.handler, "route_handler", 0)?;
         }
 
+        tx.commit()
+            .map_err(|e| format!("codegraph index_file_graph commit: {e}"))?;
         Ok(file_id)
     }
 
@@ -923,6 +1139,20 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn call_edges_to_helper(store: &Store, source_path: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind = 'calls' AND sn.path = ?1 AND dn.name = 'helper'",
+                params![source_path],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn open_recreates_old_schema_db_cleanly() {
         let dir = tempfile::tempdir().unwrap();
@@ -1017,6 +1247,88 @@ fn helper() {}
         store.index_file_graph("src/m.rs", src, "rust").unwrap();
         let second = store.counts().unwrap();
         assert_eq!(first, second, "re-indexing same file must not duplicate");
+    }
+
+    #[test]
+    fn identical_content_uses_hash_skip_without_dirtying() {
+        let store = Store::open_in_memory().unwrap();
+        let src = "fn a() { b(); }\nfn b() {}\n";
+        let first_id = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        store.connect_usages().unwrap();
+        assert!(!store.has_dirty_paths().unwrap());
+        let first = store.counts().unwrap();
+
+        let second_id = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        let second = store.counts().unwrap();
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(first, second);
+        assert!(!store.has_dirty_paths().unwrap());
+    }
+
+    #[test]
+    fn changed_content_reindexes_and_updates_hash() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/m.rs", "fn a() {}\n", "rust")
+            .unwrap();
+        let first_hash = store.stored_file_hash("src/m.rs").unwrap().unwrap();
+        let first = store.counts().unwrap();
+
+        store
+            .index_file_graph("src/m.rs", "fn a() {}\nfn b() {}\n", "rust")
+            .unwrap();
+        let second_hash = store.stored_file_hash("src/m.rs").unwrap().unwrap();
+        let second = store.counts().unwrap();
+
+        assert_ne!(first_hash, second_hash);
+        assert!(second.nodes > first.nodes);
+        let b_nodes: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE path = 'src/m.rs' AND name = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(b_nodes, 1);
+    }
+
+    #[test]
+    fn connect_usages_only_rebuilds_dirty_source_paths() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/b.rs", "fn run_b() { helper(); }\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/c.rs", "fn run_c() { helper(); }\n", "rust")
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM edges WHERE kind = 'calls' \
+                 AND src IN (SELECT id FROM nodes WHERE path = 'src/c.rs')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(call_edges_to_helper(&store, "src/c.rs"), 0);
+
+        store
+            .index_file_graph(
+                "src/b.rs",
+                "fn run_b() { helper(); }\nfn extra_b() {}\n",
+                "rust",
+            )
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        assert_eq!(call_edges_to_helper(&store, "src/b.rs"), 1);
+        assert_eq!(call_edges_to_helper(&store, "src/c.rs"), 0);
     }
 
     #[test]
