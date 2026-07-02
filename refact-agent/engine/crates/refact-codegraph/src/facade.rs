@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use refact_core::ast_types::{AstCounters, AstDefinition, SymbolType};
+use refact_core::ast_types::{AstCounters, AstDefinition, AstUsage, SymbolType};
 use refact_codegraph_parsers::{SymbolKind, SymbolNode};
 
-use crate::store::Store;
+use crate::store::{Store, SymbolData};
 
 fn symbol_type_of(kind: &SymbolKind) -> SymbolType {
     match kind {
@@ -39,13 +39,17 @@ fn friendly_dcp(dcp: &str) -> String {
     }
 }
 
-pub fn symbol_node_to_ast(symbol: &SymbolNode, node_path: &str) -> AstDefinition {
+pub fn symbol_node_to_ast(
+    symbol: &SymbolNode,
+    node_path: &str,
+    usages: Vec<AstUsage>,
+) -> AstDefinition {
     let mut official_path = vec![file_stem(node_path)];
     official_path.extend(symbol.official_path.iter().cloned());
     AstDefinition {
         official_path,
         symbol_type: symbol_type_of(&symbol.kind),
-        usages: Vec::new(),
+        usages,
         resolved_type: String::new(),
         this_is_a_class: symbol.this_is_a_class.clone(),
         this_class_derived_from: symbol.this_class_derived_from.clone(),
@@ -57,18 +61,33 @@ pub fn symbol_node_to_ast(symbol: &SymbolNode, node_path: &str) -> AstDefinition
     }
 }
 
-fn rows_to_defs(rows: Vec<(String, String)>) -> Vec<Arc<AstDefinition>> {
-    rows.into_iter()
-        .filter_map(|(node_path, data)| {
-            serde_json::from_str::<SymbolNode>(&data)
-                .ok()
-                .map(|s| Arc::new(symbol_node_to_ast(&s, &node_path)))
-        })
-        .collect()
+fn usage_to_ast(line: usize, resolved_as: String, kind: String) -> AstUsage {
+    AstUsage {
+        targets_for_guesswork: Vec::new(),
+        resolved_as,
+        debug_hint: kind,
+        uline: line.saturating_sub(1),
+    }
+}
+
+fn rows_to_defs(store: &Store, rows: Vec<SymbolData>) -> Result<Vec<Arc<AstDefinition>>, String> {
+    let mut defs = Vec::new();
+    for row in rows {
+        let Ok(symbol) = serde_json::from_str::<SymbolNode>(&row.data) else {
+            continue;
+        };
+        let usages = store
+            .usage_data_for_node(row.node_id)?
+            .into_iter()
+            .map(|(line, resolved_as, kind)| usage_to_ast(line, friendly_dcp(&resolved_as), kind))
+            .collect();
+        defs.push(Arc::new(symbol_node_to_ast(&symbol, &row.path, usages)));
+    }
+    Ok(defs)
 }
 
 pub fn doc_defs(store: &Store, cpath: &str) -> Result<Vec<Arc<AstDefinition>>, String> {
-    Ok(rows_to_defs(store.symbol_data_for_path(cpath)?))
+    rows_to_defs(store, store.symbol_data_for_path(cpath)?)
 }
 
 pub fn definitions(
@@ -83,7 +102,7 @@ pub fn definitions(
             }
         }
     }
-    Ok(rows_to_defs(rows))
+    rows_to_defs(store, rows)
 }
 
 pub fn definition_paths_fuzzy(
@@ -164,8 +183,8 @@ pub fn type_hierarchy(store: &Store, subtree_of: &str) -> Result<String, String>
 pub fn fetch_counters(store: &Store) -> Result<AstCounters, String> {
     let c = store.counts()?;
     Ok(AstCounters {
-        counter_defs: (c.nodes - c.files).max(0) as i32,
-        counter_usages: c.edges as i32,
+        counter_defs: store.symbol_count()? as i32,
+        counter_usages: store.usage_edge_count()? as i32,
         counter_docs: c.files as i32,
     })
 }
@@ -213,6 +232,18 @@ fn helper() {}
     }
 
     #[test]
+    fn doc_defs_returns_codegraph_usages() {
+        let store = store_with_rust();
+        store.connect_usages().unwrap();
+        let defs = doc_defs(&store, "src/widget.rs").unwrap();
+        let render = defs.iter().find(|d| d.name() == "render").unwrap();
+
+        assert!(render.usages.iter().any(|usage| {
+            usage.resolved_as == "widget::helper" && usage.debug_hint == "calls" && usage.uline == 4
+        }));
+    }
+
+    #[test]
     fn definitions_resolves_by_double_colon_path() {
         let store = store_with_rust();
         let defs = definitions(&store, "Widget::render").unwrap();
@@ -233,6 +264,26 @@ fn helper() {}
         let counters = fetch_counters(&store).unwrap();
         assert_eq!(counters.counter_docs, 1);
         assert!(counters.counter_defs >= 3);
+    }
+
+    #[test]
+    fn fetch_counters_counts_symbols_not_helper_nodes() {
+        let store = Store::open_in_memory().unwrap();
+        let file_id = store
+            .insert_node("file", "src/api.rs", "api.rs", "rust", 1, 3)
+            .unwrap();
+        let route_id = store
+            .insert_node("route", "src/api.rs", "GET /users", "rust", 0, 0)
+            .unwrap();
+        store
+            .add_edge(route_id, file_id, "defined_in", 1.0)
+            .unwrap();
+
+        let counters = fetch_counters(&store).unwrap();
+
+        assert_eq!(counters.counter_docs, 1);
+        assert_eq!(counters.counter_defs, 0);
+        assert_eq!(counters.counter_usages, 0);
     }
 
     #[test]

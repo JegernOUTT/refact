@@ -144,6 +144,11 @@ impl CodeGraphService {
         store.connect_usages()
     }
 
+    pub async fn has_dirty_usage_paths(&self) -> Result<bool, String> {
+        let store = self.store.lock().await;
+        store.has_dirty_paths()
+    }
+
     pub async fn doc_usages(&self, cpath: &str) -> Result<Vec<(usize, String)>, String> {
         let store = self.store.lock().await;
         store.doc_usages(cpath)

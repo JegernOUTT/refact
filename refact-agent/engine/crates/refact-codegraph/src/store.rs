@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -55,12 +55,35 @@ fn qualify(path: &str, in_file_path: &str) -> String {
     format!("{}::{}", normalized_file_namespace(path), in_file_path)
 }
 
+fn add_symbol_reference_keys(keys: &mut HashSet<String>, dcp: &str, name: &str) {
+    if !name.is_empty() {
+        keys.insert(name.to_string());
+    }
+    if !dcp.is_empty() {
+        keys.insert(dcp.to_string());
+    }
+    let parts: Vec<&str> = dcp.split("::").collect();
+    for i in 1..parts.len() {
+        let suffix = parts[i..].join("::");
+        if !suffix.is_empty() {
+            keys.insert(suffix);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counts {
     pub nodes: i64,
     pub edges: i64,
     pub files: i64,
     pub fts_docs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolData {
+    pub node_id: i64,
+    pub path: String,
+    pub data: String,
 }
 
 pub struct Store {
@@ -209,35 +232,68 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn symbol_data_for_path(&self, path: &str) -> Result<Vec<(String, String)>, String> {
+    pub fn symbol_data_for_path(&self, path: &str) -> Result<Vec<SymbolData>, String> {
         self.query_symbol_data(
-            "SELECT path, data FROM nodes WHERE path = ?1 AND data IS NOT NULL ORDER BY line1",
+            "SELECT id, path, data FROM nodes WHERE path = ?1 AND data IS NOT NULL ORDER BY line1",
             path,
         )
     }
 
-    pub fn symbol_data_by_dcp(&self, dcp: &str) -> Result<Vec<(String, String)>, String> {
+    pub fn symbol_data_by_dcp(&self, dcp: &str) -> Result<Vec<SymbolData>, String> {
         self.query_symbol_data(
-            "SELECT n.path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
+            "SELECT n.id, n.path, n.data FROM symbols s JOIN nodes n ON n.id = s.node_id \
              WHERE (s.double_colon_path = ?1 OR s.double_colon_path LIKE '%::' || ?1) \
              AND n.data IS NOT NULL",
             dcp,
         )
     }
 
-    fn query_symbol_data(&self, sql: &str, arg: &str) -> Result<Vec<(String, String)>, String> {
+    fn query_symbol_data(&self, sql: &str, arg: &str) -> Result<Vec<SymbolData>, String> {
         let mut stmt = self
             .conn
             .prepare(sql)
             .map_err(|e| format!("codegraph query_symbol_data prepare: {e}"))?;
         let rows = stmt
             .query_map(params![arg], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok(SymbolData {
+                    node_id: row.get(0)?,
+                    path: row.get(1)?,
+                    data: row.get(2)?,
+                })
             })
             .map_err(|e| format!("codegraph query_symbol_data: {e}"))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r.map_err(|e| format!("codegraph query_symbol_data row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    pub fn usage_data_for_node(
+        &self,
+        node_id: i64,
+    ) -> Result<Vec<(usize, String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT e.line, COALESCE(s.double_colon_path, dn.name), e.kind FROM edges e \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 LEFT JOIN symbols s ON s.node_id = dn.id \
+                 WHERE e.src = ?1 AND e.kind != 'defined_in' ORDER BY e.line, e.id",
+            )
+            .map_err(|e| format!("codegraph usage_data_for_node prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![node_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("codegraph usage_data_for_node: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph usage_data_for_node row: {e}"))?);
         }
         Ok(out)
     }
@@ -395,7 +451,78 @@ impl Store {
         Ok(out)
     }
 
+    fn dirty_paths(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM dirty_paths ORDER BY path")
+            .map_err(|e| format!("codegraph dirty_paths prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("codegraph dirty_paths: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph dirty_paths row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    pub fn has_dirty_paths(&self) -> Result<bool, String> {
+        Ok(self.scalar_i64("SELECT COUNT(*) FROM dirty_paths")? > 0)
+    }
+
+    fn mark_path_dirty(&self, path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO dirty_paths(path) VALUES(?1)",
+                params![path],
+            )
+            .map_err(|e| format!("codegraph mark dirty path: {e}"))?;
+        Ok(())
+    }
+
+    fn symbol_reference_keys_for_path(&self, path: &str) -> Result<HashSet<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.double_colon_path, n.name FROM symbols s JOIN nodes n ON n.id = s.node_id \
+                 WHERE n.path = ?1",
+            )
+            .map_err(|e| format!("codegraph symbol_reference_keys_for_path prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![path], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("codegraph symbol_reference_keys_for_path: {e}"))?;
+        let mut out = HashSet::new();
+        for r in rows {
+            let (dcp, name) =
+                r.map_err(|e| format!("codegraph symbol_reference_keys_for_path row: {e}"))?;
+            add_symbol_reference_keys(&mut out, &dcp, &name);
+        }
+        Ok(out)
+    }
+
+    fn mark_paths_referencing_keys(&self, keys: &HashSet<String>) -> Result<(), String> {
+        for key in keys {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO dirty_paths(path) \
+                     SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
+                     WHERE p.name = ?1",
+                    params![key],
+                )
+                .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+        }
+        Ok(())
+    }
+
     pub fn connect_usages(&self) -> Result<(), String> {
+        let dirty_paths = self.dirty_paths()?;
+        if dirty_paths.is_empty() {
+            return Ok(());
+        }
+
+        let dirty_set: HashSet<String> = dirty_paths.iter().cloned().collect();
         let symbols = self.all_symbols()?;
         let mut resolver = Resolver::new();
         let mut dcp_to_node: HashMap<String, i64> = HashMap::new();
@@ -405,10 +532,17 @@ impl Store {
         }
 
         self.conn
-            .execute("DELETE FROM edges WHERE kind != 'defined_in'", [])
+            .execute(
+                "DELETE FROM edges WHERE kind != 'defined_in' \
+                 AND src IN (SELECT id FROM nodes WHERE path IN (SELECT path FROM dirty_paths))",
+                [],
+            )
             .map_err(|e| format!("codegraph connect_usages clear: {e}"))?;
 
         for (from_node_id, from_path, name, kind, line) in self.all_pending_refs()? {
+            if !dirty_set.contains(&from_path) {
+                continue;
+            }
             let local_name = qualify(&from_path, &name);
             if let Some(res) = resolver
                 .resolve(&local_name)
@@ -427,6 +561,10 @@ impl Store {
                 }
             }
         }
+
+        self.conn
+            .execute("DELETE FROM dirty_paths", [])
+            .map_err(|e| format!("codegraph connect_usages clear dirty paths: {e}"))?;
         Ok(())
     }
 
@@ -474,7 +612,18 @@ impl Store {
         Ok(out)
     }
 
+    pub fn symbol_count(&self) -> Result<i64, String> {
+        self.scalar_i64("SELECT COUNT(*) FROM symbols")
+    }
+
+    pub fn usage_edge_count(&self) -> Result<i64, String> {
+        self.scalar_i64("SELECT COUNT(*) FROM edges WHERE kind != 'defined_in'")
+    }
+
     pub fn remove_path(&self, path: &str) -> Result<(), String> {
+        let affected_keys = self.symbol_reference_keys_for_path(path)?;
+        self.mark_path_dirty(path)?;
+        self.mark_paths_referencing_keys(&affected_keys)?;
         self.conn
             .execute(
                 "DELETE FROM pending_refs WHERE from_node_id IN \
@@ -534,6 +683,14 @@ impl Store {
         for symbol in &symbols {
             resolver.add_symbol(&qualify(path, &symbol.double_colon_path()));
         }
+
+        let mut affected_keys = HashSet::new();
+        for symbol in &symbols {
+            let dcp = qualify(path, &symbol.double_colon_path());
+            add_symbol_reference_keys(&mut affected_keys, &dcp, &symbol.name());
+        }
+        self.mark_paths_referencing_keys(&affected_keys)?;
+        self.mark_path_dirty(path)?;
 
         let mut path_to_node: HashMap<String, i64> = HashMap::new();
         for symbol in &symbols {
@@ -690,6 +847,19 @@ impl Store {
             out.push(r.map_err(|e| format!("codegraph symbol_name_ranked row: {e}"))?);
         }
         Ok(out)
+    }
+
+    pub fn file_span(&self, path: &str) -> Result<Option<(usize, usize)>, String> {
+        let span = self
+            .conn
+            .query_row(
+                "SELECT line1, line2 FROM nodes WHERE kind = 'file' AND path = ?1",
+                params![path],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("codegraph file_span: {e}"))?;
+        Ok(span.map(|(line1, line2)| (line1.max(1) as usize, line2.max(1) as usize)))
     }
 
     pub fn neighbor_paths(&self, path: &str) -> Result<Vec<String>, String> {
@@ -861,6 +1031,80 @@ fn helper() {}
             cross, 1,
             "run (b.rs) -> helper (a.rs) cross-file calls edge"
         );
+    }
+
+    #[test]
+    fn connect_usages_is_noop_when_nothing_is_dirty() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store
+            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .unwrap();
+        store.connect_usages().unwrap();
+        assert!(!store.has_dirty_paths().unwrap());
+
+        let run_id: i64 = store
+            .conn
+            .query_row("SELECT id FROM nodes WHERE name = 'run'", [], |r| r.get(0))
+            .unwrap();
+        let helper_id: i64 = store
+            .conn
+            .query_row("SELECT id FROM nodes WHERE name = 'helper'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        store
+            .add_edge_line(run_id, helper_id, "manual", 1.0, 99)
+            .unwrap();
+
+        store.connect_usages().unwrap();
+
+        let manual_edges: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE kind = 'manual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_edges, 1);
+    }
+
+    #[test]
+    fn new_symbol_marks_existing_referrers_dirty() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/b.rs", "fn run() { helper(); }\n", "rust")
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let initial_calls: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM edges WHERE kind = 'calls'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(initial_calls, 0);
+
+        store
+            .index_file_graph("src/a.rs", "pub fn helper() {}\n", "rust")
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let cross: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind = 'calls' AND sn.path = 'src/b.rs' AND dn.path = 'src/a.rs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cross, 1);
     }
 
     #[test]

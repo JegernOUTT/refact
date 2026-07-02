@@ -54,8 +54,14 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
 
         let batch = service.drain_batch(DRAIN_BATCH);
         if batch.is_empty() {
-            if let Err(err) = service.connect_usages().await {
-                error!("codegraph: connect_usages failed: {err}");
+            match service.has_dirty_usage_paths().await {
+                Ok(true) => {
+                    if let Err(err) = service.connect_usages().await {
+                        error!("codegraph: connect_usages failed: {err}");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => error!("codegraph: dirty usage check failed: {err}"),
             }
             if !service.is_initial_index_done() {
                 service.mark_initial_index_done();

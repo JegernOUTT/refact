@@ -45,23 +45,34 @@ pub fn search_hybrid(store: &Store, query: &str, limit: usize) -> Result<Vec<Cod
     let fts = store.fts_ranked(&fts_match_query(&terms), fetch)?;
     for (rank, (path, _bm25)) in fts.iter().enumerate() {
         *scores.entry(path.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f32);
+        let span = store.file_span(path)?.unwrap_or((0, 0));
+        best_span
+            .entry(path.clone())
+            .or_insert((span.0, span.1, None));
     }
 
     let mut symbol_rank = 0usize;
     for term in &terms {
         for (path, name, line1, line2) in store.symbol_name_ranked(term, fetch)? {
             *scores.entry(path.clone()).or_insert(0.0) += 1.0 / (RRF_K + symbol_rank as f32);
-            best_span
-                .entry(path.clone())
-                .or_insert((line1 as usize, line2 as usize, Some(name)));
+            if best_span
+                .get(&path)
+                .and_then(|(_, _, symbol)| symbol.as_ref())
+                .is_none()
+            {
+                best_span.insert(path.clone(), (line1 as usize, line2 as usize, Some(name)));
+            }
             symbol_rank += 1;
         }
     }
 
-    let seeds: Vec<String> = scores.keys().cloned().collect();
+    let mut seeds: Vec<String> = scores.keys().cloned().collect();
+    seeds.sort();
     for seed in seeds {
         let seed_score = *scores.get(&seed).unwrap_or(&0.0);
-        for neighbor in store.neighbor_paths(&seed)? {
+        let mut neighbors = store.neighbor_paths(&seed)?;
+        neighbors.sort();
+        for neighbor in neighbors {
             *scores.entry(neighbor).or_insert(0.0) += seed_score * NEIGHBOR_DISCOUNT;
         }
     }
@@ -133,6 +144,23 @@ mod tests {
             hits.iter().any(|h| h.path == "src/widget.rs"),
             "expected widget.rs for 'render', got {hits:?}"
         );
+    }
+
+    #[test]
+    fn fts_only_hits_return_real_file_span() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file(
+                "docs/readme.md",
+                "alpha\nneedle without symbols\nomega\n",
+                "",
+            )
+            .unwrap();
+
+        let hits = search_hybrid(&store, "needle", 10).unwrap();
+        let hit = hits.iter().find(|h| h.path == "docs/readme.md").unwrap();
+
+        assert_eq!((hit.line1, hit.line2, hit.symbol.as_deref()), (1, 3, None));
     }
 
     #[test]

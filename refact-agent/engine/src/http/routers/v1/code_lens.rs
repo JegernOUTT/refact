@@ -64,6 +64,20 @@ pub async fn handle_v1_code_lens(
         }
     };
 
+    let output = build_code_lens_output(&defs, post.debug);
+
+    let response = CodeLensResponse {
+        success: 1,
+        code_lens: output,
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(serde_json::to_string(&response).unwrap()))
+        .unwrap())
+}
+
+fn build_code_lens_output(defs: &[Arc<AstDefinition>], debug: bool) -> Vec<CodeLensOutput> {
     let mut output: Vec<CodeLensOutput> = Vec::new();
     for def in defs.iter() {
         if let Some(last) = def.official_path.last() {
@@ -71,7 +85,7 @@ pub async fn handle_v1_code_lens(
                 continue;
             }
         }
-        if !post.debug {
+        if !debug {
             let line1 = def.full_line1();
             let line2 = def.full_line2();
             if line2 > line1 {
@@ -127,14 +141,30 @@ pub async fn handle_v1_code_lens(
             }
         }
     }
+    output
+}
 
-    let response = CodeLensResponse {
-        success: 1,
-        code_lens: output,
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+    #[test]
+    fn debug_output_includes_codegraph_doc_def_usages() {
+        let store = refact_codegraph::Store::open_in_memory().unwrap();
+        store
+            .index_file_graph(
+                "src/widget.rs",
+                "fn caller() {\n    helper();\n}\nfn helper() {}\n",
+                "rust",
+            )
+            .unwrap();
+        store.connect_usages().unwrap();
+
+        let defs = refact_codegraph::facade::doc_defs(&store, "src/widget.rs").unwrap();
+        let output = build_code_lens_output(&defs, true);
+
+        assert!(output.iter().any(|lens| {
+            lens.line1 == 2 && lens.debug_string.as_deref() == Some("↗widget::helper")
+        }));
+    }
 }
