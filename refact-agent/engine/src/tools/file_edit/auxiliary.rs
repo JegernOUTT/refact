@@ -3,7 +3,8 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::DiffChunk;
 use crate::files_correction::{
     canonicalize_normalized_path, check_if_its_inside_a_workspace_or_config,
-    correct_to_nearest_dir_path, get_unscoped_project_dirs, preprocess_path_for_normalization,
+    correct_to_nearest_dir_path, get_unscoped_project_dirs, normalize_path_for_unscoped_paths,
+    preprocess_path_for_normalization, registered_worktree_path_mappings,
 };
 use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory_document_for_path};
 use crate::global_context::GlobalContext;
@@ -412,12 +413,14 @@ pub async fn fast_enqueue_for_edit(
     if docs.is_empty() {
         return Ok(());
     }
-    let paths: Vec<String> = docs
-        .iter()
-        .map(|doc| doc.to_string_lossy().to_string())
-        .collect();
     let codegraph_mb = gcx.codegraph.lock().await.clone();
     if let Some(service) = codegraph_mb {
+        let worktree_mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        let paths: Vec<String> = docs
+            .iter()
+            .filter_map(|doc| normalize_path_for_unscoped_paths(doc, &worktree_mappings))
+            .map(|doc| doc.to_string_lossy().to_string())
+            .collect();
         service.enqueue_files(&paths);
     }
     Ok(())
@@ -806,7 +809,7 @@ mod tests {
         use crate::global_context::GlobalContext;
         use crate::privacy::{FilePrivacySettings, PrivacySettings};
         use crate::tasks::types::{BoardCard, ScopeGuardMode, TaskBoard};
-        use crate::tools::file_edit::auxiliary::check_scope_guard;
+        use crate::tools::file_edit::auxiliary::{check_scope_guard, fast_enqueue_for_edit};
         use crate::tools::file_edit::tool_apply_patch::tool_apply_patch_exec;
         use crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec;
         use crate::tools::file_edit::tool_undo_textdoc::tool_undo_text_doc_exec;
@@ -819,7 +822,7 @@ mod tests {
         use crate::tools::tool_shell::ToolShell;
         use crate::tools::tools_description::Tool;
         use crate::worktrees::scope::ExecutionScope;
-        use crate::worktrees::types::WorktreeMeta;
+        use crate::worktrees::types::{WorktreeMeta, WorktreeRegistry, WorktreeRegistryRecord};
         use serde_json::{json, Value};
         use std::collections::HashMap;
         use std::fs;
@@ -945,6 +948,31 @@ mod tests {
             } else {
                 "pwd".to_string()
             }
+        }
+
+        fn write_worktree_registry(cache_dir: &Path, source: &Path, worktree: &WorktreeMeta) {
+            let source = dunce::simplified(&fs::canonicalize(source).unwrap()).to_path_buf();
+            let hash = refact_worktrees::service::project_hash_for_path(&source);
+            let registry_dir = cache_dir.join("worktrees").join(&hash);
+            fs::create_dir_all(&registry_dir).unwrap();
+            let registry = WorktreeRegistry {
+                schema_version: 1,
+                source_workspace_root: source,
+                project_hash: hash,
+                records: vec![WorktreeRegistryRecord {
+                    meta: worktree.clone(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    last_seen_at: None,
+                    references: Vec::new(),
+                    last_known_status: None,
+                }],
+            };
+            fs::write(
+                registry_dir.join("index.json"),
+                serde_json::to_string_pretty(&registry).unwrap(),
+            )
+            .unwrap();
         }
 
         fn scope_guard_card(mode: ScopeGuardMode) -> BoardCard {
@@ -1323,6 +1351,50 @@ mod tests {
                 "fast\n"
             );
             assert_eq!(service.queue_len(), 2);
+        }
+
+        #[tokio::test]
+        async fn edit_fast_enqueue_maps_registered_worktree_path_to_source_path() {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            fs::create_dir_all(source.join("src")).unwrap();
+            let source = dunce::simplified(&fs::canonicalize(source).unwrap()).to_path_buf();
+            let hash = refact_worktrees::service::project_hash_for_path(&source);
+            let worktree_root = gcx.cache_dir.join("worktrees").join(&hash).join("wt-tools");
+            fs::create_dir_all(worktree_root.join("src")).unwrap();
+            let worktree_root =
+                dunce::simplified(&fs::canonicalize(worktree_root).unwrap()).to_path_buf();
+            let source_file = source.join("src/fast.rs");
+            let worktree_file = worktree_root.join("src/fast.rs");
+            fs::write(&source_file, "fn source() {}\n").unwrap();
+            fs::write(&worktree_file, "fn worktree() {}\n").unwrap();
+            let worktree = WorktreeMeta {
+                id: "wt-tools".to_string(),
+                kind: "task_agent".to_string(),
+                root: worktree_root,
+                source_workspace_root: source.clone(),
+                repo_root: source.clone(),
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some("base".to_string()),
+                task_id: Some("task".to_string()),
+                card_id: Some("card".to_string()),
+                agent_id: Some("agent".to_string()),
+                enforce: true,
+            };
+            write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+            let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+            *gcx.codegraph.lock().await = Some(service.clone());
+
+            fast_enqueue_for_edit(gcx.clone(), &[worktree_file.clone()])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                service.drain_batch(10),
+                vec![source_file.to_string_lossy().to_string()]
+            );
         }
 
         #[tokio::test]
