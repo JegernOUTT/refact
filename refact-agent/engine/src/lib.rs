@@ -23,6 +23,7 @@ use rusqlite::ffi::sqlite3_auto_extension;
 // mods roughly sorted by dependency ↓
 
 pub use refact_agentic;
+pub use refact_agents_core;
 pub use refact_at_web;
 pub use refact_buddy_core;
 pub use refact_caps_core;

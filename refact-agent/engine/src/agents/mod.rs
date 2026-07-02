@@ -1,9 +1,8 @@
 pub mod monitor;
 pub mod push;
-pub mod registry;
 pub mod spawn;
-pub mod storage;
-pub mod types;
+
+pub use refact_agents_core::{registry, storage, types};
 
 #[cfg(test)]
 mod tests;

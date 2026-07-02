@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-use crate::agents::types::BackgroundAgent;
+use crate::types::BackgroundAgent;
 
 const RECORDS_FILE: &str = "records.json";
 const RESULTS_DIR: &str = "results";

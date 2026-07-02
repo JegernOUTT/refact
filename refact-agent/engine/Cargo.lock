@@ -3964,6 +3964,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "refact-agents-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "refact-chat-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "refact-ast"
 version = "0.1.0"
 dependencies = [
@@ -4287,6 +4300,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "refact-agentic",
+ "refact-agents-core",
  "refact-ast",
  "refact-at-web",
  "refact-buddy-core",

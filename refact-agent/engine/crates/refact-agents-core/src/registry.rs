@@ -8,8 +8,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
 
-use crate::agents::storage;
-use crate::agents::types::{
+use crate::storage;
+use crate::types::{
     AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentKind, BgAgentStatus,
     CreateAgentRequest,
 };
