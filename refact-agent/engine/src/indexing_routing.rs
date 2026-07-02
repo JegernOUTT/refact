@@ -18,7 +18,7 @@ pub fn partition_paths(paths: &[String], roots: &MemoryPlaneRoots) -> (Vec<Strin
     let mut memory_paths = Vec::new();
     let mut code_paths = Vec::new();
     for path in paths {
-        if roots.classify_root(Path::new(path)).is_some() {
+        if roots.classify_file(Path::new(path)).is_some() {
             memory_paths.push(path.clone());
         } else {
             code_paths.push(path.clone());
@@ -76,9 +76,11 @@ mod tests {
     use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     struct RecordingVecdb {
         enqueue_calls: Arc<AtomicUsize>,
+        documents: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
@@ -122,6 +124,7 @@ mod tests {
         ) {
             self.enqueue_calls
                 .fetch_add(documents.len(), Ordering::SeqCst);
+            self.documents.lock().unwrap().extend(documents.to_vec());
         }
 
         fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
@@ -194,6 +197,20 @@ mod tests {
             .join("chat.json")
             .to_string_lossy()
             .to_string();
+        let knowledge_source = project_root
+            .join(".refact")
+            .join("knowledge")
+            .join("source.rs")
+            .to_string_lossy()
+            .to_string();
+        let task_trajectory_tool = project_root
+            .join(".refact")
+            .join("tasks")
+            .join("T-1")
+            .join("trajectories")
+            .join("tool.py")
+            .to_string_lossy()
+            .to_string();
         let task_memory = project_root
             .join(".refact")
             .join("tasks")
@@ -228,6 +245,8 @@ mod tests {
                 knowledge.clone(),
                 trajectory.clone(),
                 task_trajectory.clone(),
+                knowledge_source.clone(),
+                task_trajectory_tool.clone(),
                 task_memory.clone(),
                 non_refact_task_trajectory.clone(),
                 task_meta.clone(),
@@ -239,13 +258,80 @@ mod tests {
         assert!(memory_paths.contains(&knowledge));
         assert!(memory_paths.contains(&trajectory));
         assert!(memory_paths.contains(&task_trajectory));
+        assert!(!memory_paths.contains(&knowledge_source));
+        assert!(!memory_paths.contains(&task_trajectory_tool));
         assert!(!memory_paths.contains(&task_memory));
         assert!(!memory_paths.contains(&non_refact_task_trajectory));
         assert!(!memory_paths.contains(&task_meta));
+        assert!(code_paths.contains(&knowledge_source));
+        assert!(code_paths.contains(&task_trajectory_tool));
         assert!(code_paths.contains(&task_memory));
         assert!(code_paths.contains(&non_refact_task_trajectory));
         assert!(code_paths.contains(&task_meta));
         assert!(code_paths.contains(&code));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routes_memory_artifacts_to_vecdb_and_code_under_memory_roots_to_codegraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let project_root = get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .expect("test workspace must resolve to a project dir");
+        let enqueue_calls = Arc::new(AtomicUsize::new(0));
+        let vecdb_documents = Arc::new(Mutex::new(Vec::new()));
+        *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
+            enqueue_calls: enqueue_calls.clone(),
+            documents: vecdb_documents.clone(),
+        }));
+        let codegraph = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(codegraph.clone());
+
+        let knowledge = project_root
+            .join(".refact")
+            .join("knowledge")
+            .join("note.md");
+        let trajectory = project_root
+            .join(".refact")
+            .join("tasks")
+            .join("T-1")
+            .join("trajectories")
+            .join("run.json");
+        let knowledge_source = project_root
+            .join(".refact")
+            .join("knowledge")
+            .join("source.rs");
+        let task_trajectory_tool = project_root
+            .join(".refact")
+            .join("tasks")
+            .join("T-1")
+            .join("trajectories")
+            .join("tool.py");
+        let paths = vec![
+            knowledge.to_string_lossy().to_string(),
+            trajectory.to_string_lossy().to_string(),
+            knowledge_source.to_string_lossy().to_string(),
+            task_trajectory_tool.to_string_lossy().to_string(),
+        ];
+
+        route_index_enqueue(gcx, &paths, false, false).await;
+
+        assert_eq!(enqueue_calls.load(Ordering::SeqCst), 2);
+        let vecdb_documents = vecdb_documents.lock().unwrap();
+        assert!(vecdb_documents.contains(&knowledge.to_string_lossy().to_string()));
+        assert!(vecdb_documents.contains(&trajectory.to_string_lossy().to_string()));
+        assert!(!vecdb_documents.contains(&knowledge_source.to_string_lossy().to_string()));
+        assert!(!vecdb_documents.contains(&task_trajectory_tool.to_string_lossy().to_string()));
+        drop(vecdb_documents);
+        let queued = codegraph.drain_batch(10);
+        assert_eq!(queued.len(), 2);
+        assert!(queued.contains(&knowledge_source.to_string_lossy().to_string()));
+        assert!(queued.contains(&task_trajectory_tool.to_string_lossy().to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -256,8 +342,10 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let enqueue_calls = Arc::new(AtomicUsize::new(0));
+        let vecdb_documents = Arc::new(Mutex::new(Vec::new()));
         *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
             enqueue_calls: enqueue_calls.clone(),
+            documents: vecdb_documents,
         }));
         *gcx.codegraph.lock().await = None;
         let code_path = dir.path().join("src").join("main.rs");
