@@ -1,0 +1,12 @@
+[package]
+name = "refact-browser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-chat-api = { path = "../refact-chat-api" }
+refact-integrations = { path = "../refact-integrations" }
+headless_chrome = "1.0.16"
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true

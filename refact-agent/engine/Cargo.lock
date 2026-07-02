@@ -4029,6 +4029,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "refact-browser"
+version = "0.1.0"
+dependencies = [
+ "headless_chrome",
+ "refact-chat-api",
+ "refact-integrations",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "refact-buddy-core"
 version = "0.1.0"
 dependencies = [
@@ -4304,6 +4316,7 @@ dependencies = [
  "refact-agents-core",
  "refact-ast",
  "refact-at-web",
+ "refact-browser",
  "refact-buddy-core",
  "refact-caps-core",
  "refact-chat-api",
