@@ -172,6 +172,14 @@ fn mirror_is_fresh(path: &Path) -> bool {
         < MIRROR_TTL
 }
 
+fn require_fresh_mirror(path: &Path) -> Result<(), String> {
+    if mirror_is_fresh(path) {
+        Ok(())
+    } else {
+        Err("engine mirror missing or stale; run refact_engine_clone".to_string())
+    }
+}
+
 fn clone_refact_engine_from_url(
     root: &Path,
     branch: &str,
@@ -266,9 +274,19 @@ fn resolve_under_root(root: &Path, raw: &str) -> Result<PathBuf, String> {
 }
 
 fn resolve_scope(root: &Path, scope: Option<&str>) -> Result<PathBuf, String> {
+    let root = canonical_root(root)?;
     match scope.map(str::trim).filter(|scope| !scope.is_empty()) {
-        Some(scope) => resolve_under_root(root, scope),
-        None => canonical_root(root),
+        Some(scope) => {
+            let raw_path = PathBuf::from(scope);
+            reject_relative_escape(&raw_path)?;
+            let path = root.join(raw_path);
+            match path.canonicalize() {
+                Ok(canonical) if canonical.starts_with(&root) => Ok(canonical),
+                Ok(_) => Err("scope must be an existing path under the mirror (e.g. 'refact-agent/engine/src'); globs like '*.rs' are not supported — omit scope to search everything".to_string()),
+                Err(_) => Ok(root),
+            }
+        }
+        None => Ok(root),
     }
 }
 
@@ -374,7 +392,6 @@ impl Tool for ToolRefactEngineClone {
             json!({
                 "type": "object",
                 "properties": {
-                    "branch": {"type": "string", "default": "main"},
                     "force_refresh": {"type": "boolean", "default": false}
                 },
                 "additionalProperties": false
@@ -388,13 +405,12 @@ impl Tool for ToolRefactEngineClone {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let branch = optional_string_arg(args, "branch").unwrap_or_else(|| "main".to_string());
         let cache_root = cache_root()?;
         let force_refresh = bool_arg(args, "force_refresh", false)?;
         let message = blocking_result(move || {
             clone_refact_engine_from_url(
                 &cache_root,
-                &branch,
+                "main",
                 force_refresh,
                 REFACT_ENGINE_URL,
                 true,
@@ -436,6 +452,7 @@ impl Tool for ToolRefactEngineSearch {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let root = mirror_root("main")?;
+        require_fresh_mirror(&root)?;
         let pattern = string_arg(args, "pattern")?.to_string();
         let scope = optional_string_arg(args, "scope");
         let output =
@@ -477,6 +494,7 @@ impl Tool for ToolRefactEngineCat {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let root = mirror_root("main")?;
+        require_fresh_mirror(&root)?;
         let path = string_arg(args, "path")?.to_string();
         let line1 = line_arg(args, "line1")?;
         let line2 = line_arg(args, "line2")?;
@@ -554,5 +572,46 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let err = cat_refact_engine_file_at(&root, "../outside.txt", None, None).unwrap_err();
         assert!(err.contains(".."));
+    }
+
+    #[test]
+    fn refact_engine_search_falls_back_for_glob_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mirror");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("lib.rs"), "fn refact_engine_marker() {}\n").unwrap();
+
+        let output = search_refact_engine_at(&root, "refact_engine_marker", Some("*.rs")).unwrap();
+        assert!(output.contains("src"));
+        assert!(!output.contains("canonicalize"));
+    }
+
+    #[test]
+    fn refact_engine_search_falls_back_for_missing_bare_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mirror");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("README.md"), "chat marker\n").unwrap();
+
+        let output = search_refact_engine_at(&root, "chat marker", Some("chat")).unwrap();
+        assert!(output.contains("README.md"));
+        assert!(!output.contains("canonicalize"));
+    }
+
+    #[test]
+    fn refact_engine_search_rejects_dotdot_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mirror");
+        fs::create_dir_all(&root).unwrap();
+        let err = search_refact_engine_at(&root, "secret", Some("../outside")).unwrap_err();
+        assert!(err.contains(".."));
+    }
+
+    #[test]
+    fn refact_engine_requires_fresh_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let err = require_fresh_mirror(&missing).unwrap_err();
+        assert_eq!(err, "engine mirror missing or stale; run refact_engine_clone");
     }
 }

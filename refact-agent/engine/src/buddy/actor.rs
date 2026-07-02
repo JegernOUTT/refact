@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -254,6 +255,7 @@ pub struct BuddyService {
     pub draft_store: DraftStore,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
+    pub background_tasks: Vec<JoinHandle<()>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
     pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
     #[cfg(test)]
@@ -483,6 +485,7 @@ impl BuddyService {
             draft_store: DraftStore::new(),
             last_observer_tick: HashMap::new(),
             observers: build_observer_registry(),
+            background_tasks: Vec::new(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
             chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
             #[cfg(test)]
@@ -510,6 +513,15 @@ impl BuddyService {
 
     fn persist_now_playing(&self, slot: Option<BuddyRuntimeEvent>) {
         self.persist_record(RuntimeQueueRecord::NowPlaying { event: slot });
+    }
+
+    pub fn track_background_task(&mut self, handle: JoinHandle<()>) {
+        self.background_tasks.retain(|task| !task.is_finished());
+        self.background_tasks.push(handle);
+    }
+
+    pub fn take_background_tasks(&mut self) -> Vec<JoinHandle<()>> {
+        std::mem::take(&mut self.background_tasks)
     }
 
     pub fn snapshot(&self) -> BuddySnapshot {
@@ -1318,12 +1330,13 @@ impl BuddyService {
         }
         let project_root = self.project_root.clone();
         let ctx_for_disk = ctx.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(err) = super::storage::append_diagnostic(&project_root, &ctx_for_disk).await
             {
                 warn!("buddy: failed to persist diagnostic history: {}", err);
             }
         });
+        self.track_background_task(handle);
         let _ = self.events_tx.send(BuddyEvent::DiagnosticAdded {
             diagnostic: ctx.clone(),
         });
@@ -2206,15 +2219,24 @@ pub async fn buddy_background_task(gcx: AppState) {
     // Final compaction on shutdown so the JSONL on disk is canonical, then
     // drop the writer sender (replacing the service slot does that for us)
     // and wait for the writer task to drain.
-    {
-        let buddy = buddy_arc.lock().await;
-        if let Some(svc) = buddy.as_ref() {
-            if let Some(tx) = &svc.queue_writer {
-                let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
-            }
+    // Take the whole service out of the slot atomically FIRST so any concurrent add_diagnostic
+    // observes None and cannot spawn a new tracked task or enqueue new runtime records. Send the
+    // final compaction from the taken service so nothing can mutate Buddy state after it.
+    // Dropping the taken service also drops the writer sender so the writer task can finish.
+    let mut service = buddy_arc.lock().await.take();
+    if let Some(svc) = service.as_ref() {
+        if let Some(tx) = &svc.queue_writer {
+            let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
         }
     }
-    *buddy_arc.lock().await = None;
+    let background_tasks = service
+        .as_mut()
+        .map(|svc| svc.take_background_tasks())
+        .unwrap_or_default();
+    for handle in background_tasks {
+        let _ = handle.await;
+    }
+    drop(service);
     let _ = writer_handle.await;
     let _ = commit_poller_handle.await;
 

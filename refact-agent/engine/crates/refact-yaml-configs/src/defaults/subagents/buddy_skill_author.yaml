@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_skill_author
 title: Skill Author
 description: Draft reusable skills from repeated trajectory patterns

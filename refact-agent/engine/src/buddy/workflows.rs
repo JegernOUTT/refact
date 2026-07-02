@@ -278,7 +278,7 @@ where
     let workflow_id_owned = workflow_id.to_string();
     let icon_owned = icon.to_string();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let activity = BuddyActivity {
             icon: icon_owned,
             title: summary.clone(),
@@ -408,6 +408,19 @@ where
             }
         }
     });
+
+    let untracked_handle = {
+        let mut buddy = gcx.buddy.buddy.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            svc.track_background_task(handle);
+            None
+        } else {
+            Some(handle)
+        }
+    };
+    if let Some(handle) = untracked_handle {
+        let _ = handle.await;
+    }
 
     result
 }

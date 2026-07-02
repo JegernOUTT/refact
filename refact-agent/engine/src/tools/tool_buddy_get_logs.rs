@@ -21,7 +21,9 @@ static REDACT_PATTERNS: &[&str] = &[
 ];
 
 fn redact_sensitive(line: &str) -> String {
-    let mut result = line.to_string();
+    // Use the shared Buddy secret redactor first (covers ghp_/glpat-/Authorization/password/
+    // aws keys/etc.), then apply the local log-specific patterns on top so nothing regresses.
+    let mut result = crate::buddy::actor::redact_sensitive(line);
     for pat in REDACT_PATTERNS {
         if let Ok(re) = regex::Regex::new(pat) {
             result = re.replace_all(&result, "[REDACTED]").to_string();
@@ -106,7 +108,7 @@ impl Tool for ToolBuddyGetLogs {
         let log_path = if !logs_to_file.is_empty() {
             std::path::PathBuf::from(&logs_to_file)
         } else {
-            cache_dir.join("logs")
+            resolve_log_dir(&cache_dir)
         };
 
         let log_content = read_log_content(&log_path).await?;
@@ -159,18 +161,80 @@ impl Tool for ToolBuddyGetLogs {
     }
 }
 
-fn is_log_candidate(path: &std::path::Path) -> bool {
-    let extension_is_log = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("log"))
-        .unwrap_or(false);
-    let filename_mentions_refact = path
+pub fn is_log_candidate(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".log")
+        || lower.contains("refact")
+        || lower.starts_with("rustbinary")
+        || (lower.starts_with("worker-") && lower.ends_with(".log"))
+}
+
+fn dir_has_log_candidate(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let path = entry.path();
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(is_log_candidate)
+                    .unwrap_or(false)
+        })
+}
+
+fn dir_has_worker_log(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let path = entry.path();
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        let lower = name.to_ascii_lowercase();
+                        lower.starts_with("worker-") && lower.ends_with(".log")
+                    })
+                    .unwrap_or(false)
+        })
+}
+
+/// Selection priority within a log dir: daemon worker logs beat classic rustbinary logs, which
+/// beat any other candidate. Prevents a fresher unrelated `.log` from shadowing a real log.
+fn log_tier(path: &std::path::Path) -> u8 {
+    let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase().contains("refact"))
-        .unwrap_or(false);
-    extension_is_log || filename_mentions_refact
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.starts_with("worker-") {
+        3
+    } else if name.starts_with("rustbinary") {
+        2
+    } else {
+        1
+    }
+}
+
+pub fn resolve_log_dir(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    let daemon = cache_dir.join("daemon").join("logs");
+    // Prefer the daemon worker-log layout only when it actually contains a worker-*.log, so a
+    // stray non-worker file in daemon/logs does not shadow the classic engine log. If the
+    // daemon dir has candidates but the classic dir is empty, still prefer daemon.
+    if dir_has_worker_log(&daemon)
+        || (dir_has_log_candidate(&daemon) && !dir_has_log_candidate(&cache_dir.join("logs")))
+    {
+        daemon
+    } else {
+        cache_dir.join("logs")
+    }
 }
 
 async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
@@ -212,7 +276,12 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
         let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = vec![];
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if !is_log_candidate(&path) {
+            let is_candidate = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(is_log_candidate)
+                .unwrap_or(false);
+            if !is_candidate {
                 continue;
             }
             if let Ok(meta) = tokio::fs::metadata(&path).await {
@@ -224,7 +293,12 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
             }
         }
 
-        files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        files.sort_by(|a, b| {
+            log_tier(&b.0)
+                .cmp(&log_tier(&a.0))
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
 
         if let Some((newest, _)) = files.first() {
             return read_bounded_log_tail(newest).await;
@@ -251,5 +325,61 @@ mod tests {
     fn test_buddy_get_logs_limit() {
         assert!(DEFAULT_LINES <= MAX_LINES);
         assert_eq!(501_usize.min(MAX_LINES), MAX_LINES);
+    }
+
+    #[tokio::test]
+    async fn classic_rustbinary_layout_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        tokio::fs::create_dir_all(&logs_dir).await.unwrap();
+        tokio::fs::write(logs_dir.join("rustbinary.2026-07-01"), "classic tail")
+            .await
+            .unwrap();
+
+        let resolved = resolve_log_dir(dir.path());
+        let content = read_log_content(&resolved).await.unwrap();
+
+        assert_eq!(resolved, logs_dir);
+        assert!(is_log_candidate("rustbinary.2026-07-01"));
+        assert!(content.contains("classic tail"));
+    }
+
+    #[tokio::test]
+    async fn daemon_worker_layout_is_found_and_preferred() {
+        let dir = tempfile::tempdir().unwrap();
+        let classic_dir = dir.path().join("logs");
+        let daemon_dir = dir.path().join("daemon").join("logs");
+        tokio::fs::create_dir_all(&classic_dir).await.unwrap();
+        tokio::fs::create_dir_all(&daemon_dir).await.unwrap();
+        tokio::fs::write(classic_dir.join("rustbinary.2026-07-01"), "classic")
+            .await
+            .unwrap();
+        tokio::fs::write(daemon_dir.join("worker-1.log"), "daemon tail")
+            .await
+            .unwrap();
+
+        let resolved = resolve_log_dir(dir.path());
+        let content = read_log_content(&resolved).await.unwrap();
+
+        assert_eq!(resolved, daemon_dir);
+        assert!(is_log_candidate("worker-1.log"));
+        assert!(content.contains("daemon tail"));
+    }
+
+    #[tokio::test]
+    async fn large_file_tail_does_not_read_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustbinary.2026-07-01");
+        let content = format!(
+            "old-start\n{}\nrecent-tail",
+            "x".repeat(MAX_LOG_TAIL_BYTES as usize + 1024)
+        );
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let tail = read_log_content(&path).await.unwrap();
+
+        assert!(tail.len() <= MAX_LOG_TAIL_BYTES as usize);
+        assert!(!tail.contains("old-start"));
+        assert!(tail.contains("recent-tail"));
     }
 }

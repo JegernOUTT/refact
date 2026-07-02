@@ -519,6 +519,10 @@ pub fn apply_goal_verdict(
     if session.goal.is_none() {
         return GoalVerificationApplyOutcome::NoGoal;
     }
+    let held_status = match session.goal_status {
+        Some(status @ (GoalStatus::Paused | GoalStatus::Stopped)) => Some(status),
+        _ => None,
+    };
 
     let at_ms = epoch_ms_now();
     session.goal_record_verifier_attempt(reply.tokens);
@@ -567,18 +571,24 @@ pub fn apply_goal_verdict(
             GoalVerificationApplyOutcome::Finalized
         }
         GoalVerdict::Unmet(_) => {
-            session.goal_set_status(GoalStatus::Active);
-            if trigger == "validate_goal" {
-                session.goal_note_no_progress_turn();
+            if let Some(status) = held_status {
+                session.goal_set_status(status);
+                session.set_runtime_state(SessionState::Idle, None);
                 GoalVerificationApplyOutcome::Continued
             } else {
-                session.set_runtime_state(SessionState::Idle, None);
-                let _ = session.enqueue_priority_command(CommandRequest {
-                    client_request_id: format!("goal-verifier-regenerate-{}", Uuid::new_v4()),
-                    priority: true,
-                    command: ChatCommand::Regenerate {},
-                });
-                GoalVerificationApplyOutcome::Rearmed
+                session.goal_set_status(GoalStatus::Active);
+                if trigger == "validate_goal" {
+                    session.goal_note_no_progress_turn();
+                    GoalVerificationApplyOutcome::Continued
+                } else {
+                    session.set_runtime_state(SessionState::Idle, None);
+                    let _ = session.enqueue_priority_command(CommandRequest {
+                        client_request_id: format!("goal-verifier-regenerate-{}", Uuid::new_v4()),
+                        priority: true,
+                        command: ChatCommand::Regenerate {},
+                    });
+                    GoalVerificationApplyOutcome::Rearmed
+                }
             }
         }
     }
@@ -986,6 +996,79 @@ mod tests {
             .command_queue
             .iter()
             .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+    }
+
+    #[test]
+    fn apply_goal_verdict_unmet_preserves_stop_requested_during_verification() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        session.goal_set_status(GoalStatus::Stopped);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                tokens: 13,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert!(!session
+            .command_queue
+            .iter()
+            .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+    }
+
+    #[test]
+    fn apply_goal_verdict_unmet_preserves_pause_requested_during_verification() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        session.goal_set_status(GoalStatus::Paused);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                tokens: 13,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.goal_status, Some(GoalStatus::Paused));
+        assert!(!session
+            .command_queue
+            .iter()
+            .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+    }
+
+    #[test]
+    fn apply_goal_verdict_validate_goal_unmet_preserves_stop_requested_during_verification() {
+        let mut session = session_with_goal();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.goal_set_status(GoalStatus::Verifying);
+        session.goal_set_status(GoalStatus::Stopped);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "validate_goal",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
+                verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
+                tokens: 13,
+            },
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
     }
 
     #[test]

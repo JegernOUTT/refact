@@ -15,7 +15,7 @@ use futures::Stream;
 use hyper::{Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::state::DaemonState;
@@ -173,12 +173,18 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         }))
         .layer(
             CorsLayer::new()
-                .allow_methods(Any)
-                .allow_headers(Any)
+                .allow_methods(AllowMethods::mirror_request())
+                .allow_headers(AllowHeaders::mirror_request())
+                .allow_credentials(AllowCredentials::predicate(|origin, _parts| {
+                    origin
+                        .to_str()
+                        .map(crate::daemon::auth::origin_allowed_for_loopback_or_ide)
+                        .unwrap_or(false)
+                }))
                 .allow_origin(AllowOrigin::predicate(|origin, _parts| {
                     origin
                         .to_str()
-                        .map(crate::daemon::auth::origin_is_loopback)
+                        .map(crate::daemon::auth::origin_allowed_for_loopback_or_ide)
                         .unwrap_or(false)
                 })),
         )
@@ -717,6 +723,70 @@ mod tests {
         state
     }
 
+    struct EnvGuard {
+        keys: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn fake_worker() -> Option<Self> {
+            let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+            if std::process::Command::new(&python)
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return None;
+            }
+            let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fake_worker.py");
+            let keys = vec![
+                (
+                    "REFACT_DAEMON_WORKER_CMD",
+                    std::env::var("REFACT_DAEMON_WORKER_CMD").ok(),
+                ),
+                (
+                    "REFACT_DAEMON_SUPERVISOR_BACKOFF_MS",
+                    std::env::var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS").ok(),
+                ),
+                ("FAKE_WORKER_CRASH", std::env::var("FAKE_WORKER_CRASH").ok()),
+                (
+                    "FAKE_WORKER_DELAY_READY",
+                    std::env::var("FAKE_WORKER_DELAY_READY").ok(),
+                ),
+                (
+                    "FAKE_WORKER_PORT_BUSY_EXIT",
+                    std::env::var("FAKE_WORKER_PORT_BUSY_EXIT").ok(),
+                ),
+                (
+                    "FAKE_WORKER_SKIP_LSP",
+                    std::env::var("FAKE_WORKER_SKIP_LSP").ok(),
+                ),
+            ];
+            std::env::set_var(
+                "REFACT_DAEMON_WORKER_CMD",
+                shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
+            );
+            std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
+            std::env::remove_var("FAKE_WORKER_CRASH");
+            std::env::remove_var("FAKE_WORKER_DELAY_READY");
+            std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT");
+            std::env::remove_var("FAKE_WORKER_SKIP_LSP");
+            Some(Self { keys })
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.keys.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn daemon_server_bind_rejects_invalid_host() {
         let config = DaemonConfig {
@@ -1225,6 +1295,240 @@ mod tests {
             .unwrap()
             .contains("current worker"));
         assert!(state.latest_worker_status(&entry.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_ide_webview_origins_on_proxy_path() {
+        use axum::http::header;
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/p/project/v1/ping")
+                    .header(header::ORIGIN, "http://refactai")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://refactai")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_vscode_webview_origin_on_subscribe_path() {
+        use axum::http::header;
+        use hyper::{Body, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let origin = "vscode-webview://11112222-3333-4444-5555-666677778888";
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/p/project/v1/sidebar/subscribe")
+                    .header(header::ORIGIN, origin)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some(origin)
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_rejects_untrusted_origin() {
+        use axum::http::header;
+        use hyper::{Body, Request};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = make_router(state, 8488)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/p/project/v1/ping")
+                    .header(header::ORIGIN, "http://evil.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn daemon_proxy_path_trusts_ide_webview_origin_and_rejects_others() {
+        use axum::extract::ConnectInfo;
+        use axum::http::header;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let project_root = dir.path().join("proxy-project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let entry = {
+            let mut registry = state.projects.write().await;
+            registry.open(project_root).await.unwrap()
+        };
+        state.sync_project_liveness(&entry).await;
+        let proxy_path = format!("/p/{}/v1/ping", entry.id);
+
+        let mut trusted = Request::builder()
+            .uri(&proxy_path)
+            .header(header::ORIGIN, "http://refactai")
+            .body(Body::empty())
+            .unwrap();
+        trusted
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let response = make_router(state.clone(), 8488)
+            .oneshot(trusted)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://refactai")
+        );
+
+        let mut untrusted = Request::builder()
+            .uri(&proxy_path)
+            .header(header::ORIGIN, "http://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        untrusted
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let response = make_router(state.clone(), 8488)
+            .oneshot(untrusted)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        state.supervisor.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn daemon_auth_trusts_ide_webview_origin_but_requires_auth_from_remote() {
+        use crate::daemon::config::AuthConfig;
+        use axum::extract::ConnectInfo;
+        use axum::http::header;
+        use hyper::{Body, Request, StatusCode};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            auth: AuthConfig {
+                enabled: true,
+                token: Some("secret".to_string()),
+                ..Default::default()
+            },
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("secret".to_string()),
+        );
+
+        let mut trusted = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::ORIGIN, "http://refactai")
+            .body(Body::empty())
+            .unwrap();
+        trusted
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let response = make_router(state.clone(), 8488)
+            .oneshot(trusted)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://refactai")
+        );
+
+        for origin in ["http://evil.example", "null"] {
+            let mut request = Request::builder()
+                .uri("/daemon/v1/projects")
+                .header(header::ORIGIN, origin)
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+            let response = make_router(state.clone(), 8488)
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "loopback origin {origin} must not be trusted"
+            );
+        }
+
+        let mut remote = Request::builder()
+            .uri("/daemon/v1/projects")
+            .header(header::ORIGIN, "http://refactai")
+            .body(Body::empty())
+            .unwrap();
+        remote
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))));
+        let response = make_router(state, 8488).oneshot(remote).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {

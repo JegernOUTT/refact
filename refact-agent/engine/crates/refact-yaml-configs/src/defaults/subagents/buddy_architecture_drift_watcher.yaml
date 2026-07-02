@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_architecture_drift_watcher
 title: Architecture Drift Watcher
 description: Compare code structure to remembered architecture and capture drift.
@@ -45,7 +45,7 @@ messages:
 tools:
   - cat
   - tree
-  - search_pattern
-  - search_symbol_definition
+  - regex_search
+  - symbol_def
   - buddy_runtime_event
   - buddy_memory_create

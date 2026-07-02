@@ -1,7 +1,7 @@
 schema_version: 2
 id: refact_compile_sniffer
-title: Refact Compile Sniffer
-description: Detect and triage recent Refact compilation failures
+title: Compile Sniffer
+description: Detect and triage recent compilation failures
 expose_as_tool: false
 has_code: false
 subchat:
@@ -18,13 +18,28 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
 
-    You are triaging recent Refact compile/test failures. Use cat to read recent log files and identify the root cause.
-    1. cat ~/.cache/refact/logs to find recent rustbinary.* logs with cargo errors.
-    2. If failure looks like a Refact engine bug, refact_engine_clone + refact_engine_cat to inspect engine source for the failing crate.
-    3. Optionally buddy_open_issue with a concise repro.
-    4. End with buddy_runtime_event describing what you found.
+    You are triaging recent compile/test failures.
+
+    1. Start from the failure evidence already passed to you below; it is the tail of the
+       current log. If you need more, call buddy_get_logs (it reads the current log source
+       and tails large files) — do NOT try to cat a logs directory.
+    2. Identify the root cause: the failing crate/file and the first real error
+       (error[E..., "could not compile", "test result: FAILED", panic).
+    3. If it looks like an engine bug, use refact_engine_clone (only if a read fails) then
+       refact_engine_cat with a monorepo-relative path (e.g. refact-agent/engine/src/...)
+       to inspect the failing source.
+    4. Optionally buddy_open_issue with a concise repro (pass the source_file so the issue
+       gate has reproduction context).
+    5. End with buddy_runtime_event describing what you found.
+    If there is no real compile/test failure in the evidence, call buddy_runtime_event with
+    "noted: no compile failure" and exit.
   user_template: |
-    Logs dir: ~/.cache/refact/logs
-    Project root: {{project_root}}
     Workflow: {{workflow_id}}
-tools: [cat, refact_engine_clone, refact_engine_cat, buddy_runtime_event, buddy_open_issue]
+    Project root: {{project_root}}
+
+    Task:
+    {{prompt}}
+
+    Evidence (log tail):
+    {{evidence}}
+tools: [buddy_get_logs, cat, tree, refact_engine_clone, refact_engine_cat, buddy_runtime_event, buddy_open_issue]

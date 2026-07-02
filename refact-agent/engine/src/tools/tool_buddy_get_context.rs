@@ -8,6 +8,16 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
+const ALL_SECTIONS: &[&str] = &[
+    "local_config",
+    "global_config",
+    "integrations",
+    "mcp_servers",
+    "modes",
+    "setup_status",
+    "project_info",
+];
+
 static API_KEY_PATTERNS: &[&str] = &[
     r#""api_key"\s*:\s*"[^"]+""#,
     r#""token"\s*:\s*"[^"]+""#,
@@ -24,6 +34,55 @@ fn redact_config(text: &str) -> String {
         }
     }
     result
+}
+
+fn valid_sections_text() -> String {
+    ALL_SECTIONS.join(", ")
+}
+
+fn validate_sections(sections: Vec<String>) -> Result<Vec<String>, String> {
+    for section in &sections {
+        if !ALL_SECTIONS.contains(&section.as_str()) {
+            return Err(format!(
+                "unknown section `{section}`; valid sections: {}",
+                valid_sections_text()
+            ));
+        }
+    }
+    Ok(sections)
+}
+
+fn parse_requested_sections(args: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+    match args.get("sections") {
+        Some(Value::Array(arr)) => {
+            let sections = arr
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        format!(
+                            "sections must be an array of strings; valid sections: {}",
+                            valid_sections_text()
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_sections(sections)
+        }
+        Some(Value::String(s)) => {
+            let sections = serde_json::from_str::<Vec<String>>(s).map_err(|err| {
+                format!(
+                    "sections must be a JSON array of strings when provided as a string: {err}; valid sections: {}",
+                    valid_sections_text()
+                )
+            })?;
+            validate_sections(sections)
+        }
+        Some(_) => Err(format!(
+            "sections must be an array of strings; valid sections: {}",
+            valid_sections_text()
+        )),
+        None => Ok(ALL_SECTIONS.iter().map(|s| s.to_string()).collect()),
+    }
 }
 
 pub struct ToolBuddyGetContext {
@@ -68,25 +127,7 @@ impl Tool for ToolBuddyGetContext {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let all_sections = vec![
-            "local_config",
-            "global_config",
-            "integrations",
-            "mcp_servers",
-            "modes",
-            "setup_status",
-            "project_info",
-        ];
-
-        let requested: Vec<String> = match args.get("sections") {
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
-            Some(Value::String(s)) => serde_json::from_str::<Vec<String>>(s)
-                .unwrap_or_else(|_| all_sections.iter().map(|s| s.to_string()).collect()),
-            _ => all_sections.iter().map(|s| s.to_string()).collect(),
-        };
+        let requested = parse_requested_sections(args)?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let (config_dir, project_dirs) = {
@@ -103,12 +144,12 @@ impl Tool for ToolBuddyGetContext {
         for section in &requested {
             match section.as_str() {
                 "global_config" => {
-                    let content = read_dir_summary(&config_dir, 3).await;
+                    let content = read_dir_summary(&config_dir).await;
                     result.insert(section.clone(), Value::String(redact_config(&content)));
                 }
                 "local_config" => {
                     let content = match &project_root {
-                        Some(root) => read_dir_summary(&root.join(".refact"), 3).await,
+                        Some(root) => read_dir_summary(&root.join(".refact")).await,
                         None => "no project root found".to_string(),
                     };
                     result.insert(section.clone(), Value::String(redact_config(&content)));
@@ -159,8 +200,8 @@ impl Tool for ToolBuddyGetContext {
     }
 }
 
-async fn read_dir_summary(dir: &std::path::Path, depth: usize) -> String {
-    if depth == 0 || !dir.exists() {
+async fn read_dir_summary(dir: &std::path::Path) -> String {
+    if !dir.exists() {
         return format!("{:?} (not found)", dir);
     }
     let mut lines = vec![format!("{:?}:", dir)];
@@ -270,16 +311,30 @@ mod tests {
 
     #[test]
     fn test_buddy_get_context_sections() {
-        let all = vec![
-            "local_config",
-            "global_config",
-            "integrations",
-            "mcp_servers",
-            "modes",
-            "setup_status",
-            "project_info",
-        ];
-        assert_eq!(all.len(), 7);
+        let mut args = HashMap::new();
+        args.insert(
+            "sections".to_string(),
+            Value::Array(vec![Value::String("project_info".to_string())]),
+        );
+        assert_eq!(
+            parse_requested_sections(&args).unwrap(),
+            vec!["project_info".to_string()]
+        );
+
+        args.insert(
+            "sections".to_string(),
+            Value::String("not json".to_string()),
+        );
+        let err = parse_requested_sections(&args).unwrap_err();
+        assert!(err.contains("valid sections"));
+
+        args.insert(
+            "sections".to_string(),
+            Value::Array(vec![Value::String("unknown".to_string())]),
+        );
+        let err = parse_requested_sections(&args).unwrap_err();
+        assert!(err.contains("unknown section"));
+        assert!(err.contains("project_info"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_pr_issue_matchmaker
 title: PR/Issue Matchmaker
 description: Link a meaningful local diff to likely PR or issue context
@@ -18,13 +18,15 @@ messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
     The local diff is large enough that a related PR or issue may help. Keep the pass lightweight:
-    1. Inspect the smallest useful local context.
+    1. Use the supplied changed-file and diff-stat evidence, and inspect only the smallest useful local context.
     2. Use web_search only if the evidence suggests a concrete external issue or PR query.
     3. Use buddy_speak intent=insight to share one useful match or next step.
     4. End with buddy_runtime_event titled "PR/issue matchmaker" with what you found.
+    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}
+    Task: {{prompt}}
     Evidence:
     {{evidence}}
 tools: [cat, web_search, buddy_speak, buddy_runtime_event]

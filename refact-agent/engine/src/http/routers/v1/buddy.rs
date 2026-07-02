@@ -886,12 +886,23 @@ pub async fn handle_v1_buddy_investigation_context(
     let internal = crate::buddy::issues::investigation_internal_context(app.clone())
         .await
         .unwrap_or_else(|e| format!("Investigation context unavailable: {}", e));
+    let (repo_owner, repo_name) = match crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()
+    {
+        Some(project_root) => crate::buddy::issues::detect_repo_from_git(&project_root)
+            .await
+            .map(|repo| (repo.owner, repo.repo))
+            .unwrap_or_else(|| (String::new(), String::new())),
+        None => (String::new(), String::new()),
+    };
 
     Ok(axum::Json(BuddyInvestigationContextResponse {
         logs: log_lines,
         internal_context: internal,
-        repo_owner: "smallcloudai".to_string(),
-        repo_name: "refact".to_string(),
+        repo_owner,
+        repo_name,
     }))
 }
 

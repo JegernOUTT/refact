@@ -98,7 +98,7 @@ impl BuddyJob for BuddyIdleSuggesterJob {
         if !idle_window_matches(last_ts, Utc::now()) {
             return BuddyJobResult::default();
         }
-        execute_autonomous_spec(gcx, &ctx, build_idle_suggester_spec(&ctx, last_ts)).await
+        execute_autonomous_spec(gcx, &ctx, build_idle_suggester_spec(&ctx, last_ts), self.cooldown_seconds()).await
     }
 }
 

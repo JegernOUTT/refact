@@ -1,5 +1,8 @@
+# Pinned to a known-good digest: the floating cross-rs `:main` tag drifted and its OpenSSL
+# dropped the 1.x symbols (SSL_get_peer_certificate/FIPS_mode) that libgit2/libssh2 reference,
+# breaking the aarch64-linux link. This digest built the engine successfully; bump deliberately.
 [target.aarch64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main@sha256:99e041b94e7d4f31477c6ddede176688562c3762ba3833b75de3316100afc39d"
 pre-build = [
     "dpkg --add-architecture arm64",
     "apt-get update && apt-get install --assume-yes libssl-dev:arm64 libclang-dev curl unzip",
@@ -13,8 +16,9 @@ passthrough = [
     "OPENSSL_INCLUDE_DIR=/usr/include/openssl"
 ]
 
+# Pinned to a known-good digest (see aarch64 note above) to avoid cross-rs `:main` drift.
 [target.x86_64-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main@sha256:52fe95895e48d434c349959ca52c7bb93d7cf5ab8ea2b7d5d9f7e0e655c2e579"
 pre-build = [
     "apt-get update && apt-get install --assume-yes libssl-dev libclang-dev curl unzip",
 ]

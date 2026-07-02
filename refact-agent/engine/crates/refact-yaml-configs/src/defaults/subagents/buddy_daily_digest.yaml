@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_daily_digest
 title: Daily Digest
 description: End-of-day summary of the day's work
@@ -17,11 +17,15 @@ subchat:
 messages:
   system_prompt: |
     %BUDDY_PERSONALITY%
-    You are wrapping up the day. Read recent commits & saved Buddy chats, then:
+    You are wrapping up the day. Use only the supplied evidence about recent commits and Buddy activity, then:
     1. Summarize what got done in 2-3 sentences.
     2. Use buddy_speak intent=insight to deliver the summary.
     3. End with buddy_runtime_event titled "Daily digest" with the summary.
+    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}
+    Task: {{prompt}}
+    Evidence:
+    {{evidence}}
 tools: [buddy_speak, buddy_runtime_event]

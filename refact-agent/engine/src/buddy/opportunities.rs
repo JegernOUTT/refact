@@ -132,6 +132,49 @@ mod rules {
         }
     }
 
+    fn memory_garden_signal_class(fact_kind: BuddyFactKind) -> &'static str {
+        match fact_kind {
+            BuddyFactKind::MemoryOrphan => "orphan",
+            BuddyFactKind::MemoryStaleConflict => "conflict",
+            BuddyFactKind::MemoryRecurringLesson => "review",
+            _ => "review",
+        }
+    }
+
+    fn memory_garden_lifecycle_class(pulse: &BuddyPulse) -> &'static str {
+        if pulse.memory.conflict_candidates > 0 {
+            "conflict"
+        } else if pulse.memory.duplicate_candidates > 0 || pulse.memory.merge_candidates > 0 {
+            "merge"
+        } else if pulse.memory.review_candidates > 0 {
+            "review"
+        } else if pulse.memory.archive_candidates > 0 {
+            "orphan"
+        } else {
+            "review"
+        }
+    }
+
+    fn memory_garden_lifecycle_classes(pulse: &BuddyPulse) -> Vec<&'static str> {
+        let mut classes = Vec::new();
+        if pulse.memory.archive_candidates > 0 {
+            classes.push("orphan");
+        }
+        if pulse.memory.duplicate_candidates > 0 || pulse.memory.merge_candidates > 0 {
+            classes.push("merge");
+        }
+        if pulse.memory.review_candidates > 0 {
+            classes.push("review");
+        }
+        if pulse.memory.conflict_candidates > 0 {
+            classes.push("conflict");
+        }
+        if classes.is_empty() {
+            classes.push(memory_garden_lifecycle_class(pulse));
+        }
+        classes
+    }
+
     fn opp(
         kind: BuddyOpportunityKind,
         summary: impl Into<String>,
@@ -471,23 +514,23 @@ mod rules {
             .iter()
             .flat_map(|k| store.recent_at(*k, Duration::hours(24), now))
             .collect();
-        let fact_keys: Vec<String> = recent.iter().map(|f| f.key.clone()).collect();
         let lifecycle_attention = pulse.memory.duplicate_candidates
             + pulse.memory.merge_candidates
             + pulse.memory.archive_candidates
             + pulse.memory.review_candidates
             + pulse.memory.conflict_candidates;
-        let memory_ids: Vec<String> = recent
-            .iter()
-            .flat_map(|f| {
-                let mut ids = payload_strings(f, "memory_ids");
-                ids.extend(payload_strings(f, "doc_ids"));
-                ids
-            })
-            .collect();
-        if fact_keys.is_empty() && lifecycle_attention == 0 {
+        if recent.is_empty() && lifecycle_attention == 0 {
             return vec![];
         }
+        let mut classes: Vec<&'static str> = recent
+            .iter()
+            .map(|fact| memory_garden_signal_class(fact.kind))
+            .collect();
+        if lifecycle_attention > 0 {
+            classes.extend(memory_garden_lifecycle_classes(pulse));
+        }
+        classes.sort_unstable();
+        classes.dedup();
         let summary = if lifecycle_attention > 0 {
             format!(
                 "Knowledge base needs attention: {} lifecycle candidate(s)",
@@ -496,26 +539,45 @@ mod rules {
         } else {
             "Knowledge base needs attention".to_string()
         };
-        let mut o = opp(
-            BuddyOpportunityKind::MemoryGarden,
-            summary,
-            BuddyPriority::Normal,
-            0.8,
-            fact_keys,
-            "memory:garden:global",
-            vec![
-                BuddyAction::OpenPage {
-                    page: BuddyPage::KnowledgeGraph,
-                },
-                BuddyAction::CreatePulseReport {
-                    scope: PulseScope::Memory,
-                },
-                BuddyAction::Dismiss,
-            ],
-            now,
-        );
-        o.related.memory_ids = memory_ids;
-        vec![o]
+        classes
+            .into_iter()
+            .map(|garden_class| {
+                let class_facts: Vec<_> = recent
+                    .iter()
+                    .copied()
+                    .filter(|fact| memory_garden_signal_class(fact.kind) == garden_class)
+                    .collect();
+                let fact_keys: Vec<String> = class_facts.iter().map(|f| f.key.clone()).collect();
+                let memory_ids: Vec<String> = class_facts
+                    .iter()
+                    .flat_map(|f| {
+                        let mut ids = payload_strings(f, "memory_ids");
+                        ids.extend(payload_strings(f, "doc_ids"));
+                        ids
+                    })
+                    .collect();
+                let mut o = opp(
+                    BuddyOpportunityKind::MemoryGarden,
+                    summary.clone(),
+                    BuddyPriority::Normal,
+                    0.8,
+                    fact_keys,
+                    format!("memory:garden:{}", garden_class),
+                    vec![
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::KnowledgeGraph,
+                        },
+                        BuddyAction::CreatePulseReport {
+                            scope: PulseScope::Memory,
+                        },
+                        BuddyAction::Dismiss,
+                    ],
+                    now,
+                );
+                o.related.memory_ids = memory_ids;
+                o
+            })
+            .collect()
     }
 
     pub fn diagnostic_investigation(
@@ -534,6 +596,12 @@ mod rules {
                     .and_then(|v| v.as_str())
                     .unwrap_or("error")
                     .to_string();
+                let source_bucket = fact
+                    .payload
+                    .get("source_bucket")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 let diagnostic_ids = fact_diagnostic_ids(fact);
                 let mut o = opp(
                     BuddyOpportunityKind::DiagnosticInvestigation,
@@ -541,7 +609,7 @@ mod rules {
                     BuddyPriority::High,
                     fact.confidence,
                     vec![fact.key.clone()],
-                    format!("diag:cluster:{}", error_type),
+                    format!("diag:cluster:{}:{}", error_type, source_bucket),
                     vec![
                         BuddyAction::LaunchInvestigationChat {
                             preload: InvestigationContext {
@@ -1042,6 +1110,18 @@ pub fn primary_fact_kind_for_opportunity(
 mod tests {
     use super::*;
     use crate::buddy::facts::FactStore;
+    use crate::buddy::types::BuddyFact;
+
+    fn memory_fact(kind: BuddyFactKind, key: &str) -> BuddyFact {
+        BuddyFact {
+            kind,
+            key: key.to_string(),
+            source: "test",
+            payload: serde_json::json!({ "memory_ids": [key] }),
+            seen_at: Utc::now(),
+            confidence: 0.9,
+        }
+    }
 
     #[test]
     fn memory_garden_uses_lifecycle_pulse_counts_without_recent_facts() {
@@ -1055,5 +1135,34 @@ mod tests {
         assert_eq!(opps.len(), 1);
         assert!(opps[0].summary.contains("3 lifecycle candidate"));
         assert_eq!(opps[0].kind, BuddyOpportunityKind::MemoryGarden);
+    }
+
+    #[test]
+    fn distinct_memory_garden_classes_get_distinct_cooldown_keys() {
+        let pulse = BuddyPulse::default();
+        let queue = OpportunityQueue::new();
+        let mut orphan_store = FactStore::new();
+        orphan_store.ingest(memory_fact(BuddyFactKind::MemoryOrphan, "orphan"));
+        let mut conflict_store = FactStore::new();
+        conflict_store.ingest(memory_fact(BuddyFactKind::MemoryStaleConflict, "conflict"));
+
+        let orphan_opps = rules::memory_garden(&orphan_store, &pulse, &queue, Utc::now());
+        let conflict_opps = rules::memory_garden(&conflict_store, &pulse, &queue, Utc::now());
+
+        assert_eq!(orphan_opps[0].cooldown_key, "memory:garden:orphan");
+        assert_eq!(conflict_opps[0].cooldown_key, "memory:garden:conflict");
+        assert_ne!(orphan_opps[0].cooldown_key, conflict_opps[0].cooldown_key);
+
+        let mut lifecycle_pulse = BuddyPulse::default();
+        lifecycle_pulse.memory.merge_candidates = 1;
+        lifecycle_pulse.memory.review_candidates = 1;
+        let lifecycle_keys =
+            rules::memory_garden(&FactStore::new(), &lifecycle_pulse, &queue, Utc::now())
+                .into_iter()
+                .map(|opp| opp.cooldown_key)
+                .collect::<HashSet<_>>();
+
+        assert!(lifecycle_keys.contains("memory:garden:merge"));
+        assert!(lifecycle_keys.contains("memory:garden:review"));
     }
 }

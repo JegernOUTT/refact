@@ -64,6 +64,26 @@ pub(crate) fn origin_is_loopback(origin: &str) -> bool {
             .unwrap_or(false)
 }
 
+pub(crate) fn origin_is_trusted_ide_webview(origin: &str) -> bool {
+    let origin = origin.trim();
+    if origin.eq_ignore_ascii_case("http://refactai")
+        || origin.eq_ignore_ascii_case("https://refactai")
+    {
+        return true;
+    }
+    origin
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("vscode-webview"))
+        .map(|(_, host)| {
+            !host.is_empty() && host.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn origin_allowed_for_loopback_or_ide(origin: &str) -> bool {
+    origin_is_loopback(origin) || origin_is_trusted_ide_webview(origin)
+}
+
 fn loopback_trust_allowed<B>(req: &Request<B>) -> bool {
     if !peer_is_loopback(req) {
         return false;
@@ -75,7 +95,7 @@ fn loopback_trust_allowed<B>(req: &Request<B>) -> bool {
     {
         None => true,
         Some(origin) if origin.eq_ignore_ascii_case("null") => false,
-        Some(origin) => origin_is_loopback(origin),
+        Some(origin) => origin_allowed_for_loopback_or_ide(origin),
     }
 }
 
@@ -542,9 +562,45 @@ where
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::routing::get;
+    use axum::Router;
+    use std::net::SocketAddr;
 
     fn request(uri: &str) -> Request<Body> {
         Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn request_from(peer: SocketAddr, origin: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri("/p/project/v1/ping");
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo(peer));
+        req
+    }
+
+    fn loopback_request(origin: Option<&str>) -> Request<Body> {
+        request_from(SocketAddr::from(([127, 0, 0, 1], 40000)), origin)
+    }
+
+    async fn router_response(peer: SocketAddr, origin: Option<&str>) -> StatusCode {
+        use tower::ServiceExt;
+
+        let policy = DaemonAuthPolicy {
+            token: Some("secret".to_string()),
+            ..Default::default()
+        };
+        let app = Router::new()
+            .route("/p/project/v1/ping", get(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                enforce(policy.clone(), req, next)
+            }));
+        app.oneshot(request_from(peer, origin))
+            .await
+            .unwrap()
+            .status()
     }
 
     #[test]
@@ -824,5 +880,113 @@ mod tests {
         );
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("d%61emon_token=<redacted>&chat=1"));
+    }
+
+    #[test]
+    fn origin_is_trusted_ide_webview_accepts_known_webview_origins() {
+        assert!(origin_is_trusted_ide_webview("http://refactai"));
+        assert!(origin_is_trusted_ide_webview("https://refactai"));
+        assert!(origin_is_trusted_ide_webview("HTTP://RefactAI"));
+        assert!(origin_is_trusted_ide_webview(
+            "vscode-webview://11112222-3333-4444-5555-666677778888"
+        ));
+        assert!(origin_is_trusted_ide_webview("vscode-webview://deadBEEF"));
+        assert!(origin_is_trusted_ide_webview(
+            "vscode-webview://0ddd89pf9tgcs7jvdpe0qs2lctosmhsfsbhj2q7ncq6jv6cq2us4"
+        ));
+    }
+
+    #[test]
+    fn origin_is_trusted_ide_webview_rejects_unknown_origins() {
+        assert!(!origin_is_trusted_ide_webview("http://evil.example"));
+        assert!(!origin_is_trusted_ide_webview("http://refactai.evil.com"));
+        assert!(!origin_is_trusted_ide_webview("vscode-webview://"));
+        assert!(!origin_is_trusted_ide_webview("vscode-webview://not_hex"));
+        assert!(!origin_is_trusted_ide_webview("vscode-webview://abc/../x"));
+        assert!(!origin_is_trusted_ide_webview("evil-webview://abcdef"));
+        assert!(!origin_is_trusted_ide_webview("null"));
+        assert!(!origin_is_trusted_ide_webview("http://127.0.0.1:8488"));
+    }
+
+    #[test]
+    fn origin_allowed_for_loopback_or_ide_composes_loopback_and_webview() {
+        assert!(origin_allowed_for_loopback_or_ide("http://127.0.0.1:8488"));
+        assert!(origin_allowed_for_loopback_or_ide("http://localhost:3000"));
+        assert!(origin_allowed_for_loopback_or_ide("http://refactai"));
+        assert!(origin_allowed_for_loopback_or_ide(
+            "vscode-webview://11112222-3333-4444-5555-666677778888"
+        ));
+        assert!(!origin_allowed_for_loopback_or_ide("http://evil.example"));
+        assert!(!origin_allowed_for_loopback_or_ide("null"));
+    }
+
+    #[test]
+    fn loopback_trust_allows_ide_webview_origins_from_loopback_peer() {
+        assert!(loopback_trust_allowed(&loopback_request(None)));
+        assert!(loopback_trust_allowed(&loopback_request(Some(
+            "http://refactai"
+        ))));
+        assert!(loopback_trust_allowed(&loopback_request(Some(
+            "vscode-webview://11112222-3333-4444-5555-666677778888"
+        ))));
+        assert!(loopback_trust_allowed(&loopback_request(Some(
+            "http://127.0.0.1:8488"
+        ))));
+    }
+
+    #[test]
+    fn loopback_trust_rejects_untrusted_origins_and_remote_peers() {
+        assert!(!loopback_trust_allowed(&loopback_request(Some(
+            "http://evil.example"
+        ))));
+        assert!(!loopback_trust_allowed(&loopback_request(Some("null"))));
+        assert!(!loopback_trust_allowed(&request_from(
+            SocketAddr::from(([192, 168, 1, 50], 40000)),
+            Some("http://refactai"),
+        )));
+    }
+
+    #[tokio::test]
+    async fn enforce_allows_ide_webview_origins_from_loopback_peer() {
+        assert_eq!(
+            router_response(
+                SocketAddr::from(([127, 0, 0, 1], 40000)),
+                Some("http://refactai"),
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            router_response(
+                SocketAddr::from(([127, 0, 0, 1], 40000)),
+                Some("vscode-webview://11112222-3333-4444-5555-666677778888"),
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_rejects_untrusted_loopback_origins_and_remote_ide_origin() {
+        assert_eq!(
+            router_response(
+                SocketAddr::from(([127, 0, 0, 1], 40000)),
+                Some("http://evil.example"),
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            router_response(SocketAddr::from(([127, 0, 0, 1], 40000)), Some("null"),).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            router_response(
+                SocketAddr::from(([192, 168, 1, 50], 40000)),
+                Some("http://refactai"),
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

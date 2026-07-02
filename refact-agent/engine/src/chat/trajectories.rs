@@ -12539,6 +12539,7 @@ mod tests {
             waiting_for_card_ids: Vec::new(),
             background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
+            goal_stopped_by_abort: false,
         };
 
         let snapshot = trajectory_snapshot_from_session(&session);
@@ -12634,6 +12635,7 @@ mod tests {
             waiting_for_card_ids: Vec::new(),
             background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
+            goal_stopped_by_abort: false,
         };
 
         let snapshot = trajectory_snapshot_from_session(&session);

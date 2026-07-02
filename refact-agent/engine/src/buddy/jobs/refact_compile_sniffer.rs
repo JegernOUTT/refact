@@ -1,21 +1,22 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use glob::glob;
-
-use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_COMPILE_SNIFFER_WORKFLOW_ID};
+use crate::app_state::AppState;
+use crate::buddy::autonomous_workflows::{
+    autonomous_workflow_meta, REFACT_COMPILE_SNIFFER_WORKFLOW_ID,
+};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use crate::app_state::AppState;
+use crate::tools::tool_buddy_get_logs::{is_log_candidate, resolve_log_dir};
 
 pub struct RefactCompileSnifferJob;
 
 const COOLDOWN_SECONDS: u64 = 60 * 60;
 const PRIORITY: u32 = 5;
 const MAX_LOG_LINES: usize = 5;
-const MAX_LOG_BYTES: u64 = 16 * 1024;
+const MAX_LOG_BYTES: u64 = 256 * 1024;
 
 fn modified_unix_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
@@ -26,42 +27,72 @@ fn modified_unix_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn newest_rustbinary_log(logs_dir: &Path) -> Option<PathBuf> {
-    let pattern = logs_dir.join("rustbinary.*").to_string_lossy().to_string();
-    glob(&pattern)
+fn newest_log(logs_dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(logs_dir)
         .ok()?
         .filter_map(Result::ok)
-        .filter(|path| path.is_file())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(is_log_candidate)
+                    .unwrap_or(false)
+        })
         .max_by_key(|path| modified_unix_secs(path))
 }
 
-fn first_log_lines(path: &Path) -> Option<Vec<String>> {
-    let file = File::open(path).ok()?.take(MAX_LOG_BYTES);
-    let reader = BufReader::new(file);
-    let mut lines = Vec::new();
-    for line in reader.lines().take(MAX_LOG_LINES) {
-        match line {
-            Ok(line) => lines.push(line),
-            Err(err) => {
-                tracing::warn!("buddy compile sniffer failed to read log line: {err}");
-                return None;
-            }
+fn tail_log_lines(path: &Path) -> Option<Vec<String>> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(MAX_LOG_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LOG_BYTES).read_to_end(&mut bytes).ok()?;
+    let mut text = String::from_utf8(bytes)
+        .map_err(|err| {
+            tracing::warn!("buddy compile sniffer failed to read log tail as utf8: {err}");
+            err
+        })
+        .ok()?;
+    if start > 0 {
+        if let Some(pos) = text.find('\n') {
+            text = text[pos + 1..].to_string();
         }
     }
+    let lines = text
+        .lines()
+        .rev()
+        .take(MAX_LOG_LINES)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     Some(lines)
 }
 
+fn has_failure_signature(line: &str) -> bool {
+    line.contains("error[E")
+        || line.contains("could not compile")
+        || line.contains("error: could not")
+        || line.contains("test result: FAILED")
+        || line.contains("panicked at")
+        || line.contains("error[")
+}
+
 fn compile_error_evidence(logs_dir: &Path) -> Option<String> {
-    let path = newest_rustbinary_log(logs_dir)?;
-    let first_lines = first_log_lines(&path)?;
-    if !first_lines.iter().any(|line| line.contains("error[E")) {
+    let path = newest_log(logs_dir)?;
+    let tail_lines = tail_log_lines(&path)?;
+    if !tail_lines.iter().any(|line| has_failure_signature(line)) {
         return None;
     }
     Some(format!(
-        "newest_log={}\nmodified_unix={}\nfirst_lines:\n{}",
+        "newest_log={}\nmodified_unix={}\ntail_lines:\n{}",
         path.display(),
         modified_unix_secs(&path),
-        first_lines.join("\n")
+        tail_lines.join("\n")
     ))
 }
 
@@ -93,7 +124,7 @@ impl BuddyJob for RefactCompileSnifferJob {
     }
 
     async fn should_run(&self, gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-        let logs_dir = gcx.paths.cache_dir.join("logs");
+        let logs_dir = resolve_log_dir(&gcx.paths.cache_dir);
         tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir).is_some())
             .await
             .unwrap_or_else(|err| {
@@ -103,7 +134,7 @@ impl BuddyJob for RefactCompileSnifferJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        let logs_dir = gcx.paths.cache_dir.join("logs");
+        let logs_dir = resolve_log_dir(&gcx.paths.cache_dir);
         let evidence = tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir))
             .await
             .unwrap_or_else(|err| {
@@ -113,7 +144,7 @@ impl BuddyJob for RefactCompileSnifferJob {
         let Some(evidence) = evidence else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_compile_sniffer_spec(&ctx, evidence)).await
+        execute_autonomous_spec(gcx, &ctx, build_compile_sniffer_spec(&ctx, evidence), self.cooldown_seconds()).await
     }
 }
 
@@ -160,7 +191,24 @@ mod tests {
         tokio::fs::create_dir_all(&logs_dir).await.unwrap();
         tokio::fs::write(
             logs_dir.join("rustbinary.2026-05-15"),
-            "error[E0425]: cannot find value\nsecond\nthird\nfourth\nfifth\nsixth",
+            "first\nsecond\nthird\nfourth\nfifth\nerror[E0425]: cannot find value",
+        )
+        .await
+        .unwrap();
+        let gcx = gcx_with_cache(dir.path()).await;
+        let ctx = test_context(dir.path());
+
+        assert!(RefactCompileSnifferJob.should_run(gcx, &ctx).await);
+    }
+
+    #[tokio::test]
+    async fn refact_compile_sniffer_should_run_on_daemon_worker_tail_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("daemon").join("logs");
+        tokio::fs::create_dir_all(&logs_dir).await.unwrap();
+        tokio::fs::write(
+            logs_dir.join("worker-1.log"),
+            "starting\nchecks\ntest result: FAILED. 0 passed; 1 failed",
         )
         .await
         .unwrap();
@@ -188,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn first_log_lines_caps_total_bytes_from_oversized_first_line() {
+    fn tail_log_lines_caps_total_bytes_from_oversized_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rustbinary.2026-05-15");
         std::fs::write(
@@ -197,18 +245,18 @@ mod tests {
         )
         .unwrap();
 
-        let lines = first_log_lines(&path).unwrap();
+        let lines = tail_log_lines(&path).unwrap();
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].len() <= MAX_LOG_BYTES as usize);
     }
 
     #[test]
-    fn first_log_lines_reports_invalid_utf8_as_scan_failure() {
+    fn tail_log_lines_reports_invalid_utf8_as_scan_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rustbinary.2026-05-15");
         std::fs::write(&path, [0xff, 0xfe, b'\n']).unwrap();
 
-        assert!(first_log_lines(&path).is_none());
+        assert!(tail_log_lines(&path).is_none());
     }
 }

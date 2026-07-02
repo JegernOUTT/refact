@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_idle_suggester
 title: Idle Suggester
 description: Gentle nudge when the user pauses with local work in progress
@@ -21,9 +21,11 @@ messages:
     1. Inspect only enough context to identify one safe next action.
     2. Use buddy_speak intent=insight for a short nudge.
     3. End with buddy_runtime_event titled "Idle suggestion" with what you suggested.
+    If there is nothing safe or useful to suggest, call buddy_runtime_event titled
+    "Idle suggestion" with "noted: nothing to suggest" and exit without speaking.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}
     Evidence:
     {{evidence}}
-tools: [cat, search_pattern, buddy_speak, buddy_runtime_event]
+tools: [cat, regex_search, buddy_speak, buddy_runtime_event]

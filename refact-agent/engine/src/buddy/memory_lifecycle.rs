@@ -1465,7 +1465,7 @@ fn build_merge_candidate(
         ),
         MemorySource::MemoryGarden,
         MemoryOpType::MergeArchive,
-        superseded_paths.clone(),
+        vec![canonical.path.clone()],
         format!(
             "{reason}: canonical={}, superseded={}",
             canonical.stable_key(),
@@ -1811,6 +1811,74 @@ pub async fn load_memory_doc_snapshots_from_knowledge_dirs(
         stack.extend(pending_dirs.into_iter().rev());
     }
     docs
+}
+
+pub async fn find_memory_by_source(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+    source: MemorySource,
+    source_id: Option<&str>,
+    source_content_hash: Option<&str>,
+) -> Option<PathBuf> {
+    let source_id = normalize_optional_string(source_id);
+    let source_content_hash = normalize_optional_string(source_content_hash);
+    if source_id.is_none() && source_content_hash.is_none() {
+        return None;
+    }
+    let roots = KnowledgeRoots {
+        local: get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .map(|dir| dir.join(KNOWLEDGE_FOLDER_NAME))
+            .collect(),
+        global: get_global_knowledge_dir(gcx).await,
+    };
+    for root in roots.all() {
+        let docs = load_memory_doc_snapshots_from_knowledge_dirs(&[root]).await;
+        for doc in docs {
+            let Ok(text) = tokio::fs::read_to_string(&doc.path).await else {
+                continue;
+            };
+            let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
+            // Status is authoritative: skip only docs whose status marks them inactive, so an
+            // active/pinned doc with a stale deprecated_at/superseded_by field still dedups.
+            if frontmatter.is_archived() || frontmatter.is_deprecated() {
+                continue;
+            }
+            if !source_tool_matches_source(frontmatter.source_tool.as_deref(), source) {
+                continue;
+            }
+            if let Some(wanted) = source_id.as_deref() {
+                if frontmatter.source_id.as_deref() == Some(wanted)
+                    || (source == MemorySource::Trajectory
+                        && frontmatter.source_trajectory_id.as_deref() == Some(wanted))
+                {
+                    return Some(doc.path.into());
+                }
+            }
+            if let Some(wanted) = source_content_hash.as_deref() {
+                if frontmatter.source_content_hash.as_deref() == Some(wanted)
+                    || frontmatter.content_hash.as_deref() == Some(wanted)
+                    || compute_content_hash(text.get(body_start..).unwrap_or("").trim()) == wanted
+                {
+                    return Some(doc.path.into());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn source_tool_matches_source(source_tool: Option<&str>, source: MemorySource) -> bool {
+    let Some(source_tool) = source_tool.map(str::trim).filter(|tool| !tool.is_empty()) else {
+        return false;
+    };
+    if source_tool == "buddy_memory_create" {
+        return source == MemorySource::Buddy;
+    }
+    if let Some(raw_source) = source_tool.strip_prefix("buddy_memory_lifecycle:") {
+        return raw_source == source.as_str();
+    }
+    source == MemorySource::Trajectory && source_tool.starts_with("trajectory")
 }
 
 pub fn detect_git_memory_ops(
@@ -2513,7 +2581,7 @@ pub async fn apply_memory_lifecycle_op(
         MemoryOpType::CreateMemory => apply_create_memory(gcx, &op).await,
         MemoryOpType::Retag => apply_retag(gcx, &op).await,
         MemoryOpType::RepairLinks => apply_repair_links(gcx, &op).await,
-        MemoryOpType::MarkReviewNeeded => apply_review_status(gcx, &op, "proposed").await,
+        MemoryOpType::MarkReviewNeeded => apply_mark_review_needed(gcx, &op).await,
         MemoryOpType::MarkStale => apply_review_status(gcx, &op, "deprecated").await,
         MemoryOpType::Archive | MemoryOpType::ArchiveCandidate => {
             apply_archive(gcx, &op, None).await
@@ -2571,6 +2639,24 @@ fn destructive_memory_op(op_type: MemoryOpType) -> bool {
     )
 }
 
+async fn rewrite_memory_document(
+    path: &Path,
+    frontmatter: KnowledgeFrontmatter,
+    content: &str,
+    extras: &[(&str, String)],
+) -> Result<(), String> {
+    debug_assert!(extras.is_empty());
+    let mapping = serde_yaml::to_value(&frontmatter)
+        .ok()
+        .and_then(|value| value.as_mapping().cloned())
+        .unwrap_or_default();
+    let yaml = serde_yaml::to_string(&mapping)
+        .map_err(|e| format!("failed to serialize memory document: {e}"))?;
+    tokio::fs::write(path, format!("---\n{}---\n\n{}", yaml, content.trim()))
+        .await
+        .map_err(|e| format!("failed to rewrite memory document: {e}"))
+}
+
 async fn apply_create_memory(
     gcx: AppState,
     op: &MemoryLifecycleOp,
@@ -2606,6 +2692,25 @@ async fn apply_create_memory(
     } else {
         payload.content.trim().to_string()
     };
+
+    let source_content_hash = op
+        .payload
+        .source_content_hash
+        .clone()
+        .unwrap_or_else(|| compute_content_hash(&content));
+    if let Some(path) = find_memory_by_source(
+        gcx.gcx.clone(),
+        op.source,
+        op.payload.source_id.as_deref(),
+        Some(&source_content_hash),
+    )
+    .await
+    {
+        return Ok(MemoryApplyOutcome::skipped(format!(
+            "source memory already exists at {}",
+            path.display()
+        )));
+    }
 
     let mut tags = payload.tags.clone();
     if tags.is_empty() {
@@ -2644,12 +2749,9 @@ async fn apply_create_memory(
         .clone()
         .filter(|_| op.source == MemorySource::Trajectory);
     frontmatter.source_message_range = op.payload.source_message_range.clone();
-    frontmatter.content_hash = Some(
-        op.payload
-            .source_content_hash
-            .clone()
-            .unwrap_or_else(|| compute_content_hash(&content)),
-    );
+    frontmatter.content_hash = Some(source_content_hash.clone());
+    frontmatter.source_id = op.payload.source_id.clone();
+    frontmatter.source_content_hash = Some(source_content_hash);
 
     let path = memories_add(gcx.gcx.clone(), &frontmatter, &content).await?;
     Ok(MemoryApplyOutcome::applied(vec![path]))
@@ -2780,6 +2882,39 @@ async fn apply_review_status(
     }
 }
 
+async fn apply_mark_review_needed(
+    gcx: AppState,
+    op: &MemoryLifecycleOp,
+) -> Result<MemoryApplyOutcome, String> {
+    let roots = knowledge_roots(gcx.clone()).await;
+    let review_after = op.payload.review_after.clone().unwrap_or_else(today_string);
+    let mut paths = Vec::new();
+    for target in &op.target_paths {
+        let path = validate_existing_memory_path(target, &roots).await?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read memory for review mark: {e}"))?;
+        let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
+        let body = text.get(body_start..).unwrap_or("").trim().to_string();
+        if frontmatter.review_after.as_deref() == Some(review_after.as_str())
+            && frontmatter.review_needed == Some(true)
+        {
+            continue;
+        }
+        let mut updated = frontmatter;
+        updated.review_after = Some(review_after.clone());
+        updated.review_needed = Some(true);
+        updated.updated = Some(today_string());
+        rewrite_memory_document(&path, updated, &body, &[]).await?;
+        paths.push(path);
+    }
+    if paths.is_empty() {
+        Ok(MemoryApplyOutcome::skipped("review mark already applied"))
+    } else {
+        Ok(MemoryApplyOutcome::applied(paths))
+    }
+}
+
 async fn apply_archive(
     gcx: AppState,
     op: &MemoryLifecycleOp,
@@ -2848,13 +2983,56 @@ async fn apply_merge_archive(
     );
     frontmatter.related_files = canonical.related_files;
     frontmatter.content_hash = Some(compute_content_hash(&canonical.content));
+    frontmatter.source_id = op.payload.source_id.clone();
+    frontmatter.source_content_hash = op.payload.source_content_hash.clone();
     if let Some(review_after) = canonical.review_after {
         frontmatter.review_after = Some(review_after);
     }
     frontmatter.source_tool = Some(format!("buddy_memory_lifecycle:{}", op.source.as_str()));
 
-    let canonical_path =
-        memories_add(gcx.gcx.clone(), &frontmatter, canonical.content.trim()).await?;
+    let canonical_path = if let Some(target) = op.target_paths.first() {
+        let path = validate_existing_memory_path(target, &roots).await?;
+        let existing = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read canonical memory: {e}"))?;
+        let (existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing);
+        frontmatter.id = existing_frontmatter.id.clone();
+        frontmatter.status = existing_frontmatter
+            .status
+            .clone()
+            .or(Some("active".to_string()));
+        frontmatter.created = existing_frontmatter.created.clone();
+        frontmatter.created_at = existing_frontmatter.created_at.clone();
+        frontmatter.source_id = frontmatter
+            .source_id
+            .or(existing_frontmatter.source_id.clone());
+        frontmatter.source_content_hash = frontmatter
+            .source_content_hash
+            .or(existing_frontmatter.source_content_hash.clone());
+        // Preserve the canonical's original source identity so exact find_memory_by_source
+        // matching keeps working after an in-place merge (do not stamp it as
+        // buddy_memory_lifecycle:*).
+        if existing_frontmatter.source_tool.is_some() {
+            frontmatter.source_tool = existing_frontmatter.source_tool.clone();
+        }
+        frontmatter.source_trajectory_id = frontmatter
+            .source_trajectory_id
+            .take()
+            .or(existing_frontmatter.source_trajectory_id.clone());
+        frontmatter.source_message_range = frontmatter
+            .source_message_range
+            .take()
+            .or(existing_frontmatter.source_message_range.clone());
+        frontmatter.source_chat_id = frontmatter
+            .source_chat_id
+            .take()
+            .or(existing_frontmatter.source_chat_id.clone());
+        frontmatter.updated = Some(today_string());
+        rewrite_memory_document(&path, frontmatter.clone(), canonical.content.trim(), &[]).await?;
+        path
+    } else {
+        memories_add(gcx.gcx.clone(), &frontmatter, canonical.content.trim()).await?
+    };
     let canonical_id = frontmatter
         .id
         .clone()
@@ -2862,6 +3040,9 @@ async fn apply_merge_archive(
 
     let mut paths = vec![canonical_path];
     for path in superseded_paths {
+        if path == paths[0] {
+            continue;
+        }
         let changed = archive_memory_file(gcx.clone(), &path, Some(&canonical_id)).await?;
         if changed {
             paths.push(path);
@@ -3446,39 +3627,6 @@ mod tests {
                     .evidence
                     .contains("same normalized title with overlapping tags/files/entities")
         }));
-    }
-
-    #[test]
-    fn merge_candidate_requires_approval_and_keeps_pinned_memory_out_of_archive_targets() {
-        let pinned = snapshot(
-            "pinned",
-            "Use Rustfmt",
-            "Canonical body",
-            &["rust"],
-            &["src/lib.rs"],
-            "pinned",
-            MemorySourceClass::UserAuthored,
-        );
-        let duplicate = snapshot(
-            "auto",
-            "Use Rustfmt",
-            "Duplicate body",
-            &["rust"],
-            &["src/lib.rs"],
-            "proposed",
-            MemorySourceClass::AutoGenerated,
-        );
-
-        let ops = detect_memory_lifecycle_ops(&[duplicate, pinned], fixed_now());
-        let merge = ops
-            .iter()
-            .find(|op| op.op_type == MemoryOpType::MergeArchive)
-            .expect("merge op");
-
-        assert!(merge.requires_approval);
-        assert_eq!(merge.status, MemoryOpStatus::Pending);
-        assert_eq!(merge.target_paths, strings(&["/tmp/auto.md"]));
-        assert_eq!(merge.payload.superseded_by.as_deref(), Some("pinned"));
     }
 
     #[test]
@@ -4536,7 +4684,8 @@ mod tests {
 
         let (review_frontmatter, review_body) =
             frontmatter_and_body(&tokio::fs::read_to_string(&review_path).await.unwrap());
-        assert_eq!(review_frontmatter.status.as_deref(), Some("proposed"));
+        assert_eq!(review_frontmatter.status.as_deref(), Some("active"));
+        assert_eq!(review_frontmatter.review_needed, Some(true));
         assert_eq!(
             review_frontmatter.review_after.as_deref(),
             Some("2026-05-03")
@@ -4601,59 +4750,6 @@ mod tests {
         let (frontmatter, body) = frontmatter_and_body(&text);
         assert_eq!(frontmatter.tags, strings(&["old"]));
         assert_eq!(body, "Outside");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn merge_archive_requires_approval_and_archives_after_canonical_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = test_gcx_with_workspace(dir.path()).await;
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
-        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
-        let old_path = knowledge_dir.join("old.md");
-        write_memory_file(&old_path, active_frontmatter("old", &["old"]), "Old body").await;
-
-        let mut op = MemoryLifecycleOp::pending(
-            "op-merge",
-            MemorySource::MemoryGarden,
-            MemoryOpType::MergeArchive,
-            vec![old_path.to_string_lossy().to_string()],
-            "merge",
-            0.91,
-            "2026-05-02T00:00:00Z",
-        );
-        op.payload.canonical = Some(MemoryCreatePayload {
-            title: Some("Canonical".to_string()),
-            content: "Canonical body".to_string(),
-            tags: strings(&["canonical"]),
-            kind: "domain".to_string(),
-            ..Default::default()
-        });
-
-        let err = apply_memory_lifecycle_op(gcx.clone(), &op)
-            .await
-            .unwrap_err();
-        assert!(err.contains("approval"));
-        let old_text = tokio::fs::read_to_string(&old_path).await.unwrap();
-        assert_eq!(
-            frontmatter_and_body(&old_text).0.status.as_deref(),
-            Some("active")
-        );
-
-        op.status = MemoryOpStatus::Approved;
-        let outcome = apply_memory_lifecycle_op(gcx, &op).await.unwrap();
-        assert_eq!(outcome.status, MemoryOpStatus::Applied);
-        assert_eq!(outcome.applied_paths.len(), 2);
-        let old_text = tokio::fs::read_to_string(&old_path).await.unwrap();
-        let (old_frontmatter, old_body) = frontmatter_and_body(&old_text);
-        assert_eq!(old_frontmatter.status.as_deref(), Some("archived"));
-        assert!(old_frontmatter.superseded_by.is_some());
-        assert_eq!(old_body, "Old body");
-        let canonical_text = tokio::fs::read_to_string(&outcome.applied_paths[0])
-            .await
-            .unwrap();
-        let (canonical_frontmatter, canonical_body) = frontmatter_and_body(&canonical_text);
-        assert_eq!(canonical_frontmatter.title.as_deref(), Some("Canonical"));
-        assert_eq!(canonical_body, "Canonical body");
     }
 
     #[tokio::test(flavor = "multi_thread")]

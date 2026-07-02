@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_behavior_learner
 title: Behavior Learner
 description: Learn stable user preferences from repeated behavior signals.

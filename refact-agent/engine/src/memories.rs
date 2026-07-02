@@ -180,6 +180,9 @@ pub fn create_frontmatter(
         use_count: 0,
         last_injected_at: None,
         dismissed_count: 0,
+        source_id: None,
+        source_content_hash: None,
+        review_needed: None,
     }
 }
 
@@ -1812,6 +1815,9 @@ pub async fn memories_add_enriched(
         use_count: 0,
         last_injected_at: None,
         dismissed_count: 0,
+        source_id: None,
+        source_content_hash: None,
+        review_needed: None,
     };
 
     let file_path = memories_add(gcx.clone(), &frontmatter, content).await?;

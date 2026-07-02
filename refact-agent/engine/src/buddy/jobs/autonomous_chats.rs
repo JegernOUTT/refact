@@ -100,6 +100,13 @@ impl AutonomousBuddyChatSpec {
         self
     }
 
+    /// Override the auto-derived signal hash with a stable one (used for diagnostic clusters
+    /// so volatile timestamp/count churn does not re-trigger the same investigation).
+    pub fn with_signal_hash(mut self, signal_hash: impl Into<String>) -> Self {
+        self.signal_hash = signal_hash.into();
+        self
+    }
+
     pub fn with_display(
         mut self,
         icon: impl Into<String>,
@@ -119,6 +126,12 @@ pub struct AutonomousLastResult {
     pub signal_hash: String,
     pub chat_id: String,
     pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_category: Option<WorkflowFailureCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<u32>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -128,6 +141,9 @@ impl AutonomousLastResult {
             signal_hash: signal_hash.into(),
             chat_id: chat_id.into(),
             completed_at: Utc::now().to_rfc3339(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         }
     }
 }
@@ -176,14 +192,55 @@ pub fn serialize_last_autonomous_result(result: &AutonomousLastResult) -> String
         "signal_hash": result.signal_hash,
         "chat_id": result.chat_id,
         "completed_at": result.completed_at,
+        "status": result.status,
+        "failure_category": result.failure_category,
+        "consecutive_failures": result.consecutive_failures,
     })
     .to_string()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+fn autonomous_failure_backoff_secs(cooldown_seconds: u64, consecutive_failures: u32) -> u64 {
+    let exponent = consecutive_failures.saturating_sub(1).min(6);
+    let multiplier = 1u64.checked_shl(exponent).unwrap_or(64).max(1);
+    cooldown_seconds
+        .saturating_mul(multiplier)
+        .min(24 * 60 * 60)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn failure_backoff_active(last: &AutonomousLastResult, cooldown_seconds: u64) -> bool {
+    if last.status.as_deref() != Some("failed") {
+        return false;
+    }
+    let consecutive = last.consecutive_failures.unwrap_or(1).max(1);
+    let backoff = autonomous_failure_backoff_secs(cooldown_seconds, consecutive);
+    chrono::DateTime::parse_from_rfc3339(&last.completed_at)
+        .map(|t| {
+            Utc::now()
+                .signed_duration_since(t.with_timezone(&Utc))
+                .num_seconds()
+                .max(0) as u64
+                <= backoff
+        })
+        .unwrap_or(false)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn same_signal(ctx: &BuddyJobContext, hash: &str) -> bool {
     parse_last_autonomous_result(ctx.job_state.last_result.as_deref())
-        .map(|last| last.signal_hash == hash)
+        .map(|last| last.signal_hash == hash && last.status.as_deref() != Some("failed"))
+        .unwrap_or(false)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn same_signal_or_failed_backoff(ctx: &BuddyJobContext, hash: &str, cooldown_seconds: u64) -> bool {
+    parse_last_autonomous_result(ctx.job_state.last_result.as_deref())
+        .map(|last| {
+            last.signal_hash == hash
+                && (last.status.as_deref() != Some("failed")
+                    || failure_backoff_active(&last, cooldown_seconds))
+        })
         .unwrap_or(false)
 }
 
@@ -544,10 +601,37 @@ fn last_assistant_text(messages: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
-fn autonomous_failure_result(spec: &AutonomousBuddyChatSpec, error: String) -> BuddyJobResult {
+fn autonomous_failure_result(
+    ctx: &BuddyJobContext,
+    spec: &AutonomousBuddyChatSpec,
+    error: String,
+) -> BuddyJobResult {
     let category = WorkflowFailureCategory::classify(&error);
     let detail = redact_and_cap_text(&error, 1_000);
     let summary = super::super::workflows::workflow_failure_summary(&category, &error);
+    let previous = parse_last_autonomous_result(ctx.job_state.last_result.as_deref());
+    let consecutive_failures = previous
+        .as_ref()
+        .filter(|last| {
+            last.signal_hash == spec.signal_hash
+                && last.status.as_deref() == Some("failed")
+                && last.failure_category.as_ref() == Some(&category)
+        })
+        .and_then(|last| last.consecutive_failures)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let last = AutonomousLastResult {
+        signal_hash: spec.signal_hash.clone(),
+        chat_id: format!(
+            "failed:{}:{}",
+            spec.workflow_id,
+            fact_kind_name(BuddyFactKind::BrokenModelReference)
+        ),
+        completed_at: Utc::now().to_rfc3339(),
+        status: Some("failed".to_string()),
+        failure_category: Some(category.clone()),
+        consecutive_failures: Some(consecutive_failures),
+    };
     BuddyJobResult {
         workflow_failure: Some(WorkflowFailureReport {
             workflow_id: spec.workflow_id.clone(),
@@ -556,6 +640,7 @@ fn autonomous_failure_result(spec: &AutonomousBuddyChatSpec, error: String) -> B
             detail,
             chat_id: None,
         }),
+        last_result: Some(serialize_last_autonomous_result(&last)),
         ..Default::default()
     }
 }
@@ -586,15 +671,16 @@ pub(crate) async fn execute_autonomous_spec(
     gcx: AppState,
     ctx: &BuddyJobContext,
     spec: AutonomousBuddyChatSpec,
+    cooldown_seconds: u64,
 ) -> BuddyJobResult {
-    if same_signal(ctx, &spec.signal_hash) {
+    if same_signal_or_failed_backoff(ctx, &spec.signal_hash, cooldown_seconds) {
         return preserve_last_result(ctx);
     }
     let chat_id = match run_autonomous_buddy_chat(gcx.clone(), spec.clone()).await {
         Ok(chat_id) => chat_id,
         Err(err) => {
             tracing::warn!("autonomous buddy job {} failed: {}", spec.workflow_id, err);
-            return autonomous_failure_result(&spec, err);
+            return autonomous_failure_result(ctx, &spec, err);
         }
     };
     autonomous_success_result(gcx, ctx, spec, chat_id).await
@@ -1627,14 +1713,24 @@ impl BuddyJob for BuddyMemoryGardenerJob {
         let Some(evidence) = memory_gardener_evidence(ctx) else {
             return false;
         };
-        !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
+        !same_signal_or_failed_backoff(
+            ctx,
+            &build_spec(self.id(), evidence).signal_hash,
+            self.cooldown_seconds(),
+        )
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = memory_gardener_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_spec(self.id(), evidence)).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_spec(self.id(), evidence),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 
@@ -1656,14 +1752,24 @@ impl BuddyJob for BuddyKnowledgeConflictResolverJob {
         let Some(evidence) = knowledge_conflict_evidence(ctx) else {
             return false;
         };
-        !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
+        !same_signal_or_failed_backoff(
+            ctx,
+            &build_spec(self.id(), evidence).signal_hash,
+            self.cooldown_seconds(),
+        )
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = knowledge_conflict_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_spec(self.id(), evidence)).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_spec(self.id(), evidence),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 
@@ -1690,10 +1796,11 @@ impl BuddyJob for BuddyBehaviorLearnerJob {
             return BuddyJobResult::default();
         };
         let spec = build_spec(self.id(), evidence);
-        if same_signal(&ctx, &spec.signal_hash) {
+        if same_signal_or_failed_backoff(&ctx, &spec.signal_hash, self.cooldown_seconds()) {
             return preserve_last_result(&ctx);
         }
-        let mut result = execute_autonomous_spec(gcx.clone(), &ctx, spec).await;
+        let mut result =
+            execute_autonomous_spec(gcx.clone(), &ctx, spec, self.cooldown_seconds()).await;
         if result.last_result.is_some() {
             let queued = enqueue_behavior_preferences(gcx, &candidates).await;
             if queued > 0 {
@@ -1729,14 +1836,24 @@ impl BuddyJob for BuddyUserHabitCoachJob {
         let Some(evidence) = habit_evidence(ctx) else {
             return false;
         };
-        !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
+        !same_signal_or_failed_backoff(
+            ctx,
+            &build_spec(self.id(), evidence).signal_hash,
+            self.cooldown_seconds(),
+        )
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = habit_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_spec(self.id(), evidence)).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_spec(self.id(), evidence),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 
@@ -1762,7 +1879,13 @@ impl BuddyJob for BuddyModelCostOptimizerJob {
         let Some(evidence) = model_cost_evidence(gcx.clone()).await else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_spec(gcx, &ctx, build_spec(self.id(), evidence)).await
+        execute_autonomous_spec(
+            gcx,
+            &ctx,
+            build_spec(self.id(), evidence),
+            self.cooldown_seconds(),
+        )
+        .await
     }
 }
 
@@ -1860,6 +1983,39 @@ async fn autonomous_chats_enabled(gcx: AppState) -> Result<bool, String> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+/// C1: pick the model-type mode whose configured default model actually exists in caps.
+/// A stale `chat_buddy_model` (e.g. a removed model id) must not fail the whole autonomous
+/// fleet; fall back to default/thinking/light. Returns "buddy" when caps are unavailable or
+/// nothing resolves, so the normal error path can surface.
+async fn pick_available_buddy_mode(gcx: AppState) -> String {
+    let caps_state = gcx.model.caps.read().await;
+    let Some(caps) = caps_state.caps.as_ref() else {
+        return "buddy".to_string();
+    };
+    // Use the same resolution as the real subchat path (handles provider-prefixed and
+    // finetune model ids), so a valid `model:ft-...` default is not treated as missing.
+    let avail = |m: &str| {
+        let m = m.trim();
+        !m.is_empty() && crate::caps::resolve_model(&caps.chat_models, m).is_ok()
+    };
+    let d = &caps.defaults;
+    if avail(&d.chat_buddy_model) {
+        "buddy".to_string()
+    } else if avail(&d.chat_default_model) {
+        tracing::warn!(
+            "buddy: chat_buddy_model '{}' unavailable, falling back to chat_default_model",
+            d.chat_buddy_model
+        );
+        "default".to_string()
+    } else if avail(&d.chat_thinking_model) {
+        "thinking".to_string()
+    } else if avail(&d.chat_light_model) {
+        "light".to_string()
+    } else {
+        "buddy".to_string()
+    }
+}
+
 pub async fn run_autonomous_buddy_chat(
     gcx: AppState,
     spec: AutonomousBuddyChatSpec,
@@ -1890,7 +2046,7 @@ pub async fn run_autonomous_buddy_chat(
         max_steps,
         false,
         None,
-        "buddy".to_string(),
+        pick_available_buddy_mode(gcx.clone()).await,
     )
     .await?;
 
@@ -2146,7 +2302,7 @@ async fn execute_built_autonomous_job(
     definition: AutonomousJobDefinition,
     spec: AutonomousBuddyChatSpec,
 ) -> BuddyJobResult {
-    if same_signal(ctx, &spec.signal_hash) {
+    if same_signal_or_failed_backoff(ctx, &spec.signal_hash, definition.cooldown_seconds) {
         return preserve_last_result(ctx);
     }
 
@@ -2159,7 +2315,7 @@ async fn execute_built_autonomous_job(
                 definition.meta.id,
                 err
             );
-            return autonomous_failure_result(&spec.clone(), err);
+            return autonomous_failure_result(ctx, &spec, err);
         }
     };
 
@@ -2252,14 +2408,44 @@ fn format_diagnostic_summary(diag: &DiagnosticContext) -> String {
         .or(diag.tool_name.as_deref())
         .unwrap_or("unknown");
     let preview = preview_text(&diag.error_message, 240);
+    // NOTE: collected_at (timestamp) is intentionally excluded so the same recurring cluster
+    // renders a stable summary and does not re-trigger the investigation every occurrence.
     format!(
-        "type={} severity={:?} source={} timestamp={} preview={}",
+        "type={} severity={:?} source={} preview={}",
         clean_evidence_value(&diag.error_type),
         diag.severity,
         clean_evidence_value(source),
-        clean_evidence_value(&diag.collected_at),
         preview
     )
+}
+
+/// Stable signal for a diagnostic cluster: error type + bucketed counts + timestamp-free
+/// per-summary identities. Excludes volatile timestamps and exact counts so repeated
+/// occurrences of the same cluster hash identically (fixes endless re-triggering).
+fn stable_diagnostic_signal(evidence: &DiagnosticEvidence) -> String {
+    fn bucket(n: usize) -> usize {
+        // Round down to the nearest power of two so slow count growth does not change identity.
+        if n == 0 {
+            0
+        } else {
+            1usize << (usize::BITS - 1 - n.leading_zeros())
+        }
+    }
+    let mut parts = vec![
+        format!(
+            "type={}",
+            evidence.repeated_error_type.as_deref().unwrap_or("none")
+        ),
+        format!("count_bucket={}", bucket(evidence.repeated_count)),
+        format!(
+            "highcrit_bucket={}",
+            bucket(evidence.high_or_critical_count)
+        ),
+    ];
+    let mut summaries = evidence.summaries.clone();
+    summaries.sort();
+    parts.extend(summaries);
+    parts.join("|")
 }
 
 fn render_diagnostic_evidence(evidence: &DiagnosticEvidence) -> String {
@@ -3138,20 +3324,32 @@ impl BuddyJob for ErrorDetectiveJob {
             error_detective_definition(),
             render_diagnostic_evidence(&evidence),
         );
-        !same_signal(ctx, &spec.signal_hash)
+        let stable = signal_hash([
+            spec.workflow_id.as_str(),
+            stable_diagnostic_signal(&evidence).as_str(),
+        ]);
+        let spec = spec.with_signal_hash(stable);
+        !same_signal_or_failed_backoff(
+            ctx,
+            &spec.signal_hash,
+            error_detective_definition().cooldown_seconds,
+        )
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = diagnostic_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
-        execute_autonomous_job(
-            gcx,
-            &ctx,
+        let spec = build_autonomous_job_spec(
             error_detective_definition(),
             render_diagnostic_evidence(&evidence),
-        )
-        .await
+        );
+        let stable = signal_hash([
+            spec.workflow_id.as_str(),
+            stable_diagnostic_signal(&evidence).as_str(),
+        ]);
+        let spec = spec.with_signal_hash(stable);
+        execute_built_autonomous_job(gcx, &ctx, error_detective_definition(), spec).await
     }
 }
 
@@ -3221,7 +3419,11 @@ impl BuddyJob for SetupCoachJob {
             return false;
         };
         let spec = build_autonomous_job_spec(setup_coach_definition(), evidence);
-        !same_signal(ctx, &spec.signal_hash)
+        !same_signal_or_failed_backoff(
+            ctx,
+            &spec.signal_hash,
+            setup_coach_definition().cooldown_seconds,
+        )
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
@@ -3695,6 +3897,9 @@ mod tests {
             signal_hash: "hash-a".to_string(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let serialized = serialize_last_autonomous_result(&result);
 
@@ -3785,6 +3990,9 @@ mod tests {
             signal_hash: "same".to_string(),
             chat_id: "chat".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
         let malformed_ctx = context_with_last_result(Some("same".to_string()));
@@ -4414,6 +4622,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         }));
 
         assert!(same_signal(&ctx, &spec.signal_hash));
@@ -4886,6 +5097,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
 
@@ -4907,6 +5121,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         };
         let ctx = context_with_last_result(Some(serialize_last_autonomous_result(&result)));
 
@@ -4964,6 +5181,9 @@ mod tests {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
             completed_at: "2026-01-01T00:00:00Z".to_string(),
+            status: None,
+            failure_category: None,
+            consecutive_failures: None,
         });
         let ctx = context_with_last_result(Some(stored.clone()));
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
@@ -4985,8 +5205,10 @@ mod tests {
             "Prompt",
             "Evidence",
         );
+        let ctx = context_with_last_result(None);
 
         let model = autonomous_failure_result(
+            &ctx,
             &spec,
             "OpenAI 404: model refact/gpt-4.1-nano not found".to_string(),
         )
@@ -4996,6 +5218,7 @@ mod tests {
         assert!(model.summary.contains("Model unavailable"));
 
         let context = autonomous_failure_result(
+            &ctx,
             &spec,
             "This model's maximum context length is 128000 tokens".to_string(),
         )
@@ -5004,6 +5227,7 @@ mod tests {
         assert_eq!(context.category, WorkflowFailureCategory::ContextTooLarge);
 
         let tool = autonomous_failure_result(
+            &ctx,
             &spec,
             "Error: tool 'buddy_log_activity' not found".to_string(),
         )

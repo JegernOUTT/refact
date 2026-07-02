@@ -85,7 +85,7 @@ debug = false
 
 [package]
 name = "refact-lsp"
-version = "8.2.1"
+version = "8.2.3"
 edition = "2021"
 build = "build.rs"
 

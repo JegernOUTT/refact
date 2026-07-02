@@ -1,23 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::app_state::AppState;
 use crate::buddy::autonomous_workflows::{
     autonomous_workflow_meta, BUDDY_PR_ISSUE_MATCHMAKER_WORKFLOW_ID,
 };
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use crate::app_state::AppState;
 
 pub struct BuddyPrIssueMatchmakerJob;
 
 const COOLDOWN_SECONDS: u64 = 4 * 60 * 60;
 const PRIORITY: u32 = 33;
 const MIN_CHANGED_LINES: u32 = 10;
+const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrIssueMatchmakerCache {
@@ -86,26 +86,40 @@ fn parse_shortstat_changed_lines(output: &str) -> u32 {
         .sum()
 }
 
-fn git_diff_shortstat_changed_lines(project_root: &Path) -> u32 {
-    let output = Command::new("git")
-        .arg("diff")
-        .arg("--shortstat")
-        .current_dir(project_root)
-        .output();
-    let Ok(output) = output else {
-        return 0;
-    };
+async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(project_root)
+        .args(args)
+        .env("PATH", TRUSTED_COMMAND_PATH)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Bound the git invocation so a hung repo/filesystem cannot stall the Tokio worker.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .ok()?
+        .ok()?;
     if !output.status.success() {
-        return 0;
+        return None;
     }
-    parse_shortstat_changed_lines(&String::from_utf8_lossy(&output.stdout))
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+async fn git_diff_shortstat_changed_lines(project_root: &Path) -> u32 {
+    trusted_git_output(project_root, &["diff", "--shortstat"])
+        .await
+        .map(|output| parse_shortstat_changed_lines(&output))
+        .unwrap_or(0)
 }
 
 async fn checked_diff_cache(project_root: PathBuf) -> PrIssueMatchmakerCache {
-    let changed_lines =
-        tokio::task::spawn_blocking(move || git_diff_shortstat_changed_lines(&project_root))
-            .await
-            .unwrap_or(0);
+    let changed_lines = git_diff_shortstat_changed_lines(&project_root).await;
     PrIssueMatchmakerCache {
         checked_at: Utc::now(),
         changed_lines,
@@ -138,13 +152,30 @@ fn cache_result(cache: &PrIssueMatchmakerCache) -> BuddyJobResult {
     }
 }
 
-fn build_pr_matchmaker_spec(ctx: &BuddyJobContext, changed_lines: u32) -> AutonomousBuddyChatSpec {
+async fn diff_evidence(ctx: &BuddyJobContext, changed_lines: u32) -> String {
+    let diff_stat = trusted_git_output(&ctx.project_root, &["diff", "--stat"])
+        .await
+        .unwrap_or_else(|| "none".to_string());
+    let changed_files = trusted_git_output(&ctx.project_root, &["diff", "--name-only"])
+        .await
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "project_root={}\nchanged_lines={}\nthreshold={}\n\nChanged files:\n{}\n\nDiff stat:\n{}",
+        ctx.project_root.to_string_lossy(),
+        changed_lines,
+        MIN_CHANGED_LINES,
+        changed_files,
+        diff_stat
+    )
+}
+
+async fn build_pr_matchmaker_spec(
+    ctx: &BuddyJobContext,
+    changed_lines: u32,
+) -> AutonomousBuddyChatSpec {
     let meta = autonomous_workflow_meta(BUDDY_PR_ISSUE_MATCHMAKER_WORKFLOW_ID).unwrap();
     let project_root = ctx.project_root.to_string_lossy().to_string();
-    let evidence = format!(
-        "project_root={}\nchanged_lines={}\nthreshold={}",
-        project_root, changed_lines, MIN_CHANGED_LINES
-    );
+    let evidence = diff_evidence(ctx, changed_lines).await;
     AutonomousBuddyChatSpec::new(
         meta.id,
         meta.title,
@@ -183,7 +214,8 @@ impl BuddyJob for BuddyPrIssueMatchmakerJob {
         let mut result = execute_autonomous_spec(
             gcx,
             &ctx,
-            build_pr_matchmaker_spec(&ctx, cache.changed_lines),
+            build_pr_matchmaker_spec(&ctx, cache.changed_lines).await,
+            self.cooldown_seconds(),
         )
         .await;
         result.last_result = cache_result(&cache).last_result;
@@ -240,19 +272,16 @@ mod tests {
         (dir, repo)
     }
 
-    fn counted_git_diff_shortstat_changed_lines(project_root: &Path) -> u32 {
+    async fn counted_git_diff_shortstat_changed_lines(project_root: &Path) -> u32 {
         DIFF_CHECKS.fetch_add(1, Ordering::SeqCst);
-        git_diff_shortstat_changed_lines(project_root)
+        git_diff_shortstat_changed_lines(project_root).await
     }
 
     async fn diff_changed_lines_counted(ctx: &BuddyJobContext) -> u32 {
         if let Some(cache) = fresh_cache(ctx) {
             return cache.changed_lines;
         }
-        let root = ctx.project_root.clone();
-        tokio::task::spawn_blocking(move || counted_git_diff_shortstat_changed_lines(&root))
-            .await
-            .unwrap_or(0)
+        counted_git_diff_shortstat_changed_lines(&ctx.project_root).await
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_onboarding
 title: Onboarding
 description: Keep AGENTS.md aligned with new top-level project areas

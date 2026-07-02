@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: buddy_test_coverage_watcher
 title: Test Coverage Watcher
 description: Detect changed Rust files that may need focused tests
@@ -35,7 +35,7 @@ messages:
 tools:
   - tree
   - cat
-  - search_symbol_definition
+  - symbol_def
   - create_textdoc
   - buddy_runtime_event
   - buddy_open_issue

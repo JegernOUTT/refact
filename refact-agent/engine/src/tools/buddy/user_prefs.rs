@@ -103,6 +103,26 @@ fn limited_text_arg(
     Ok(clean_value(&redact_and_cap_text(value, max_chars)))
 }
 
+fn optional_limited_text_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+    max_chars: usize,
+) -> Result<String, String> {
+    let Some(value) = args.get(name) else {
+        return Ok(String::new());
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| format!("argument `{name}` must be a string"))?
+        .trim();
+    if value.chars().count() > max_chars {
+        return Err(format!(
+            "argument `{name}` must be at most {max_chars} chars"
+        ));
+    }
+    Ok(clean_value(&redact_and_cap_text(value, max_chars)))
+}
+
 fn confidence_arg(args: &HashMap<String, Value>) -> Result<f64, String> {
     let confidence = args
         .get("confidence")
@@ -292,7 +312,7 @@ fn dedup_index(prefs: &[UserPreference], statement: &str) -> Option<usize> {
     let needle = normalized(statement);
     prefs.iter().position(|pref| {
         let hay = normalized(&pref.statement);
-        hay.contains(&needle) || needle.contains(&hay)
+        hay == needle
     })
 }
 
@@ -438,7 +458,7 @@ impl Tool for ToolBuddyUserPrefUpsert {
                     "evidence": {"type": "string", "maxLength": 600},
                     "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
                 },
-                "required": ["statement", "evidence", "confidence"],
+                "required": ["statement", "confidence"],
                 "additionalProperties": false
             }),
         )
@@ -451,7 +471,7 @@ impl Tool for ToolBuddyUserPrefUpsert {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let statement = limited_text_arg(args, "statement", 600)?;
-        let evidence = limited_text_arg(args, "evidence", 600)?;
+        let evidence = optional_limited_text_arg(args, "evidence", 600)?;
         let confidence = confidence_arg(args)?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -519,33 +539,49 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn buddy_user_pref_upsert_creates_new_then_increments_on_dedup() {
+    async fn buddy_user_pref_upsert_allows_empty_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("user_profile.md");
-        let first = upsert_user_pref_at(
+        upsert_user_pref_at(
             &path,
-            "Prefers Rust over Python for systems work",
-            "Picked Rust repeatedly",
-            0.85,
+            "Prefers terse explanations",
+            "",
+            0.75,
             "2026-05-14T16:00:00Z",
         )
         .await
         .unwrap();
-        let second = upsert_user_pref_at(
+
+        let prefs = read_profile(&path).await.unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].evidence, "");
+    }
+
+    #[tokio::test]
+    async fn buddy_user_pref_upsert_does_not_merge_substring_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user_profile.md");
+        upsert_user_pref_at(
             &path,
-            "prefers rust over python",
-            "Chose Rust again",
-            0.90,
+            "Prefers Rust",
+            "Evidence",
+            0.80,
+            "2026-05-14T16:00:00Z",
+        )
+        .await
+        .unwrap();
+        upsert_user_pref_at(
+            &path,
+            "Prefers Rust for systems code but Python for ML pipelines and data exploration",
+            "Evidence",
+            0.85,
             "2026-05-14T17:00:00Z",
         )
         .await
         .unwrap();
+
         let prefs = read_profile(&path).await.unwrap();
-        assert!(first.1);
-        assert!(!second.1);
-        assert_eq!(prefs.len(), 1);
-        assert_eq!(prefs[0].updates, 2);
-        assert_eq!(prefs[0].statement, "prefers rust over python");
+        assert_eq!(prefs.len(), 2);
     }
 
     #[tokio::test]

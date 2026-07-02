@@ -878,7 +878,9 @@ pub(crate) async fn read_recent_log_lines(
     let log_path = if !logs_to_file.is_empty() {
         PathBuf::from(logs_to_file)
     } else {
-        cache_dir.join("logs").join("refact.log")
+        // Route through the shared resolver so daemon worker-*.log and classic rustbinary.* are
+        // both found; the joined filename is only an anchor whose parent is the resolved dir.
+        crate::tools::tool_buddy_get_logs::resolve_log_dir(&cache_dir).join("refact.log")
     };
     let log_content = read_log_content(&log_path).await?;
     let tail: Vec<String> = log_content
@@ -896,17 +898,12 @@ pub(crate) async fn read_recent_log_lines(
 const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn is_log_candidate(path: &std::path::Path) -> bool {
-    let extension_is_log = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("log"))
-        .unwrap_or(false);
-    let filename_mentions_refact = path
-        .file_name()
+    // Delegate to the shared candidate check so classic rustbinary.* and daemon worker-*.log
+    // are recognized here too (this local picker previously missed rustbinary.* files).
+    path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase().contains("refact"))
-        .unwrap_or(false);
-    extension_is_log || filename_mentions_refact
+        .map(crate::tools::tool_buddy_get_logs::is_log_candidate)
+        .unwrap_or(false)
 }
 
 async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
