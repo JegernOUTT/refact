@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod drafts;
 pub mod events;
 pub mod facts;
+pub mod opportunities;
 pub mod queue;
 pub mod runtime_queue;
 pub mod settings;
