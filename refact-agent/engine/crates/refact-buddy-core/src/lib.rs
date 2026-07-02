@@ -18,5 +18,6 @@ pub mod types;
 pub mod user_action;
 pub mod user_activity;
 pub mod voice_service;
+pub mod workflows;
 
 pub use queue::*;
