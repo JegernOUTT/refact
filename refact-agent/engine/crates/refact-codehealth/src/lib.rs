@@ -82,6 +82,7 @@ fn collect_functions(node: Node, bytes: &[u8], out: &mut Vec<FunctionHealth>) {
             loc,
             maintainability: maintainability_score(complexity, nesting, loc),
         });
+        return;
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -187,6 +188,20 @@ class Foo:
         let names: Vec<String> = health.functions.iter().map(|f| f.name.clone()).collect();
         assert!(names.contains(&"method_a".to_string()), "got {names:?}");
         assert!(names.contains(&"method_b".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn nested_local_functions_are_not_enumerated_separately() {
+        let src = "\
+def outer():
+    def inner():
+        return 1
+    return inner()
+";
+        let health = analyze("python", src);
+        let names: Vec<String> = health.functions.iter().map(|f| f.name.clone()).collect();
+
+        assert_eq!(names, vec!["outer".to_string()]);
     }
 
     #[test]

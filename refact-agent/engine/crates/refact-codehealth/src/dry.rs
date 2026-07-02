@@ -1,8 +1,9 @@
 use crate::biomarkers::{Dimension, Finding, Severity};
 
-const MIN_DUP_PCT: f64 = 8.0;
+const MIN_DUP_PCT: f64 = 0.08;
 const MIN_CLONE_LINES: usize = 6;
 const ACTIVE_CO_CHANGE: u32 = 3;
+const HIGH_DUP_PCT: f64 = 0.25;
 
 pub struct DryClonePair {
     pub file_a: String,
@@ -46,9 +47,9 @@ pub fn dry_violation(input: &DryInput) -> Vec<Finding> {
         &worst.file_a
     };
     let active = worst.co_change_count >= ACTIVE_CO_CHANGE;
-    let severity = if active && input.duplication_pct >= 25.0 {
+    let severity = if active && input.duplication_pct >= HIGH_DUP_PCT {
         Severity::High
-    } else if active || input.duplication_pct >= 25.0 {
+    } else if active || input.duplication_pct >= HIGH_DUP_PCT {
         Severity::Medium
     } else {
         Severity::Low
@@ -104,7 +105,7 @@ mod tests {
     fn dup_pct_below_threshold_is_silent() {
         let input = DryInput {
             file_path: "a.rs".to_string(),
-            duplication_pct: 7.99,
+            duplication_pct: 0.0799,
             clones: vec![clone_pair("a.rs", 4, 10, "b.rs", 8, 10, 3)],
         };
 
@@ -115,7 +116,7 @@ mod tests {
     fn active_ten_line_clone_at_high_dup_pct_fires_high() {
         let input = DryInput {
             file_path: "a.rs".to_string(),
-            duplication_pct: 30.0,
+            duplication_pct: 0.30,
             clones: vec![clone_pair("a.rs", 4, 10, "b.rs", 8, 10, 3)],
         };
 
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(findings[0].category, "duplication");
         assert_eq!(findings[0].dimension, Dimension::Defect);
         assert_eq!(findings[0].line, 4);
-        assert!(findings[0].detail.contains("duplication_pct=30.00"));
+        assert!(findings[0].detail.contains("duplication_pct=0.30"));
         assert!(findings[0].detail.contains("clone_pair_count=1"));
         assert!(findings[0].detail.contains("worst_clone_lines=10"));
         assert!(findings[0].detail.contains("partner=b.rs"));
@@ -138,7 +139,7 @@ mod tests {
     fn dormant_clone_at_low_dup_pct_fires_low() {
         let input = DryInput {
             file_path: "a.rs".to_string(),
-            duplication_pct: 10.0,
+            duplication_pct: 0.10,
             clones: vec![clone_pair("a.rs", 4, 10, "b.rs", 8, 10, 2)],
         };
 
@@ -152,7 +153,7 @@ mod tests {
     fn worst_clone_selection_prefers_higher_co_change_count() {
         let input = DryInput {
             file_path: "a.rs".to_string(),
-            duplication_pct: 10.0,
+            duplication_pct: 0.10,
             clones: vec![
                 clone_pair("a.rs", 10, 30, "large.rs", 20, 30, 1),
                 clone_pair("a.rs", 40, 8, "active.rs", 50, 8, 4),
@@ -167,5 +168,30 @@ mod tests {
         assert!(findings[0].detail.contains("partner=active.rs"));
         assert!(findings[0].detail.contains("worst_clone_lines=8"));
         assert!(findings[0].detail.contains("worst_clone_co_change=4"));
+    }
+
+    #[test]
+    fn uses_fractional_duplication_pct_from_detector() {
+        let shared = (0..20)
+            .map(|i| format!("    total += input + {i};\n"))
+            .collect::<String>();
+        let src = format!(
+            "fn a(input: i32) -> i32 {{\n    let mut total = input;\n{shared}    total\n}}\nfn b(input: i32) -> i32 {{\n    let mut total = input;\n{shared}    total\n}}\n"
+        );
+        let duplication_pct = crate::duplication::duplication_pct("rust", &src);
+        assert!(
+            duplication_pct > 0.25 && duplication_pct <= 1.0,
+            "got {duplication_pct}"
+        );
+
+        let input = DryInput {
+            file_path: "a.rs".to_string(),
+            duplication_pct,
+            clones: vec![clone_pair("a.rs", 2, 20, "b.rs", 25, 20, 3)],
+        };
+        let findings = dry_violation(&input);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::High);
     }
 }

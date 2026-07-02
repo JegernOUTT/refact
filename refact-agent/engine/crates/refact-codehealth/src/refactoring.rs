@@ -22,7 +22,6 @@ const CLASS_KINDS: &[&str] = &[
     "struct_item",
     "impl_item",
     "interface_declaration",
-    "object_creation_expression",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -236,7 +235,7 @@ struct MethodInfo {
 }
 
 fn collect_classes(node: Node, bytes: &[u8], out: &mut Vec<ClassInfo>) {
-    if CLASS_KINDS.contains(&node.kind()) {
+    if CLASS_KINDS.contains(&node.kind()) && node.is_named() {
         let mut methods = Vec::new();
         collect_methods(node, bytes, &mut methods);
         out.push(ClassInfo {
@@ -366,5 +365,16 @@ mod tests {
         let suggestions = break_cycle_suggestions(&[vec!["a".into(), "b".into(), "c".into()]]);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].kind, RefactoringKind::BreakCycle);
+    }
+
+    #[test]
+    fn object_creation_is_not_a_class() {
+        let src = "class Owner { void f() { Foo x = new Foo(); } } class Foo {}";
+        let tree = refact_codegraph_parsers::parse_tree("java", src).unwrap();
+        let mut classes = Vec::new();
+        collect_classes(tree.root_node(), src.as_bytes(), &mut classes);
+        let names: Vec<_> = classes.into_iter().map(|c| c.name).collect();
+
+        assert_eq!(names, vec!["Owner".to_string(), "Foo".to_string()]);
     }
 }

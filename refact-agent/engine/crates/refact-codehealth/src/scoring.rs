@@ -58,10 +58,15 @@ pub struct FileScore {
     pub performance: f64,
 }
 
-fn score_dimension(findings: &[&Finding]) -> f64 {
+fn score_dimension(findings: &[&Finding], apply_defect_weights: bool) -> f64 {
     let mut per_cat: HashMap<&str, f64> = HashMap::new();
     for f in findings {
-        let d = severity_deduction(f.severity) * weight_multiplier(&f.biomarker);
+        let multiplier = if apply_defect_weights {
+            weight_multiplier(&f.biomarker)
+        } else {
+            1.0
+        };
+        let d = severity_deduction(f.severity) * multiplier;
         *per_cat.entry(f.category.as_str()).or_insert(0.0) += d;
     }
     let total: f64 = per_cat
@@ -84,9 +89,9 @@ pub fn score_file(findings: &[Finding]) -> FileScore {
         .filter(|f| f.dimension == Dimension::Performance)
         .collect();
     FileScore {
-        defect: score_dimension(&all),
-        maintainability: score_dimension(&maint),
-        performance: score_dimension(&perf),
+        defect: score_dimension(&all, true),
+        maintainability: score_dimension(&maint, false),
+        performance: score_dimension(&perf, false),
     }
 }
 
@@ -170,6 +175,25 @@ mod tests {
             (score.defect - 9.5).abs() < 1e-9,
             "error_handling cap 0.5 => 9.5, got {}",
             score.defect
+        );
+    }
+
+    #[test]
+    fn defect_weights_do_not_apply_to_home_dimensions() {
+        let findings = vec![finding(
+            "low_cohesion",
+            "structural_complexity",
+            Dimension::Maintainability,
+            Severity::High,
+        )];
+
+        let score = score_file(&findings);
+
+        assert!((score.defect - 9.4).abs() < 1e-9, "got {}", score.defect);
+        assert!(
+            (score.maintainability - 8.8).abs() < 1e-9,
+            "got {}",
+            score.maintainability
         );
     }
 

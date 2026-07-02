@@ -862,7 +862,7 @@ impl Tool for ToolCodeDuplication {
                 .collect();
             let file_dup_tokens: usize = file_clones.iter().map(|c| c.token_len).sum();
             let file_total = tokens_by_path.get(path).copied().unwrap_or(0).max(1);
-            let file_dup_pct = (file_dup_tokens as f64 / file_total as f64 * 100.0).min(100.0);
+            let file_dup_pct = (file_dup_tokens as f64 / file_total as f64).min(1.0);
             let dry_input = refact_codehealth::dry::DryInput {
                 file_path: path.clone(),
                 duplication_pct: file_dup_pct,

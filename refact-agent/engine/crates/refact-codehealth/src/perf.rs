@@ -58,6 +58,11 @@ pub fn io_kind(name: &str) -> bool {
         .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
         .to_ascii_lowercase();
     let last = n.rsplit(['.', ':']).next().unwrap_or(&n);
+    let receiver = n
+        .rsplit_once('.')
+        .or_else(|| n.rsplit_once("::"))
+        .map(|(receiver, _)| receiver)
+        .unwrap_or("");
     matches!(
         last,
         "open"
@@ -68,14 +73,31 @@ pub fn io_kind(name: &str) -> bool {
             | "query"
             | "fetch"
             | "request"
-            | "get"
-            | "post"
             | "glob"
             | "listdir"
             | "stat"
             | "subprocess"
             | "popen"
     ) || n.contains("cursor.execute")
+        || (matches!(last, "get" | "post") && looks_like_http_receiver(receiver))
+}
+
+fn looks_like_http_receiver(receiver: &str) -> bool {
+    let receiver = receiver.rsplit(['.', ':']).next().unwrap_or(receiver);
+    matches!(
+        receiver,
+        "requests"
+            | "reqwest"
+            | "ureq"
+            | "surf"
+            | "http"
+            | "https"
+            | "client"
+            | "session"
+            | "axios"
+            | "fetch"
+    ) || receiver.ends_with("client")
+        || receiver.ends_with("session")
 }
 
 fn detect_loop(node: Node<'_>, bytes: &[u8], out: &mut Vec<Finding>) {
@@ -393,6 +415,43 @@ for i in range(3):
             findings
                 .iter()
                 .any(|f| f.biomarker == "string_concat_in_loop"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn hash_map_get_is_not_io() {
+        let src = "fn f(map: std::collections::HashMap<String, String>, keys: Vec<String>) {\n    for key in keys {\n        let _ = map.get(&key);\n    }\n}\n";
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings.iter().all(|f| f.biomarker != "io_in_loop"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn known_http_get_is_io() {
+        let src = r#"
+import requests
+for url in urls:
+    requests.get(url)
+"#;
+        let findings = detect_perf("python", src);
+
+        assert!(
+            findings.iter().any(|f| f.biomarker == "io_in_loop"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn known_rust_http_get_is_io() {
+        let src = "async fn f(urls: Vec<String>) {\n    for url in urls {\n        let _ = reqwest::get(url).await;\n    }\n}\n";
+        let findings = detect_perf("rust", src);
+
+        assert!(
+            findings.iter().any(|f| f.biomarker == "io_in_loop"),
             "{findings:?}"
         );
     }

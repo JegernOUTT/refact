@@ -434,7 +434,7 @@ fn collect_class_nodes<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
 fn compute_lcom4(methods: &[FunctionMetric<'_>], bytes: &[u8]) -> (usize, usize) {
     let n = methods.len();
     if n == 0 {
-        return (1, 0);
+        return (0, 0);
     }
     let member_sets: Vec<BTreeSet<String>> = methods
         .iter()
@@ -446,7 +446,7 @@ fn compute_lcom4(methods: &[FunctionMetric<'_>], bytes: &[u8]) -> (usize, usize)
         member_sets.iter().flat_map(|s| s.iter().cloned()).collect();
     let field_count = all_members.difference(&method_names).count();
     if total_refs == 0 {
-        return (1, field_count);
+        return (n, field_count);
     }
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], i: usize) -> usize {
@@ -636,16 +636,7 @@ fn count_boolean_ops(node: Node<'_>) -> u32 {
 }
 
 fn is_boolean_operator(node: Node<'_>) -> bool {
-    if matches!(node.kind(), "&&" | "||" | "and" | "or" | "boolean_operator") {
-        return true;
-    }
-    let mut cursor = node.walk();
-    for c in node.children(&mut cursor) {
-        if matches!(c.kind(), "&&" | "||" | "and" | "or") {
-            return true;
-        }
-    }
-    false
+    matches!(node.kind(), "&&" | "||" | "and" | "or")
 }
 
 fn construct_name(kind: &str) -> &'static str {
@@ -806,6 +797,43 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.biomarker == "low_cohesion" && f.detail.contains("LCOM4=2")),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn lcom4_counts_disconnected_methods_without_member_refs() {
+        let src = "class Foo:\n    def a(self):\n        return 1\n    def b(self):\n        return 2\n    def c(self):\n        return 3\n    def d(self):\n        return 4\n    def e(self):\n        return 5\n";
+        let findings = detect_biomarkers("python", src);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.biomarker == "low_cohesion" && f.detail.contains("LCOM4=5")),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn boolean_condition_counts_operator_tokens_once() {
+        let src = "fn check(a: bool, b: bool, c: bool) -> bool {\n    if a && b || c {\n        return true;\n    }\n    false\n}\n";
+        let findings = detect_biomarkers("rust", src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "complex_conditional"),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn python_boolean_condition_counts_operator_tokens_once() {
+        let src =
+            "def check(a, b, c):\n    if a and b or c:\n        return True\n    return False\n";
+        let findings = detect_biomarkers("python", src);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.biomarker != "complex_conditional"),
             "got {findings:?}"
         );
     }

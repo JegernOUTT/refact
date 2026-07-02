@@ -86,7 +86,7 @@ pub fn parse_lcov(text: &str) -> CoverageReport {
                 let parts: Vec<_> = rest.split(',').collect();
                 if parts.len() == 4 {
                     cur.branches_total += 1;
-                    if parts[3].trim() != "-" && parts[3].trim() != "0" {
+                    if parse_u32(parts[3]).is_some_and(|hits| hits > 0) {
                         cur.branches_covered += 1;
                     }
                 }
@@ -139,9 +139,6 @@ pub fn parse_cobertura(xml: &str) -> CoverageReport {
                     bucket.branches_total += total;
                 } else {
                     bucket.branches_total += 2;
-                    if hits > 0 {
-                        bucket.branches_covered += 2;
-                    }
                 }
             }
         }
@@ -405,6 +402,25 @@ mod tests {
         assert_eq!(report.files[0].lines_covered, 1);
         assert_eq!(report.files[0].branches_total, 2);
         assert_eq!(report.files[0].branches_covered, 1);
+    }
+
+    #[test]
+    fn lcov_branch_hits_must_be_numeric_and_positive() {
+        let report = parse_lcov(
+            "SF:src/lib.rs\nBRDA:1,0,0,1\nBRDA:2,0,0,0\nBRDA:3,0,0,-\nBRDA:4,0,0,abc\nend_of_record\n",
+        );
+        assert_eq!(report.files[0].branches_total, 4);
+        assert_eq!(report.files[0].branches_covered, 1);
+    }
+
+    #[test]
+    fn cobertura_branch_without_condition_coverage_is_uncovered() {
+        let xml = r#"<coverage line-rate="1"><packages><package><classes><class filename="pkg/a.py"><lines><line number="1" hits="3" branch="true"/></lines></class></classes></package></packages></coverage>"#;
+        let report = parse_cobertura(xml);
+        assert_eq!(report.files[0].lines_total, 1);
+        assert_eq!(report.files[0].lines_covered, 1);
+        assert_eq!(report.files[0].branches_total, 2);
+        assert_eq!(report.files[0].branches_covered, 0);
     }
 
     #[test]
