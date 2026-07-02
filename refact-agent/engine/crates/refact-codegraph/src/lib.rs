@@ -12,12 +12,13 @@ pub mod symbols_fmt;
 
 pub use retrieval::CodeHit;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AMutex;
+use tokio::sync::Notify;
 
 pub use store::{Counts, Store};
 
@@ -53,9 +54,16 @@ pub fn lang_from_path(path: &str) -> &'static str {
 
 pub struct CodeGraphService {
     store: AMutex<Store>,
-    queue: StdMutex<VecDeque<String>>,
+    queue: StdMutex<PendingQueue>,
+    queue_notify: Notify,
     db_path: PathBuf,
     initial_index_done: AtomicBool,
+}
+
+#[derive(Default)]
+struct PendingQueue {
+    paths: VecDeque<String>,
+    pending: HashSet<String>,
 }
 
 impl CodeGraphService {
@@ -63,7 +71,8 @@ impl CodeGraphService {
         let store = Store::open(&db_path)?;
         Ok(Self {
             store: AMutex::new(store),
-            queue: StdMutex::new(VecDeque::new()),
+            queue: StdMutex::new(PendingQueue::default()),
+            queue_notify: Notify::new(),
             db_path,
             initial_index_done: AtomicBool::new(false),
         })
@@ -73,7 +82,8 @@ impl CodeGraphService {
         let store = Store::open_in_memory()?;
         Ok(Self {
             store: AMutex::new(store),
-            queue: StdMutex::new(VecDeque::new()),
+            queue: StdMutex::new(PendingQueue::default()),
+            queue_notify: Notify::new(),
             db_path: PathBuf::from(":memory:"),
             initial_index_done: AtomicBool::new(true),
         })
@@ -109,21 +119,35 @@ impl CodeGraphService {
             return;
         }
         let mut queue = self.queue.lock().unwrap();
+        let mut added = false;
         for path in paths {
-            if !queue.contains(path) {
-                queue.push_back(path.clone());
+            if queue.pending.insert(path.clone()) {
+                queue.paths.push_back(path.clone());
+                added = true;
             }
+        }
+        drop(queue);
+        if added {
+            self.queue_notify.notify_one();
         }
     }
 
     pub fn drain_batch(&self, max: usize) -> Vec<String> {
         let mut queue = self.queue.lock().unwrap();
-        let take = max.min(queue.len());
-        queue.drain(..take).collect()
+        let take = max.min(queue.paths.len());
+        let drained = queue.paths.drain(..take).collect::<Vec<_>>();
+        for path in &drained {
+            queue.pending.remove(path);
+        }
+        drained
     }
 
     pub fn queue_len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.queue.lock().unwrap().paths.len()
+    }
+
+    pub async fn wait_for_enqueue(&self) {
+        self.queue_notify.notified().await;
     }
 
     pub async fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(), String> {
@@ -275,5 +299,60 @@ mod tests {
 
         service.enqueue_files(&["src/a.rs".to_string()]);
         assert_eq!(service.drain_batch(10), vec!["src/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn enqueue_files_requeues_drained_paths_but_not_pending_paths() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+
+        service.enqueue_files(&["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        assert_eq!(service.drain_batch(1), vec!["src/a.rs".to_string()]);
+
+        service.enqueue_files(&["src/a.rs".to_string(), "src/b.rs".to_string()]);
+
+        assert_eq!(service.queue_len(), 2);
+        assert_eq!(
+            service.drain_batch(10),
+            vec!["src/b.rs".to_string(), "src/a.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn enqueue_files_bulk_dedupes_without_quadratic_scan() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let mut paths = Vec::with_capacity(100_000);
+        for idx in 0..50_000 {
+            paths.push(format!("src/{idx}.rs"));
+        }
+        for idx in 0..50_000 {
+            paths.push(format!("src/{idx}.rs"));
+        }
+
+        let started = Instant::now();
+        service.enqueue_files(&paths);
+        let elapsed = started.elapsed();
+
+        assert_eq!(service.queue_len(), 50_000);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bulk enqueue took {:?}",
+            elapsed
+        );
+        let drained = service.drain_batch(usize::MAX);
+        assert_eq!(drained.len(), 50_000);
+        assert_eq!(drained.first(), Some(&"src/0.rs".to_string()));
+        assert_eq!(drained.last(), Some(&"src/49999.rs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn wait_for_enqueue_wakes_after_new_pending_path() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let notified = service.wait_for_enqueue();
+
+        service.enqueue_files(&["src/a.rs".to_string()]);
+
+        tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .unwrap();
     }
 }

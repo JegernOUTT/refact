@@ -178,6 +178,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             let shutdown_flag = gcx.shutdown_flag.clone();
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                _ = service.wait_for_enqueue() => {}
                 _ = async move {
                     while !shutdown_flag.load(Ordering::Relaxed) {
                         tokio::time::sleep(Duration::from_millis(50)).await;
