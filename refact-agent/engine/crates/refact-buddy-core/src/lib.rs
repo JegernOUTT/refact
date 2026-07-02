@@ -10,6 +10,7 @@ pub mod opportunities;
 pub mod policy;
 pub mod queue;
 pub mod runtime_queue;
+pub mod runtime_writer;
 pub mod settings;
 pub mod snapshot;
 pub mod speech_policy;
